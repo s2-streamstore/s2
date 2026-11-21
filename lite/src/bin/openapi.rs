@@ -1,6 +1,9 @@
 use s2_api::{
     data::Format,
-    v1::metrics::{AccountMetricSet, BasinMetricSet, StreamMetricSet},
+    v1::{
+        ProvisionResult,
+        metrics::{AccountMetricSet, BasinMetricSet, StreamMetricSet},
+    },
 };
 use s2_common::resources::RequestToken;
 use s2_lite::handlers::v1::{
@@ -93,7 +96,14 @@ use utoipa::{
         basin_metrics,
         stream_metrics,
     ),
-    components(schemas(Format, RequestToken, AccountMetricSet, BasinMetricSet, StreamMetricSet))
+    components(schemas(
+        Format,
+        ProvisionResult,
+        RequestToken,
+        AccountMetricSet,
+        BasinMetricSet,
+        StreamMetricSet
+    ))
 )]
 pub struct ApiDoc;
 

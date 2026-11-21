@@ -179,8 +179,9 @@ impl ServiceError {
                     standard(ErrorCode::Unavailable, e.to_string())
                 }
                 DeleteStreamError::RequestDroppedError(e) => {
-                    // Unavailable error code promised to be side-effect free,
-                    // The terminal trim marker may have become durable prior to drop.
+                    // Lite sends `unavailable` only when nothing was submitted, though the
+                    // error-code table lists its side effect as "maybe". The terminal trim
+                    // marker may have become durable before the drop.
                     standard(ErrorCode::Other, e.to_string())
                 }
                 DeleteStreamError::StreamNotFound(e) => {
@@ -241,8 +242,9 @@ impl ServiceError {
                     standard(ErrorCode::Unavailable, e.to_string())
                 }
                 AppendError::RequestDroppedError(e) => {
-                    // Unavailable error code promised to be side-effect free,
-                    // The append may have become durable prior to drop.
+                    // Lite sends `unavailable` only when nothing was submitted, though the
+                    // error-code table lists its side effect as "maybe". The append may have
+                    // become durable before the drop.
                     standard(ErrorCode::Other, e.to_string())
                 }
                 AppendError::BasinNotFound(e) => standard(ErrorCode::BasinNotFound, e.to_string()),

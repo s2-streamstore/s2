@@ -194,19 +194,30 @@ pub enum ErrorResponse {
 }
 
 impl ErrorResponse {
+    pub fn status(&self) -> http::StatusCode {
+        match self {
+            ErrorResponse::AppendConditionFailed(_) => http::StatusCode::PRECONDITION_FAILED,
+            ErrorResponse::Unwritten(_) => http::StatusCode::RANGE_NOT_SATISFIABLE,
+            ErrorResponse::Standard(err) => err.status,
+        }
+    }
+
     pub fn to_parts(&self) -> (http::StatusCode, String) {
-        let (status, res) = match self {
-            ErrorResponse::AppendConditionFailed(payload) => (
-                http::StatusCode::PRECONDITION_FAILED,
-                serde_json::to_string(&payload),
-            ),
-            ErrorResponse::Unwritten(payload) => (
-                http::StatusCode::RANGE_NOT_SATISFIABLE,
-                serde_json::to_string(&payload),
-            ),
-            ErrorResponse::Standard(err) => (err.status, serde_json::to_string(&err.info)),
-        };
-        (status, res.expect("basic json ser"))
+        (
+            self.status(),
+            serde_json::to_string(self).expect("basic json ser"),
+        )
+    }
+}
+
+/// Serializes as the response body.
+impl Serialize for ErrorResponse {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            ErrorResponse::AppendConditionFailed(payload) => payload.serialize(serializer),
+            ErrorResponse::Unwritten(payload) => payload.serialize(serializer),
+            ErrorResponse::Standard(err) => err.info.serialize(serializer),
+        }
     }
 }
 

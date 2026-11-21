@@ -20,6 +20,14 @@ pub static BASIN_HEADER: http::HeaderName = http::HeaderName::from_static("s2-ba
 pub struct BasinNameStr<T: StrProps>(CompactString, PhantomData<T>);
 
 impl<T: StrProps> BasinNameStr<T> {
+    /// What `validate_str` accepts, apart from length.
+    #[cfg(feature = "utoipa")]
+    const PATTERN: &str = if T::IS_PREFIX {
+        "^([a-z0-9][a-z0-9-]*)?$"
+    } else {
+        "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$"
+    };
+
     fn validate_str(name: &str) -> Result<(), ValidationError> {
         if name.len() > caps::MAX_BASIN_NAME_LEN {
             return Err(format!(
@@ -87,6 +95,7 @@ where
             .schema_type(utoipa::openapi::Type::String)
             .min_length((!T::IS_PREFIX).then_some(caps::MIN_BASIN_NAME_LEN))
             .max_length(Some(caps::MAX_BASIN_NAME_LEN))
+            .pattern(Some(Self::PATTERN))
             .into()
     }
 }

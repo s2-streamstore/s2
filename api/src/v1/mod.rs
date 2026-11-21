@@ -23,6 +23,20 @@ pub struct S2RequestTokenHeader {
     pub s2_request_token: RequestToken,
 }
 
+/// What a create or ensure did, as the `s2-provision-result` response header reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::IntoStaticStr)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "utoipa", schema(rename_all = "snake_case"))]
+#[strum(serialize_all = "snake_case")]
+pub enum ProvisionResult {
+    /// The resource was created.
+    Created,
+    /// The resource existed, and its configuration was changed.
+    Updated,
+    /// The resource existed, and nothing was written.
+    Noop,
+}
+
 #[rustfmt::skip]
 #[derive(Debug)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::IntoParams))]

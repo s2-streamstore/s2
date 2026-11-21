@@ -88,7 +88,12 @@ pub struct CreateArgs {
     params(v1t::S2RequestTokenHeader),
     request_body = v1t::stream::CreateStreamRequest,
     responses(
-        (status = StatusCode::CREATED, body = v1t::stream::StreamInfo),
+        (
+            status = StatusCode::CREATED,
+            description = "Created, or already created by an earlier attempt with the same request token.",
+            body = v1t::stream::StreamInfo,
+            headers(("s2-provision-result" = v1t::ProvisionResult, description = "`created`, or `noop` if an earlier attempt created it.")),
+        ),
         (status = StatusCode::CONFLICT, body = v1t::error::ErrorInfo),
         (status = StatusCode::NOT_FOUND, body = v1t::error::ErrorInfo),
         (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
@@ -133,13 +138,13 @@ pub async fn create_stream(
         .await?
         .map(Into::into);
     let (outcome, info) = match info {
-        ProvisionResult::Created(info) => ("created", info),
-        ProvisionResult::Noop(info) => ("noop", info),
+        ProvisionResult::Created(info) => (v1t::ProvisionResult::Created, info),
+        ProvisionResult::Noop(info) => (v1t::ProvisionResult::Noop, info),
         ProvisionResult::Updated(_) => unreachable!("CreateOnly mode never produces Updated"),
     };
     Ok((
         StatusCode::CREATED,
-        [(PROVISION_RESULT_HEADER.clone(), outcome)],
+        [(PROVISION_RESULT_HEADER.clone(), outcome.into())],
         Json(info),
     ))
 }
@@ -193,6 +198,10 @@ pub struct EnsureArgs {
 }
 
 /// Ensure a stream.
+///
+/// Creates the stream if it does not exist. Otherwise makes its configuration the given one, where
+/// omitted fields take their defaults from the basin's default stream configuration, as on create.
+/// Reconfigure instead leaves omitted fields unchanged.
 #[cfg_attr(feature = "utoipa", utoipa::path(
     put,
     path = super::paths::streams::ENSURE,
@@ -200,8 +209,18 @@ pub struct EnsureArgs {
     request_body = Option<v1t::config::StreamConfig>,
     params(v1t::StreamNamePathSegment),
     responses(
-        (status = StatusCode::OK, body = v1t::stream::StreamInfo),
-        (status = StatusCode::CREATED, body = v1t::stream::StreamInfo),
+        (
+            status = StatusCode::OK,
+            description = "The stream existed, and now has the given configuration.",
+            body = v1t::stream::StreamInfo,
+            headers(("s2-provision-result" = v1t::ProvisionResult, description = "`updated` if the configuration changed, else `noop`.")),
+        ),
+        (
+            status = StatusCode::CREATED,
+            description = "The stream was created.",
+            body = v1t::stream::StreamInfo,
+            headers(("s2-provision-result" = v1t::ProvisionResult, description = "`created`.")),
+        ),
         (status = StatusCode::NOT_FOUND, body = v1t::error::ErrorInfo),
         (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
         (status = StatusCode::FORBIDDEN, body = v1t::error::ErrorInfo),
@@ -240,13 +259,15 @@ pub async fn ensure_stream(
         .await?
         .map(Into::into);
     let (status, outcome, info) = match info {
-        ProvisionResult::Created(info) => (StatusCode::CREATED, "created", info),
-        ProvisionResult::Updated(info) => (StatusCode::OK, "updated", info),
-        ProvisionResult::Noop(info) => (StatusCode::OK, "noop", info),
+        ProvisionResult::Created(info) => {
+            (StatusCode::CREATED, v1t::ProvisionResult::Created, info)
+        }
+        ProvisionResult::Updated(info) => (StatusCode::OK, v1t::ProvisionResult::Updated, info),
+        ProvisionResult::Noop(info) => (StatusCode::OK, v1t::ProvisionResult::Noop, info),
     };
     Ok((
         status,
-        [(PROVISION_RESULT_HEADER.clone(), outcome)],
+        [(PROVISION_RESULT_HEADER.clone(), outcome.into())],
         Json(info),
     ))
 }
@@ -266,7 +287,7 @@ pub struct DeleteArgs {
     path = super::paths::streams::DELETE,
     tag = super::paths::streams::TAG,
     responses(
-        (status = StatusCode::ACCEPTED),
+        (status = StatusCode::ACCEPTED, description = "The stream is being deleted, including if it already was."),
         (status = StatusCode::CONFLICT, body = v1t::error::ErrorInfo),
         (status = StatusCode::NOT_FOUND, body = v1t::error::ErrorInfo),
         (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),

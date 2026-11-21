@@ -73,7 +73,12 @@ pub struct CreateArgs {
     request_body = v1t::basin::CreateBasinRequest,
     responses(
         (status = StatusCode::OK, body = v1t::basin::BasinInfo),
-        (status = StatusCode::CREATED, body = v1t::basin::BasinInfo),
+        (
+            status = StatusCode::CREATED,
+            description = "Created, or already created by an earlier attempt with the same request token.",
+            body = v1t::basin::BasinInfo,
+            headers(("s2-provision-result" = v1t::ProvisionResult, description = "`created`, or `noop` if an earlier attempt created it.")),
+        ),
         (status = StatusCode::CONFLICT, body = v1t::error::ErrorInfo),
         (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
         (status = StatusCode::FORBIDDEN, body = v1t::error::ErrorInfo),
@@ -108,13 +113,13 @@ pub async fn create_basin(
         .await?
         .map(Into::into);
     let (outcome, info) = match info {
-        ProvisionResult::Created(info) => ("created", info),
-        ProvisionResult::Noop(info) => ("noop", info),
+        ProvisionResult::Created(info) => (v1t::ProvisionResult::Created, info),
+        ProvisionResult::Noop(info) => (v1t::ProvisionResult::Noop, info),
         ProvisionResult::Updated(_) => unreachable!("CreateOnly mode never produces Updated"),
     };
     Ok((
         StatusCode::CREATED,
-        [(PROVISION_RESULT_HEADER.clone(), outcome)],
+        [(PROVISION_RESULT_HEADER.clone(), outcome.into())],
         Json(info),
     ))
 }
@@ -158,6 +163,10 @@ pub struct EnsureArgs {
 }
 
 /// Ensure a basin.
+///
+/// Creates the basin if it does not exist. Otherwise makes its configuration the given one, where
+/// omitted fields take their defaults, as on create. Reconfigure instead leaves omitted fields
+/// unchanged.
 #[cfg_attr(feature = "utoipa", utoipa::path(
     put,
     path = super::paths::basins::ENSURE,
@@ -165,8 +174,18 @@ pub struct EnsureArgs {
     request_body = Option<v1t::basin::EnsureBasinRequest>,
     params(v1t::BasinNamePathSegment),
     responses(
-        (status = StatusCode::OK, body = v1t::basin::BasinInfo),
-        (status = StatusCode::CREATED, body = v1t::basin::BasinInfo),
+        (
+            status = StatusCode::OK,
+            description = "The basin existed, and now has the given configuration.",
+            body = v1t::basin::BasinInfo,
+            headers(("s2-provision-result" = v1t::ProvisionResult, description = "`updated` if the configuration changed, else `noop`.")),
+        ),
+        (
+            status = StatusCode::CREATED,
+            description = "The basin was created.",
+            body = v1t::basin::BasinInfo,
+            headers(("s2-provision-result" = v1t::ProvisionResult, description = "`created`.")),
+        ),
         (status = StatusCode::CONFLICT, body = v1t::error::ErrorInfo),
         (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
         (status = StatusCode::REQUEST_TIMEOUT, body = v1t::error::ErrorInfo),
@@ -196,13 +215,15 @@ pub async fn ensure_basin(
         .await?
         .map(Into::into);
     let (status, outcome, info) = match info {
-        ProvisionResult::Created(info) => (StatusCode::CREATED, "created", info),
-        ProvisionResult::Updated(info) => (StatusCode::OK, "updated", info),
-        ProvisionResult::Noop(info) => (StatusCode::OK, "noop", info),
+        ProvisionResult::Created(info) => {
+            (StatusCode::CREATED, v1t::ProvisionResult::Created, info)
+        }
+        ProvisionResult::Updated(info) => (StatusCode::OK, v1t::ProvisionResult::Updated, info),
+        ProvisionResult::Noop(info) => (StatusCode::OK, v1t::ProvisionResult::Noop, info),
     };
     Ok((
         status,
-        [(PROVISION_RESULT_HEADER.clone(), outcome)],
+        [(PROVISION_RESULT_HEADER.clone(), outcome.into())],
         Json(info),
     ))
 }
@@ -220,7 +241,7 @@ pub struct DeleteArgs {
     path = super::paths::basins::DELETE,
     tag = super::paths::basins::TAG,
     responses(
-        (status = StatusCode::ACCEPTED),
+        (status = StatusCode::ACCEPTED, description = "The basin is being deleted, including if it already was."),
         (status = StatusCode::CONFLICT, body = v1t::error::ErrorInfo),
         (status = StatusCode::NOT_FOUND, body = v1t::error::ErrorInfo),
         (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),

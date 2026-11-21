@@ -27,13 +27,13 @@ use strum::FromRepr;
   └─────────────┴────────────┴─────────────┴───────────────┘
 
   LENGTH = size of (FLAGS + PAYLOAD), does NOT include length header itself
-  Implemented limit: 2 MiB (smaller than 24-bit protocol maximum)
+  Implemented limit: 2.5 MiB (smaller than 24-bit protocol maximum)
 */
 
 const LENGTH_PREFIX_SIZE: usize = 3;
 const STATUS_CODE_SIZE: usize = 2;
 const COMPRESSION_THRESHOLD_BYTES: usize = 1024; // 1 KiB
-const MAX_FRAME_BYTES: usize = 2 * 1024 * 1024; // 2 MiB
+const MAX_FRAME_BYTES: usize = 5 * 512 * 1024; // 2.5 MiB
 
 /*
 Flag byte layout:

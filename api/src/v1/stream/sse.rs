@@ -4,6 +4,9 @@ use s2_common::http::ParseableHeader;
 use serde::Serialize;
 
 use super::{ReadBatch, StreamPosition};
+use crate::v1::error::ErrorInfo;
+#[cfg(feature = "axum")]
+use crate::v1::error::ErrorResponse;
 
 static LAST_EVENT_ID_HEADER: http::HeaderName = http::HeaderName::from_static("last-event-id");
 
@@ -113,7 +116,7 @@ pub enum ReadEvent {
     Error {
         #[cfg_attr(feature = "utoipa", schema(inline))]
         event: Error,
-        data: String,
+        data: ErrorEventData,
     },
     #[cfg_attr(feature = "utoipa", schema(title = "ping"))]
     Ping {
@@ -149,10 +152,19 @@ pub fn read_batch_event(
 }
 
 #[cfg(feature = "axum")]
-pub fn error_event(data: String) -> Result<axum::response::sse::Event, axum::Error> {
-    Ok(axum::response::sse::Event::default()
+pub fn error_event(error: &ErrorResponse) -> Result<axum::response::sse::Event, axum::Error> {
+    #[derive(Serialize)]
+    struct Data<'a> {
+        status: u16,
+        #[serde(flatten)]
+        body: &'a ErrorResponse,
+    }
+    axum::response::sse::Event::default()
         .event(Error::Error)
-        .data(data))
+        .json_data(Data {
+            status: error.status().as_u16(),
+            body: error,
+        })
 }
 
 #[cfg(feature = "axum")]
@@ -183,6 +195,18 @@ impl AsRef<str> for DoneEventData {
     }
 }
 
+/// Why the read ended: the error a response would have carried, with its status.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub struct ErrorEventData {
+    /// HTTP status code of the error.
+    pub status: u16,
+    #[serde(flatten)]
+    pub info: ErrorInfo,
+}
+
+/// Heartbeat while the read waits at the tail, sent only when the server has nothing earlier to
+/// send.
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
