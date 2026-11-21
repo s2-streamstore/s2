@@ -187,6 +187,7 @@ impl Producer {
             config,
             cmd_rx,
             terminal_err.clone(),
+            permits.clone(),
         )));
         Self {
             cmd_tx,
@@ -215,7 +216,8 @@ impl Producer {
     /// for a simpler API.
     ///
     /// Waits when the unacknowledged bytes limit is reached, providing explicit backpressure
-    /// control. The returned permit must be used to submit the record.
+    /// control. If the producer terminates while waiting, returns its terminal error.
+    /// The returned permit must be used to submit the record.
     ///
     /// Reserving capacity does not order a record relative to [`flush`](Self::flush); the record is
     /// ordered when [`RecordSubmitPermit::submit`] is called.
@@ -227,7 +229,11 @@ impl Producer {
     /// [`Sender::reserve_owned`](tokio::sync::mpsc::Sender::reserve_owned), both of which are
     /// cancel safe.
     pub async fn reserve(&self, bytes: u32) -> Result<RecordSubmitPermit, ProducerError> {
-        let append_permit = self.permits.acquire(bytes).await;
+        let append_permit = self
+            .permits
+            .acquire(bytes)
+            .await
+            .map_err(|_| self.terminal_err())?;
         let cmd_tx_permit = self
             .cmd_tx
             .clone()
@@ -281,6 +287,7 @@ impl Producer {
         config: ProducerConfig,
         mut cmd_rx: mpsc::Receiver<Command>,
         terminal_err: Arc<OnceLock<ProducerError>>,
+        permits: AppendPermits,
     ) {
         let (record_tx, mut inputs) = Self::batcher(&config, config.match_seq_num);
         let mut record_tx = Some(record_tx);
@@ -339,6 +346,7 @@ impl Producer {
                             terminate_producer(
                                 ProducerError::ProducerDropped,
                                 &terminal_err,
+                                &permits,
                                 &mut pending_batch_acks,
                                 &mut pending_record_acks,
                                 &mut stashed_submission,
@@ -358,9 +366,18 @@ impl Producer {
                             submit_fut = Some(Box::pin(session.submit(input).map_err(Into::into)));
                         }
                         Some(Err(err)) => {
+                            // Validation of a later record says nothing about appends already
+                            // accepted by the session. Drain it and keep their actual outcomes.
+                            if !pending_batch_acks.is_empty() {
+                                let _ = session.close().await;
+                                while let Some((batch_ack, batch_record_acks)) = pending_batch_acks.next().await {
+                                    dispatch_acks(batch_ack, batch_record_acks);
+                                }
+                            }
                             terminate_producer(
                                 err.into(),
                                 &terminal_err,
+                                &permits,
                                 &mut pending_batch_acks,
                                 &mut pending_record_acks,
                                 &mut stashed_submission,
@@ -399,6 +416,7 @@ impl Producer {
                             terminate_producer(
                                 err,
                                 &terminal_err,
+                                &permits,
                                 &mut pending_batch_acks,
                                 &mut pending_record_acks,
                                 &mut stashed_submission,
@@ -418,6 +436,7 @@ impl Producer {
                         terminate_producer(
                             err,
                             &terminal_err,
+                            &permits,
                             &mut pending_batch_acks,
                             &mut pending_record_acks,
                             &mut stashed_submission,
@@ -604,28 +623,37 @@ fn dispatch_acks(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn terminate_producer(
     err: ProducerError,
     terminal_err: &OnceLock<ProducerError>,
+    permits: &AppendPermits,
     pending_batch_acks: &mut FuturesUnordered<PendingBatchAck>,
     pending_record_acks: &mut VecDeque<PendingRecordAck>,
     stashed_submission: &mut Option<StashedSubmission>,
     control: &mut PendingControl,
     cmd_rx: &mut mpsc::Receiver<Command>,
 ) {
-    while let Some((batch_ack, pending_record_acks)) =
-        pending_batch_acks.next().now_or_never().flatten()
-    {
-        dispatch_acks(batch_ack, pending_record_acks);
+    // Poll every ticket directly: cooperative yielding must not hide a ready acknowledgement.
+    for pending in pending_batch_acks.iter_mut() {
+        if let Some((batch_ack, pending_record_acks)) =
+            tokio::task::coop::unconstrained(pending).now_or_never()
+        {
+            dispatch_acks(batch_ack, pending_record_acks);
+        }
     }
 
     let _ = terminal_err.set(err.clone());
+    // Settle unfinished tickets and release their permits before draining commands, which
+    // can wait for an unrelated RecordSubmitPermit to be submitted or dropped.
+    pending_batch_acks.clear();
     for pending in pending_record_acks.drain(..) {
         let _ = pending.ack_tx.send(Err(err.clone()));
     }
     if let Some(submission) = stashed_submission.take() {
         let _ = submission.ack_tx.send(Err(err.clone()));
     }
+    permits.close();
     if let Some(done_tx) = control.flush_tx.take() {
         let _ = done_tx.send(Err(err.clone()));
     }

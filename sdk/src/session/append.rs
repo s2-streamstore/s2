@@ -10,7 +10,7 @@ use std::{
 
 use futures_util::StreamExt;
 use tokio::{
-    sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot},
+    sync::{AcquireError, OwnedSemaphorePermit, Semaphore, mpsc, oneshot},
     time::Instant,
 };
 use tokio_muxt::{CoalesceMode, MuxTimer};
@@ -294,6 +294,7 @@ impl AppendSession {
             retry_builder,
             buffer_size,
             terminal_err.clone(),
+            Some(permits.clone()),
         )));
         Self {
             cmd_tx,
@@ -325,6 +326,7 @@ impl AppendSession {
     /// for a simpler API.
     ///
     /// Waits when inflight limits are reached, providing explicit backpressure control.
+    /// If the session terminates while waiting, returns its terminal error.
     /// The returned permit must be used to submit the batch.
     ///
     /// **Note**: After all submits, you must call [`close`](Self::close) to ensure all batches are
@@ -337,7 +339,11 @@ impl AppendSession {
     /// [`Sender::reserve_owned`](tokio::sync::mpsc::Sender::reserve), both of which are cancel
     /// safe.
     pub async fn reserve(&self, bytes: u32) -> Result<BatchSubmitPermit, AppendSessionError> {
-        let append_permit = self.permits.acquire(bytes).await;
+        let append_permit = self
+            .permits
+            .acquire(bytes)
+            .await
+            .map_err(|_| self.terminal_err())?;
         let cmd_tx_permit = self
             .cmd_tx
             .clone()
@@ -413,6 +419,7 @@ impl AppendSessionInternal {
             retry_builder,
             buffer_size,
             terminal_err.clone(),
+            None,
         )));
         Self {
             cmd_tx,
@@ -487,29 +494,26 @@ impl AppendPermits {
         }
     }
 
-    pub(crate) async fn acquire(&self, bytes: u32) -> AppendPermit {
-        AppendPermit {
+    pub(crate) async fn acquire(&self, bytes: u32) -> Result<AppendPermit, AcquireError> {
+        Ok(AppendPermit {
             _count: if let Some(count) = self.count.as_ref() {
-                Some(
-                    count
-                        .clone()
-                        .acquire_many_owned(1)
-                        .await
-                        .expect("semaphore should not be closed"),
-                )
+                Some(count.clone().acquire_many_owned(1).await?)
             } else {
                 None
             },
-            _bytes: self
-                .bytes
-                .clone()
-                .acquire_many_owned(bytes)
-                .await
-                .expect("semaphore should not be closed"),
+            _bytes: self.bytes.clone().acquire_many_owned(bytes).await?,
+        })
+    }
+
+    pub(crate) fn close(&self) {
+        if let Some(count) = &self.count {
+            count.close();
         }
+        self.bytes.close();
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_session_with_retry(
     client: BasinClient,
     stream: StreamName,
@@ -518,6 +522,7 @@ async fn run_session_with_retry(
     retry_builder: RetryBackoffBuilder,
     buffer_size: usize,
     terminal_err: Arc<OnceLock<AppendSessionError>>,
+    permits: Option<AppendPermits>,
 ) {
     let access_token_mode = client.config.access_token.mode();
     let frame_signal = match client.config.retry.append_retry_policy {
@@ -611,6 +616,9 @@ async fn run_session_with_retry(
                         state.inflight_appends.iter().any(|a| a.prior_uncertainty),
                     );
                     let _ = terminal_err.set(session_err.clone());
+                    if let Some(permits) = &permits {
+                        permits.close();
+                    }
 
                     for inflight_append in state.inflight_appends.drain(..) {
                         let error = err

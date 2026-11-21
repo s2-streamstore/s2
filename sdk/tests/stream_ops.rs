@@ -2176,6 +2176,58 @@ async fn append_session_for_non_existent_stream_errors(
 
 #[test_context(SharedS2Basin)]
 #[tokio_shared_rt::test(shared)]
+async fn append_session_terminal_error_wakes_waiters(
+    basin: &SharedS2Basin,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for batches in [1, 2] {
+        let config = AppendSessionConfig::new()
+            .with_max_unacked_bytes(1024 * 1024)?
+            .with_max_unacked_batches(batches.try_into()?);
+        let session = basin.stream(unique_stream_name()).append_session(config);
+        let _held = session.reserve(1024 * 1024).await?;
+        let waiting = session.reserve(1);
+        tokio::pin!(waiting);
+        assert!(poll!(&mut waiting).is_pending());
+        let result = tokio::time::timeout(Duration::from_secs(10), waiting).await?;
+        assert_matches!(result.err(), Some(AppendSessionError::Append(AppendError::Request(RequestError::Server(err)))) => {
+            assert_eq!(err.code, "stream_not_found");
+        });
+    }
+    Ok(())
+}
+
+#[test_context(S2Stream)]
+#[tokio_shared_rt::test(shared)]
+async fn producer_validation_drains_earlier_appends(
+    stream: &S2Stream,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let limits = BatchLimits::new()
+        .with_max_batch_bytes(8)?
+        .with_max_batch_records(1)?;
+    let producer = stream.producer(
+        ProducerConfig::new()
+            .with_max_unacked_bytes(1024 * 1024)?
+            .with_batching(
+                BatchingConfig::new()
+                    .with_linger(Duration::ZERO)
+                    .with_limits(limits),
+            ),
+    );
+    let _held = producer.reserve(1024 * 1024 - 17).await?;
+    let earlier = producer.submit(AppendRecord::new("")?).await?;
+    let _later = producer.submit(AppendRecord::new("x")?).await?;
+    let waiting = producer.reserve(100);
+    tokio::pin!(waiting);
+    assert!(poll!(&mut waiting).is_pending());
+    assert_matches!(producer.flush().await, Err(ProducerError::Validation(_)));
+    let result = tokio::time::timeout(Duration::from_secs(10), waiting).await?;
+    assert_matches!(result.err(), Some(ProducerError::Validation(_)));
+    assert_eq!(earlier.await?.seq_num, 0);
+    Ok(())
+}
+
+#[test_context(SharedS2Basin)]
+#[tokio_shared_rt::test(shared)]
 async fn producer_for_non_existent_stream_errors(
     basin: &SharedS2Basin,
 ) -> Result<(), Box<dyn std::error::Error>> {
