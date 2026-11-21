@@ -13,7 +13,7 @@ image:
   # Overrides the image tag whose default is the chart appVersion.
   tag: ""
   # Digest of the appVersion image, set on release. Ignored when tag is set.
-  digest: "sha256:24ba6d315f59408c4bb91e2f58e1f83c0248a9cd99d61d8bd2d74baedcf4dbf6"
+  digest: "sha256:1fecdd87e41ce89e0e3b4ce6a68b627e15cda5715d0b8e3b1235efef4bf637c8"
 
 imagePullSecrets: []
 nameOverride: "s2-lite"
