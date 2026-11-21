@@ -175,14 +175,9 @@ impl ServiceError {
                 DeleteStreamError::TransactionConflict(e) => {
                     standard(ErrorCode::TransactionConflict, e.to_string())
                 }
-                DeleteStreamError::StreamerMissingInActionError(e) => {
+                DeleteStreamError::StreamerMissingInActionError(_)
+                | DeleteStreamError::RequestDroppedError(_) => {
                     standard(ErrorCode::Unavailable, e.to_string())
-                }
-                DeleteStreamError::RequestDroppedError(e) => {
-                    // Lite sends `unavailable` only when nothing was submitted, although the
-                    // error-code table allows side effects for it. The terminal trim marker may
-                    // have become durable before the drop, so this is `other`.
-                    standard(ErrorCode::Other, e.to_string())
                 }
                 DeleteStreamError::StreamNotFound(e) => {
                     standard(ErrorCode::StreamNotFound, e.to_string())
@@ -238,14 +233,9 @@ impl ServiceError {
                 AppendError::TransactionConflict(e) => {
                     standard(ErrorCode::TransactionConflict, e.to_string())
                 }
-                AppendError::StreamerMissingInActionError(e) => {
+                AppendError::StreamerMissingInActionError(_)
+                | AppendError::RequestDroppedError(_) => {
                     standard(ErrorCode::Unavailable, e.to_string())
-                }
-                AppendError::RequestDroppedError(e) => {
-                    // Lite sends `unavailable` only when nothing was submitted, although the
-                    // error-code table allows side effects for it. The append may have become
-                    // durable before the drop, so this is `other`.
-                    standard(ErrorCode::Other, e.to_string())
                 }
                 AppendError::BasinNotFound(e) => standard(ErrorCode::BasinNotFound, e.to_string()),
                 AppendError::StreamNotFound(e) => {
