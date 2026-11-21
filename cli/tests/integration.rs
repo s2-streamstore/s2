@@ -209,7 +209,7 @@ fn ls_basins() {
 fn delete_nonexistent_basin() {
     s2().args(["basin", "delete", "nonexistent-basin-12345"])
         .assert()
-        .failure();
+        .success();
 }
 
 #[test]
@@ -447,7 +447,7 @@ fn delete_nonexistent_stream() {
         &format!("s2://{basin}/nonexistent-stream-12345"),
     ])
     .assert()
-    .failure();
+    .success();
 }
 
 #[test]

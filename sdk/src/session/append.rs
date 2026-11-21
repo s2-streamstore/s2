@@ -1,7 +1,6 @@
 use std::{
     collections::VecDeque,
     future::Future,
-    num::NonZeroU32,
     pin::Pin,
     sync::{Arc, OnceLock},
     task::{Context, Poll},
@@ -215,12 +214,20 @@ impl AppendSessionConfig {
 
     /// Set the limit on number of unacknowledged [`AppendInput`]s held in memory.
     ///
+    /// **Note:** Must be at least `1`.
+    ///
     /// Defaults to no limit.
-    pub fn with_max_unacked_batches(self, max_unacked_batches: NonZeroU32) -> Self {
-        Self {
-            max_unacked_batches: Some(max_unacked_batches.get()),
-            ..self
+    pub fn with_max_unacked_batches(
+        self,
+        max_unacked_batches: u32,
+    ) -> Result<Self, ValidationError> {
+        if max_unacked_batches == 0 {
+            return Err("max_unacked_batches must be at least 1".into());
         }
+        Ok(Self {
+            max_unacked_batches: Some(max_unacked_batches),
+            ..self
+        })
     }
 
     /// Set the stream configuration to apply if the stream is created on append.

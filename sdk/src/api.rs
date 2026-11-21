@@ -44,7 +44,7 @@ use s2_common::{
 };
 use secrecy::ExposeSecret;
 use tokio_util::codec::Decoder;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::{
     client::{self, StreamingResponse, UnaryResponse},
@@ -55,7 +55,7 @@ use crate::{
     types::{
         AccessToken, AccessTokenId, AccessTokenMode, AppendRetryPolicy, BasinAuthority, BasinName,
         Compression, EncryptionKey, LocationName, NetworkPolicySelector, RetryConfig, S2Config,
-        S2Endpoints, StreamName,
+        S2Endpoints, StreamName, ValidationError,
     },
 };
 const CONTENT_TYPE_S2S: &str = "s2s/proto";
@@ -113,7 +113,10 @@ impl AccountClient {
     pub async fn revoke_access_token(&self, id: AccessTokenId) -> Result<(), ApiError> {
         let url = self.uri(format!("v1/access-tokens/{}", urlencoding::encode(&id)));
         let request = self.delete(url).build()?;
-        let _response = self.request(request).send().await?;
+        self.request(request)
+            .send()
+            .await
+            .ignore_not_found_code("access_token_not_found")?;
         Ok(())
     }
 
@@ -159,7 +162,10 @@ impl AccountClient {
             urlencoding::encode(&selector.to_string())
         ));
         let request = self.delete(url).build()?;
-        let _response = self.request(request).send().await?;
+        self.request(request)
+            .send()
+            .await
+            .ignore_not_found_code("network_policy_not_found")?;
         Ok(())
     }
 
@@ -251,17 +257,13 @@ impl AccountClient {
         ))
     }
 
-    pub async fn delete_basin(
-        &self,
-        name: BasinName,
-        ignore_not_found: bool,
-    ) -> Result<(), ApiError> {
+    pub async fn delete_basin(&self, name: BasinName) -> Result<(), ApiError> {
         let url = self.uri(format!("v1/basins/{name}"));
         let request = self.delete(url).build()?;
         self.request(request)
             .send()
             .await
-            .ignore_not_found(ignore_not_found)?;
+            .ignore_not_found_code("basin_not_found")?;
         Ok(())
     }
 
@@ -410,17 +412,13 @@ impl BasinClient {
         ))
     }
 
-    pub async fn delete_stream(
-        &self,
-        name: StreamName,
-        ignore_not_found: bool,
-    ) -> Result<(), ApiError> {
+    pub async fn delete_stream(&self, name: StreamName) -> Result<(), ApiError> {
         let url = self.uri(format!("v1/streams/{}", urlencoding::encode(&name)));
         let request = self.delete(url).build()?;
         self.request(request)
             .send()
             .await
-            .ignore_not_found(ignore_not_found)?;
+            .ignore_not_found_code("stream_not_found")?;
         Ok(())
     }
 
@@ -710,8 +708,8 @@ pub(crate) enum ApiError {
     ProtoDecode(#[from] prost::DecodeError),
     #[error(transparent)]
     TerminalDecode(#[from] TerminalDecodeError),
-    #[error("malformed access token: {0}")]
-    MalformedAccessToken(String),
+    #[error(transparent)]
+    Validation(#[from] ValidationError),
     #[cfg(feature = "_hidden")]
     #[error("access token provider failed: {0}")]
     AccessTokenProvider(crate::types::AccessTokenProviderError),
@@ -769,7 +767,7 @@ impl AppendRetryError for ApiError {
                 server_error_has_no_side_effects(*status, &err_resp.code)
             }
             Self::Client(err) => err.has_no_side_effects(),
-            Self::AppendConditionFailed(_) | Self::MalformedAccessToken(_) => true,
+            Self::AppendConditionFailed(_) | Self::Validation(_) => true,
             #[cfg(feature = "_hidden")]
             Self::AccessTokenProvider(_) => true,
             _ => false,
@@ -805,7 +803,7 @@ impl From<TerminalMessage> for ApiError {
         };
         if status == StatusCode::PRECONDITION_FAILED {
             let condition_failed =
-                match serde_json::from_str::<MaybeKnown<AppendConditionFailed>>(&msg.body) {
+                match serde_json::from_slice::<MaybeKnown<AppendConditionFailed>>(&msg.body) {
                     Ok(condition_failed) => condition_failed,
                     Err(err) => {
                         return ApiError::TerminalDecode(err.into());
@@ -813,7 +811,7 @@ impl From<TerminalMessage> for ApiError {
                 };
             ApiError::AppendConditionFailed(condition_failed)
         } else if status == StatusCode::RANGE_NOT_SATISFIABLE {
-            let tail = match serde_json::from_str::<TailResponse>(&msg.body) {
+            let tail = match serde_json::from_slice::<TailResponse>(&msg.body) {
                 Ok(tail) => tail,
                 Err(err) => {
                     return ApiError::TerminalDecode(err.into());
@@ -821,7 +819,7 @@ impl From<TerminalMessage> for ApiError {
             };
             ApiError::ReadUnwritten(tail)
         } else {
-            let response = match serde_json::from_str::<ServerErrorBody>(&msg.body) {
+            let response = match serde_json::from_slice::<ServerErrorBody>(&msg.body) {
                 Ok(response) => response,
                 Err(err) => {
                     return ApiError::TerminalDecode(err.into());
@@ -834,9 +832,12 @@ impl From<TerminalMessage> for ApiError {
 
 pub type Streaming<R> = Pin<Box<dyn Send + Stream<Item = Result<R, ApiError>>>>;
 
-fn authorization_header(access_token: &str) -> Result<HeaderValue, ApiError> {
+pub(crate) fn authorization_header(access_token: &str) -> Result<HeaderValue, ValidationError> {
+    if access_token.is_empty() {
+        return Err(ValidationError("invalid access token: must not be empty".into()));
+    }
     let mut header = HeaderValue::try_from(format!("Bearer {access_token}"))
-        .map_err(|error| ApiError::MalformedAccessToken(error.to_string()))?;
+        .map_err(|error| ValidationError(format!("invalid access token: {error}")))?;
     header.set_sensitive(true);
     Ok(header)
 }
@@ -876,6 +877,7 @@ impl BaseClient {
     where
         C: client::Connect + Clone + Send + Sync + 'static,
     {
+        config.validate()?;
         let access_token_mode = config.access_token.mode();
         let mut default_headers = config.default_headers.clone();
         // Authorization belongs to the configured token, including when a
@@ -1127,27 +1129,7 @@ impl<'a> RequestBuilder<'a> {
 
             let (err, retry_after, access_token) = match response {
                 Ok((resp, access_token)) => {
-                    let retry_after: Option<Duration> = resp
-                        .headers()
-                        .get(RETRY_AFTER_MS_HEADER)
-                        .and_then(|v| match v.to_str() {
-                            Ok(s) => Some(s),
-                            Err(e) => {
-                                warn!(
-                                    ?e,
-                                    "failed to parse {RETRY_AFTER_MS_HEADER} header as string"
-                                );
-                                None
-                            }
-                        })
-                        .and_then(|v| match v.parse::<u64>() {
-                            Ok(ms) => Some(ms),
-                            Err(e) => {
-                                warn!(?e, "failed to parse {RETRY_AFTER_MS_HEADER} header as u64");
-                                None
-                            }
-                        })
-                        .map(Duration::from_millis);
+                    let retry_after = parse_retry_after_ms(resp.headers());
 
                     let result = if let Some(ref handler) = self.error_handler {
                         resp.into_result_with_handler(handler)
@@ -1321,15 +1303,41 @@ impl StreamingResult for StreamingResponse {
     }
 }
 
-trait IgnoreNotFound {
-    fn ignore_not_found(self, enabled: bool) -> Result<(), ApiError>;
+fn parse_retry_after_ms(headers: &HeaderMap) -> Option<Duration> {
+    let value = headers.get(RETRY_AFTER_MS_HEADER)?;
+    let raw = match value.to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            debug!(?e, "ignoring non-UTF-8 {RETRY_AFTER_MS_HEADER} header");
+            return None;
+        }
+    };
+    if raw.is_empty() || !raw.bytes().all(|b| b.is_ascii_digit()) {
+        debug!(value = raw, "ignoring malformed {RETRY_AFTER_MS_HEADER} header");
+        return None;
+    }
+    match raw.parse::<u64>() {
+        Ok(ms) => Some(Duration::from_millis(ms)),
+        Err(e) => {
+            debug!(?e, value = raw, "ignoring out-of-range {RETRY_AFTER_MS_HEADER} header");
+            None
+        }
+    }
 }
 
-impl IgnoreNotFound for Result<UnaryResponse, ApiError> {
-    fn ignore_not_found(self, enabled: bool) -> Result<(), ApiError> {
+trait IgnoreNotFoundCode {
+    fn ignore_not_found_code(self, expected_code: &str) -> Result<(), ApiError>;
+}
+
+impl IgnoreNotFoundCode for Result<UnaryResponse, ApiError> {
+    fn ignore_not_found_code(self, expected_code: &str) -> Result<(), ApiError> {
         match self {
             Ok(_) => Ok(()),
-            Err(ApiError::Server(StatusCode::NOT_FOUND, _)) if enabled => Ok(()),
+            Err(ApiError::Server(StatusCode::NOT_FOUND, ref body))
+                if body.code == expected_code =>
+            {
+                Ok(())
+            }
             Err(err) => Err(err),
         }
     }
@@ -1749,13 +1757,13 @@ mod tests {
     #[case::unrecognized_condition(
         ApiError::from(TerminalMessage {
             status: 412,
-            body: r#"{"some_future_mismatch":7}"#.to_owned(),
+            body: bytes::Bytes::from_static(br#"{"some_future_mismatch":7}"#),
         }),
         "unrecognized condition: some_future_mismatch"
     )]
-    #[case::malformed_access_token(
-        ApiError::MalformedAccessToken("invalid header".to_owned()),
-        "malformed access token: invalid header"
+    #[case::invalid_access_token(
+        ApiError::Validation(ValidationError("invalid access token: invalid header".to_owned())),
+        "invalid access token: invalid header"
     )]
     #[test]
     fn unary_append_wraps_definite_terminal_errors(#[case] error: ApiError, #[case] message: &str) {
@@ -1987,5 +1995,81 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    // spec: r1 T3, L2
+    #[test]
+    fn parse_retry_after_ms_accepts_only_unsigned_ascii_digits() {
+        let headers = HeaderMap::new();
+        assert_eq!(parse_retry_after_ms(&headers), None);
+
+        for (raw, expected) in [
+            ("0", Some(Duration::ZERO)),
+            ("1500", Some(Duration::from_millis(1500))),
+            ("18446744073709551615", Some(Duration::from_millis(u64::MAX))),
+            ("", None),
+            ("+100", None),
+            ("-1", None),
+            ("100 ", None),
+            (" 100", None),
+            ("1.5", None),
+            ("abc", None),
+            ("18446744073709551616", None),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                RETRY_AFTER_MS_HEADER,
+                HeaderValue::from_str(raw).unwrap(),
+            );
+            assert_eq!(parse_retry_after_ms(&headers), expected, "raw={raw:?}");
+        }
+
+        let mut non_utf8 = HeaderMap::new();
+        non_utf8.insert(
+            RETRY_AFTER_MS_HEADER,
+            HeaderValue::from_bytes(b"\xff").unwrap(),
+        );
+        assert_eq!(parse_retry_after_ms(&non_utf8), None);
+    }
+
+    // spec: r1 M4
+    #[test]
+    fn ignore_not_found_code_matches_only_expected_404_code() {
+        let matching: Result<UnaryResponse, ApiError> =
+            Err(server_error(StatusCode::NOT_FOUND, "stream_not_found"));
+        assert!(matching.ignore_not_found_code("stream_not_found").is_ok());
+
+        let wrong_code: Result<UnaryResponse, ApiError> =
+            Err(server_error(StatusCode::NOT_FOUND, "basin_not_found"));
+        assert!(matches!(
+            wrong_code.ignore_not_found_code("stream_not_found"),
+            Err(ApiError::Server(StatusCode::NOT_FOUND, body)) if body.code == "basin_not_found"
+        ));
+
+        let wrong_status: Result<UnaryResponse, ApiError> =
+            Err(server_error(StatusCode::CONFLICT, "stream_not_found"));
+        assert!(matches!(
+            wrong_status.ignore_not_found_code("stream_not_found"),
+            Err(ApiError::Server(StatusCode::CONFLICT, _))
+        ));
+
+        let server_err: Result<UnaryResponse, ApiError> =
+            Err(server_error(StatusCode::INTERNAL_SERVER_ERROR, "unavailable"));
+        assert!(matches!(
+            server_err.ignore_not_found_code("stream_not_found"),
+            Err(ApiError::Server(StatusCode::INTERNAL_SERVER_ERROR, _))
+        ));
+    }
+
+    // spec: r1 C1, L3
+    #[test]
+    fn authorization_header_rejects_empty_and_invalid_and_marks_sensitive() {
+        assert!(authorization_header("").is_err());
+        assert!(authorization_header("bad\ntoken").is_err());
+        assert!(authorization_header("bad\rtoken").is_err());
+
+        let valid = authorization_header("secret-token").unwrap();
+        assert_eq!(valid, "Bearer secret-token");
+        assert!(valid.is_sensitive());
     }
 }

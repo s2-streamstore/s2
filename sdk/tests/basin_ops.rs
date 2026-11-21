@@ -27,9 +27,7 @@ async fn create_list_and_delete_stream(basin: &S2Basin) -> Result<(), RequestErr
     assert_eq!(page.values, vec![stream_info]);
     assert!(!page.has_more);
 
-    basin
-        .delete_stream(DeleteStreamInput::new(stream_name.clone()))
-        .await?;
+    basin.delete_stream(stream_name.clone()).await?;
 
     let page = basin.list_streams(ListStreamsInput::new()).await?;
 
@@ -91,7 +89,7 @@ async fn reconfigure_stream(basin: &S2Basin) -> Result<(), RequestError> {
         .await?;
 
     let new_config = StreamReconfiguration::new().with_delete_on_empty(
-        DeleteOnEmptyReconfiguration::new().with_min_age(Duration::from_hours(12)),
+        DeleteOnEmptyReconfiguration::new().with_min_age(Duration::from_hours(12))?,
     );
 
     let updated_config = basin
@@ -114,7 +112,8 @@ async fn reconfigure_stream(basin: &S2Basin) -> Result<(), RequestError> {
 async fn ensure_stream_created(basin: &S2Basin) -> Result<(), RequestError> {
     let stream_name = unique_stream_name();
 
-    let delete_on_empty_config = DeleteOnEmptyConfig::new().with_min_age(Duration::from_hours(24));
+    let delete_on_empty_config =
+        DeleteOnEmptyConfig::new().with_min_age(Duration::from_hours(24))?;
 
     let output = basin
         .ensure_stream(
@@ -160,7 +159,7 @@ async fn ensure_stream_config_updated(basin: &S2Basin) -> Result<(), RequestErro
             ))
             .await?;
 
-    assert_matches!(output, EnsureOutput::ConfigUpdated(_));
+    assert_matches!(output, EnsureOutput::Updated(_));
 
     let updated_config = basin.get_stream_config(stream_name).await?;
 
@@ -194,7 +193,7 @@ async fn ensure_basin_config_unchanged(basin: &S2Basin) -> Result<(), RequestErr
         .ensure_stream(EnsureStreamInput::new(stream_name.clone()).with_config(config.clone()))
         .await?;
 
-    assert_matches!(output, EnsureOutput::ConfigUnchanged(_));
+    assert_matches!(output, EnsureOutput::Noop(_));
 
     let updated_config = basin.get_stream_config(stream_name).await?;
 
@@ -316,27 +315,8 @@ async fn list_streams_with_start_after_returns_empty_page(
 
 #[test_context(S2Basin)]
 #[tokio_shared_rt::test(shared)]
-async fn delete_nonexistent_stream_errors(basin: &S2Basin) -> Result<(), RequestError> {
-    let result = basin
-        .delete_stream(DeleteStreamInput::new(unique_stream_name()))
-        .await;
-
-    assert_matches!(
-        result,
-        Err(RequestError::Server(ServerError { code, .. })) => {
-            assert_eq!(code, "stream_not_found")
-        }
-    );
-
-    Ok(())
-}
-
-#[test_context(S2Basin)]
-#[tokio_shared_rt::test(shared)]
-async fn delete_nonexistent_stream_with_ignore(basin: &S2Basin) -> Result<(), RequestError> {
-    let result = basin
-        .delete_stream(DeleteStreamInput::new(unique_stream_name()).with_ignore_not_found(true))
-        .await;
+async fn delete_nonexistent_stream_succeeds(basin: &S2Basin) -> Result<(), RequestError> {
+    let result = basin.delete_stream(unique_stream_name()).await;
 
     assert_matches!(result, Ok(()));
 
@@ -384,9 +364,7 @@ async fn list_streams_with_limit_zero(basin: &SharedS2Basin) -> Result<(), Reque
     assert!(page.values.iter().any(|info| info.name == stream_name));
     assert!(page.values.len() <= 1000);
 
-    basin
-        .delete_stream(DeleteStreamInput::new(stream_name))
-        .await?;
+    basin.delete_stream(stream_name).await?;
 
     Ok(())
 }
@@ -414,9 +392,7 @@ async fn list_streams_with_limit_over_max(basin: &SharedS2Basin) -> Result<(), R
     assert!(page.values.iter().any(|info| info.name == stream_name));
     assert!(page.values.len() <= 1000);
 
-    basin
-        .delete_stream(DeleteStreamInput::new(stream_name))
-        .await?;
+    basin.delete_stream(stream_name).await?;
 
     Ok(())
 }
@@ -484,7 +460,7 @@ async fn list_streams_with_pagination(basin: &SharedS2Basin) -> Result<(), Reque
     assert_eq!(listed, expected);
 
     for name in stream_names {
-        let _ = basin.delete_stream(DeleteStreamInput::new(name)).await;
+        let _ = basin.delete_stream(name).await;
     }
 
     Ok(())
@@ -518,7 +494,7 @@ async fn list_streams_returns_lexicographic_order(
     assert_eq!(listed, stream_names);
 
     for name in stream_names {
-        let _ = basin.delete_stream(DeleteStreamInput::new(name)).await;
+        let _ = basin.delete_stream(name).await;
     }
 
     Ok(())
@@ -555,7 +531,7 @@ async fn list_all_streams_iterates_with_prefix(
     assert_eq!(listed, stream_names);
 
     for name in stream_names {
-        let _ = basin.delete_stream(DeleteStreamInput::new(name)).await;
+        let _ = basin.delete_stream(name).await;
     }
 
     Ok(())
@@ -574,9 +550,7 @@ async fn list_all_streams_include_deleted(
     basin
         .create_stream(CreateStreamInput::new(stream_name.clone()))
         .await?;
-    basin
-        .delete_stream(DeleteStreamInput::new(stream_name.clone()))
-        .await?;
+    basin.delete_stream(stream_name.clone()).await?;
 
     let mut stream = basin.list_all_streams(
         ListAllStreamsInput::new()
@@ -612,7 +586,7 @@ async fn create_stream_with_full_config(basin: &SharedS2Basin) -> Result<(), Req
                 .with_mode(TimestampingMode::ClientRequire)
                 .with_uncapped(true),
         )
-        .with_delete_on_empty(DeleteOnEmptyConfig::new().with_min_age(Duration::from_secs(3600)));
+        .with_delete_on_empty(DeleteOnEmptyConfig::new().with_min_age(Duration::from_secs(3600))?);
 
     basin
         .create_stream(CreateStreamInput::new(stream_name.clone()).with_config(config))
@@ -638,9 +612,7 @@ async fn create_stream_with_full_config(basin: &SharedS2Basin) -> Result<(), Req
         } if storage_class == "standard"
     );
 
-    basin
-        .delete_stream(DeleteStreamInput::new(stream_name))
-        .await?;
+    basin.delete_stream(stream_name).await?;
 
     Ok(())
 }
@@ -666,9 +638,7 @@ async fn create_stream_storage_class_express(basin: &SharedS2Basin) -> Result<()
     let retrieved = basin.get_stream_config(stream_name.clone()).await?;
     assert_matches!(retrieved.storage_class.as_deref(), Some("express") | None);
 
-    basin
-        .delete_stream(DeleteStreamInput::new(stream_name))
-        .await?;
+    basin.delete_stream(stream_name).await?;
 
     Ok(())
 }
@@ -696,9 +666,7 @@ async fn create_stream_retention_policy_infinite(
     let retrieved = basin.get_stream_config(stream_name.clone()).await?;
     assert_matches!(retrieved.retention_policy, Some(RetentionPolicy::Infinite));
 
-    basin
-        .delete_stream(DeleteStreamInput::new(stream_name))
-        .await?;
+    basin.delete_stream(stream_name).await?;
 
     Ok(())
 }
@@ -742,9 +710,7 @@ async fn create_stream_timestamping_modes(basin: &SharedS2Basin) -> Result<(), R
             }
         }
 
-        basin
-            .delete_stream(DeleteStreamInput::new(stream_name))
-            .await?;
+        basin.delete_stream(stream_name).await?;
     }
 
     Ok(())
@@ -768,9 +734,7 @@ async fn create_stream_timestamping_uncapped(basin: &SharedS2Basin) -> Result<()
             .expect("explicit uncapped setting should be preserved");
         assert_eq!(timestamping.uncapped, Some(uncapped));
 
-        basin
-            .delete_stream(DeleteStreamInput::new(stream_name))
-            .await?;
+        basin.delete_stream(stream_name).await?;
     }
 
     Ok(())
@@ -781,7 +745,7 @@ async fn create_stream_timestamping_uncapped(basin: &SharedS2Basin) -> Result<()
 async fn create_stream_delete_on_empty_min_age(basin: &SharedS2Basin) -> Result<(), RequestError> {
     let stream_name = unique_stream_name();
     let config = StreamConfig::new()
-        .with_delete_on_empty(DeleteOnEmptyConfig::new().with_min_age(Duration::from_secs(3600)));
+        .with_delete_on_empty(DeleteOnEmptyConfig::new().with_min_age(Duration::from_secs(3600))?);
 
     basin
         .create_stream(CreateStreamInput::new(stream_name.clone()).with_config(config))
@@ -796,9 +760,7 @@ async fn create_stream_delete_on_empty_min_age(basin: &SharedS2Basin) -> Result<
         })
     );
 
-    basin
-        .delete_stream(DeleteStreamInput::new(stream_name))
-        .await?;
+    basin.delete_stream(stream_name).await?;
 
     Ok(())
 }
@@ -859,9 +821,7 @@ async fn reconfigure_stream_storage_class_standard(
 
     assert_matches!(config.storage_class.as_deref(), Some("standard"));
 
-    basin
-        .delete_stream(DeleteStreamInput::new(stream_name))
-        .await?;
+    basin.delete_stream(stream_name).await?;
 
     Ok(())
 }
@@ -886,9 +846,7 @@ async fn reconfigure_stream_storage_class_express(
     let config = match result {
         Ok(config) => config,
         Err(err) if is_free_tier_limitation(&err) => {
-            let _ = basin
-                .delete_stream(DeleteStreamInput::new(stream_name))
-                .await;
+            let _ = basin.delete_stream(stream_name).await;
             return Ok(());
         }
         Err(err) => return Err(err),
@@ -896,9 +854,7 @@ async fn reconfigure_stream_storage_class_express(
 
     assert_matches!(config.storage_class.as_deref(), Some("express") | None);
 
-    basin
-        .delete_stream(DeleteStreamInput::new(stream_name))
-        .await?;
+    basin.delete_stream(stream_name).await?;
 
     Ok(())
 }
@@ -922,9 +878,7 @@ async fn reconfigure_stream_retention_policy_age(
 
     assert_matches!(config.retention_policy, Some(RetentionPolicy::Age(3600)));
 
-    basin
-        .delete_stream(DeleteStreamInput::new(stream_name))
-        .await?;
+    basin.delete_stream(stream_name).await?;
 
     Ok(())
 }
@@ -949,9 +903,7 @@ async fn reconfigure_stream_retention_policy_infinite(
     let config = match result {
         Ok(config) => config,
         Err(err) if is_free_tier_limitation(&err) => {
-            let _ = basin
-                .delete_stream(DeleteStreamInput::new(stream_name))
-                .await;
+            let _ = basin.delete_stream(stream_name).await;
             return Ok(());
         }
         Err(err) => return Err(err),
@@ -959,9 +911,7 @@ async fn reconfigure_stream_retention_policy_infinite(
 
     assert_matches!(config.retention_policy, Some(RetentionPolicy::Infinite));
 
-    basin
-        .delete_stream(DeleteStreamInput::new(stream_name))
-        .await?;
+    basin.delete_stream(stream_name).await?;
 
     Ok(())
 }
@@ -1009,9 +959,7 @@ async fn reconfigure_stream_timestamping_modes(basin: &SharedS2Basin) -> Result<
             }
         }
 
-        basin
-            .delete_stream(DeleteStreamInput::new(stream_name))
-            .await?;
+        basin.delete_stream(stream_name).await?;
     }
 
     Ok(())
@@ -1041,9 +989,7 @@ async fn reconfigure_stream_timestamping_uncapped(
             .expect("explicit uncapped setting should be preserved");
         assert_eq!(timestamping.uncapped, Some(uncapped));
 
-        basin
-            .delete_stream(DeleteStreamInput::new(stream_name))
-            .await?;
+        basin.delete_stream(stream_name).await?;
     }
 
     Ok(())
@@ -1061,7 +1007,7 @@ async fn reconfigure_stream_delete_on_empty(basin: &SharedS2Basin) -> Result<(),
         .reconfigure_stream(ReconfigureStreamInput::new(
             stream_name.clone(),
             StreamReconfiguration::new().with_delete_on_empty(
-                DeleteOnEmptyReconfiguration::new().with_min_age(Duration::from_secs(3600)),
+                DeleteOnEmptyReconfiguration::new().with_min_age(Duration::from_secs(3600))?,
             ),
         ))
         .await?;
@@ -1074,9 +1020,7 @@ async fn reconfigure_stream_delete_on_empty(basin: &SharedS2Basin) -> Result<(),
         })
     );
 
-    basin
-        .delete_stream(DeleteStreamInput::new(stream_name))
-        .await?;
+    basin.delete_stream(stream_name).await?;
 
     Ok(())
 }
@@ -1090,7 +1034,7 @@ async fn reconfigure_stream_disable_delete_on_empty(
     basin
         .create_stream(CreateStreamInput::new(stream_name.clone()).with_config(
             StreamConfig::new().with_delete_on_empty(
-                DeleteOnEmptyConfig::new().with_min_age(Duration::from_secs(3600)),
+                DeleteOnEmptyConfig::new().with_min_age(Duration::from_secs(3600))?,
             ),
         ))
         .await?;
@@ -1099,7 +1043,7 @@ async fn reconfigure_stream_disable_delete_on_empty(
         .reconfigure_stream(ReconfigureStreamInput::new(
             stream_name.clone(),
             StreamReconfiguration::new().with_delete_on_empty(
-                DeleteOnEmptyReconfiguration::new().with_min_age(Duration::from_secs(0)),
+                DeleteOnEmptyReconfiguration::new().with_min_age(Duration::from_secs(0))?,
             ),
         ))
         .await?;
@@ -1109,9 +1053,7 @@ async fn reconfigure_stream_disable_delete_on_empty(
             || config.delete_on_empty == Some(DeleteOnEmptyConfig::new())
     );
 
-    basin
-        .delete_stream(DeleteStreamInput::new(stream_name))
-        .await?;
+    basin.delete_stream(stream_name).await?;
 
     Ok(())
 }
@@ -1143,9 +1085,7 @@ async fn reconfigure_stream_empty_config_no_change(
     assert_matches!(retrieved.storage_class.as_deref(), Some("standard"));
     assert_matches!(retrieved.retention_policy, Some(RetentionPolicy::Age(3600)));
 
-    basin
-        .delete_stream(DeleteStreamInput::new(stream_name))
-        .await?;
+    basin.delete_stream(stream_name).await?;
 
     Ok(())
 }
@@ -1185,9 +1125,7 @@ async fn reconfigure_stream_partial_update(basin: &SharedS2Basin) -> Result<(), 
         })
     );
 
-    basin
-        .delete_stream(DeleteStreamInput::new(stream_name))
-        .await?;
+    basin.delete_stream(stream_name).await?;
 
     Ok(())
 }
@@ -1216,9 +1154,7 @@ async fn reconfigure_stream_invalid_retention_age_zero(
         }
     );
 
-    basin
-        .delete_stream(DeleteStreamInput::new(stream_name))
-        .await?;
+    basin.delete_stream(stream_name).await?;
 
     Ok(())
 }
@@ -1263,9 +1199,7 @@ async fn create_stream_duplicate_name_errors(basin: &SharedS2Basin) -> Result<()
         }
     );
 
-    basin
-        .delete_stream(DeleteStreamInput::new(stream_name))
-        .await?;
+    basin.delete_stream(stream_name).await?;
 
     Ok(())
 }
@@ -1281,19 +1215,9 @@ async fn delete_stream_already_deleting_is_idempotent(
         .create_stream(CreateStreamInput::new(stream_name.clone()))
         .await?;
 
-    basin
-        .delete_stream(DeleteStreamInput::new(stream_name.clone()))
-        .await?;
+    basin.delete_stream(stream_name.clone()).await?;
 
-    let result = basin
-        .delete_stream(DeleteStreamInput::new(stream_name.clone()))
-        .await;
-
-    match result {
-        Ok(()) => {}
-        Err(RequestError::Server(ServerError { code, .. })) if code == "stream_not_found" => {}
-        Err(err) => return Err(err),
-    }
+    basin.delete_stream(stream_name.clone()).await?;
 
     Ok(())
 }
@@ -1309,9 +1233,7 @@ async fn get_stream_config_for_deleting_stream_errors(
         .create_stream(CreateStreamInput::new(stream_name.clone()))
         .await?;
 
-    basin
-        .delete_stream(DeleteStreamInput::new(stream_name.clone()))
-        .await?;
+    basin.delete_stream(stream_name.clone()).await?;
 
     let result = basin.get_stream_config(stream_name.clone()).await;
 
@@ -1336,9 +1258,7 @@ async fn deleted_stream_has_deleted_at_when_listed(
         .create_stream(CreateStreamInput::new(stream_name.clone()))
         .await?;
 
-    basin
-        .delete_stream(DeleteStreamInput::new(stream_name.clone()))
-        .await?;
+    basin.delete_stream(stream_name.clone()).await?;
 
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {

@@ -252,7 +252,7 @@ impl ReadUpdate {
         }
     }
 
-    fn from_batch(mut batch: ReadBatch, ignore_command_records: bool) -> Self {
+    fn from_batch(batch: ReadBatch) -> Self {
         let resume_seq_num = resume_seq_num_after_batch(&batch);
         let caught_up_tail = batch.tail.filter(|tail| {
             batch.records.is_empty()
@@ -261,10 +261,6 @@ impl ReadUpdate {
                     .last()
                     .is_some_and(|record| record.seq_num.checked_add(1) == Some(tail.seq_num))
         });
-
-        if ignore_command_records {
-            batch.records.retain(|record| !record.is_command_record());
-        }
 
         Self {
             batch: (!batch.records.is_empty()).then_some(batch),
@@ -295,16 +291,14 @@ impl ReadSession {
     /// An unclamped absolute starting sequence number is available immediately. A timestamp,
     /// tail-relative, or clamped start returns `None` until the session receives a record or a
     /// reported tail. The returned value is the sequence number of the next record the session
-    /// expects. It advances as the session is polled, including across records hidden by
-    /// [`ReadInput::ignore_command_records`](crate::types::ReadInput::ignore_command_records).
+    /// expects. It advances as the session is polled.
     pub fn resume_seq_num(&self) -> Option<u64> {
         self.resume_seq_num
     }
 
     /// Return whether all records through the latest reported tail were delivered.
     ///
-    /// A later batch that does not reach a reported tail or a reconnect resets it.
-    /// Ignored command records count toward progress. Use
+    /// A later batch that does not reach a reported tail or a reconnect resets it. Use
     /// [`S2Stream::check_tail`](crate::S2Stream::check_tail) for the current tail.
     pub fn is_caught_up(&self) -> bool {
         self.state.is_caught_up()
@@ -379,7 +373,6 @@ pub async fn read_session(
     let ReadInput {
         start,
         stop,
-        ignore_command_records,
         stream_config: _,
     } = input;
     let mut start: ReadStart = start.into();
@@ -509,15 +502,19 @@ pub async fn read_session(
 
                     update_resume_start(&mut start, &batch);
                     if let Some(count) = end.count.as_mut() {
-                        *count = count.saturating_sub(batch.records.len())
+                        *count = count.saturating_sub(batch.records.len() as u64)
                     }
                     if let Some(bytes) = end.bytes.as_mut() {
                         *bytes = bytes.saturating_sub(
-                            batch.records.iter().map(|r| r.metered_bytes()).sum()
+                            batch
+                                .records
+                                .iter()
+                                .map(|r| r.metered_bytes() as u64)
+                                .sum::<u64>(),
                         )
                     }
 
-                    yield Ok(ReadUpdate::from_batch(batch, ignore_command_records));
+                    yield Ok(ReadUpdate::from_batch(batch));
                 }
                 Some(Err(err)) => {
                     batches = None;
@@ -657,7 +654,7 @@ fn retry_delay(
 
     let backoff = match retry_policy {
         ReadSessionRetryPolicy::Budgeted => backoffs.next(),
-        ReadSessionRetryPolicy::Indefinite => Some(backoffs.next_or_max()),
+        ReadSessionRetryPolicy::Unbounded => Some(backoffs.next_or_max()),
     };
     if let Some(backoff) = backoff {
         debug!(
@@ -756,10 +753,10 @@ mod tests {
         let mut session = test_session(UnboundedReceiverStream::new(rx));
 
         assert_eq!(session.resume_seq_num(), None);
-        tx.send(Ok(ReadUpdate::from_batch(
-            batch(Vec::new(), Some(position(42))),
-            false,
-        )))
+        tx.send(Ok(ReadUpdate::from_batch(batch(
+            Vec::new(),
+            Some(position(42)),
+        ))))
         .unwrap();
 
         let mut next = Box::pin(session.next());
@@ -773,14 +770,14 @@ mod tests {
     async fn caught_up_follows_delivery_and_pins_tail() {
         let tail = position(2);
         let mut session = test_session(stream::iter([
-            Ok(ReadUpdate::from_batch(
-                batch(vec![record(0, false), record(1, false)], Some(tail)),
-                false,
-            )),
-            Ok(ReadUpdate::from_batch(
-                batch(vec![record(2, false)], Some(position(5))),
-                false,
-            )),
+            Ok(ReadUpdate::from_batch(batch(
+                vec![record(0, false), record(1, false)],
+                Some(tail),
+            ))),
+            Ok(ReadUpdate::from_batch(batch(
+                vec![record(2, false)],
+                Some(position(5)),
+            ))),
         ]));
         let caught_up = session.caught_up();
         let mut pending = Box::pin(caught_up.clone());
@@ -808,16 +805,13 @@ mod tests {
         let mut session = test_session(UnboundedReceiverStream::new(rx));
         let caught_up = session.caught_up();
 
-        tx.send(Ok(ReadUpdate::from_batch(
-            batch(vec![record(0, false), record(1, false)], None),
-            false,
-        )))
+        tx.send(Ok(ReadUpdate::from_batch(batch(
+            vec![record(0, false), record(1, false)],
+            None,
+        ))))
         .unwrap();
-        tx.send(Ok(ReadUpdate::from_batch(
-            batch(Vec::new(), Some(tail)),
-            false,
-        )))
-        .unwrap();
+        tx.send(Ok(ReadUpdate::from_batch(batch(Vec::new(), Some(tail)))))
+            .unwrap();
 
         assert_eq!(session.next().await.unwrap().unwrap().records.len(), 2);
         assert!(!session.is_caught_up());
@@ -835,19 +829,16 @@ mod tests {
         let (tx, rx) = mpsc::unbounded_channel();
         let mut session = test_session(UnboundedReceiverStream::new(rx));
 
-        tx.send(Ok(ReadUpdate::from_batch(
-            batch(vec![record(0, false)], Some(tail)),
-            false,
-        )))
+        tx.send(Ok(ReadUpdate::from_batch(batch(
+            vec![record(0, false)],
+            Some(tail),
+        ))))
         .unwrap();
         session.next().await.unwrap().unwrap();
         let caught_up = session.state.future();
 
-        tx.send(Ok(ReadUpdate::from_batch(
-            batch(Vec::new(), Some(tail)),
-            false,
-        )))
-        .unwrap();
+        tx.send(Ok(ReadUpdate::from_batch(batch(Vec::new(), Some(tail)))))
+            .unwrap();
         let mut next = Box::pin(session.next());
         assert!(poll!(next.as_mut()).is_pending());
         drop(next);
@@ -862,42 +853,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn filtered_command_counts_toward_caught_up() {
-        let tail = position(2);
-        let mut session = test_session(stream::iter([
-            Ok(ReadUpdate::from_batch(
-                batch(vec![record(0, false)], None),
-                true,
-            )),
-            Ok(ReadUpdate::from_batch(
-                batch(vec![record(1, true)], Some(tail)),
-                true,
-            )),
-        ]));
-        let caught_up = session.caught_up();
-
-        let delivered = session.next().await.unwrap().unwrap();
-        assert_eq!(delivered.records.len(), 1);
-        assert_eq!(delivered.records[0].seq_num, 0);
-        assert!(!session.is_caught_up());
-
-        assert!(session.next().await.is_none());
-        assert!(session.is_caught_up());
-        assert_eq!(session.resume_seq_num(), Some(2));
-        assert_eq!(caught_up.await.unwrap(), tail);
-    }
-
-    #[tokio::test]
     async fn caught_up_wait_survives_retry() {
         let first_tail = position(1);
         let tail = position(3);
         let (tx, rx) = mpsc::unbounded_channel();
         let mut session = test_session(UnboundedReceiverStream::new(rx));
 
-        tx.send(Ok(ReadUpdate::from_batch(
-            batch(Vec::new(), Some(first_tail)),
-            false,
-        )))
+        tx.send(Ok(ReadUpdate::from_batch(batch(
+            Vec::new(),
+            Some(first_tail),
+        ))))
         .unwrap();
         let mut next = Box::pin(session.next());
         assert!(poll!(next.as_mut()).is_pending());
@@ -912,11 +877,8 @@ mod tests {
         let caught_up = session.caught_up();
 
         tx.send(Ok(ReadUpdate::behind())).unwrap();
-        tx.send(Ok(ReadUpdate::from_batch(
-            batch(Vec::new(), Some(tail)),
-            false,
-        )))
-        .unwrap();
+        tx.send(Ok(ReadUpdate::from_batch(batch(Vec::new(), Some(tail)))))
+            .unwrap();
         drop(tx);
         assert!(session.next().await.is_none());
         assert_eq!(caught_up.await.unwrap(), tail);
@@ -948,10 +910,10 @@ mod tests {
     async fn read_error_after_caught_up_preserves_resolved_future() {
         let tail = position(1);
         let mut session = test_session(stream::iter([
-            Ok(ReadUpdate::from_batch(
-                batch(vec![record(0, false)], Some(tail)),
-                false,
-            )),
+            Ok(ReadUpdate::from_batch(batch(
+                vec![record(0, false)],
+                Some(tail),
+            ))),
             Err(ReadSessionFailure::HeartbeatTimeout),
         ]));
 

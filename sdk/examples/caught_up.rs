@@ -3,8 +3,8 @@ use s2_sdk::{
     S2,
     types::{
         AppendInput, AppendRecord, AppendRecordBatch, BasinName, CreateBasinInput,
-        CreateStreamInput, DeleteBasinInput, DeleteStreamInput, ReadBatch, ReadFrom, ReadInput,
-        ReadSessionConfig, ReadStart, S2Config, S2Endpoints, StreamName,
+        CreateStreamInput, ReadBatch, ReadFrom, ReadInput, ReadSessionConfig, ReadStart, S2Config,
+        S2Endpoints, StreamName,
     },
 };
 
@@ -92,10 +92,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Session is caught up again: {}", session.is_caught_up());
 
     drop(session);
-    basin
-        .delete_stream(DeleteStreamInput::new(stream_name))
-        .await?;
-    s2.delete_basin(DeleteBasinInput::new(basin_name)).await?;
+    basin.delete_stream(stream_name).await?;
+    s2.delete_basin(basin_name).await?;
 
     Ok(())
 }

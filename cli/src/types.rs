@@ -315,13 +315,17 @@ pub struct DeleteOnEmptyConfig {
 
 impl From<DeleteOnEmptyConfig> for sdk::types::DeleteOnEmptyConfig {
     fn from(value: DeleteOnEmptyConfig) -> Self {
-        sdk::types::DeleteOnEmptyConfig::new().with_min_age(value.delete_on_empty_min_age)
+        sdk::types::DeleteOnEmptyConfig::new()
+            .with_min_age(Duration::from_secs(value.delete_on_empty_min_age.as_secs()))
+            .expect("whole-second duration")
     }
 }
 
 impl From<DeleteOnEmptyConfig> for sdk::types::DeleteOnEmptyReconfiguration {
     fn from(value: DeleteOnEmptyConfig) -> Self {
-        sdk::types::DeleteOnEmptyReconfiguration::new().with_min_age(value.delete_on_empty_min_age)
+        sdk::types::DeleteOnEmptyReconfiguration::new()
+            .with_min_age(Duration::from_secs(value.delete_on_empty_min_age.as_secs()))
+            .expect("whole-second duration")
     }
 }
 

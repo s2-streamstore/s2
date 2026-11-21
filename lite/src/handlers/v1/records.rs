@@ -62,8 +62,8 @@ fn apply_last_event_id(
     }) = last_event_id
     {
         start.from = ReadFrom::SeqNum(seq_num.saturating_add(1));
-        end.count = end.count.map(|c| c.saturating_sub(count));
-        end.bytes = end.bytes.map(|c| c.saturating_sub(bytes));
+        end.count = end.count.map(|c| c.saturating_sub(count as u64));
+        end.bytes = end.bytes.map(|c| c.saturating_sub(bytes as u64));
         delivered = CountOrBytes { count, bytes };
     }
     (start, end, delivered)
@@ -343,6 +343,7 @@ async fn merge_read_session(
                     wait.is_some_and(|d| d > Duration::ZERO),
                     "heartbeat {pos} only if non-zero wait"
                 );
+                acc.tail = Some(pos);
                 if !acc.records.is_empty() {
                     break;
                 }

@@ -4,7 +4,7 @@ use std::{
     collections::HashSet,
     env::VarError,
     fmt,
-    net::IpAddr,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
     num::NonZeroU32,
     ops::{Deref, RangeTo},
     pin::Pin,
@@ -15,6 +15,7 @@ use std::{
 
 #[cfg(feature = "_hidden")]
 use async_trait::async_trait;
+use base64ct::{Base64, Encoding};
 use bytes::Bytes;
 use compact_str::CompactString;
 use http::{
@@ -22,6 +23,8 @@ use http::{
     header::HeaderValue,
     uri::{Authority, Scheme},
 };
+/// Wall-clock UTC timestamp.
+pub use jiff::Timestamp;
 use rand::RngExt;
 use s2_api::{
     v1 as api,
@@ -78,16 +81,15 @@ pub use s2_common::stream::StreamName;
 pub use s2_common::stream::StreamNamePrefix;
 /// See [`ListStreamsInput::start_after`]. It must not contain NUL bytes.
 pub use s2_common::stream::StreamNameStartAfter;
-pub use s2_common::{caps::RECORD_BATCH_MAX, encryption::EncryptionKey};
+pub use s2_common::{caps::RECORD_BATCH_MAX, maybe::Maybe};
 
 pub(crate) const ONE_MIB: u32 = 1024 * 1024;
 
 use s2_common::{
-    maybe::Maybe,
     record::{MAX_FENCING_TOKEN_LENGTH, Metered, MeteredSize},
     resources::ProvisionResult,
 };
-use secrecy::SecretString;
+use secrecy::{ExposeSecret, SecretBox, SecretString};
 
 use crate::error::RequestError;
 
@@ -178,50 +180,99 @@ impl fmt::Debug for AccessToken {
     }
 }
 
-/// An RFC 3339 datetime.
+/// Client-supplied encryption key for server-side encryption.
 ///
-/// It can be created in either of the following ways:
-/// - Parse an RFC 3339 datetime string using [`FromStr`] or [`str::parse`].
-/// - Convert from [`time::OffsetDateTime`] using [`TryFrom`]/[`TryInto`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct S2DateTime(time::OffsetDateTime);
+/// Represents raw key bytes encoded as standard padded base64 for the `s2-encryption-key`
+/// header. Key length validation is left to the server, since the required length depends on
+/// the stream's cipher.
+#[derive(Clone)]
+pub struct EncryptionKey(SecretString);
 
-impl TryFrom<time::OffsetDateTime> for S2DateTime {
-    type Error = ValidationError;
+impl EncryptionKey {
+    /// Construct an [`EncryptionKey`] from raw key bytes.
+    pub fn new(bytes: impl AsRef<[u8]>) -> Result<Self, ValidationError> {
+        let bytes = bytes.as_ref();
+        if bytes.is_empty() {
+            return Err(ValidationError("encryption key must not be empty".into()));
+        }
+        Ok(Self(SecretString::from(Base64::encode_string(bytes))))
+    }
 
-    fn try_from(dt: time::OffsetDateTime) -> Result<Self, Self::Error> {
-        dt.format(&time::format_description::well_known::Rfc3339)
-            .map_err(|e| ValidationError(format!("not a valid RFC 3339 datetime: {e}")))?;
-        Ok(Self(dt))
+    /// Encode this key as a sensitive HTTP header value for `s2-encryption-key`.
+    pub fn to_header_value(&self) -> HeaderValue {
+        let mut value = HeaderValue::from_str(self.0.expose_secret())
+            .expect("base64-encoded encryption key is a valid HTTP header value");
+        value.set_sensitive(true);
+        value
     }
 }
 
-impl From<S2DateTime> for time::OffsetDateTime {
-    fn from(dt: S2DateTime) -> Self {
-        dt.0
-    }
-}
-
-impl FromStr for S2DateTime {
+impl FromStr for EncryptionKey {
     type Err = ValidationError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        time::OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339)
-            .map(Self)
-            .map_err(|e| ValidationError(format!("not a valid RFC 3339 datetime: {e}")))
+        let trimmed = s.trim();
+        if trimmed.is_empty() {
+            return Err(ValidationError("encryption key must not be empty".into()));
+        }
+        let decoded = SecretBox::from(Base64::decode_vec(trimmed).map_err(|_| {
+            ValidationError("encryption key must be valid standard padded base64".into())
+        })?);
+        if decoded.expose_secret().is_empty() {
+            return Err(ValidationError("encryption key must not be empty".into()));
+        }
+        Ok(Self(SecretString::from(trimmed.to_owned())))
     }
 }
 
-impl fmt::Display for S2DateTime {
+impl fmt::Debug for EncryptionKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}",
-            self.0
-                .format(&time::format_description::well_known::Rfc3339)
-                .expect("RFC3339 formatting should not fail for S2DateTime")
-        )
+        f.write_str("EncryptionKey(<redacted>)")
     }
+}
+
+fn whole_seconds(duration: Duration, field: &str) -> Result<u64, ValidationError> {
+    if duration.subsec_nanos() != 0 {
+        return Err(ValidationError(format!(
+            "{field} must be a whole number of seconds"
+        )));
+    }
+    Ok(duration.as_secs())
+}
+
+fn timestamp_from_offset_datetime(dt: time::OffsetDateTime) -> Result<Timestamp, ValidationError> {
+    Timestamp::from_nanosecond(dt.unix_timestamp_nanos())
+        .map_err(|e| ValidationError(format!("timestamp out of range: {e}")))
+}
+
+fn timestamp_to_offset_datetime(ts: Timestamp) -> Result<time::OffsetDateTime, ValidationError> {
+    let dt = time::OffsetDateTime::from_unix_timestamp_nanos(ts.as_nanosecond())
+        .map_err(|e| ValidationError(format!("timestamp out of range: {e}")))?;
+    if !(0..=9999).contains(&dt.year()) {
+        return Err(ValidationError(format!(
+            "timestamp ({ts}) year must be between 0000 and 9999 for RFC 3339"
+        )));
+    }
+    Ok(dt)
+}
+
+fn timestamp_from_epoch_secs(secs: u32) -> Timestamp {
+    Timestamp::from_second(i64::from(secs)).expect("u32 Unix epoch seconds fits in Timestamp")
+}
+
+fn validate_metrics_timestamp(ts: Timestamp, field: &str) -> Result<u32, ValidationError> {
+    if ts < Timestamp::UNIX_EPOCH {
+        return Err(ValidationError(format!(
+            "{field} ({ts}) must be between 0 and {} Unix epoch seconds",
+            u32::MAX
+        )));
+    }
+    u32::try_from(ts.as_second()).map_err(|_| {
+        ValidationError(format!(
+            "{field} ({ts}) must be between 0 and {} Unix epoch seconds",
+            u32::MAX
+        ))
+    })
 }
 
 /// Authority for connecting to an S2 basin.
@@ -233,8 +284,44 @@ pub(crate) enum BasinAuthority {
     Direct(Authority),
 }
 
+fn parse_endpoint_scheme_and_rest<'a>(
+    s: &'a str,
+    kind: &str,
+) -> Result<(Scheme, &'a str), ValidationError> {
+    let (scheme, rest) = match s.find("://") {
+        Some(idx) => {
+            let scheme: Scheme = s[..idx]
+                .parse()
+                .map_err(|_| format!("invalid {kind} endpoint scheme"))?;
+            if scheme != Scheme::HTTP && scheme != Scheme::HTTPS {
+                return Err(format!(
+                    "invalid {kind} endpoint scheme: only http and https are supported"
+                )
+                .into());
+            }
+            (scheme, &s[idx + 3..])
+        }
+        None => (Scheme::HTTPS, s),
+    };
+    let rest = rest.strip_suffix('/').unwrap_or(rest);
+    Ok((scheme, rest))
+}
+
 fn parse_endpoint_authority(authority: &str, kind: &str) -> Result<Authority, String> {
-    authority.parse().map_err(|e| {
+    if authority.is_empty() {
+        return Err(format!("invalid {kind} endpoint authority: empty"));
+    }
+    if authority.contains('@') {
+        return Err(format!(
+            "invalid {kind} endpoint authority: user info is not allowed"
+        ));
+    }
+    if authority.ends_with(':') {
+        return Err(format!(
+            "invalid {kind} endpoint authority: port cannot be empty"
+        ));
+    }
+    let parsed: Authority = authority.parse().map_err(|e| {
         // A bare IPv6 address has several colons, which `Authority` cannot tell
         // apart from the port separator.
         if !authority.contains('[') && authority.matches(':').count() > 1 {
@@ -245,16 +332,60 @@ fn parse_endpoint_authority(authority: &str, kind: &str) -> Result<Authority, St
         } else {
             format!("invalid {kind} endpoint authority: {e}")
         }
+    })?;
+    if parsed.host().is_empty() {
+        return Err(format!("invalid {kind} endpoint authority: empty host"));
+    }
+    validate_endpoint_host(parsed.host(), kind)?;
+    Ok(parsed)
+}
+
+fn validate_endpoint_host(host: &str, kind: &str) -> Result<(), String> {
+    if host.starts_with('[') || host.ends_with(']') {
+        let Some(inner) = host.strip_prefix('[').and_then(|s| s.strip_suffix(']')) else {
+            return Err(format!(
+                "invalid {kind} endpoint host `{host}`: malformed bracketed IPv6 literal"
+            ));
+        };
+        inner
+            .parse::<Ipv6Addr>()
+            .map_err(|_| format!("invalid {kind} endpoint host `{host}`: invalid IPv6 address"))?;
+        return Ok(());
+    }
+    if host.parse::<Ipv4Addr>().is_ok() {
+        return Ok(());
+    }
+    if is_valid_dns_name(host) {
+        return Ok(());
+    }
+    Err(format!(
+        "invalid {kind} endpoint host `{host}`: must be a DNS name or IP address"
+    ))
+}
+
+fn is_valid_dns_name(host: &str) -> bool {
+    let dns = host.strip_suffix('.').unwrap_or(host);
+    if dns.is_empty() || dns.len() > 253 {
+        return false;
+    }
+    dns.split('.').all(|label| {
+        let bytes = label.as_bytes();
+        !bytes.is_empty()
+            && bytes.len() <= 63
+            && bytes[0].is_ascii_alphanumeric()
+            && bytes[bytes.len() - 1].is_ascii_alphanumeric()
+            && bytes
+                .iter()
+                .all(|b| b.is_ascii_alphanumeric() || *b == b'-')
     })
 }
 
 /// Whether the authority's host is an IP address (`127.0.0.1`, `[::1]`) rather than a DNS name.
 fn is_ip_literal(authority: &Authority) -> bool {
     let host = authority.host();
-    let host = host
-        .strip_prefix('[')
-        .and_then(|host| host.strip_suffix(']'))
-        .unwrap_or(host);
+    if host.starts_with('[') || host.ends_with(']') {
+        return true;
+    }
     host.parse::<IpAddr>().is_ok()
 }
 
@@ -276,15 +407,7 @@ impl FromStr for AccountEndpoint {
     type Err = ValidationError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let (scheme, authority) = match s.find("://") {
-            Some(idx) => {
-                let scheme: Scheme = s[..idx]
-                    .parse()
-                    .map_err(|_| "invalid account endpoint scheme".to_string())?;
-                (scheme, &s[idx + 3..])
-            }
-            None => (Scheme::HTTPS, s),
-        };
+        let (scheme, authority) = parse_endpoint_scheme_and_rest(s, "account")?;
         Ok(Self {
             scheme,
             authority: parse_endpoint_authority(authority, "account")?,
@@ -313,15 +436,7 @@ impl FromStr for BasinEndpoint {
     type Err = ValidationError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let (scheme, authority) = match s.find("://") {
-            Some(idx) => {
-                let scheme: Scheme = s[..idx]
-                    .parse()
-                    .map_err(|_| "invalid basin endpoint scheme".to_string())?;
-                (scheme, &s[idx + 3..])
-            }
-            None => (Scheme::HTTPS, s),
-        };
+        let (scheme, authority) = parse_endpoint_scheme_and_rest(s, "basin")?;
         let authority = if let Some(authority) = authority.strip_prefix("{basin}.") {
             let zone = parse_endpoint_authority(authority, "basin")?;
             if is_ip_literal(&zone) {
@@ -378,37 +493,37 @@ impl S2Endpoints {
 
     /// Create a new [`S2Endpoints`] from environment variables.
     ///
-    /// The following environment variables are expected to be set:
-    /// - `S2_ACCOUNT_ENDPOINT` - Account-level endpoint.
-    /// - `S2_BASIN_ENDPOINT` - Basin-level endpoint.
+    /// Reads `S2_ACCOUNT_ENDPOINT` and `S2_BASIN_ENDPOINT`. Empty values are treated as unset.
+    /// If neither variable is set, returns the default S2 Cloud endpoints ([`Self::for_cloud`]).
+    /// If only one is set, returns a [`ValidationError`].
     pub fn from_env() -> Result<Self, ValidationError> {
-        let account_endpoint: AccountEndpoint = match std::env::var("S2_ACCOUNT_ENDPOINT") {
-            Ok(endpoint) => endpoint.parse()?,
-            Err(VarError::NotPresent) => return Err("S2_ACCOUNT_ENDPOINT env var not set".into()),
-            Err(VarError::NotUnicode(_)) => {
-                return Err("S2_ACCOUNT_ENDPOINT is not valid unicode".into());
+        Self::from_env_with(|key| std::env::var(key))
+    }
+
+    /// Create a new [`S2Endpoints`] from a custom environment variable lookup function.
+    #[doc(hidden)]
+    pub fn from_env_with<F>(mut var: F) -> Result<Self, ValidationError>
+    where
+        F: FnMut(&str) -> Result<String, VarError>,
+    {
+        let read_opt = |name: &str, var: &mut F| -> Result<Option<String>, ValidationError> {
+            match var(name) {
+                Ok(value) if value.is_empty() => Ok(None),
+                Ok(value) => Ok(Some(value)),
+                Err(VarError::NotPresent) => Ok(None),
+                Err(VarError::NotUnicode(_)) => Err(format!("{name} is not valid unicode").into()),
             }
         };
 
-        let basin_endpoint: BasinEndpoint = match std::env::var("S2_BASIN_ENDPOINT") {
-            Ok(endpoint) => endpoint.parse()?,
-            Err(VarError::NotPresent) => return Err("S2_BASIN_ENDPOINT env var not set".into()),
-            Err(VarError::NotUnicode(_)) => {
-                return Err("S2_BASIN_ENDPOINT is not valid unicode".into());
-            }
-        };
+        let account = read_opt("S2_ACCOUNT_ENDPOINT", &mut var)?;
+        let basin = read_opt("S2_BASIN_ENDPOINT", &mut var)?;
 
-        if account_endpoint.scheme != basin_endpoint.scheme {
-            return Err(
-                "S2_ACCOUNT_ENDPOINT and S2_BASIN_ENDPOINT must have the same scheme".into(),
-            );
+        match (account, basin) {
+            (None, None) => Ok(Self::for_cloud()),
+            (Some(_), None) => Err("S2_ACCOUNT_ENDPOINT is set without S2_BASIN_ENDPOINT".into()),
+            (None, Some(_)) => Err("S2_BASIN_ENDPOINT is set without S2_ACCOUNT_ENDPOINT".into()),
+            (Some(account), Some(basin)) => Self::new(account.parse()?, basin.parse()?),
         }
-
-        Ok(Self {
-            scheme: account_endpoint.scheme,
-            account_authority: account_endpoint.authority,
-            basin_authority: basin_endpoint.authority,
-        })
     }
 
     /// Return the default S2 Cloud endpoints.
@@ -421,9 +536,27 @@ impl S2Endpoints {
             ),
         }
     }
+
+    /// Return the resolved origin for account requests (e.g. `https://a.s2.dev`).
+    pub fn account_origin(&self) -> String {
+        format!("{}://{}", self.scheme, self.account_authority)
+    }
+
+    /// Return the resolved origin for requests targeting `basin`.
+    pub fn basin_origin(&self, basin: &BasinName) -> String {
+        match &self.basin_authority {
+            BasinAuthority::ParentZone(zone) => format!("{}://{basin}.{zone}", self.scheme),
+            BasinAuthority::Direct(authority) => format!("{}://{authority}", self.scheme),
+        }
+    }
+
+    /// Whether basin requests must send the `s2-basin` header.
+    pub fn uses_basin_header(&self) -> bool {
+        matches!(self.basin_authority, BasinAuthority::Direct(_))
+    }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Compression algorithm for request and response bodies.
 pub enum Compression {
     /// No compression.
@@ -444,8 +577,7 @@ impl From<Compression> for CompressionAlgorithm {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Retry policy for [`append`](crate::S2Stream::append) and
 /// [`append_session`](crate::S2Stream::append_session) operations.
 pub enum AppendRetryPolicy {
@@ -472,7 +604,7 @@ pub enum AppendRetryPolicy {
 /// base_delay = min(min_base_delay · 2ⁿ, max_base_delay)    (n = retry attempt, starting from 0)
 ///     jitter = rand[0, base_delay]
 ///     delay  = base_delay + jitter
-/// ````
+/// ```
 pub struct RetryConfig {
     /// Total number of attempts including the initial try. A value of `1` means no retries.
     ///
@@ -515,11 +647,15 @@ impl RetryConfig {
     }
 
     /// Set the total number of attempts including the initial try.
-    pub fn with_max_attempts(self, max_attempts: NonZeroU32) -> Self {
-        Self {
+    ///
+    /// **Note:** Must be at least `1`.
+    pub fn with_max_attempts(self, max_attempts: u32) -> Result<Self, ValidationError> {
+        let max_attempts = NonZeroU32::new(max_attempts)
+            .ok_or_else(|| ValidationError("max_attempts must be at least 1".into()))?;
+        Ok(Self {
             max_attempts,
             ..self
-        }
+        })
     }
 
     /// Set the minimum base delay for retries.
@@ -687,6 +823,50 @@ impl S2Config {
         }
     }
 
+    /// Create a new [`S2Config`] from environment variables.
+    ///
+    /// Reads `S2_ACCESS_TOKEN`, and optionally `S2_ACCOUNT_ENDPOINT` and `S2_BASIN_ENDPOINT`
+    /// (empty endpoint variables are treated as unset; if one is set, both must be set).
+    pub fn from_env() -> Result<Self, ValidationError> {
+        Self::from_env_with(|key| std::env::var(key))
+    }
+
+    /// Create a new [`S2Config`] from a custom environment variable lookup function.
+    #[doc(hidden)]
+    pub fn from_env_with<F>(mut var: F) -> Result<Self, ValidationError>
+    where
+        F: FnMut(&str) -> Result<String, VarError>,
+    {
+        let access_token = match var("S2_ACCESS_TOKEN") {
+            Ok(token) => token,
+            Err(VarError::NotPresent) => return Err("S2_ACCESS_TOKEN env var not set".into()),
+            Err(VarError::NotUnicode(_)) => {
+                return Err("S2_ACCESS_TOKEN is not valid unicode".into());
+            }
+        };
+        crate::api::authorization_header(&access_token)?;
+        let endpoints = S2Endpoints::from_env_with(var)?;
+        Ok(Self::new(access_token).with_endpoints(endpoints))
+    }
+
+    /// Return the configured endpoints.
+    pub fn endpoints(&self) -> &S2Endpoints {
+        &self.endpoints
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), ValidationError> {
+        if self.connection_timeout.is_zero() {
+            return Err("connection_timeout must be greater than zero".into());
+        }
+        if self.request_timeout.is_zero() {
+            return Err("request_timeout must be greater than zero".into());
+        }
+        if self.retry.min_base_delay > self.retry.max_base_delay {
+            return Err("min_base_delay must not exceed max_base_delay".into());
+        }
+        Ok(())
+    }
+
     #[cfg(feature = "_hidden")]
     #[doc(hidden)]
     pub fn with_access_token_provider(self, provider: impl AccessTokenProvider + 'static) -> Self {
@@ -758,22 +938,35 @@ impl S2Config {
 
     /// Set the timeout for establishing a connection to the server.
     ///
+    /// **Note:** Must be greater than zero.
+    ///
     /// Defaults to `3s`.
-    pub fn with_connection_timeout(self, connection_timeout: Duration) -> Self {
-        Self {
+    pub fn with_connection_timeout(
+        self,
+        connection_timeout: Duration,
+    ) -> Result<Self, ValidationError> {
+        if connection_timeout.is_zero() {
+            return Err("connection_timeout must be greater than zero".into());
+        }
+        Ok(Self {
             connection_timeout,
             ..self
-        }
+        })
     }
 
     /// Set the timeout for requests.
     ///
+    /// **Note:** Must be greater than zero.
+    ///
     /// Defaults to `5s`.
-    pub fn with_request_timeout(self, request_timeout: Duration) -> Self {
-        Self {
+    pub fn with_request_timeout(self, request_timeout: Duration) -> Result<Self, ValidationError> {
+        if request_timeout.is_zero() {
+            return Err("request_timeout must be greater than zero".into());
+        }
+        Ok(Self {
             request_timeout,
             ..self
-        }
+        })
     }
 
     /// Set the retry configuration for requests.
@@ -813,9 +1006,10 @@ impl S2Config {
 
     /// Use a specific rustls crypto provider for SDK TLS connections.
     ///
-    /// With default features enabled, the SDK uses the `aws-lc-rs` provider.
-    /// With default features disabled, the SDK uses rustls's process-global
-    /// provider if one has been installed, or returns an error otherwise.
+    /// With default features (`rustls-aws-lc-rs`) enabled, the SDK uses the `aws-lc-rs`
+    /// provider. With `rustls-ring` enabled (and `rustls-aws-lc-rs` disabled), the SDK uses
+    /// `ring`. With neither provider feature enabled, the SDK uses rustls's process-global
+    /// provider if one has been installed, or returns an error for HTTPS endpoints otherwise.
     ///
     /// Use this when your application needs a specific rustls provider, such as
     /// `ring` or a custom [`rustls::crypto::CryptoProvider`]. The corresponding
@@ -933,6 +1127,17 @@ pub enum RetentionPolicy {
     Infinite,
     /// A policy this version of the SDK does not recognize, by its wire name.
     Unknown(String),
+}
+
+impl RetentionPolicy {
+    /// Create an age-based retention policy from a whole-second [`Duration`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ValidationError`] if `age` has sub-second precision.
+    pub fn age(age: Duration) -> Result<Self, ValidationError> {
+        Ok(Self::Age(whole_seconds(age, "retention_age")?))
+    }
 }
 
 impl From<MaybeKnown<api::config::RetentionPolicy>> for RetentionPolicy {
@@ -1072,11 +1277,15 @@ impl DeleteOnEmptyConfig {
         Self::default()
     }
 
-    /// Set the minimum age in seconds before an empty stream can be deleted.
-    pub fn with_min_age(self, min_age: Duration) -> Self {
-        Self {
-            min_age_secs: min_age.as_secs(),
-        }
+    /// Set the minimum age before an empty stream can be deleted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ValidationError`] if `min_age` has sub-second precision.
+    pub fn with_min_age(self, min_age: Duration) -> Result<Self, ValidationError> {
+        Ok(Self {
+            min_age_secs: whole_seconds(min_age, "delete_on_empty.min_age")?,
+        })
     }
 }
 
@@ -1273,7 +1482,6 @@ pub struct CreateBasinInput {
     ///
     /// If omitted when creating, uses the default location for the account.
     pub location: Option<LocationName>,
-    idempotency_token: String,
 }
 
 impl CreateBasinInput {
@@ -1283,7 +1491,6 @@ impl CreateBasinInput {
             name,
             config: None,
             location: None,
-            idempotency_token: idempotency_token(),
         }
     }
 
@@ -1311,16 +1518,13 @@ impl CreateBasinInput {
     }
 }
 
-impl From<CreateBasinInput> for (api::basin::CreateBasinRequest, String) {
+impl From<CreateBasinInput> for api::basin::CreateBasinRequest {
     fn from(value: CreateBasinInput) -> Self {
-        (
-            api::basin::CreateBasinRequest {
-                basin: value.name,
-                config: value.config.map(Into::into),
-                location: value.location,
-            },
-            value.idempotency_token,
-        )
+        Self {
+            basin: value.name,
+            config: value.config.map(Into::into),
+            location: value.location,
+        }
     }
 }
 
@@ -1390,24 +1594,41 @@ impl From<EnsureBasinInput> for (BasinName, Option<api::basin::EnsureBasinReques
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 /// Output for `ensure` operations ([`ensure_basin`](crate::S2::ensure_basin),
 /// [`ensure_stream`](crate::S2Basin::ensure_stream)).
 pub enum EnsureOutput<T> {
     /// Resource created.
     Created(T),
     /// Resource already existed, and its config was updated.
-    ConfigUpdated(T),
+    Updated(T),
     /// Resource already existed, and its config is unchanged.
-    ConfigUnchanged(T),
+    Noop(T),
+}
+
+impl<T> EnsureOutput<T> {
+    /// Return a reference to the resource info regardless of whether it was created, updated, or
+    /// unchanged.
+    pub fn inner(&self) -> &T {
+        match self {
+            Self::Created(info) | Self::Updated(info) | Self::Noop(info) => info,
+        }
+    }
+
+    /// Consume this output and return the resource info.
+    pub fn into_inner(self) -> T {
+        match self {
+            Self::Created(info) | Self::Updated(info) | Self::Noop(info) => info,
+        }
+    }
 }
 
 impl<T> From<ProvisionResult<T>> for EnsureOutput<T> {
     fn from(result: ProvisionResult<T>) -> Self {
         match result {
             ProvisionResult::Created(info) => EnsureOutput::Created(info),
-            ProvisionResult::Updated(info) => EnsureOutput::ConfigUpdated(info),
-            ProvisionResult::Noop(info) => EnsureOutput::ConfigUnchanged(info),
+            ProvisionResult::Updated(info) => EnsureOutput::Updated(info),
+            ProvisionResult::Noop(info) => EnsureOutput::Noop(info),
         }
     }
 }
@@ -1470,6 +1691,7 @@ impl From<ListBasinsInput> for api::basin::ListBasinsRequest {
 }
 
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 /// Input for [`list_all_basins`](crate::S2::list_all_basins) operation.
 pub struct ListAllBasinsInput {
     /// Filter basins whose names begin with this value.
@@ -1524,9 +1746,9 @@ pub struct BasinInfo {
     /// Location of the basin.
     pub location: Option<LocationName>,
     /// Creation time.
-    pub created_at: S2DateTime,
+    pub created_at: Timestamp,
     /// Deletion time if the basin is being deleted.
-    pub deleted_at: Option<S2DateTime>,
+    pub deleted_at: Option<Timestamp>,
 }
 
 impl TryFrom<api::basin::BasinInfo> for BasinInfo {
@@ -1536,37 +1758,12 @@ impl TryFrom<api::basin::BasinInfo> for BasinInfo {
         Ok(Self {
             name: value.name,
             location: value.location,
-            created_at: value.created_at.try_into()?,
-            deleted_at: value.deleted_at.map(S2DateTime::try_from).transpose()?,
+            created_at: timestamp_from_offset_datetime(value.created_at)?,
+            deleted_at: value
+                .deleted_at
+                .map(timestamp_from_offset_datetime)
+                .transpose()?,
         })
-    }
-}
-
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-/// Input for [`delete_basin`](crate::S2::delete_basin) operation.
-pub struct DeleteBasinInput {
-    /// Basin name.
-    pub name: BasinName,
-    /// Whether to ignore `Not Found` error if the basin doesn't exist.
-    pub ignore_not_found: bool,
-}
-
-impl DeleteBasinInput {
-    /// Create a new [`DeleteBasinInput`] with the given basin name.
-    pub fn new(name: BasinName) -> Self {
-        Self {
-            name,
-            ignore_not_found: false,
-        }
-    }
-
-    /// Set whether to ignore `Not Found` error if the basin is not existing.
-    pub fn with_ignore_not_found(self, ignore_not_found: bool) -> Self {
-        Self {
-            ignore_not_found,
-            ..self
-        }
     }
 }
 
@@ -1594,10 +1791,26 @@ impl TimestampingReconfiguration {
         }
     }
 
+    /// Reset [`mode`](TimestampingConfig::mode) to the server default.
+    pub fn reset_mode(self) -> Self {
+        Self {
+            mode: Maybe::Specified(None),
+            ..self
+        }
+    }
+
     /// Set the override for the existing [`uncapped`](TimestampingConfig::uncapped).
     pub fn with_uncapped(self, uncapped: bool) -> Self {
         Self {
             uncapped: Maybe::Specified(Some(uncapped)),
+            ..self
+        }
+    }
+
+    /// Reset [`uncapped`](TimestampingConfig::uncapped) to the server default.
+    pub fn reset_uncapped(self) -> Self {
+        Self {
+            uncapped: Maybe::Specified(None),
             ..self
         }
     }
@@ -1627,9 +1840,23 @@ impl DeleteOnEmptyReconfiguration {
     }
 
     /// Set the override for the existing [`min_age_secs`](DeleteOnEmptyConfig::min_age_secs).
-    pub fn with_min_age(self, min_age: Duration) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ValidationError`] if `min_age` has sub-second precision.
+    pub fn with_min_age(self, min_age: Duration) -> Result<Self, ValidationError> {
+        Ok(Self {
+            min_age_secs: Maybe::Specified(Some(whole_seconds(
+                min_age,
+                "delete_on_empty.min_age",
+            )?)),
+        })
+    }
+
+    /// Reset [`min_age_secs`](DeleteOnEmptyConfig::min_age_secs) to the server default.
+    pub fn reset_min_age(self) -> Self {
         Self {
-            min_age_secs: Maybe::Specified(Some(min_age.as_secs())),
+            min_age_secs: Maybe::Specified(None),
         }
     }
 }
@@ -1670,10 +1897,26 @@ impl StreamReconfiguration {
         }
     }
 
+    /// Reset [`storage_class`](StreamConfig::storage_class) to the server default.
+    pub fn reset_storage_class(self) -> Self {
+        Self {
+            storage_class: Maybe::Specified(None),
+            ..self
+        }
+    }
+
     /// Set the override for the existing [`retention_policy`](StreamConfig::retention_policy).
     pub fn with_retention_policy(self, retention_policy: RetentionPolicy) -> Self {
         Self {
             retention_policy: Maybe::Specified(Some(retention_policy)),
+            ..self
+        }
+    }
+
+    /// Reset [`retention_policy`](StreamConfig::retention_policy) to the server default.
+    pub fn reset_retention_policy(self) -> Self {
+        Self {
+            retention_policy: Maybe::Specified(None),
             ..self
         }
     }
@@ -1686,10 +1929,26 @@ impl StreamReconfiguration {
         }
     }
 
+    /// Reset [`timestamping`](StreamConfig::timestamping) to the server default.
+    pub fn reset_timestamping(self) -> Self {
+        Self {
+            timestamping: Maybe::Specified(None),
+            ..self
+        }
+    }
+
     /// Set the override for the existing [`delete_on_empty`](StreamConfig::delete_on_empty).
     pub fn with_delete_on_empty(self, delete_on_empty: DeleteOnEmptyReconfiguration) -> Self {
         Self {
             delete_on_empty: Maybe::Specified(Some(delete_on_empty)),
+            ..self
+        }
+    }
+
+    /// Reset [`delete_on_empty`](StreamConfig::delete_on_empty) to the server default.
+    pub fn reset_delete_on_empty(self) -> Self {
+        Self {
+            delete_on_empty: Maybe::Specified(None),
             ..self
         }
     }
@@ -1716,9 +1975,9 @@ pub struct BasinReconfiguration {
     pub stream_cipher: Maybe<Option<EncryptionAlgorithm>>,
     /// Override for the existing
     /// [`create_stream_on_append`](BasinConfig::create_stream_on_append).
-    pub create_stream_on_append: Maybe<bool>,
+    pub create_stream_on_append: Maybe<Option<bool>>,
     /// Override for the existing [`create_stream_on_read`](BasinConfig::create_stream_on_read).
-    pub create_stream_on_read: Maybe<bool>,
+    pub create_stream_on_read: Maybe<Option<bool>>,
 }
 
 impl BasinReconfiguration {
@@ -1736,6 +1995,14 @@ impl BasinReconfiguration {
         }
     }
 
+    /// Reset [`default_stream_config`](BasinConfig::default_stream_config) to the server default.
+    pub fn reset_default_stream_config(self) -> Self {
+        Self {
+            default_stream_config: Maybe::Specified(None),
+            ..self
+        }
+    }
+
     /// Set the override for the existing [`stream_cipher`](BasinConfig::stream_cipher).
     pub fn with_stream_cipher(self, stream_cipher: EncryptionAlgorithm) -> Self {
         Self {
@@ -1744,11 +2011,28 @@ impl BasinReconfiguration {
         }
     }
 
+    /// Reset [`stream_cipher`](BasinConfig::stream_cipher) to the server default.
+    pub fn reset_stream_cipher(self) -> Self {
+        Self {
+            stream_cipher: Maybe::Specified(None),
+            ..self
+        }
+    }
+
     /// Set the override for the existing
     /// [`create_stream_on_append`](BasinConfig::create_stream_on_append).
     pub fn with_create_stream_on_append(self, create_stream_on_append: bool) -> Self {
         Self {
-            create_stream_on_append: Maybe::Specified(create_stream_on_append),
+            create_stream_on_append: Maybe::Specified(Some(create_stream_on_append)),
+            ..self
+        }
+    }
+
+    /// Reset [`create_stream_on_append`](BasinConfig::create_stream_on_append) to the server
+    /// default.
+    pub fn reset_create_stream_on_append(self) -> Self {
+        Self {
+            create_stream_on_append: Maybe::Specified(None),
             ..self
         }
     }
@@ -1757,7 +2041,15 @@ impl BasinReconfiguration {
     /// [`create_stream_on_read`](BasinConfig::create_stream_on_read).
     pub fn with_create_stream_on_read(self, create_stream_on_read: bool) -> Self {
         Self {
-            create_stream_on_read: Maybe::Specified(create_stream_on_read),
+            create_stream_on_read: Maybe::Specified(Some(create_stream_on_read)),
+            ..self
+        }
+    }
+
+    /// Reset [`create_stream_on_read`](BasinConfig::create_stream_on_read) to the server default.
+    pub fn reset_create_stream_on_read(self) -> Self {
+        Self {
+            create_stream_on_read: Maybe::Specified(None),
             ..self
         }
     }
@@ -1849,6 +2141,7 @@ impl From<ListAccessTokensInput> for api::access::ListAccessTokensRequest {
 }
 
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 /// Input for [`list_all_access_tokens`](crate::S2::list_all_access_tokens) operation.
 pub struct ListAllAccessTokensInput {
     /// Filter access tokens whose IDs begin with this value.
@@ -1956,7 +2249,7 @@ pub struct AccessTokenInfo {
     /// Access token ID.
     pub id: AccessTokenId,
     /// Expiration time, or `None` if the token does not expire.
-    pub expires_at: Option<S2DateTime>,
+    pub expires_at: Option<Timestamp>,
     /// Whether to automatically prefix stream names during creation and strip the prefix during
     /// listing.
     pub auto_prefix_streams: bool,
@@ -1970,7 +2263,10 @@ impl TryFrom<api::access::AccessTokenInfo> for AccessTokenInfo {
     type Error = ValidationError;
 
     fn try_from(value: api::access::AccessTokenInfo) -> Result<Self, Self::Error> {
-        let expires_at = value.expires_at.map(S2DateTime::try_from).transpose()?;
+        let expires_at = value
+            .expires_at
+            .map(timestamp_from_offset_datetime)
+            .transpose()?;
         Ok(Self {
             id: value.id,
             expires_at,
@@ -2039,6 +2335,7 @@ impl From<ListNetworkPoliciesInput> for api::network_policy::ListNetworkPolicies
 }
 
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 /// Input for [`list_all_network_policies`](crate::S2::list_all_network_policies) operation.
 pub struct ListAllNetworkPoliciesInput {
     /// Filter network policies whose slugs begin with this value.
@@ -2242,7 +2539,7 @@ pub struct NetworkPolicyInfo {
     /// Full reference, `<slug>.<nonce>`, which access tokens are bound to.
     pub id: NetworkPolicyRef,
     /// Creation time.
-    pub created_at: S2DateTime,
+    pub created_at: Timestamp,
     /// The restriction.
     pub policy: NetworkPolicy,
 }
@@ -2262,7 +2559,7 @@ impl TryFrom<api::network_policy::NetworkPolicyInfo> for NetworkPolicyInfo {
     fn try_from(value: api::network_policy::NetworkPolicyInfo) -> Result<Self, Self::Error> {
         Ok(Self {
             id: value.id,
-            created_at: value.created_at.try_into()?,
+            created_at: timestamp_from_offset_datetime(value.created_at)?,
             policy: value.policy.into(),
         })
     }
@@ -2803,7 +3100,7 @@ pub struct IssueAccessTokenInput {
     ///
     /// Defaults to the expiration time of requestor's access token passed via
     /// [`S2Config`](S2Config::new).
-    pub expires_at: Option<S2DateTime>,
+    pub expires_at: Option<Timestamp>,
     /// Whether to automatically prefix stream names during creation and strip the prefix during
     /// listing.
     ///
@@ -2845,11 +3142,15 @@ impl IssueAccessTokenInput {
     }
 
     /// Set the expiration time.
-    pub fn with_expires_at(self, expires_at: S2DateTime) -> Self {
-        Self {
+    ///
+    /// Returns [`ValidationError`] if `expires_at` falls outside the RFC 3339 year range
+    /// (`0000`–`9999`).
+    pub fn with_expires_at(self, expires_at: Timestamp) -> Result<Self, ValidationError> {
+        let _ = timestamp_to_offset_datetime(expires_at)?;
+        Ok(Self {
             expires_at: Some(expires_at),
             ..self
-        }
+        })
     }
 
     /// Set whether to automatically prefix stream names during creation and strip the prefix during
@@ -2862,15 +3163,21 @@ impl IssueAccessTokenInput {
     }
 }
 
-impl From<IssueAccessTokenInput> for api::access::IssueAccessTokenRequest {
-    fn from(value: IssueAccessTokenInput) -> Self {
-        Self {
+impl TryFrom<IssueAccessTokenInput> for api::access::IssueAccessTokenRequest {
+    type Error = ValidationError;
+
+    fn try_from(value: IssueAccessTokenInput) -> Result<Self, Self::Error> {
+        let expires_at = value
+            .expires_at
+            .map(timestamp_to_offset_datetime)
+            .transpose()?;
+        Ok(Self {
             id: value.id,
-            expires_at: value.expires_at.map(Into::into),
+            expires_at,
             auto_prefix_streams: value.auto_prefix_streams.then_some(true),
             scope: value.scope.into(),
             network_policy: value.network_policy,
-        }
+        })
     }
 }
 
@@ -2914,31 +3221,49 @@ impl From<MaybeKnown<api::metrics::TimeseriesInterval>> for TimeseriesInterval {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-/// Time range as Unix epoch seconds.
+/// Time range for metrics queries.
 pub struct TimeRange {
-    /// Start timestamp (inclusive).
-    pub start: u32,
-    /// End timestamp (exclusive).
-    pub end: u32,
+    start_secs: u32,
+    end_secs: u32,
 }
 
 impl TimeRange {
-    /// Create a new [`TimeRange`] with the given start and end timestamps.
-    pub fn new(start: u32, end: u32) -> Self {
-        Self { start, end }
+    /// Create a new [`TimeRange`] with the given start (inclusive) and end (exclusive) timestamps.
+    ///
+    /// Sub-second precision is floored to whole Unix seconds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ValidationError`] if either timestamp is outside the `0..=u32::MAX` Unix epoch
+    /// second range.
+    pub fn new(start: Timestamp, end: Timestamp) -> Result<Self, ValidationError> {
+        let start_secs = validate_metrics_timestamp(start, "start")?;
+        let end_secs = validate_metrics_timestamp(end, "end")?;
+        Ok(Self {
+            start_secs,
+            end_secs,
+        })
+    }
+
+    /// Start timestamp (inclusive), floored to whole Unix seconds.
+    pub fn start(&self) -> Timestamp {
+        timestamp_from_epoch_secs(self.start_secs)
+    }
+
+    /// End timestamp (exclusive), floored to whole Unix seconds.
+    pub fn end(&self) -> Timestamp {
+        timestamp_from_epoch_secs(self.end_secs)
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-/// Time range as Unix epoch seconds and accumulation interval.
+/// Time range and accumulation interval for metrics queries.
 pub struct TimeRangeAndInterval {
-    /// Start timestamp (inclusive).
-    pub start: u32,
-    /// End timestamp (exclusive).
-    pub end: u32,
+    start_secs: u32,
+    end_secs: u32,
     /// Interval to accumulate over for timeseries metric sets.
     ///
     /// Default is dependent on the requested metric set.
@@ -2946,13 +3271,33 @@ pub struct TimeRangeAndInterval {
 }
 
 impl TimeRangeAndInterval {
-    /// Create a new [`TimeRangeAndInterval`] with the given start and end timestamps.
-    pub fn new(start: u32, end: u32) -> Self {
-        Self {
-            start,
-            end,
+    /// Create a new [`TimeRangeAndInterval`] with the given start (inclusive) and end (exclusive)
+    /// timestamps.
+    ///
+    /// Sub-second precision is floored to whole Unix seconds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ValidationError`] if either timestamp is outside the `0..=u32::MAX` Unix epoch
+    /// second range.
+    pub fn new(start: Timestamp, end: Timestamp) -> Result<Self, ValidationError> {
+        let start_secs = validate_metrics_timestamp(start, "start")?;
+        let end_secs = validate_metrics_timestamp(end, "end")?;
+        Ok(Self {
+            start_secs,
+            end_secs,
             interval: None,
-        }
+        })
+    }
+
+    /// Start timestamp (inclusive), floored to whole Unix seconds.
+    pub fn start(&self) -> Timestamp {
+        timestamp_from_epoch_secs(self.start_secs)
+    }
+
+    /// End timestamp (exclusive), floored to whole Unix seconds.
+    pub fn end(&self) -> Timestamp {
+        timestamp_from_epoch_secs(self.end_secs)
     }
 
     /// Set the interval to accumulate over for timeseries metric sets.
@@ -3014,22 +3359,22 @@ impl From<GetAccountMetricsInput> for api::metrics::AccountMetricSetRequest {
         let (set, start, end, interval, token_ids) = match value.set {
             AccountMetricSet::ActiveBasins(args) => (
                 api::metrics::AccountMetricSet::ActiveBasins,
-                Some(args.start),
-                Some(args.end),
+                Some(args.start_secs),
+                Some(args.end_secs),
                 None,
                 Vec::new(),
             ),
             AccountMetricSet::AccountOps(args) => (
                 api::metrics::AccountMetricSet::AccountOps,
-                Some(args.start),
-                Some(args.end),
+                Some(args.start_secs),
+                Some(args.end_secs),
                 args.interval,
                 Vec::new(),
             ),
             AccountMetricSet::EstimatedBillableUsage(args) => (
                 api::metrics::AccountMetricSet::EstimatedBillableUsage,
-                Some(args.start),
-                Some(args.end),
+                Some(args.start_secs),
+                Some(args.end_secs),
                 args.interval,
                 Vec::new(),
             ),
@@ -3118,38 +3463,38 @@ impl From<GetBasinMetricsInput> for (BasinName, api::metrics::BasinMetricSetRequ
         let (set, start, end, interval) = match value.set {
             BasinMetricSet::Storage(args) => (
                 api::metrics::BasinMetricSet::Storage,
-                args.start,
-                args.end,
+                args.start_secs,
+                args.end_secs,
                 None,
             ),
             BasinMetricSet::AppendOps(args) => (
                 api::metrics::BasinMetricSet::AppendOps,
-                args.start,
-                args.end,
+                args.start_secs,
+                args.end_secs,
                 args.interval,
             ),
             BasinMetricSet::ReadOps(args) => (
                 api::metrics::BasinMetricSet::ReadOps,
-                args.start,
-                args.end,
+                args.start_secs,
+                args.end_secs,
                 args.interval,
             ),
             BasinMetricSet::ReadThroughput(args) => (
                 api::metrics::BasinMetricSet::ReadThroughput,
-                args.start,
-                args.end,
+                args.start_secs,
+                args.end_secs,
                 args.interval,
             ),
             BasinMetricSet::AppendThroughput(args) => (
                 api::metrics::BasinMetricSet::AppendThroughput,
-                args.start,
-                args.end,
+                args.start_secs,
+                args.end_secs,
                 args.interval,
             ),
             BasinMetricSet::BasinOps(args) => (
                 api::metrics::BasinMetricSet::BasinOps,
-                args.start,
-                args.end,
+                args.start_secs,
+                args.end_secs,
                 args.interval,
             ),
         };
@@ -3202,8 +3547,8 @@ impl From<GetStreamMetricsInput> for (BasinName, StreamName, api::metrics::Strea
         let (set, start, end, interval) = match value.set {
             StreamMetricSet::Storage(args) => (
                 api::metrics::StreamMetricSet::Storage,
-                args.start,
-                args.end,
+                args.start_secs,
+                args.end_secs,
                 None,
             ),
         };
@@ -3272,9 +3617,8 @@ pub struct AccumulationMetric {
     /// The interval at which datapoints are accumulated.
     pub interval: TimeseriesInterval,
     /// Series of `(timestamp, value)` datapoints. Each datapoint represents the accumulated
-    /// `value` for the time period starting at the `timestamp` (in Unix epoch seconds), spanning
-    /// one `interval`.
-    pub values: Vec<(u32, f64)>,
+    /// `value` for the time period starting at the `timestamp`, spanning one `interval`.
+    pub values: Vec<(Timestamp, f64)>,
 }
 
 #[derive(Debug, Clone)]
@@ -3286,8 +3630,8 @@ pub struct GaugeMetric {
     /// Unit for the instantaneous values.
     pub unit: MetricUnit,
     /// Series of `(timestamp, value)` datapoints. Each datapoint represents the `value` at the
-    /// instant of the `timestamp` (in Unix epoch seconds).
-    pub values: Vec<(u32, f64)>,
+    /// instant of the `timestamp`.
+    pub values: Vec<(Timestamp, f64)>,
 }
 
 #[derive(Debug, Clone)]
@@ -3306,8 +3650,8 @@ pub struct LabelMetric {
 pub struct RecordMetric {
     /// Record name.
     pub name: String,
-    /// Timestamp of the record in Unix epoch seconds.
-    pub timestamp: u32,
+    /// Timestamp of the record.
+    pub timestamp: Timestamp,
     /// Named string attributes of the record.
     pub fields: std::collections::BTreeMap<String, String>,
 }
@@ -3347,12 +3691,20 @@ impl From<MaybeKnown<api::metrics::Metric>> for Metric {
                 name: am.name.into(),
                 unit: am.unit.into(),
                 interval: am.interval.into(),
-                values: am.values,
+                values: am
+                    .values
+                    .into_iter()
+                    .map(|(ts, v)| (timestamp_from_epoch_secs(ts), v))
+                    .collect(),
             }),
             api::metrics::Metric::Gauge(gm) => Metric::Gauge(GaugeMetric {
                 name: gm.name.into(),
                 unit: gm.unit.into(),
-                values: gm.values,
+                values: gm
+                    .values
+                    .into_iter()
+                    .map(|(ts, v)| (timestamp_from_epoch_secs(ts), v))
+                    .collect(),
             }),
             api::metrics::Metric::Label(lm) => Metric::Label(LabelMetric {
                 name: lm.name.into(),
@@ -3360,7 +3712,7 @@ impl From<MaybeKnown<api::metrics::Metric>> for Metric {
             }),
             api::metrics::Metric::Record(rm) => Metric::Record(RecordMetric {
                 name: rm.name.into(),
-                timestamp: rm.timestamp,
+                timestamp: timestamp_from_epoch_secs(rm.timestamp),
                 fields: rm.fields,
             }),
         }
@@ -3425,6 +3777,7 @@ impl From<ListStreamsInput> for api::stream::ListStreamsRequest {
 }
 
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 /// Input for [`list_all_streams`](crate::S2Basin::list_all_streams) operation.
 pub struct ListAllStreamsInput {
     /// Filter streams whose names begin with this value.
@@ -3477,9 +3830,9 @@ pub struct StreamInfo {
     /// Stream name.
     pub name: StreamName,
     /// Creation time.
-    pub created_at: S2DateTime,
+    pub created_at: Timestamp,
     /// Deletion time if the stream is being deleted.
-    pub deleted_at: Option<S2DateTime>,
+    pub deleted_at: Option<Timestamp>,
     /// Encryption algorithm for this stream, if encryption is enabled.
     pub cipher: Option<EncryptionAlgorithm>,
 }
@@ -3490,8 +3843,11 @@ impl TryFrom<api::stream::StreamInfo> for StreamInfo {
     fn try_from(value: api::stream::StreamInfo) -> Result<Self, Self::Error> {
         Ok(Self {
             name: value.name,
-            created_at: value.created_at.try_into()?,
-            deleted_at: value.deleted_at.map(S2DateTime::try_from).transpose()?,
+            created_at: timestamp_from_offset_datetime(value.created_at)?,
+            deleted_at: value
+                .deleted_at
+                .map(timestamp_from_offset_datetime)
+                .transpose()?,
             cipher: value.cipher.map(Into::into),
         })
     }
@@ -3507,17 +3863,12 @@ pub struct CreateStreamInput {
     ///
     /// See [`StreamConfig`] for defaults.
     pub config: Option<StreamConfig>,
-    idempotency_token: String,
 }
 
 impl CreateStreamInput {
     /// Create a new [`CreateStreamInput`] with the given stream name.
     pub fn new(name: StreamName) -> Self {
-        Self {
-            name,
-            config: None,
-            idempotency_token: idempotency_token(),
-        }
+        Self { name, config: None }
     }
 
     /// Set the configuration for the stream.
@@ -3529,15 +3880,12 @@ impl CreateStreamInput {
     }
 }
 
-impl From<CreateStreamInput> for (api::stream::CreateStreamRequest, String) {
+impl From<CreateStreamInput> for api::stream::CreateStreamRequest {
     fn from(value: CreateStreamInput) -> Self {
-        (
-            api::stream::CreateStreamRequest {
-                stream: value.name,
-                config: value.config.map(Into::into),
-            },
-            value.idempotency_token,
-        )
+        Self {
+            stream: value.name,
+            config: value.config.map(Into::into),
+        }
     }
 }
 
@@ -3577,34 +3925,6 @@ impl From<EnsureStreamInput> for (StreamName, Option<api::config::StreamConfig>)
 
 #[derive(Debug, Clone)]
 #[non_exhaustive]
-/// Input of [`delete_stream`](crate::S2Basin::delete_stream) operation.
-pub struct DeleteStreamInput {
-    /// Stream name.
-    pub name: StreamName,
-    /// Whether to ignore `Not Found` error if the stream doesn't exist.
-    pub ignore_not_found: bool,
-}
-
-impl DeleteStreamInput {
-    /// Create a new [`DeleteStreamInput`] with the given stream name.
-    pub fn new(name: StreamName) -> Self {
-        Self {
-            name,
-            ignore_not_found: false,
-        }
-    }
-
-    /// Set whether to ignore `Not Found` error if the stream doesn't exist.
-    pub fn with_ignore_not_found(self, ignore_not_found: bool) -> Self {
-        Self {
-            ignore_not_found,
-            ..self
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-#[non_exhaustive]
 /// Input for [`reconfigure_stream`](crate::S2Basin::reconfigure_stream) operation.
 pub struct ReconfigureStreamInput {
     /// Stream name.
@@ -3635,12 +3955,18 @@ impl FencingToken {
 
     /// Generate a random alphanumeric fencing token of `n` bytes.
     pub fn generate(n: usize) -> Result<Self, ValidationError> {
-        rand::rng()
-            .sample_iter(&rand::distr::Alphanumeric)
-            .take(n)
-            .map(char::from)
-            .collect::<String>()
-            .parse()
+        if n > MAX_FENCING_TOKEN_LENGTH {
+            return Err(ValidationError(format!(
+                "fencing token exceeds {MAX_FENCING_TOKEN_LENGTH} bytes in length",
+            )));
+        }
+        Ok(Self(
+            rand::rng()
+                .sample_iter(&rand::distr::Alphanumeric)
+                .take(n)
+                .map(char::from)
+                .collect(),
+        ))
     }
 }
 
@@ -3671,7 +3997,7 @@ impl Deref for FencingToken {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 /// A position in a stream.
 pub struct StreamPosition {
@@ -3715,7 +4041,7 @@ impl From<api::stream::StreamPosition> for StreamPosition {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 /// A name-value pair.
 pub struct Header {
@@ -3753,7 +4079,7 @@ impl From<api::stream::proto::Header> for Header {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 /// A record to append.
 pub struct AppendRecord {
     body: Bytes,
@@ -3847,13 +4173,13 @@ macro_rules! metered_bytes_impl {
     ($ty:ty) => {
         impl MeteredBytes for $ty {
             fn metered_bytes(&self) -> usize {
-                8 + (2 * self.headers.len())
-                    + self
-                        .headers
-                        .iter()
-                        .map(|h| h.name.len() + h.value.len())
-                        .sum::<usize>()
-                    + self.body.len()
+                let mut total = 8usize.saturating_add(self.headers.len().saturating_mul(2));
+                for h in &self.headers {
+                    total = total
+                        .saturating_add(h.name.len())
+                        .saturating_add(h.value.len());
+                }
+                total.saturating_add(self.body.len())
             }
         }
     };
@@ -3890,7 +4216,9 @@ impl AppendRecordBatch {
     where
         I: IntoIterator<Item = AppendRecord>,
     {
-        let mut records = Metered::with_capacity(RECORD_BATCH_MAX.count);
+        let iter = iter.into_iter();
+        let cap = iter.size_hint().0.min(RECORD_BATCH_MAX.count);
+        let mut records = Metered::with_capacity(cap);
 
         for record in iter {
             records.push(Metered::from(record));
@@ -4109,7 +4437,7 @@ impl From<AppendInput> for api::stream::proto::AppendInput {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 /// Acknowledgement for an [`AppendInput`].
 pub struct AppendAck {
@@ -4147,7 +4475,7 @@ impl From<api::stream::proto::AppendAck> for AppendAck {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Starting position for reading from a stream.
 pub enum ReadFrom {
     /// Read from this sequence number.
@@ -4158,20 +4486,14 @@ pub enum ReadFrom {
     TailOffset(u64),
 }
 
-impl Default for ReadFrom {
-    fn default() -> Self {
-        Self::SeqNum(0)
-    }
-}
-
 #[derive(Debug, Default, Clone)]
 #[non_exhaustive]
 /// Where to start reading.
 pub struct ReadStart {
     /// Starting position.
     ///
-    /// Defaults to reading from sequence number `0`.
-    pub from: ReadFrom,
+    /// Defaults to `None` (no start parameter is sent, causing the API to begin at the tail).
+    pub from: Option<ReadFrom>,
     /// Whether to start from tail if the requested starting position is beyond it.
     ///
     /// Defaults to `false` (errors if position is beyond tail).
@@ -4186,7 +4508,10 @@ impl ReadStart {
 
     /// Set the starting position.
     pub fn with_from(self, from: ReadFrom) -> Self {
-        Self { from, ..self }
+        Self {
+            from: Some(from),
+            ..self
+        }
     }
 
     /// Set whether to start from tail if the requested starting position is beyond it.
@@ -4201,9 +4526,10 @@ impl ReadStart {
 impl From<ReadStart> for api::stream::ReadStart {
     fn from(value: ReadStart) -> Self {
         let (seq_num, timestamp, tail_offset) = match value.from {
-            ReadFrom::SeqNum(n) => (Some(n), None, None),
-            ReadFrom::Timestamp(t) => (None, Some(t), None),
-            ReadFrom::TailOffset(o) => (None, None, Some(o)),
+            Some(ReadFrom::SeqNum(n)) => (Some(n), None, None),
+            Some(ReadFrom::Timestamp(t)) => (None, Some(t), None),
+            Some(ReadFrom::TailOffset(o)) => (None, None, Some(o)),
+            None => (None, None, None),
         };
         Self {
             seq_num,
@@ -4225,11 +4551,11 @@ pub struct ReadLimits {
     /// Limit on number of records.
     ///
     /// Defaults to `1000` for non-streaming read.
-    pub count: Option<usize>,
+    pub count: Option<u64>,
     /// Limit on total metered bytes of records.
     ///
     /// Defaults to `1MiB` for non-streaming read.
-    pub bytes: Option<usize>,
+    pub bytes: Option<u64>,
 }
 
 impl ReadLimits {
@@ -4239,7 +4565,7 @@ impl ReadLimits {
     }
 
     /// Set the limit on number of records.
-    pub fn with_count(self, count: usize) -> Self {
+    pub fn with_count(self, count: u64) -> Self {
         Self {
             count: Some(count),
             ..self
@@ -4247,7 +4573,7 @@ impl ReadLimits {
     }
 
     /// Set the limit on total metered bytes of records.
-    pub fn with_bytes(self, bytes: usize) -> Self {
+    pub fn with_bytes(self, bytes: u64) -> Self {
         Self {
             bytes: Some(bytes),
             ..self
@@ -4298,12 +4624,24 @@ impl ReadStop {
         }
     }
 
-    /// Set the duration in seconds to wait for new records before stopping.
-    pub fn with_wait(self, wait: u32) -> Self {
-        Self {
-            wait: Some(wait),
+    /// Set the duration to wait for new records before stopping.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ValidationError`] if `wait` has sub-second precision or exceeds `u32::MAX`
+    /// seconds.
+    pub fn with_wait(self, wait: Duration) -> Result<Self, ValidationError> {
+        let secs = whole_seconds(wait, "read.stop.wait")?;
+        let secs = u32::try_from(secs).map_err(|_| {
+            ValidationError(format!(
+                "read.stop.wait ({secs}s) exceeds maximum {}s",
+                u32::MAX
+            ))
+        })?;
+        Ok(Self {
+            wait: Some(secs),
             ..self
-        }
+        })
     }
 }
 
@@ -4331,10 +4669,6 @@ pub struct ReadInput {
     ///
     /// See [`ReadStop`] for defaults.
     pub stop: ReadStop,
-    /// Whether to filter out command records from the stream when reading.
-    ///
-    /// Defaults to `false`.
-    pub ignore_command_records: bool,
     /// Stream configuration to apply if the stream is created on read.
     ///
     /// Unset fields inherit the basin's default stream configuration. Ignored if the stream
@@ -4354,7 +4688,7 @@ pub enum ReadSessionRetryPolicy {
     /// This also applies while establishing the initial session, so
     /// [`read_session`](crate::S2Stream::read_session) may remain pending through retryable
     /// failures until it connects or the future is cancelled.
-    Indefinite,
+    Unbounded,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -4398,14 +4732,6 @@ impl ReadInput {
     /// Set when to stop reading.
     pub fn with_stop(self, stop: ReadStop) -> Self {
         Self { stop, ..self }
-    }
-
-    /// Set whether to filter out command records from the stream when reading.
-    pub fn with_ignore_command_records(self, ignore_command_records: bool) -> Self {
-        Self {
-            ignore_command_records,
-            ..self
-        }
     }
 
     /// Set the stream configuration to apply if the stream is created on read.
@@ -4475,10 +4801,8 @@ metered_bytes_impl!(SequencedRecord);
 pub struct ReadBatch {
     /// Records that are durably sequenced on the stream.
     ///
-    /// It can be empty only for a [`read`](crate::S2Stream::read) operation when:
-    /// - the [`stop condition`](ReadInput::stop) was already met, or
-    /// - all records in the batch were command records and
-    ///   [`ignore_command_records`](ReadInput::ignore_command_records) was set to `true`.
+    /// It can be empty only for a [`read`](crate::S2Stream::read) operation when the
+    /// [`stop condition`](ReadInput::stop) was already met.
     pub records: Vec<SequencedRecord>,
     /// Sequence number that will be assigned to the next record on the stream, and timestamp of
     /// the last record.
@@ -4506,7 +4830,7 @@ impl ReadBatch {
 /// A stream of values of type `Result<T, RequestError>`.
 pub type Streaming<T> = Pin<Box<dyn Send + futures_core::Stream<Item = Result<T, RequestError>>>>;
 
-fn idempotency_token() -> String {
+pub(crate) fn idempotency_token() -> String {
     uuid::Uuid::new_v4().simple().to_string()
 }
 
@@ -4613,38 +4937,47 @@ mod tests {
             + body.len()
     }
 
-    // -- S2DateTime --
+    // -- Timestamp & TimeRange --
 
     #[test]
-    fn s2_datetime_parse_valid_rfc3339() {
-        let dt: S2DateTime = "2024-01-15T12:30:00Z".parse().unwrap();
-        assert_eq!(dt.to_string(), "2024-01-15T12:30:00Z");
-    }
-
-    #[test]
-    fn s2_datetime_parse_with_offset() {
-        let dt: S2DateTime = "2024-06-01T08:00:00+05:30".parse().unwrap();
-        assert_eq!(dt.to_string(), "2024-06-01T08:00:00+05:30");
-
-        let offset_dt: time::OffsetDateTime = dt.into();
-        assert_eq!(
-            offset_dt.offset(),
-            time::UtcOffset::from_hms(5, 30, 0).unwrap()
-        );
-    }
-
-    #[test]
-    fn s2_datetime_parse_invalid() {
-        let err = "not-a-date".parse::<S2DateTime>();
-        assert!(err.is_err());
-    }
-
-    #[test]
-    fn s2_datetime_roundtrip_via_offset_datetime() {
+    fn timestamp_roundtrip_via_offset_datetime() {
         let odt = time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
-        let dt = S2DateTime::try_from(odt).unwrap();
-        let back: time::OffsetDateTime = dt.into();
+        let ts = timestamp_from_offset_datetime(odt).unwrap();
+        let back = timestamp_to_offset_datetime(ts).unwrap();
         assert_eq!(odt, back);
+
+        // Negative years are outside RFC 3339 (0000..=9999); year 9999 fits.
+        assert!(timestamp_to_offset_datetime(Timestamp::MIN).is_err());
+        assert!(timestamp_to_offset_datetime(Timestamp::MAX).is_ok());
+    }
+
+    #[test]
+    fn time_range_floors_subseconds_and_checks_bounds() {
+        let start = Timestamp::new(100, 999_999_999).unwrap();
+        let end = Timestamp::new(200, 500_000_000).unwrap();
+        let range = TimeRange::new(start, end).unwrap();
+        assert_eq!(range.start().as_second(), 100);
+        assert_eq!(range.start().subsec_nanosecond(), 0);
+        assert_eq!(range.end().as_second(), 200);
+        assert_eq!(range.end().subsec_nanosecond(), 0);
+
+        let before_epoch = Timestamp::new(-1, 500_000_000).unwrap();
+        assert!(TimeRange::new(before_epoch, end).is_err());
+
+        let max_valid = Timestamp::from_second(i64::from(u32::MAX)).unwrap();
+        assert!(TimeRange::new(Timestamp::UNIX_EPOCH, max_valid).is_ok());
+
+        let over_max = Timestamp::from_second(i64::from(u32::MAX) + 1).unwrap();
+        assert!(TimeRange::new(Timestamp::UNIX_EPOCH, over_max).is_err());
+    }
+
+    #[test]
+    fn encryption_key_debug_is_redacted() {
+        let key: EncryptionKey = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
+            .parse()
+            .unwrap();
+        assert_eq!(format!("{key:?}"), "EncryptionKey(<redacted>)");
+        assert!(key.to_header_value().is_sensitive());
     }
 
     // -- AccountEndpoint --
@@ -4884,7 +5217,9 @@ mod tests {
 
     #[test]
     fn delete_on_empty_config_roundtrip() {
-        let sdk = DeleteOnEmptyConfig::new().with_min_age(Duration::from_secs(300));
+        let sdk = DeleteOnEmptyConfig::new()
+            .with_min_age(Duration::from_secs(300))
+            .unwrap();
         let api: api::config::DeleteOnEmptyConfig = sdk.into();
         let back: DeleteOnEmptyConfig = api.into();
         assert_eq!(back, sdk);
@@ -5128,11 +5463,21 @@ mod tests {
     // -- ReadStop --
 
     #[test]
+    fn read_start_default_omits_all_start_params() {
+        let api: api::stream::ReadStart = ReadStart::new().into();
+        assert_eq!(api.seq_num, None);
+        assert_eq!(api.timestamp, None);
+        assert_eq!(api.tail_offset, None);
+        assert_eq!(api.clamp, None);
+    }
+
+    #[test]
     fn read_stop_to_api() {
         let stop = ReadStop::new()
             .with_limits(ReadLimits::new().with_count(50))
             .with_until(..1000)
-            .with_wait(30);
+            .with_wait(Duration::from_secs(30))
+            .unwrap();
         let api: api::stream::ReadEnd = stop.into();
         assert_eq!(api.count, Some(50));
         assert_eq!(api.until, Some(1000));
@@ -5168,6 +5513,10 @@ mod tests {
             Operation::ListLocations,
             Operation::GetDefaultLocation,
             Operation::SetDefaultLocation,
+            Operation::ListNetworkPolicies,
+            Operation::CreateNetworkPolicy,
+            Operation::GetNetworkPolicy,
+            Operation::DeleteNetworkPolicy,
         ];
         for op in variants {
             let api_op: MaybeKnown<api::access::Operation> = op.clone().into();
@@ -5255,10 +5604,9 @@ mod tests {
     fn create_basin_input_to_api() {
         let name: BasinName = "test-basin-name".parse().unwrap();
         let input = CreateBasinInput::new(name.clone()).with_config(BasinConfig::new());
-        let (req, token): (api::basin::CreateBasinRequest, String) = input.into();
+        let req: api::basin::CreateBasinRequest = input.into();
         assert_eq!(req.basin, name);
         assert!(req.config.is_some());
-        assert!(!token.is_empty());
     }
 
     // -- CreateStreamInput --
@@ -5267,10 +5615,9 @@ mod tests {
     fn create_stream_input_to_api() {
         let name: StreamName = "my-stream".parse().unwrap();
         let input = CreateStreamInput::new(name.clone()).with_config(StreamConfig::new());
-        let (req, token): (api::stream::CreateStreamRequest, String) = input.into();
+        let req: api::stream::CreateStreamRequest = input.into();
         assert_eq!(req.stream, name);
         assert!(req.config.is_some());
-        assert!(!token.is_empty());
     }
 
     // -- SequencedRecord from proto --
@@ -5342,6 +5689,79 @@ mod tests {
             Http2Config::new()
                 .with_connection_receive_window(u32::MAX)
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn endpoint_validation_rejects_malformed_hosts_and_bracketed_basin_zone() {
+        for bad in [
+            "https://[::1::1]",
+            "https://[1234]",
+            "https://[fe80::1%25eth0]",
+            "https://example%20.com",
+            "https://foo_bar",
+            "https://a!b",
+            "https://..",
+            "https://.example.com",
+            "https://-example.com",
+            "https://example-.com",
+        ] {
+            assert!(
+                AccountEndpoint::new(bad).is_err(),
+                "expected AccountEndpoint::new({bad:?}) to fail"
+            );
+            assert!(
+                BasinEndpoint::new(bad).is_err(),
+                "expected BasinEndpoint::new({bad:?}) to fail"
+            );
+        }
+        assert!(BasinEndpoint::new("https://{basin}.[::1::1]").is_err());
+        assert!(BasinEndpoint::new("https://{basin}.[::1]").is_err());
+        assert!(BasinEndpoint::new("https://{basin}.127.0.0.1").is_err());
+        assert!(BasinEndpoint::new("https://{basin}..example.com").is_err());
+        assert!(AccountEndpoint::new("https://[::1]:8080").is_ok());
+        assert!(AccountEndpoint::new("https://localhost:8080").is_ok());
+        assert!(BasinEndpoint::new("https://{basin}.b.example.com.").is_ok());
+    }
+
+    #[test]
+    fn issue_access_token_rejects_negative_year_timestamp() {
+        let scope =
+            AccessTokenScopeInput::from_op_group_perms(OperationGroupPermissions::read_write_all());
+        let id: AccessTokenId = "tok-1".parse().unwrap();
+        let err = IssueAccessTokenInput::new(id.clone(), scope.clone())
+            .with_expires_at(Timestamp::MIN)
+            .unwrap_err();
+        assert!(err.to_string().contains("0000"));
+
+        // Direct field mutation is also caught by TryFrom.
+        let mut input = IssueAccessTokenInput::new(id, scope);
+        input.expires_at = Some(Timestamp::MIN);
+        assert!(api::access::IssueAccessTokenRequest::try_from(input).is_err());
+    }
+
+    #[test]
+    fn fencing_token_generate_validates_before_allocating() {
+        assert!(FencingToken::generate(usize::MAX).is_err());
+        assert!(FencingToken::generate(MAX_FENCING_TOKEN_LENGTH + 1).is_err());
+        assert_eq!(
+            FencingToken::generate(MAX_FENCING_TOKEN_LENGTH)
+                .unwrap()
+                .len(),
+            MAX_FENCING_TOKEN_LENGTH
+        );
+    }
+
+    #[test]
+    fn basin_reconfiguration_reset_booleans() {
+        let reconfig = BasinReconfiguration::new()
+            .reset_create_stream_on_append()
+            .reset_create_stream_on_read();
+        let api_reconfig: api::config::BasinReconfiguration = reconfig.into();
+        let json = serde_json::to_string(&api_reconfig).unwrap();
+        assert_eq!(
+            json,
+            r#"{"create_stream_on_append":null,"create_stream_on_read":null}"#
         );
     }
 }

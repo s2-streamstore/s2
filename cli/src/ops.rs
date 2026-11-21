@@ -14,16 +14,16 @@ use s2_sdk::{
         AccessTokenId, AccessTokenInfo, AccessTokenScopeInput, AccountMetricSet, AppendAck,
         AppendInput, AppendRecord, AppendRecordBatch, AwsPrivateNetPolicy, BasinInfo,
         BasinMetricSet, BasinName, BasinReconfiguration, CommandRecord, CreateBasinInput,
-        CreateNetworkPolicyInput, CreateStreamInput, DeleteBasinInput, DeleteStreamInput,
-        EncryptionKey, FencingToken, GetAccountMetricsInput, GetBasinMetricsInput,
-        GetStreamMetricsInput, IssueAccessTokenInput, ListAccessTokensInput,
-        ListAllAccessTokensInput, ListAllBasinsInput, ListAllNetworkPoliciesInput,
-        ListAllStreamsInput, ListBasinsInput, ListNetworkPoliciesInput, ListStreamsInput,
-        LocationInfo, LocationName, MeteredBytes, Metric, NetworkPolicy, NetworkPolicyInfo,
-        NetworkPolicySelector, PublicNetPolicy, ReadFrom, ReadInput, ReadLimits, ReadSessionConfig,
-        ReadStart, ReadStop, ReconfigureBasinInput, ReconfigureStreamInput, S2DateTime,
-        SequencedRecord, StreamInfo, StreamMetricSet, StreamNamePrefix, StreamPosition,
-        StreamReconfiguration, TimeRange, TimeRangeAndInterval, TimeseriesInterval,
+        CreateNetworkPolicyInput, CreateStreamInput, EncryptionKey, FencingToken,
+        GetAccountMetricsInput, GetBasinMetricsInput, GetStreamMetricsInput, IssueAccessTokenInput,
+        ListAccessTokensInput, ListAllAccessTokensInput, ListAllBasinsInput,
+        ListAllNetworkPoliciesInput, ListAllStreamsInput, ListBasinsInput,
+        ListNetworkPoliciesInput, ListStreamsInput, LocationInfo, LocationName, MeteredBytes,
+        Metric, NetworkPolicy, NetworkPolicyInfo, NetworkPolicySelector, PublicNetPolicy, ReadFrom,
+        ReadInput, ReadLimits, ReadSessionConfig, ReadStart, ReadStop, ReconfigureBasinInput,
+        ReconfigureStreamInput, SequencedRecord, StreamInfo, StreamMetricSet, StreamNamePrefix,
+        StreamPosition, StreamReconfiguration, TimeRange, TimeRangeAndInterval, TimeseriesInterval,
+        Timestamp,
     },
 };
 
@@ -114,7 +114,7 @@ pub async fn create_basin(s2: &S2, args: CreateBasinArgs) -> Result<BasinInfo, C
 }
 
 pub async fn delete_basin(s2: &S2, basin: &BasinName) -> Result<(), CliError> {
-    s2.delete_basin(DeleteBasinInput::new(basin.clone()))
+    s2.delete_basin(basin.clone())
         .await
         .map_err(|e| CliError::op(OpKind::DeleteBasin, e))
 }
@@ -284,19 +284,22 @@ pub async fn issue_access_token(s2: &S2, args: IssueAccessTokenArgs) -> Result<S
     let mut input = IssueAccessTokenInput::new(args.id, scope);
     if let Some(expires_in) = args.expires_in {
         let expiry_time = std::time::SystemTime::now() + *expires_in;
-        let rfc3339 = humantime::format_rfc3339(expiry_time).to_string();
-        let dt: S2DateTime = rfc3339.parse().map_err(|e| {
+        let dt = Timestamp::try_from(expiry_time).map_err(|e| {
             CliError::InvalidArgs(miette::miette!("Invalid expiration time: {}", e))
         })?;
-        input = input.with_expires_at(dt);
+        input = input
+            .with_expires_at(dt)
+            .map_err(|e| CliError::InvalidArgs(miette::miette!("Invalid expiration time: {e}")))?;
     } else if let Some(expires_at) = args.expires_at {
-        let dt: S2DateTime = expires_at.parse().map_err(|e| {
+        let dt: Timestamp = expires_at.parse().map_err(|e| {
             CliError::InvalidArgs(miette::miette!(
                 "Invalid expires_at (expected RFC3339 format, e.g., '2024-12-31T23:59:59Z'): {}",
                 e
             ))
         })?;
-        input = input.with_expires_at(dt);
+        input = input
+            .with_expires_at(dt)
+            .map_err(|e| CliError::InvalidArgs(miette::miette!("Invalid expires_at: {e}")))?;
     }
     if args.auto_prefix_streams {
         input = input.with_auto_prefix_streams(true);
@@ -438,7 +441,9 @@ pub async fn get_account_metrics(
     let (range, set) = match args.metric {
         AccountMetricCommand::ActiveBasins(t) => {
             let range = resolve_time_range(&t, None::<Interval>);
-            let set = AccountMetricSet::ActiveBasins(TimeRange::new(range.start, range.end));
+            let set = AccountMetricSet::ActiveBasins(
+                TimeRange::new(range.start(), range.end()).expect("valid resolved range"),
+            );
             (Some(range), set)
         }
         AccountMetricCommand::AccountOps(t) => {
@@ -472,7 +477,9 @@ pub async fn get_basin_metrics(
     let (range, set) = match args.metric {
         BasinMetricCommand::Storage(t) => {
             let range = resolve_time_range(&t, None::<Interval>);
-            let set = BasinMetricSet::Storage(TimeRange::new(range.start, range.end));
+            let set = BasinMetricSet::Storage(
+                TimeRange::new(range.start(), range.end()).expect("valid resolved range"),
+            );
             (range, set)
         }
         BasinMetricCommand::AppendOps(t) => {
@@ -514,7 +521,9 @@ pub async fn get_stream_metrics(
     let (range, set) = match args.metric {
         StreamMetricCommand::Storage(t) => {
             let range = resolve_time_range(&t, None::<Interval>);
-            let set = StreamMetricSet::Storage(TimeRange::new(range.start, range.end));
+            let set = StreamMetricSet::Storage(
+                TimeRange::new(range.start(), range.end()).expect("valid resolved range"),
+            );
             (range, set)
         }
     };
@@ -597,7 +606,7 @@ pub async fn create_stream(s2: &S2, args: CreateStreamArgs) -> Result<StreamInfo
 pub async fn delete_stream(s2: &S2, uri: S2BasinAndStreamUri) -> Result<(), CliError> {
     let basin = s2.basin(uri.basin);
     basin
-        .delete_stream(DeleteStreamInput::new(uri.stream))
+        .delete_stream(uri.stream)
         .await
         .map_err(|e| CliError::op(OpKind::DeleteStream, e))
 }
@@ -709,10 +718,10 @@ pub async fn read(
 
     let mut limits = ReadLimits::new();
     if let Some(count) = args.count {
-        limits = limits.with_count(count as usize);
+        limits = limits.with_count(count);
     }
     if let Some(bytes) = args.bytes {
-        limits = limits.with_bytes(bytes as usize);
+        limits = limits.with_bytes(bytes);
     }
 
     let mut stop = ReadStop::new().with_limits(limits);
@@ -855,7 +864,7 @@ pub async fn tail(
     let stop = if args.follow {
         ReadStop::new()
     } else {
-        ReadStop::new().with_limits(ReadLimits::new().with_count(args.lines as usize))
+        ReadStop::new().with_limits(ReadLimits::new().with_count(args.lines))
     };
 
     let batches = stream
@@ -922,7 +931,9 @@ fn resolve_time_range(
     let end = resolve_time(args.end_timestamp, args.end_ago, now).unwrap_or(now);
     let start = resolve_time(args.start_timestamp, args.start_ago, now)
         .unwrap_or_else(|| end.saturating_sub(DEFAULT_SPAN_SECS));
-    let range = TimeRangeAndInterval::new(start, end);
+    let start = Timestamp::from_second(i64::from(start)).expect("u32 fits in Timestamp");
+    let end = Timestamp::from_second(i64::from(end)).expect("u32 fits in Timestamp");
+    let range = TimeRangeAndInterval::new(start, end).expect("u32 seconds in range");
     match interval {
         Some(interval) => range.with_interval(interval.into()),
         None => range,

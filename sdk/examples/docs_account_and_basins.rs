@@ -7,9 +7,8 @@ use s2_sdk::{
     S2,
     types::{
         AccessTokenScopeInput, BasinMatcher, BasinName, CreateBasinInput, CreateStreamInput,
-        DeleteBasinInput, DeleteStreamInput, IssueAccessTokenInput, ListAllStreamsInput,
-        ListBasinsInput, ListStreamsInput, OperationGroupPermissions, ReadWritePermissions,
-        S2Config, StreamMatcher,
+        IssueAccessTokenInput, ListAllStreamsInput, ListBasinsInput, ListStreamsInput,
+        OperationGroupPermissions, ReadWritePermissions, S2Config, StreamMatcher,
     },
 };
 
@@ -33,9 +32,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = client.get_basin_config("my-events".parse()?).await?;
 
     // Delete
-    client
-        .delete_basin(DeleteBasinInput::new("my-events".parse()?))
-        .await?;
+    client.delete_basin("my-events".parse()?).await?;
     // ANCHOR_END: basin-operations
     println!("Basins: {:?}, config: {:?}", basins, config);
 
@@ -57,9 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = basin.get_stream_config("user-actions".parse()?).await?;
 
     // Delete
-    basin
-        .delete_stream(DeleteStreamInput::new("user-actions".parse()?))
-        .await?;
+    basin.delete_stream("user-actions".parse()?).await?;
     // ANCHOR_END: stream-operations
     println!("Streams: {:?}, config: {:?}", streams, config);
 
@@ -79,7 +74,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .with_basins(BasinMatcher::Prefix("".parse()?)) // all basins
                 .with_streams(StreamMatcher::Prefix("users/1234/".parse()?)),
             )
-            .with_expires_at("2027-01-01T00:00:00Z".parse()?),
+            .with_expires_at("2027-01-01T00:00:00Z".parse()?)?,
         )
         .await?;
 

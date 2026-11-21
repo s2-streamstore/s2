@@ -208,9 +208,6 @@ pub enum RequestError {
     /// An error returned by the server.
     #[error(transparent)]
     Server(#[from] ServerError),
-    /// The access token could not be used as an HTTP header value.
-    #[error("malformed access token: {0}")]
-    MalformedAccessToken(String),
     #[cfg(feature = "_hidden")]
     #[doc(hidden)]
     #[error("access token provider failed: {0}")]
@@ -228,7 +225,7 @@ impl RequestError {
             Self::Server(error) => error.is_retryable(),
             #[cfg(feature = "_hidden")]
             Self::AccessTokenProvider(error) => error.is_retryable(),
-            Self::MalformedAccessToken(_) | Self::Validation(_) => false,
+            Self::Validation(_) => false,
         }
     }
 
@@ -239,7 +236,7 @@ impl RequestError {
             Self::Server(error) => error.has_no_side_effects(),
             #[cfg(feature = "_hidden")]
             Self::AccessTokenProvider(_) => true,
-            Self::MalformedAccessToken(_) | Self::Validation(_) => true,
+            Self::Validation(_) => true,
         }
     }
 
@@ -279,7 +276,7 @@ impl From<ApiError> for RequestError {
             ApiError::TerminalDecode(error) => {
                 Self::Client(ClientError::SessionProtocol(error.to_string()))
             }
-            ApiError::MalformedAccessToken(error) => Self::MalformedAccessToken(error),
+            ApiError::Validation(error) => Self::Validation(error),
             #[cfg(feature = "_hidden")]
             ApiError::AccessTokenProvider(error) => Self::AccessTokenProvider(error),
             ApiError::Compression(error) => {

@@ -51,6 +51,8 @@ Flag byte layout:
 const FLAG_TOTAL_SIZE: usize = 1;
 // The frame length budget includes one flag byte, so payload bytes are capped at budget - flag.
 const MAX_FRAME_PAYLOAD_BYTES: usize = MAX_FRAME_BYTES - FLAG_TOTAL_SIZE;
+/// Maximum body bytes allowed in a terminal S2S frame (`MAX_FRAME_BYTES - 1 flag - 2 status`).
+pub const MAX_TERMINAL_BODY_BYTES: usize = MAX_FRAME_PAYLOAD_BYTES - STATUS_CODE_SIZE;
 const MAX_DECOMPRESSED_PAYLOAD_BYTES: usize = MAX_FRAME_PAYLOAD_BYTES;
 const FLAG_TERMINAL: u8 = 0b1000_0000;
 const FLAG_COMPRESSION_MASK: u8 = 0b0110_0000;
@@ -161,7 +163,7 @@ impl CompressedData {
         })
     }
 
-    fn decompressed(self) -> std::io::Result<Bytes> {
+    pub fn decompressed(self) -> std::io::Result<Bytes> {
         let initial_capacity = self
             .payload
             .len()
@@ -218,7 +220,7 @@ impl CompressedData {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalMessage {
     pub status: u16,
-    pub body: String,
+    pub body: Bytes,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -251,15 +253,15 @@ impl SessionMessage {
     }
 
     pub fn encode(&self) -> Bytes {
-        let encoded_size = FLAG_TOTAL_SIZE + self.payload_size();
-        assert!(
-            encoded_size <= MAX_FRAME_BYTES,
-            "payload exceeds encoder limit"
-        );
-        let mut buf = BytesMut::with_capacity(LENGTH_PREFIX_SIZE + encoded_size);
-        buf.put_uint(encoded_size as u64, 3);
         match self {
             Self::Regular(msg) => {
+                let encoded_size = FLAG_TOTAL_SIZE + msg.payload.len();
+                assert!(
+                    encoded_size <= MAX_FRAME_BYTES,
+                    "payload exceeds encoder limit"
+                );
+                let mut buf = BytesMut::with_capacity(LENGTH_PREFIX_SIZE + encoded_size);
+                buf.put_uint(encoded_size as u64, 3);
                 let mut flag =
                     ((msg.compression as u8) << FLAG_COMPRESSION_SHIFT) & FLAG_COMPRESSION_MASK;
                 if msg.reconnect_advised {
@@ -267,20 +269,29 @@ impl SessionMessage {
                 }
                 buf.put_u8(flag);
                 buf.extend_from_slice(&msg.payload);
+                buf.freeze()
             }
             Self::Terminal(msg) => {
+                let body = if msg.body.len() <= MAX_TERMINAL_BODY_BYTES {
+                    &msg.body[..]
+                } else {
+                    &msg.body[..MAX_TERMINAL_BODY_BYTES]
+                };
+                let encoded_size = FLAG_TOTAL_SIZE + STATUS_CODE_SIZE + body.len();
+                let mut buf = BytesMut::with_capacity(LENGTH_PREFIX_SIZE + encoded_size);
+                buf.put_uint(encoded_size as u64, 3);
                 buf.put_u8(FLAG_TERMINAL);
                 buf.put_u16(msg.status);
-                buf.extend_from_slice(msg.body.as_bytes());
+                buf.extend_from_slice(body);
+                buf.freeze()
             }
         }
-        buf.freeze()
     }
 
     fn decode_message(mut buf: Bytes) -> std::io::Result<Self> {
         if buf.is_empty() {
             return Err(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
+                std::io::ErrorKind::InvalidData,
                 "empty frame payload",
             ));
         }
@@ -295,10 +306,7 @@ impl SessionMessage {
                 ));
             }
             let status = buf.get_u16();
-            let body = String::from_utf8(buf.into()).map_err(|_| {
-                std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid utf-8")
-            })?;
-            return Ok(TerminalMessage { status, body }.into());
+            return Ok(TerminalMessage { status, body: buf }.into());
         }
 
         let compression_bits = (flag & FLAG_COMPRESSION_MASK) >> FLAG_COMPRESSION_SHIFT;
@@ -315,13 +323,6 @@ impl SessionMessage {
             payload: buf,
         }
         .into())
-    }
-
-    fn payload_size(&self) -> usize {
-        match self {
-            Self::Regular(msg) => msg.payload.len(),
-            Self::Terminal(msg) => STATUS_CODE_SIZE + msg.body.len(),
-        }
     }
 }
 
@@ -464,7 +465,7 @@ mod test {
         fn from(val: TestError) -> Self {
             TerminalMessage {
                 status: val.status,
-                body: val.body.to_string(),
+                body: Bytes::from_static(val.body.as_bytes()),
             }
         }
     }
@@ -639,7 +640,7 @@ mod test {
     fn terminal_session_message_round_trips() {
         let terminal = TerminalMessage {
             status: 418,
-            body: "short-circuit".to_string(),
+            body: Bytes::from_static(b"short-circuit"),
         };
         let msg = SessionMessage::from(terminal.clone());
         let encoded = msg.encode();
@@ -728,7 +729,7 @@ mod test {
         let mut decoder = FrameDecoder;
         let mut buf = BytesMut::from(raw.as_slice());
         let err = decoder.decode(&mut buf).unwrap_err();
-        assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     }
 
     #[test]

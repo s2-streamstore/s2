@@ -110,9 +110,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ANCHOR_END: check-tail
 
     // Cleanup
-    basin
-        .delete_stream(s2_sdk::types::DeleteStreamInput::new(stream_name))
-        .await?;
+    basin.delete_stream(stream_name).await?;
 
     println!("Streams examples completed");
 
@@ -207,7 +205,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .read_session(
             ReadInput::new()
                 .with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0)))
-                .with_stop(ReadStop::new().with_wait(30)),
+                .with_stop(ReadStop::new().with_wait(Duration::from_secs(30))?),
             ReadSessionConfig::default(),
         )
         .await?;

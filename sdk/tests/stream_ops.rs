@@ -110,7 +110,9 @@ async fn append_with_headers(stream: &S2Stream) -> Result<(), Box<dyn std::error
 
     assert_eq!(ack.start.seq_num, 0);
 
-    let batch = stream.read(ReadInput::new()).await?;
+    let batch = stream
+        .read(ReadInput::new().with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0))))
+        .await?;
 
     assert_eq!(batch.records.len(), 1);
     assert_eq!(batch.records[0].headers.len(), headers.len());
@@ -195,6 +197,7 @@ async fn read_with_count_limit_exact(stream: &S2Stream) -> Result<(), Box<dyn st
     let batch = stream
         .read(
             ReadInput::new()
+                .with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0)))
                 .with_stop(ReadStop::new().with_limits(ReadLimits::new().with_count(3))),
         )
         .await?;
@@ -256,6 +259,7 @@ async fn read_with_count_over_max_clamps(
     let batch = stream
         .read(
             ReadInput::new()
+                .with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0)))
                 .with_stop(ReadStop::new().with_limits(ReadLimits::new().with_count(2000))),
         )
         .await?;
@@ -285,7 +289,10 @@ async fn read_with_bytes_limit_partial(
     let batch = stream
         .read(
             ReadInput::new()
-                .with_stop(ReadStop::new().with_limits(ReadLimits::new().with_bytes(bytes_limit))),
+                .with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0)))
+                .with_stop(
+                    ReadStop::new().with_limits(ReadLimits::new().with_bytes(bytes_limit as u64)),
+                ),
         )
         .await?;
 
@@ -310,7 +317,10 @@ async fn read_with_bytes_limit_exact(stream: &S2Stream) -> Result<(), Box<dyn st
     let batch = stream
         .read(
             ReadInput::new()
-                .with_stop(ReadStop::new().with_limits(ReadLimits::new().with_bytes(bytes_limit))),
+                .with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0)))
+                .with_stop(
+                    ReadStop::new().with_limits(ReadLimits::new().with_bytes(bytes_limit as u64)),
+                ),
         )
         .await?;
 
@@ -338,6 +348,7 @@ async fn read_with_bytes_limit_exceeds(
     let batch = stream
         .read(
             ReadInput::new()
+                .with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0)))
                 .with_stop(ReadStop::new().with_limits(ReadLimits::new().with_bytes(1000))),
         )
         .await?;
@@ -363,12 +374,15 @@ async fn read_with_bytes_over_max_clamps(
     )?])?);
     stream.append(input).await?;
 
-    let batch =
-        stream
-            .read(ReadInput::new().with_stop(
-                ReadStop::new().with_limits(ReadLimits::new().with_bytes(2 * 1024 * 1024)),
-            ))
-            .await?;
+    let batch = stream
+        .read(
+            ReadInput::new()
+                .with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0)))
+                .with_stop(
+                    ReadStop::new().with_limits(ReadLimits::new().with_bytes(2 * 1024 * 1024)),
+                ),
+        )
+        .await?;
 
     let read_bytes: usize = batch.records.iter().map(|r| r.metered_bytes()).sum();
     assert!(read_bytes <= 1024 * 1024);
@@ -399,7 +413,9 @@ async fn read_from_seq_num_with_bytes_limit(
         .read(
             ReadInput::new()
                 .with_start(ReadStart::new().with_from(ReadFrom::SeqNum(1)))
-                .with_stop(ReadStop::new().with_limits(ReadLimits::new().with_bytes(bytes_limit))),
+                .with_stop(
+                    ReadStop::new().with_limits(ReadLimits::new().with_bytes(bytes_limit as u64)),
+                ),
         )
         .await?;
 
@@ -427,6 +443,7 @@ async fn read_with_zero_bytes_limit(stream: &S2Stream) -> Result<(), Box<dyn std
     let batch = stream
         .read(
             ReadInput::new()
+                .with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0)))
                 .with_stop(ReadStop::new().with_limits(ReadLimits::new().with_bytes(0))),
         )
         .await?;
@@ -450,7 +467,11 @@ async fn read_with_unbounded_limit(stream: &S2Stream) -> Result<(), Box<dyn std:
     assert_eq!(ack.end.seq_num, 2);
 
     let batch = stream
-        .read(ReadInput::new().with_stop(ReadStop::new().with_limits(ReadLimits::new())))
+        .read(
+            ReadInput::new()
+                .with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0)))
+                .with_stop(ReadStop::new().with_limits(ReadLimits::new())),
+        )
         .await?;
 
     assert_eq!(batch.records.len(), 2);
@@ -729,7 +750,7 @@ async fn read_beyond_tail_with_clamp_to_tail_and_wait_returns_empty_batch(
                         .with_from(ReadFrom::SeqNum(10))
                         .with_clamp_to_tail(true),
                 )
-                .with_stop(ReadStop::new().with_wait(1)),
+                .with_stop(ReadStop::new().with_wait(Duration::from_secs(1))?),
         )
         .await?;
 
@@ -881,7 +902,9 @@ async fn append_with_empty_header_value(
     assert_eq!(ack.start.seq_num, 0);
     assert_eq!(ack.end.seq_num, 1);
 
-    let batch = stream.read(ReadInput::new()).await?;
+    let batch = stream
+        .read(ReadInput::new().with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0))))
+        .await?;
 
     assert_eq!(batch.records.len(), 1);
     assert_eq!(batch.records[0].headers.len(), 2);
@@ -906,7 +929,9 @@ async fn append_mixed_records_with_and_without_headers(
     assert_eq!(ack.start.seq_num, 0);
     assert_eq!(ack.end.seq_num, 3);
 
-    let batch = stream.read(ReadInput::new()).await?;
+    let batch = stream
+        .read(ReadInput::new().with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0))))
+        .await?;
 
     assert_eq!(batch.records.len(), 3);
     assert_eq!(batch.records[0].headers.len(), 1);
@@ -1045,7 +1070,9 @@ async fn read_from_timestamp_with_bytes_limit(
         .read(
             ReadInput::new()
                 .with_start(ReadStart::new().with_from(ReadFrom::Timestamp(base_timestamp + 1)))
-                .with_stop(ReadStop::new().with_limits(ReadLimits::new().with_bytes(bytes_limit))),
+                .with_stop(
+                    ReadStop::new().with_limits(ReadLimits::new().with_bytes(bytes_limit as u64)),
+                ),
         )
         .await?;
 
@@ -1184,9 +1211,7 @@ async fn append_without_timestamp_client_require_errors(
         }
     );
 
-    basin
-        .delete_stream(DeleteStreamInput::new(stream_name))
-        .await?;
+    basin.delete_stream(stream_name).await?;
 
     Ok(())
 }
@@ -1216,9 +1241,7 @@ async fn append_with_future_timestamp_uncapped_false_caps(
 
     assert!(ack.start.timestamp < future);
 
-    basin
-        .delete_stream(DeleteStreamInput::new(stream_name))
-        .await?;
+    basin.delete_stream(stream_name).await?;
 
     Ok(())
 }
@@ -1248,9 +1271,7 @@ async fn append_with_future_timestamp_uncapped_true_preserves(
 
     assert_eq!(ack.start.timestamp, future);
 
-    basin
-        .delete_stream(DeleteStreamInput::new(stream_name))
-        .await?;
+    basin.delete_stream(stream_name).await?;
 
     Ok(())
 }
@@ -1420,7 +1441,7 @@ async fn read_empty_stream_with_wait_returns_empty(
     stream: &S2Stream,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let batch = stream
-        .read(ReadInput::new().with_stop(ReadStop::new().with_wait(1)))
+        .read(ReadInput::new().with_stop(ReadStop::new().with_wait(Duration::from_secs(1))?))
         .await?;
 
     assert!(batch.records.is_empty());
@@ -1442,6 +1463,7 @@ async fn read_with_count_zero_returns_empty(
     let batch = stream
         .read(
             ReadInput::new()
+                .with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0)))
                 .with_stop(ReadStop::new().with_limits(ReadLimits::new().with_count(0))),
         )
         .await?;
@@ -1465,6 +1487,7 @@ async fn read_with_bytes_zero_returns_empty(
     let batch = stream
         .read(
             ReadInput::new()
+                .with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0)))
                 .with_stop(ReadStop::new().with_limits(ReadLimits::new().with_bytes(0))),
         )
         .await?;
@@ -1519,7 +1542,11 @@ async fn read_until_timestamp(stream: &S2Stream) -> Result<(), Box<dyn std::erro
     let _ = stream.append(input).await?;
 
     let batch = stream
-        .read(ReadInput::new().with_stop(ReadStop::new().with_until(..(base_timestamp + 2))))
+        .read(
+            ReadInput::new()
+                .with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0)))
+                .with_stop(ReadStop::new().with_until(..(base_timestamp + 2))),
+        )
         .await?;
 
     assert_eq!(batch.records.len(), 2);
@@ -1973,7 +2000,7 @@ async fn create_stream_inherits_basin_default_config() -> Result<(), Box<dyn std
     let default_stream_config = StreamConfig::new()
         .with_storage_class("standard")
         .with_retention_policy(RetentionPolicy::Age(3600))
-        .with_delete_on_empty(DeleteOnEmptyConfig::new().with_min_age(Duration::from_secs(3600)));
+        .with_delete_on_empty(DeleteOnEmptyConfig::new().with_min_age(Duration::from_secs(3600))?);
     let basin_config = BasinConfig::new().with_default_stream_config(default_stream_config);
 
     s2.create_basin(CreateBasinInput::new(basin_name.clone()).with_config(basin_config))
@@ -1999,10 +2026,8 @@ async fn create_stream_inherits_basin_default_config() -> Result<(), Box<dyn std
         } if storage_class == "standard"
     );
 
-    basin
-        .delete_stream(DeleteStreamInput::new(stream_name))
-        .await?;
-    s2.delete_basin(DeleteBasinInput::new(basin_name)).await?;
+    basin.delete_stream(stream_name).await?;
+    s2.delete_basin(basin_name).await?;
 
     Ok(())
 }
@@ -2041,13 +2066,13 @@ async fn compression_roundtrip_unary(
     assert_eq!(ack.start.seq_num, 0);
     assert_eq!(ack.end.seq_num, 2);
 
-    let batch = stream.read(ReadInput::new()).await?;
+    let batch = stream
+        .read(ReadInput::new().with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0))))
+        .await?;
     assert_eq!(batch.records.len(), 2);
 
-    basin
-        .delete_stream(DeleteStreamInput::new(stream_name))
-        .await?;
-    s2.delete_basin(DeleteBasinInput::new(basin_name)).await?;
+    basin.delete_stream(stream_name).await?;
+    s2.delete_basin(basin_name).await?;
 
     Ok(())
 }
@@ -2086,13 +2111,13 @@ async fn compression_with_no_side_effects_unary(
     assert_eq!(ack.start.seq_num, 0);
     assert_eq!(ack.end.seq_num, 2);
 
-    let batch = stream.read(ReadInput::new()).await?;
+    let batch = stream
+        .read(ReadInput::new().with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0))))
+        .await?;
     assert_eq!(batch.records.len(), 2);
 
-    basin
-        .delete_stream(DeleteStreamInput::new(stream_name))
-        .await?;
-    s2.delete_basin(DeleteBasinInput::new(basin_name)).await?;
+    basin.delete_stream(stream_name).await?;
+    s2.delete_basin(basin_name).await?;
 
     Ok(())
 }
@@ -2138,16 +2163,17 @@ async fn compression_roundtrip_session(
     assert_eq!(ack.end.seq_num, 1);
 
     let mut batches = stream
-        .read_session(ReadInput::new(), ReadSessionConfig::default())
+        .read_session(
+            ReadInput::new().with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0))),
+            ReadSessionConfig::default(),
+        )
         .await?;
     let batch = batches.next().await.expect("should have batch")?;
     assert_eq!(batch.records.len(), 1);
     assert_eq!(batch.records[0].body.len(), 20480);
 
-    basin
-        .delete_stream(DeleteStreamInput::new(stream_name))
-        .await?;
-    s2.delete_basin(DeleteBasinInput::new(basin_name)).await?;
+    basin.delete_stream(stream_name).await?;
+    s2.delete_basin(basin_name).await?;
 
     Ok(())
 }
@@ -2229,7 +2255,7 @@ async fn stream_config_applies_only_when_append_creates_stream()
 
     let stream_config = StreamConfig::new()
         .with_retention_policy(RetentionPolicy::Age(3600))
-        .with_delete_on_empty(DeleteOnEmptyConfig::new().with_min_age(Duration::from_secs(300)));
+        .with_delete_on_empty(DeleteOnEmptyConfig::new().with_min_age(Duration::from_secs(300))?);
 
     let unary_stream = unique_stream_name();
     basin
@@ -2292,7 +2318,7 @@ async fn stream_config_applies_only_when_append_creates_stream()
     assert_eq!(after, before);
     assert_ne!(after.retention_policy, Some(RetentionPolicy::Age(3600)));
 
-    s2.delete_basin(DeleteBasinInput::new(basin_name)).await?;
+    s2.delete_basin(basin_name).await?;
     Ok(())
 }
 
@@ -2321,6 +2347,6 @@ async fn stream_config_applies_when_read_creates_stream() -> Result<(), Box<dyn 
     let config = basin.get_stream_config(session_stream).await?;
     assert_eq!(config.retention_policy, Some(RetentionPolicy::Age(3600)));
 
-    s2.delete_basin(DeleteBasinInput::new(basin_name)).await?;
+    s2.delete_basin(basin_name).await?;
     Ok(())
 }

@@ -1,6 +1,6 @@
 use s2_sdk::{
     S2,
-    types::{BasinName, DeleteStreamInput, S2Config, StreamName},
+    types::{BasinName, S2Config, StreamName},
 };
 
 #[tokio::main]
@@ -17,8 +17,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let s2 = S2::new(S2Config::new(access_token))?;
     let basin = s2.basin(basin_name);
 
-    let input = DeleteStreamInput::new(stream_name);
-    basin.delete_stream(input).await?;
+    basin.delete_stream(stream_name).await?;
     println!("Deletion requested");
 
     Ok(())

@@ -575,7 +575,9 @@ pub fn bench_read_catchup(
     bench_read_inner(
         stream,
         record_size,
-        ReadStop::new().with_wait(0),
+        ReadStop::new()
+            .with_wait(Duration::ZERO)
+            .expect("whole-second duration"),
         Arc::new(AtomicU64::new(WRITE_DONE_SENTINEL)),
         bench_start,
     )

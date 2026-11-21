@@ -9,15 +9,15 @@ use crate::{
     },
     types::{
         AccessTokenId, AccessTokenInfo, AppendAck, AppendInput, BasinConfig, BasinInfo, BasinName,
-        CreateBasinInput, CreateNetworkPolicyInput, CreateStreamInput, DeleteBasinInput,
-        DeleteStreamInput, EncryptionKey, EnsureBasinInput, EnsureOutput, EnsureStreamInput,
-        GetAccountMetricsInput, GetBasinMetricsInput, GetStreamMetricsInput, IssueAccessTokenInput,
-        ListAccessTokensInput, ListAllAccessTokensInput, ListAllBasinsInput,
-        ListAllNetworkPoliciesInput, ListAllStreamsInput, ListBasinsInput,
-        ListNetworkPoliciesInput, ListStreamsInput, LocationInfo, LocationName, Metric,
-        NetworkPolicyInfo, NetworkPolicySelector, Page, ReadBatch, ReadInput, ReadSessionConfig,
-        ReconfigureBasinInput, ReconfigureStreamInput, S2Config, StreamConfig, StreamInfo,
-        StreamName, StreamPosition, Streaming,
+        CreateBasinInput, CreateNetworkPolicyInput, CreateStreamInput, EncryptionKey,
+        EnsureBasinInput, EnsureOutput, EnsureStreamInput, GetAccountMetricsInput,
+        GetBasinMetricsInput, GetStreamMetricsInput, IssueAccessTokenInput, ListAccessTokensInput,
+        ListAllAccessTokensInput, ListAllBasinsInput, ListAllNetworkPoliciesInput,
+        ListAllStreamsInput, ListBasinsInput, ListNetworkPoliciesInput, ListStreamsInput,
+        LocationInfo, LocationName, Metric, NetworkPolicyInfo, NetworkPolicySelector, Page,
+        ReadBatch, ReadInput, ReadSessionConfig, ReconfigureBasinInput, ReconfigureStreamInput,
+        S2Config, StreamConfig, StreamInfo, StreamName, StreamPosition, Streaming,
+        idempotency_token,
     },
 };
 
@@ -34,6 +34,14 @@ impl S2 {
         Ok(Self {
             client: AccountClient::init(config, base_client),
         })
+    }
+
+    /// Create a new [`S2`] from environment variables.
+    ///
+    /// Reads `S2_ACCESS_TOKEN`, and optionally `S2_ACCOUNT_ENDPOINT` and `S2_BASIN_ENDPOINT`
+    /// (empty endpoint variables are treated as unset; if one is set, both must be set).
+    pub fn from_env() -> Result<Self, RequestError> {
+        Self::new(S2Config::from_env()?)
     }
 
     #[doc(hidden)]
@@ -105,8 +113,10 @@ impl S2 {
 
     /// Create a basin.
     pub async fn create_basin(&self, input: CreateBasinInput) -> Result<BasinInfo, RequestError> {
-        let (request, idempotency_token) = input.into();
-        let info = self.client.create_basin(request, idempotency_token).await?;
+        let info = self
+            .client
+            .create_basin(input.into(), idempotency_token())
+            .await?;
         Ok(info.try_into()?)
     }
 
@@ -146,11 +156,10 @@ impl S2 {
     }
 
     /// Delete a basin.
-    pub async fn delete_basin(&self, input: DeleteBasinInput) -> Result<(), RequestError> {
-        Ok(self
-            .client
-            .delete_basin(input.name, input.ignore_not_found)
-            .await?)
+    ///
+    /// Succeeds if the basin is already being deleted or does not exist.
+    pub async fn delete_basin(&self, name: BasinName) -> Result<(), RequestError> {
+        Ok(self.client.delete_basin(name).await?)
     }
 
     /// Reconfigure a basin.
@@ -226,11 +235,14 @@ impl S2 {
         &self,
         input: IssueAccessTokenInput,
     ) -> Result<String, RequestError> {
-        let response = self.client.issue_access_token(input.into()).await?;
+        let request = input.try_into()?;
+        let response = self.client.issue_access_token(request).await?;
         Ok(response.access_token)
     }
 
     /// Revoke an access token.
+    ///
+    /// Succeeds if the access token does not exist.
     pub async fn revoke_access_token(&self, id: AccessTokenId) -> Result<(), RequestError> {
         Ok(self.client.revoke_access_token(id).await?)
     }
@@ -303,6 +315,8 @@ impl S2 {
 
     /// Delete a network policy by slug or full reference. It must not be bound to any access
     /// token.
+    ///
+    /// Succeeds if the network policy does not exist.
     pub async fn delete_network_policy(
         &self,
         selector: NetworkPolicySelector,
@@ -433,10 +447,9 @@ impl S2Basin {
         &self,
         input: CreateStreamInput,
     ) -> Result<StreamInfo, RequestError> {
-        let (request, idempotency_token) = input.into();
         let info = self
             .client
-            .create_stream(request, idempotency_token)
+            .create_stream(input.into(), idempotency_token())
             .await?;
         Ok(info.try_into()?)
     }
@@ -477,11 +490,10 @@ impl S2Basin {
     }
 
     /// Delete a stream.
-    pub async fn delete_stream(&self, input: DeleteStreamInput) -> Result<(), RequestError> {
-        Ok(self
-            .client
-            .delete_stream(input.name, input.ignore_not_found)
-            .await?)
+    ///
+    /// Succeeds if the stream is already being deleted or does not exist.
+    pub async fn delete_stream(&self, name: StreamName) -> Result<(), RequestError> {
+        Ok(self.client.delete_stream(name).await?)
     }
 
     /// Reconfigure a stream.
@@ -563,11 +575,7 @@ impl S2Stream {
                 stream_config.as_ref(),
             )
             .await?;
-        let mut batch = ReadBatch::from_api(batch);
-        if input.ignore_command_records {
-            batch.records.retain(|r| !r.is_command_record());
-        }
-        Ok(batch)
+        Ok(ReadBatch::from_api(batch))
     }
 
     /// Create an append session for submitting [`AppendInput`]s.

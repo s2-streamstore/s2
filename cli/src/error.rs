@@ -1,7 +1,10 @@
 use miette::Diagnostic;
-use s2_sdk::error::{
-    AppendError, AppendSessionError, ErrorCode, ProducerError, ReadError, ReadSessionError,
-    RequestError, ServerError,
+use s2_sdk::{
+    error::{
+        AppendError, AppendSessionError, ErrorCode, ProducerError, ReadError, ReadSessionError,
+        RequestError, ServerError,
+    },
+    types::ValidationError,
 };
 use thiserror::Error;
 
@@ -308,7 +311,8 @@ fn is_not_implemented(err: &SdkError) -> bool {
 fn is_malformed_access_token(err: &SdkError) -> bool {
     matches!(
         err.request_error(),
-        Some(RequestError::MalformedAccessToken(_))
+        Some(RequestError::Validation(ValidationError(message)))
+            if message.contains("access token")
     )
 }
 
@@ -440,7 +444,11 @@ mod tests {
         #[case] token_source: TokenSource,
         #[case] expected: &str,
     ) {
-        let sdk_error = || SdkError::Request(RequestError::MalformedAccessToken("bad".into()));
+        let sdk_error = || {
+            SdkError::Request(RequestError::Validation(ValidationError(
+                "invalid access token: bad".into(),
+            )))
+        };
         for error in [
             CliError::UnauthorizedAccessToken(OpKind::ListBasins, sdk_error(), token_source),
             CliError::MalformedAccessToken(sdk_error(), token_source),

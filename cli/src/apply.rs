@@ -103,9 +103,11 @@ fn timestamping_mode_to_sdk(
 fn delete_on_empty_to_sdk(
     delete_on_empty: s2_resource_spec::DeleteOnEmpty,
 ) -> Option<s2_sdk::types::DeleteOnEmptyConfig> {
-    delete_on_empty
-        .min_age
-        .map(|min_age| s2_sdk::types::DeleteOnEmptyConfig::new().with_min_age(min_age.0))
+    delete_on_empty.min_age.map(|min_age| {
+        s2_sdk::types::DeleteOnEmptyConfig::new()
+            .with_min_age(std::time::Duration::from_secs(min_age.0.as_secs()))
+            .expect("whole-second duration")
+    })
 }
 
 fn format_encryption_algorithm(algorithm: &s2_sdk::types::EncryptionAlgorithm) -> &str {
@@ -165,13 +167,13 @@ async fn apply_basin(
         s2_sdk::types::EnsureOutput::Created(_) => {
             eprintln!("{}", format!("  basin {basin} (created)").green().bold());
         }
-        s2_sdk::types::EnsureOutput::ConfigUpdated(_) => {
+        s2_sdk::types::EnsureOutput::Updated(_) => {
             eprintln!(
                 "{}",
                 format!("  basin {basin} (config updated)").yellow().bold()
             );
         }
-        s2_sdk::types::EnsureOutput::ConfigUnchanged(_) => {
+        s2_sdk::types::EnsureOutput::Noop(_) => {
             eprintln!("{}", format!("  basin {basin} (config unchanged)").dimmed());
         }
     }
@@ -206,7 +208,7 @@ async fn apply_stream(
                     .bold()
             );
         }
-        s2_sdk::types::EnsureOutput::ConfigUpdated(_) => {
+        s2_sdk::types::EnsureOutput::Updated(_) => {
             eprintln!(
                 "{}",
                 format!("  stream {basin}/{stream} (config updated)")
@@ -214,7 +216,7 @@ async fn apply_stream(
                     .bold()
             );
         }
-        s2_sdk::types::EnsureOutput::ConfigUnchanged(_) => {
+        s2_sdk::types::EnsureOutput::Noop(_) => {
             eprintln!(
                 "{}",
                 format!("  stream {basin}/{stream} (config unchanged)").dimmed()
