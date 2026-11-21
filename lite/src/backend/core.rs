@@ -393,7 +393,8 @@ impl Backend {
         stream: &StreamName,
         auto_create_on: AutoCreateOn,
         stream_config: OptionalStreamConfig,
-        resolve_encryption: impl FnOnce(Option<EncryptionAlgorithm>) -> Result<EncryptionSpec, E>,
+        resolve_encryption: impl FnOnce(Option<EncryptionAlgorithm>) -> Result<EncryptionSpec, E>
+        + Clone,
     ) -> Result<StreamHandle, E>
     where
         E: From<StreamerError>
@@ -419,17 +420,26 @@ impl Backend {
                 // request creating this stream, so a retry is likely to find it.
                 for attempt in 1.. {
                     let Err(e) = self
-                        .provision_stream(
+                        .provision_stream_with_check(
                             basin.clone(),
                             stream.clone(),
                             stream_config.clone(),
                             ProvisionMode::CreateOnly {
                                 request_token: None,
                             },
+                            |cipher| {
+                                resolve_encryption.clone()(cipher)
+                                    .map(|_| ())
+                                    .map_err(AutoCreateError::Admission)
+                            },
                         )
                         .await
                     else {
                         break;
+                    };
+                    let e = match e {
+                        AutoCreateError::Admission(e) => return Err(e),
+                        AutoCreateError::Provision(e) => e,
                     };
                     match e {
                         ProvisionStreamError::TransactionConflict(_)
@@ -461,6 +471,17 @@ impl Backend {
 }
 
 const AUTO_CREATE_PROVISION_ATTEMPTS: usize = 3;
+
+enum AutoCreateError<E> {
+    Provision(ProvisionStreamError),
+    Admission(E),
+}
+
+impl<E> From<ProvisionStreamError> for AutoCreateError<E> {
+    fn from(e: ProvisionStreamError) -> Self {
+        Self::Provision(e)
+    }
+}
 
 /// Which basin setting governs creating a missing stream on demand.
 #[derive(Debug, Clone, Copy)]
@@ -626,6 +647,107 @@ mod tests {
         .await
         .unwrap();
         backend.close().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn auto_create_rechecks_encryption_after_concurrent_cipher_change() {
+        use std::sync::Mutex;
+
+        use s2_common::{config::BasinReconfiguration, maybe::Maybe, stream::ListStreamsRequest};
+
+        use crate::backend::error::ReadError;
+
+        for cipher in [
+            EncryptionAlgorithm::Aegis256,
+            EncryptionAlgorithm::Aes256Gcm,
+        ] {
+            let backend = new_test_backend().await;
+            let basin: BasinName = "cipher-change".parse().unwrap();
+            let stream: StreamName = "stream".parse().unwrap();
+            backend
+                .provision_basin(
+                    basin.clone(),
+                    BasinConfig {
+                        create_stream_on_read: true,
+                        ..Default::default()
+                    },
+                    ProvisionMode::Ensure,
+                )
+                .await
+                .unwrap();
+            let (admitted_tx, admitted_rx) = tokio::sync::oneshot::channel();
+            let admitted_tx = Arc::new(Mutex::new(Some(admitted_tx)));
+            let (updated_tx, updated_rx) = std::sync::mpsc::channel();
+            let updated_rx = Arc::new(Mutex::new(updated_rx));
+            let update = tokio::spawn({
+                let backend = backend.clone();
+                let basin = basin.clone();
+                async move {
+                    admitted_rx.await.unwrap();
+                    backend
+                        .reconfigure_basin(
+                            basin,
+                            BasinReconfiguration {
+                                stream_cipher: Maybe::Specified(Some(cipher)),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .unwrap();
+                    updated_tx.send(()).unwrap();
+                }
+            });
+            let result = backend
+                .stream_handle_with_auto_create::<ReadError>(
+                    &basin,
+                    &stream,
+                    AutoCreateOn::Read,
+                    OptionalStreamConfig::default(),
+                    move |cipher| {
+                        if let Some(tx) = admitted_tx.lock().unwrap().take() {
+                            assert_eq!(cipher, None);
+                            tx.send(()).unwrap();
+                            updated_rx
+                                .lock()
+                                .unwrap()
+                                .recv_timeout(std::time::Duration::from_secs(10))
+                                .unwrap();
+                        }
+                        Ok(EncryptionSpec::resolve(cipher, None)?)
+                    },
+                )
+                .await;
+            update.await.unwrap();
+            assert!(
+                matches!(result, Err(ReadError::EncryptionSpecResolution(_))),
+                "auto-creation did not reject encryption after the concurrent basin update"
+            );
+            assert!(
+                backend
+                    .list_streams(basin.clone(), ListStreamsRequest::default())
+                    .await
+                    .unwrap()
+                    .values
+                    .is_empty(),
+                "rejected encryption after a concurrent basin update created a stream"
+            );
+            assert!(matches!(
+                backend
+                    .open_for_read(&basin, &stream, None, OptionalStreamConfig::default())
+                    .await,
+                Err(ReadError::EncryptionSpecResolution(_))
+            ));
+            assert!(
+                backend
+                    .list_streams(basin, ListStreamsRequest::default())
+                    .await
+                    .unwrap()
+                    .values
+                    .is_empty(),
+                "rejected encryption after a concurrent basin update created a stream"
+            );
+            backend.close().await.unwrap();
+        }
     }
 
     #[tokio::test]
