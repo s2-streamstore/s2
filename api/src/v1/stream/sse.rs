@@ -4,9 +4,7 @@ use s2_common::http::ParseableHeader;
 use serde::Serialize;
 
 use super::{ReadBatch, StreamPosition};
-use crate::v1::error::ErrorInfo;
-#[cfg(feature = "axum")]
-use crate::v1::error::ErrorResponse;
+use crate::v1::error::{ErrorInfo, StandardError};
 
 static LAST_EVENT_ID_HEADER: http::HeaderName = http::HeaderName::from_static("last-event-id");
 
@@ -152,19 +150,12 @@ pub fn read_batch_event(
 }
 
 #[cfg(feature = "axum")]
-pub fn error_event(error: &ErrorResponse) -> Result<axum::response::sse::Event, axum::Error> {
-    #[derive(Serialize)]
-    struct Data<'a> {
-        status: u16,
-        #[serde(flatten)]
-        body: &'a ErrorResponse,
-    }
+pub fn error_event(
+    data: impl Into<ErrorEventData>,
+) -> Result<axum::response::sse::Event, axum::Error> {
     axum::response::sse::Event::default()
         .event(Error::Error)
-        .json_data(Data {
-            status: error.status().as_u16(),
-            body: error,
-        })
+        .json_data(data.into())
 }
 
 #[cfg(feature = "axum")]
@@ -195,7 +186,8 @@ impl AsRef<str> for DoneEventData {
     }
 }
 
-/// Why the read ended: the error a response would have carried, with its status.
+/// Payload of an SSE `error` event emitted when a streaming read terminates with an error, carrying the HTTP status code alongside the error details.
+#[rustfmt::skip]
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct ErrorEventData {
@@ -205,8 +197,16 @@ pub struct ErrorEventData {
     pub info: ErrorInfo,
 }
 
-/// Heartbeat while the read waits at the tail, sent only when the server has nothing earlier to
-/// send.
+impl From<StandardError> for ErrorEventData {
+    fn from(error: StandardError) -> Self {
+        Self {
+            status: error.status.as_u16(),
+            info: error.info,
+        }
+    }
+}
+
+/// Heartbeat emitted while waiting at the tail for new records, sent only once all records before `tail` have been delivered.
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]

@@ -101,7 +101,18 @@ where
 }
 
 #[cfg(feature = "utoipa")]
-impl<T> utoipa::ToSchema for BasinNameStr<T> where T: StrProps {}
+impl<T> utoipa::ToSchema for BasinNameStr<T>
+where
+    T: StrProps,
+{
+    fn name() -> std::borrow::Cow<'static, str> {
+        if T::IS_PREFIX {
+            std::borrow::Cow::Borrowed("BasinNamePrefixStr")
+        } else {
+            std::borrow::Cow::Borrowed("BasinNameStr")
+        }
+    }
+}
 
 impl<T: StrProps> serde::Serialize for BasinNameStr<T> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>

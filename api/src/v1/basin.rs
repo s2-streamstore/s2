@@ -14,10 +14,10 @@ use super::config::BasinConfig;
 #[cfg_attr(feature = "utoipa", into_params(parameter_in = Query))]
 pub struct ListBasinsRequest {
     /// Filter to basins whose names begin with this prefix.
-    #[cfg_attr(feature = "utoipa", param(value_type = String, default = "", required = false))]
+    #[cfg_attr(feature = "utoipa", param(value_type = String, max_length = 48, pattern = "^([a-z0-9][a-z0-9-]*)?$", default = "", required = false))]
     pub prefix: Option<BasinNamePrefix>,
     /// Filter to basins whose names lexicographically start after this string.
-    #[cfg_attr(feature = "utoipa", param(value_type = String, default = "", required = false))]
+    #[cfg_attr(feature = "utoipa", param(value_type = String, max_length = 48, pattern = "^([a-z0-9][a-z0-9-]*)?$", default = "", required = false))]
     pub start_after: Option<BasinNameStartAfter>,
     /// Number of results, up to a maximum of 1000.
     #[cfg_attr(feature = "utoipa", param(value_type = usize, maximum = 1000, default = 1000, required = false))]

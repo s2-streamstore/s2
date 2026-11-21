@@ -90,9 +90,9 @@ pub struct CreateArgs {
     responses(
         (
             status = StatusCode::CREATED,
-            description = "Created, or already created by an earlier attempt with the same request token.",
+            description = "The stream was created, or matched an earlier creation with the same `s2-request-token` and configuration.",
             body = v1t::stream::StreamInfo,
-            headers(("s2-provision-result" = v1t::ProvisionResult, description = "`created`, or `noop` if an earlier attempt created it.")),
+            headers(("s2-provision-result" = v1t::ProvisionResult, description = "`created` if newly created, or `noop` on an idempotent retry with the same `s2-request-token`.")),
         ),
         (status = StatusCode::CONFLICT, body = v1t::error::ErrorInfo),
         (status = StatusCode::NOT_FOUND, body = v1t::error::ErrorInfo),
@@ -198,28 +198,25 @@ pub struct EnsureArgs {
 }
 
 /// Ensure a stream.
-///
-/// Creates the stream if it does not exist. Otherwise makes its configuration the given one, where
-/// omitted fields take their defaults from the basin's default stream configuration, as on create.
-/// Reconfigure instead leaves omitted fields unchanged.
 #[cfg_attr(feature = "utoipa", utoipa::path(
     put,
     path = super::paths::streams::ENSURE,
     tag = super::paths::streams::TAG,
+    description = "Creates the stream if it does not exist. If it already exists, sets its configuration to match the request, with omitted fields inheriting the basin's default stream configuration (unlike reconfigure, which leaves omitted fields unchanged).",
     request_body = Option<v1t::config::StreamConfig>,
     params(v1t::StreamNamePathSegment),
     responses(
         (
             status = StatusCode::OK,
-            description = "The stream existed, and now has the given configuration.",
+            description = "The stream already existed and now matches the requested configuration.",
             body = v1t::stream::StreamInfo,
-            headers(("s2-provision-result" = v1t::ProvisionResult, description = "`updated` if the configuration changed, else `noop`.")),
+            headers(("s2-provision-result" = v1t::ProvisionResult, description = "`updated` if the configuration changed, or `noop` if it already matched.")),
         ),
         (
             status = StatusCode::CREATED,
             description = "The stream was created.",
             body = v1t::stream::StreamInfo,
-            headers(("s2-provision-result" = v1t::ProvisionResult, description = "`created`.")),
+            headers(("s2-provision-result" = v1t::ProvisionResult, description = "Always `created`.")),
         ),
         (status = StatusCode::NOT_FOUND, body = v1t::error::ErrorInfo),
         (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
@@ -287,7 +284,7 @@ pub struct DeleteArgs {
     path = super::paths::streams::DELETE,
     tag = super::paths::streams::TAG,
     responses(
-        (status = StatusCode::ACCEPTED, description = "The stream is being deleted, including if it already was."),
+        (status = StatusCode::ACCEPTED, description = "Stream deletion has been initiated, or was already in progress."),
         (status = StatusCode::CONFLICT, body = v1t::error::ErrorInfo),
         (status = StatusCode::NOT_FOUND, body = v1t::error::ErrorInfo),
         (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),

@@ -147,7 +147,7 @@ pub struct ReadArgs {
 
 /// Read records.
 ///
-/// A read that sets none of `seq_num`, `timestamp` and `tail_offset` starts at the tail.
+/// Starts at the tail when `seq_num`, `timestamp`, and `tail_offset` are all omitted.
 #[cfg_attr(feature = "utoipa", utoipa::path(
     get,
     path = super::paths::streams::records::READ,
@@ -252,8 +252,15 @@ pub async fn read(
                             yield v1t::stream::sse::read_batch_event(format, &batch, id);
                         },
                         Err(err) => {
-                            let error = ServiceError::from(err).to_response();
-                            yield v1t::stream::sse::error_event(&error);
+                            let error = match ServiceError::from(err).to_response() {
+                                v1t::error::ErrorResponse::Standard(err) => err,
+                                other => {
+                                    unreachable!(
+                                        "unexpected non-standard mid-stream read error: {other:?}"
+                                    )
+                                }
+                            };
+                            yield v1t::stream::sse::error_event(error);
                             errored = true;
                         }
                     }
@@ -367,7 +374,7 @@ pub struct AppendArgs {
         (status = StatusCode::PRECONDITION_FAILED, body = v1t::stream::AppendConditionFailed),
         (
             status = StatusCode::TOO_MANY_REQUESTS,
-            description = "Appending too fast (`rate_limited`). Nothing was appended.",
+            description = "Append rate limit exceeded (`rate_limited`). No records were appended.",
             body = v1t::error::ErrorInfo,
             headers(("retry-after-ms" = u64, description = "Milliseconds to wait before retrying.")),
         ),

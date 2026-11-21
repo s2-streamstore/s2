@@ -72,12 +72,11 @@ pub struct CreateArgs {
     params(v1t::S2RequestTokenHeader),
     request_body = v1t::basin::CreateBasinRequest,
     responses(
-        (status = StatusCode::OK, body = v1t::basin::BasinInfo),
         (
             status = StatusCode::CREATED,
-            description = "Created, or already created by an earlier attempt with the same request token.",
+            description = "The basin was created, or matched an earlier creation with the same `s2-request-token` and configuration.",
             body = v1t::basin::BasinInfo,
-            headers(("s2-provision-result" = v1t::ProvisionResult, description = "`created`, or `noop` if an earlier attempt created it.")),
+            headers(("s2-provision-result" = v1t::ProvisionResult, description = "`created` if newly created, or `noop` on an idempotent retry with the same `s2-request-token`.")),
         ),
         (status = StatusCode::CONFLICT, body = v1t::error::ErrorInfo),
         (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
@@ -163,31 +162,29 @@ pub struct EnsureArgs {
 }
 
 /// Ensure a basin.
-///
-/// Creates the basin if it does not exist. Otherwise makes its configuration the given one, where
-/// omitted fields take their defaults, as on create. Reconfigure instead leaves omitted fields
-/// unchanged.
 #[cfg_attr(feature = "utoipa", utoipa::path(
     put,
     path = super::paths::basins::ENSURE,
     tag = super::paths::basins::TAG,
+    description = "Creates the basin if it does not exist. If it already exists, sets its configuration to match the request, with omitted fields taking their default values (unlike reconfigure, which leaves omitted fields unchanged).",
     request_body = Option<v1t::basin::EnsureBasinRequest>,
     params(v1t::BasinNamePathSegment),
     responses(
         (
             status = StatusCode::OK,
-            description = "The basin existed, and now has the given configuration.",
+            description = "The basin already existed and now matches the requested configuration.",
             body = v1t::basin::BasinInfo,
-            headers(("s2-provision-result" = v1t::ProvisionResult, description = "`updated` if the configuration changed, else `noop`.")),
+            headers(("s2-provision-result" = v1t::ProvisionResult, description = "`updated` if the configuration changed, or `noop` if it already matched.")),
         ),
         (
             status = StatusCode::CREATED,
             description = "The basin was created.",
             body = v1t::basin::BasinInfo,
-            headers(("s2-provision-result" = v1t::ProvisionResult, description = "`created`.")),
+            headers(("s2-provision-result" = v1t::ProvisionResult, description = "Always `created`.")),
         ),
         (status = StatusCode::CONFLICT, body = v1t::error::ErrorInfo),
         (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
+        (status = StatusCode::FORBIDDEN, body = v1t::error::ErrorInfo),
         (status = StatusCode::REQUEST_TIMEOUT, body = v1t::error::ErrorInfo),
     ),
 ))]
@@ -241,7 +238,7 @@ pub struct DeleteArgs {
     path = super::paths::basins::DELETE,
     tag = super::paths::basins::TAG,
     responses(
-        (status = StatusCode::ACCEPTED, description = "The basin is being deleted, including if it already was."),
+        (status = StatusCode::ACCEPTED, description = "Basin deletion has been initiated, or was already in progress."),
         (status = StatusCode::CONFLICT, body = v1t::error::ErrorInfo),
         (status = StatusCode::NOT_FOUND, body = v1t::error::ErrorInfo),
         (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),

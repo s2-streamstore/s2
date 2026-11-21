@@ -23,7 +23,7 @@ pub struct S2RequestTokenHeader {
     pub s2_request_token: RequestToken,
 }
 
-/// What a create or ensure did, as the `s2-provision-result` response header reports it.
+/// Outcome of a create or ensure operation, reported in the `s2-provision-result` response header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::IntoStaticStr)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "utoipa", schema(rename_all = "snake_case"))]
@@ -31,9 +31,9 @@ pub struct S2RequestTokenHeader {
 pub enum ProvisionResult {
     /// The resource was created.
     Created,
-    /// The resource existed, and its configuration was changed.
+    /// The resource already existed and its configuration was updated.
     Updated,
-    /// The resource existed, and nothing was written.
+    /// The resource already existed and no changes were made.
     Noop,
 }
 

@@ -85,7 +85,7 @@ pub struct RevokeArgs {
     tag = super::paths::access_tokens::TAG,
     responses(
         (status = StatusCode::NO_CONTENT),
-        (status = StatusCode::NOT_FOUND, description = "No access token has this ID (`access_token_not_found`).", body = v1t::error::ErrorInfo),
+        (status = StatusCode::NOT_FOUND, description = "No access token exists with this ID (`access_token_not_found`).", body = v1t::error::ErrorInfo),
         (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
         (status = StatusCode::FORBIDDEN, body = v1t::error::ErrorInfo),
         (status = StatusCode::REQUEST_TIMEOUT, body = v1t::error::ErrorInfo),
