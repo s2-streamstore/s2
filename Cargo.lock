@@ -5151,7 +5151,6 @@ dependencies = [
  "thiserror 2.0.21",
  "time",
  "tokio",
- "tokio-muxt",
  "tokio-shared-rt",
  "tokio-stream",
  "tokio-util",
@@ -6163,16 +6162,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.10",
-]
-
-[[package]]
-name = "tokio-muxt"
-version = "0.8.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a08b20f8324114e2639a1a251692cc8a4154aa311bee55a83bdc82826b09a3b1"
-dependencies = [
- "pin-project",
- "tokio",
 ]
 
 [[package]]

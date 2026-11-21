@@ -21,9 +21,8 @@ use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use rand::{Rng, SeedableRng};
 use s2_sdk::{
     S2Stream,
-    batching::BatchingConfig,
     error::AppendSessionError,
-    producer::{IndexedAppendAck, ProducerConfig},
+    producer::{ProducerConfig, RecordAck},
     types::{
         AppendRecord, Header, MeteredBytes as _, RECORD_BATCH_MAX, ReadFrom, ReadInput,
         ReadSessionConfig, ReadStart, ReadStop, SequencedRecord,
@@ -65,7 +64,7 @@ pub fn default_linger(target_mibps: NonZeroU64, record_size: u32) -> Duration {
 }
 
 type PendingAck =
-    Pin<Box<dyn Future<Output = (Instant, Result<IndexedAppendAck, AppendSessionError>)> + Send>>;
+    Pin<Box<dyn Future<Output = (Instant, Result<RecordAck, AppendSessionError>)> + Send>>;
 
 pub struct BenchWriteSample {
     pub bytes: u64,
@@ -425,9 +424,7 @@ pub fn bench_write(
         new_record(Bytes::from(vec![0u8; body_size(record_size)]), 0, 0).metered_bytes();
     assert_eq!(metered_size, record_size);
 
-    let producer = stream.producer(
-        ProducerConfig::default().with_batching(BatchingConfig::new().with_linger(linger)),
-    );
+    let producer = stream.producer(ProducerConfig::default().with_linger(linger));
 
     async_stream::stream! {
         let producer = match producer {
@@ -533,10 +530,18 @@ pub fn bench_write(
                             let hash = chain_hash(prev_hash, body.as_ref());
                             prev_hash = hash;
                             let record = new_record(body, timestamp, hash);
-                            pending_acks.push(Box::pin(async move {
-                                let res = permit.submit(record).await;
-                                (submit_time, res)
-                            }));
+                            match permit.submit(record) {
+                                Ok(ticket) => {
+                                    pending_acks.push(Box::pin(async move {
+                                        let res = ticket.await;
+                                        (submit_time, res)
+                                    }));
+                                }
+                                Err(e) => {
+                                    yield Err(CliError::op(OpKind::Bench, e));
+                                    return;
+                                }
+                            }
                             bytes_submitted += record_size;
                         }
                         Err(e) => {

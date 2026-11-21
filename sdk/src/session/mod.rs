@@ -1,7 +1,10 @@
 pub mod append;
 pub mod read;
 
-pub(crate) use append::{AppendPermit, AppendPermits, AppendSessionInternal, BatchSubmitTicket};
+pub(crate) use append::{
+    AppendPermit, AppendPermits, AppendSessionInternal, BatchSubmitTicket, SessionLifecycle,
+    validate_reserve_bytes,
+};
 pub use append::{AppendSession, AppendSessionConfig};
 pub use read::ReadSession;
 pub(crate) use read::read_session;

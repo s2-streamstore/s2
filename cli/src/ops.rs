@@ -7,8 +7,7 @@ use s2_api::v1::{
 };
 use s2_sdk::{
     self as sdk, S2, S2Stream,
-    batching::BatchingConfig,
-    producer::{IndexedAppendAck, ProducerConfig},
+    producer::{ProducerConfig, RecordAck},
     read_session::ReadSession,
     types::{
         AccessTokenId, AccessTokenInfo, AccessTokenScopeInput, AccountMetricSet, AppendAck,
@@ -755,15 +754,14 @@ pub fn append<'a, S, E>(
     uri: S2BasinAndStreamUri,
     encryption_key: Option<&'a EncryptionKey>,
     options: AppendOptions,
-) -> impl Stream<Item = Result<IndexedAppendAck, CliError>> + Send + 'a
+) -> impl Stream<Item = Result<RecordAck, CliError>> + Send + 'a
 where
     S: Stream<Item = Result<AppendRecord, E>> + Send + Unpin + 'a,
     E: std::error::Error + Send + Sync + 'static,
 {
     let stream = stream_with_encryption(s2, uri, encryption_key);
 
-    let batching_config = BatchingConfig::new().with_linger(options.linger);
-    let mut producer_config = ProducerConfig::new().with_batching(batching_config);
+    let mut producer_config = ProducerConfig::new().with_linger(options.linger);
     if let Some(config) = options.stream_config {
         producer_config = producer_config.with_stream_config(config);
     }
@@ -796,7 +794,13 @@ where
                     match permit {
                         Ok(permit) => {
                             let record = stashed_record.take().unwrap();
-                            pending_acks.push_back(permit.submit(record));
+                            match permit.submit(record) {
+                                Ok(ticket) => pending_acks.push_back(ticket),
+                                Err(e) => {
+                                    yield Err(CliError::op(OpKind::Append, e));
+                                    break 'inner;
+                                }
+                            }
                         }
                         Err(e) => {
                             yield Err(CliError::op(OpKind::Append, e));

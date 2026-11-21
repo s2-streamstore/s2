@@ -34,7 +34,7 @@ use s2_api::v1::{
         CreateStreamRequest, ListStreamsRequest, ListStreamsResponse, ReadEnd, ReadStart,
         StreamInfo, TailResponse,
         proto::{AppendAck, AppendInput, ReadBatch},
-        s2s::{self, FrameDecoder, SessionMessage, TerminalMessage},
+        s2s::{FrameDecoder, SessionMessage, TerminalMessage},
     },
 };
 use s2_common::{
@@ -692,15 +692,14 @@ impl BasinClient {
     pub async fn append_session<I>(
         &self,
         name: &StreamName,
-        inputs: I,
+        encoded_chunks: I,
         encryption: Option<&EncryptionKey>,
         stream_config: Option<&StreamConfig>,
-        frame_signal: Option<FrameSignal>,
         reconnect: ReconnectAdvice,
         attempt: u32,
     ) -> Result<Streaming<AppendAck>, ApiError>
     where
-        I: Stream<Item = AppendInput> + Send + 'static,
+        I: Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send + 'static,
     {
         let ctx = ErrorContext::stream("append_session", self.name.as_ref(), name.as_ref(), false);
         if self.client.is_closed() {
@@ -708,17 +707,7 @@ impl BasinClient {
         }
         let url = self.uri(format!("v1/streams/{}/records", urlencoding::encode(name)));
 
-        let compression = self.config.compression.into();
-
-        let encoded_stream = inputs.map(move |input| {
-            s2s::SessionMessage::regular(compression, &input).map(|msg| msg.encode())
-        });
-
-        let body = client::Body::wrap_stream(encoded_stream);
-        let body = match frame_signal {
-            Some(signal) => body.monitored(signal),
-            None => body,
-        };
+        let body = client::Body::wrap_stream(encoded_chunks);
 
         let mut request_builder = self
             .client
@@ -2030,7 +2019,6 @@ mod tests {
                 .append_session(
                     &stream,
                     futures_util::stream::empty(),
-                    None,
                     None,
                     None,
                     ReconnectAdvice::default(),

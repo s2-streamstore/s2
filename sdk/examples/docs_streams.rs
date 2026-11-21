@@ -8,7 +8,6 @@ use futures_util::StreamExt;
 use s2_sdk::{
     S2,
     append_session::AppendSessionConfig,
-    batching::BatchingConfig,
     producer::ProducerConfig,
     types::{
         AppendInput, AppendRecord, AppendRecordBatch, BasinName, ReadFrom, ReadInput, ReadLimits,
@@ -86,10 +85,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ANCHOR_END: append-session
 
     // ANCHOR: producer
-    let producer = stream.producer(
-        ProducerConfig::new()
-            .with_batching(BatchingConfig::new().with_linger(Duration::from_millis(5))),
-    )?;
+    let producer = stream.producer(ProducerConfig::new().with_linger(Duration::from_millis(5)))?;
 
     // Submit individual records
     let ticket = producer.submit(AppendRecord::new("my event")?).await?;

@@ -4199,8 +4199,7 @@ impl MeteredSize for AppendRecord {
 /// **Note:** It must contain at least `1` record and no more than `1000`.
 /// The total size of the batch must not exceed `1MiB` in metered bytes.
 ///
-/// See [`AppendRecordBatches`](crate::batching::AppendRecordBatches) and
-/// [`AppendInputs`](crate::batching::AppendInputs) for convenient and automatic batching of records
+/// See [`Batcher`](crate::batching::Batcher) for convenient and automatic batching of records
 /// that takes care of the abovementioned constraints.
 pub struct AppendRecordBatch(Metered<Vec<AppendRecord>>);
 

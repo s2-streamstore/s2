@@ -6,13 +6,7 @@ use assert_matches::assert_matches;
 use common::{S2Stream, SharedS2Basin, s2, s2_config, unique_basin_name, unique_stream_name};
 use futures_util::{StreamExt, poll};
 use rstest::rstest;
-use s2_sdk::{
-    append_session::AppendSessionConfig,
-    batching::{BatchLimits, BatchingConfig},
-    error::*,
-    producer::ProducerConfig,
-    types::*,
-};
+use s2_sdk::{append_session::AppendSessionConfig, error::*, producer::ProducerConfig, types::*};
 use test_context::test_context;
 use time::OffsetDateTime;
 
@@ -1722,10 +1716,8 @@ async fn producer_delivers_all_acks(stream: &S2Stream) -> Result<(), Box<dyn std
 async fn producer_flushes_partial_batch_without_waiting_for_linger(
     stream: &S2Stream,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let producer = stream.producer(
-        ProducerConfig::new()
-            .with_batching(BatchingConfig::new().with_linger(Duration::from_secs(60 * 60))),
-    )?;
+    let producer =
+        stream.producer(ProducerConfig::new().with_linger(Duration::from_secs(60 * 60)))?;
     let ticket = producer.submit(AppendRecord::new("lorem")?).await?;
 
     tokio::time::timeout(Duration::from_secs(10), producer.flush())
@@ -1746,10 +1738,8 @@ async fn producer_flushes_partial_batch_without_waiting_for_linger(
 async fn producer_flush_delivers_all_indexed_acks(
     stream: &S2Stream,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let producer = stream.producer(
-        ProducerConfig::new()
-            .with_batching(BatchingConfig::new().with_linger(Duration::from_secs(60 * 60))),
-    )?;
+    let producer =
+        stream.producer(ProducerConfig::new().with_linger(Duration::from_secs(60 * 60)))?;
     let ticket1 = producer.submit(AppendRecord::new("lorem")?).await?;
     let ticket2 = producer.submit(AppendRecord::new("ipsum")?).await?;
     let ticket3 = producer.submit(AppendRecord::new("dolor")?).await?;
@@ -1784,7 +1774,7 @@ async fn producer_flush_is_reusable_and_excludes_later_submission(
     let producer = stream.producer(
         ProducerConfig::new()
             .with_match_seq_num(0)
-            .with_batching(BatchingConfig::new().with_linger(Duration::from_secs(60 * 60))),
+            .with_linger(Duration::from_secs(60 * 60)),
     )?;
     let ticket1 = producer.submit(AppendRecord::new("lorem")?).await?;
 
@@ -1792,7 +1782,7 @@ async fn producer_flush_is_reusable_and_excludes_later_submission(
     let permit2 = producer.reserve(record2.metered_bytes() as u32).await?;
     let mut flush = Box::pin(producer.flush());
     assert!(poll!(flush.as_mut()).is_pending());
-    let mut ticket2 = Box::pin(permit2.submit(record2));
+    let mut ticket2 = Box::pin(permit2.submit(record2)?);
 
     tokio::time::timeout(Duration::from_secs(10), flush)
         .await
@@ -1824,10 +1814,8 @@ async fn producer_flush_is_reusable_and_excludes_later_submission(
 async fn producer_empty_flush_is_immediate_and_reusable(
     stream: &S2Stream,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let producer = stream.producer(
-        ProducerConfig::new()
-            .with_batching(BatchingConfig::new().with_linger(Duration::from_secs(60 * 60))),
-    )?;
+    let producer =
+        stream.producer(ProducerConfig::new().with_linger(Duration::from_secs(60 * 60)))?;
 
     tokio::time::timeout(Duration::from_secs(10), producer.flush())
         .await
@@ -1859,7 +1847,7 @@ async fn producer_flush_propagates_condition_failure_to_covered_ticket(
     let producer = stream.producer(
         ProducerConfig::new()
             .with_match_seq_num(0)
-            .with_batching(BatchingConfig::new().with_linger(Duration::from_secs(60 * 60))),
+            .with_linger(Duration::from_secs(60 * 60)),
     )?;
     let ticket = producer.submit(AppendRecord::new("ipsum")?).await?;
 
@@ -1927,9 +1915,7 @@ async fn producer_close_delivers_all_indexed_acks_from_same_ack(
 async fn producer_close_delivers_all_indexed_acks_from_different_acks(
     stream: &S2Stream,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let producer = stream.producer(ProducerConfig::default().with_batching(
-        BatchingConfig::default().with_limits(BatchLimits::default().with_max_batch_records(1)?),
-    ))?;
+    let producer = stream.producer(ProducerConfig::default().with_max_batch_records(1)?)?;
 
     let ticket1 = producer.submit(AppendRecord::new("lorem")?).await?;
     let ticket2 = producer.submit(AppendRecord::new("ipsum")?).await?;
@@ -1956,10 +1942,8 @@ async fn producer_close_delivers_all_indexed_acks_from_different_acks(
 async fn producer_drop_errors_all_claimable_tickets(
     stream: &S2Stream,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let producer = stream.producer(
-        ProducerConfig::default()
-            .with_batching(BatchingConfig::default().with_linger(Duration::from_secs(1))),
-    )?;
+    let producer =
+        stream.producer(ProducerConfig::default().with_linger(Duration::from_secs(1)))?;
 
     let ticket1 = producer.submit(AppendRecord::new("lorem")?).await?;
     let ticket2 = producer.submit(AppendRecord::new("ipsum")?).await?;
@@ -1969,8 +1953,10 @@ async fn producer_drop_errors_all_claimable_tickets(
     let result1 = ticket1.await;
     let result2 = ticket2.await;
 
-    assert_matches!(result1, Err(AppendSessionError::Aborted(_)) => {});
-    assert_matches!(result2, Err(AppendSessionError::Aborted(_)) => {});
+    // A6a/A8c: records still being batched when the producer is dropped settle with
+    // SessionClosedError carrying the AbortedError session failure.
+    assert_matches!(result1, Err(AppendSessionError::SessionClosed(ref c)) if matches!(c.failure(), Some(AppendSessionError::Aborted(_))));
+    assert_matches!(result2, Err(AppendSessionError::SessionClosed(ref c)) if matches!(c.failure(), Some(AppendSessionError::Aborted(_))));
 
     Ok(())
 }
@@ -2250,9 +2236,7 @@ async fn producer_for_non_existent_stream_errors(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let stream = basin.stream(unique_stream_name());
 
-    let producer = stream.producer(ProducerConfig::new().with_batching(
-        BatchingConfig::new().with_limits(BatchLimits::new().with_max_batch_records(10)?),
-    ))?;
+    let producer = stream.producer(ProducerConfig::new().with_max_batch_records(10)?)?;
     let num_records = 2000;
 
     let mut tickets = Vec::with_capacity(num_records);
