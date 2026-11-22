@@ -25,7 +25,6 @@ codegen = ["dep:prost-build"]
 axum = { workspace = true, optional = true }
 base64ct = { workspace = true, features = ["alloc"] }
 bytes = { workspace = true }
-compact_str = { workspace = true, features = ["serde"] }
 flate2 = { workspace = true }
 futures-core = { workspace = true }
 futures-util = { workspace = true }

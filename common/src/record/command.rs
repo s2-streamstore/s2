@@ -1,7 +1,6 @@
 use std::{fmt, str::Utf8Error};
 
 use bytes::Bytes;
-use compact_str::CompactString;
 
 use super::{FencingTokenTooLongError, MeteredSize, fencing::FencingToken};
 use crate::{deep_size::DeepSize, record::SeqNum};
@@ -80,9 +79,8 @@ impl CommandRecord {
     pub fn try_from_parts(op: CommandOp, payload: &[u8]) -> Result<Self, CommandPayloadError> {
         match op {
             CommandOp::Fence => {
-                let token = CompactString::from_utf8(payload)
-                    .map_err(CommandPayloadError::InvalidUtf8)?
-                    .try_into()?;
+                let s = std::str::from_utf8(payload).map_err(CommandPayloadError::InvalidUtf8)?;
+                let token = FencingToken::try_from(s)?;
                 Ok(Self::Fence(token))
             }
             CommandOp::Trim => {
@@ -109,7 +107,6 @@ pub enum CommandPayloadError {
 
 #[cfg(test)]
 mod tests {
-    use compact_str::ToCompactString;
     use proptest::prelude::*;
     use rstest::rstest;
 
@@ -151,7 +148,7 @@ mod tests {
     #[case::arbit("arbitrary")]
     #[case::full("0123456789012345")]
     fn fence_roundtrip(#[case] token: &str) {
-        let cmd = CommandRecord::Fence(FencingToken::try_from(token.to_compact_string()).unwrap());
+        let cmd = CommandRecord::Fence(FencingToken::try_from(token).unwrap());
         assert_eq!(
             CommandRecord::try_from_parts(CommandOp::Fence, token.as_bytes()),
             Ok(cmd.clone())
@@ -175,8 +172,7 @@ mod tests {
 
     #[test]
     fn metered_size_is_computed_without_materializing_payload() {
-        let fence =
-            CommandRecord::Fence(FencingToken::try_from("fence-me".to_compact_string()).unwrap());
+        let fence = CommandRecord::Fence(FencingToken::try_from("fence-me").unwrap());
         assert_eq!(
             fence.metered_size(),
             8 + 2 + CommandOp::Fence.to_id().len() + "fence-me".len()

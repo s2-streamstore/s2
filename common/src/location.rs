@@ -42,6 +42,11 @@ impl LocationName {
 
         validate_location_str("name", location)
     }
+
+    fn try_from_compact(location: CompactString) -> Result<Self, ValidationError> {
+        Self::validate_str(&location)?;
+        Ok(Self(location))
+    }
 }
 
 #[cfg(feature = "utoipa")]
@@ -73,7 +78,7 @@ impl<'de> serde::Deserialize<'de> for LocationName {
         D: serde::Deserializer<'de>,
     {
         let s = CompactString::deserialize(deserializer)?;
-        s.try_into().map_err(serde::de::Error::custom)
+        Self::try_from_compact(s).map_err(serde::de::Error::custom)
     }
 }
 
@@ -91,20 +96,12 @@ impl Deref for LocationName {
     }
 }
 
-impl TryFrom<CompactString> for LocationName {
-    type Error = ValidationError;
-
-    fn try_from(location: CompactString) -> Result<Self, Self::Error> {
-        Self::validate_str(&location)?;
-        Ok(Self(location))
-    }
-}
-
 impl TryFrom<String> for LocationName {
     type Error = ValidationError;
 
     fn try_from(location: String) -> Result<Self, Self::Error> {
-        location.to_compact_string().try_into()
+        Self::validate_str(&location)?;
+        Ok(Self(CompactString::from(location)))
     }
 }
 
@@ -112,7 +109,7 @@ impl TryFrom<&str> for LocationName {
     type Error = ValidationError;
 
     fn try_from(location: &str) -> Result<Self, Self::Error> {
-        location.to_compact_string().try_into()
+        location.parse()
     }
 }
 
@@ -120,7 +117,8 @@ impl FromStr for LocationName {
     type Err = ValidationError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        s.try_into()
+        Self::validate_str(s)?;
+        Ok(Self(s.to_compact_string()))
     }
 }
 
@@ -136,16 +134,16 @@ impl std::fmt::Display for LocationName {
     }
 }
 
-impl From<LocationName> for CompactString {
+impl From<LocationName> for String {
     fn from(value: LocationName) -> Self {
-        value.0
+        value.0.into_string()
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AwsPrivateNet {
-    pub service_name: CompactString,
-    pub private_dns_name: Option<CompactString>,
+    pub service_name: String,
+    pub private_dns_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -157,8 +155,8 @@ pub enum PrivateNet {
 pub struct LocationInfo {
     pub name: LocationName,
     pub is_private: bool,
-    pub storage_classes: Vec<CompactString>,
-    pub default_storage_class: CompactString,
+    pub storage_classes: Vec<String>,
+    pub default_storage_class: String,
     pub private_net: Option<PrivateNet>,
 }
 
@@ -192,5 +190,19 @@ mod test {
         location
             .parse::<LocationName>()
             .expect_err("expected validation error");
+    }
+
+    #[test]
+    fn string_conversions_and_serde_roundtrip() {
+        let from_str = LocationName::try_from("aws:us-east-1").unwrap();
+        let from_string = LocationName::try_from("aws:us-east-1".to_owned()).unwrap();
+        assert_eq!(from_str, from_string);
+        assert_eq!(String::from(from_string), "aws:us-east-1");
+
+        let json = serde_json::to_string(&from_str).unwrap();
+        assert_eq!(json, r#""aws:us-east-1""#);
+        let decoded: LocationName = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, from_str);
+        assert!(serde_json::from_str::<LocationName>(r#""""#).is_err());
     }
 }

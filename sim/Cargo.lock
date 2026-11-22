@@ -3614,7 +3614,6 @@ dependencies = [
  "axum",
  "base64ct",
  "bytes",
- "compact_str",
  "flate2",
  "futures-core",
  "futures-util",
@@ -3700,7 +3699,6 @@ dependencies = [
 name = "s2-resource-spec"
 version = "0.49.0"
 dependencies = [
- "compact_str",
  "humantime",
  "s2-common",
  "schemars",

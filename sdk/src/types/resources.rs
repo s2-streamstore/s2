@@ -401,7 +401,7 @@ impl StreamConfig {
 impl From<api::config::StreamConfig> for StreamConfig {
     fn from(value: api::config::StreamConfig) -> Self {
         Self {
-            storage_class: value.storage_class.map(Into::into),
+            storage_class: value.storage_class,
             retention_policy: value.retention_policy.map(Into::into),
             timestamping: value.timestamping.map(Into::into),
             delete_on_empty: value.delete_on_empty.map(Into::into),
@@ -412,7 +412,7 @@ impl From<api::config::StreamConfig> for StreamConfig {
 impl From<StreamConfig> for api::config::StreamConfig {
     fn from(value: StreamConfig) -> Self {
         Self {
-            storage_class: value.storage_class.map(Into::into),
+            storage_class: value.storage_class,
             retention_policy: value.retention_policy.map(Into::into),
             timestamping: value.timestamping.map(Into::into),
             delete_on_empty: value.delete_on_empty.map(Into::into),
@@ -1008,7 +1008,7 @@ impl StreamReconfiguration {
 impl From<StreamReconfiguration> for api::config::StreamReconfiguration {
     fn from(value: StreamReconfiguration) -> Self {
         Self {
-            storage_class: value.storage_class.map(Into::into).into_maybe(),
+            storage_class: value.storage_class.into_maybe(),
             retention_policy: value.retention_policy.map(Into::into).into_maybe(),
             timestamping: value.timestamping.map(Into::into).into_maybe(),
             delete_on_empty: value.delete_on_empty.map(Into::into).into_maybe(),
@@ -1162,8 +1162,8 @@ impl From<MaybeKnown<api::location::PrivateNet>> for PrivateNet {
     fn from(value: MaybeKnown<api::location::PrivateNet>) -> Self {
         match value {
             MaybeKnown::Known(api::location::PrivateNet::Aws(aws)) => Self::Aws(AwsPrivateNet {
-                service_name: aws.service_name.into(),
-                private_dns_name: aws.private_dns_name.map(Into::into),
+                service_name: aws.service_name,
+                private_dns_name: aws.private_dns_name,
             }),
             MaybeKnown::Unknown(name) => Self::Unknown(name),
         }
@@ -1195,10 +1195,8 @@ impl From<api::location::LocationInfo> for LocationInfo {
         Self {
             name: value.name,
             is_private: value.is_private,
-            storage_classes: value
-                .storage_classes
-                .map(|classes| classes.into_iter().map(Into::into).collect()),
-            default_storage_class: value.default_storage_class.map(Into::into),
+            storage_classes: value.storage_classes,
+            default_storage_class: value.default_storage_class,
             private_net: value.private_net.map(Into::into),
         }
     }

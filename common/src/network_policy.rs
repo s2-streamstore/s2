@@ -57,6 +57,11 @@ impl<T: StrProps> NetworkPolicySlugStr<T> {
 
         Ok(())
     }
+
+    fn try_from_compact(slug: CompactString) -> Result<Self, ValidationError> {
+        Self::validate_str(&slug)?;
+        Ok(Self(slug, PhantomData))
+    }
 }
 
 #[cfg(feature = "utoipa")]
@@ -88,7 +93,7 @@ impl<'de, T: StrProps> serde::Deserialize<'de> for NetworkPolicySlugStr<T> {
         D: serde::Deserializer<'de>,
     {
         let s = CompactString::deserialize(deserializer)?;
-        s.try_into().map_err(serde::de::Error::custom)
+        Self::try_from_compact(s).map_err(serde::de::Error::custom)
     }
 }
 
@@ -103,15 +108,6 @@ impl<T: StrProps> Deref for NetworkPolicySlugStr<T> {
 
     fn deref(&self) -> &Self::Target {
         &self.0
-    }
-}
-
-impl<T: StrProps> TryFrom<CompactString> for NetworkPolicySlugStr<T> {
-    type Error = ValidationError;
-
-    fn try_from(slug: CompactString) -> Result<Self, Self::Error> {
-        Self::validate_str(&slug)?;
-        Ok(Self(slug, PhantomData))
     }
 }
 
@@ -150,6 +146,12 @@ impl<T: StrProps> fmt::Debug for NetworkPolicySlugStr<T> {
 impl<T: StrProps> fmt::Display for NetworkPolicySlugStr<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
+    }
+}
+
+impl<T: StrProps> From<NetworkPolicySlugStr<T>> for String {
+    fn from(value: NetworkPolicySlugStr<T>) -> Self {
+        value.0.into_string()
     }
 }
 
@@ -908,5 +910,19 @@ mod tests {
             NetworkPolicyNonce::from_random_bytes([0, 1, 25, 26, 35, 36, 255, 7]).to_string(),
             "abz09adh"
         );
+    }
+
+    #[test]
+    fn slug_string_conversions_and_serde_roundtrip() {
+        let from_str = NetworkPolicySlug::try_from("office_net-1").unwrap();
+        let from_string = NetworkPolicySlug::try_from("office_net-1".to_owned()).unwrap();
+        assert_eq!(from_str, from_string);
+        assert_eq!(String::from(from_string), "office_net-1");
+
+        let json = serde_json::to_string(&from_str).unwrap();
+        assert_eq!(json, r#""office_net-1""#);
+        let decoded: NetworkPolicySlug = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, from_str);
+        assert!(serde_json::from_str::<NetworkPolicySlug>(r#""""#).is_err());
     }
 }

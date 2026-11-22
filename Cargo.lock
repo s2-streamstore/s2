@@ -4942,7 +4942,6 @@ dependencies = [
  "axum",
  "base64ct",
  "bytes",
- "compact_str",
  "flate2",
  "futures",
  "futures-core",
@@ -4978,7 +4977,6 @@ dependencies = [
  "clap",
  "color-print",
  "colored",
- "compact_str",
  "config",
  "dirs",
  "fs2",
@@ -5105,7 +5103,6 @@ dependencies = [
 name = "s2-resource-spec"
 version = "0.49.0"
 dependencies = [
- "compact_str",
  "humantime",
  "s2-common",
  "schemars 1.2.3",

@@ -1,6 +1,5 @@
 use std::{str::FromStr, time::Duration};
 
-use compact_str::CompactString;
 use http::{HeaderName, HeaderValue};
 use s2_common::{http::ParseableHeader, maybe::Maybe};
 use serde::{Deserialize, Serialize};
@@ -287,8 +286,7 @@ impl From<s2_common::encryption::EncryptionAlgorithm> for EncryptionAlgorithm {
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct StreamConfig {
     /// [Storage class](https://s2.dev/docs/storage-classes) for recent writes.
-    #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
-    pub storage_class: Option<CompactString>,
+    pub storage_class: Option<String>,
     /// Retention policy for the stream.
     /// If unspecified, the default is to retain records for 7 days.
     #[cfg_attr(feature = "utoipa", schema(value_type = Option<RetentionPolicy>))]
@@ -425,7 +423,7 @@ pub struct StreamReconfiguration {
     /// [Storage class](https://s2.dev/docs/storage-classes) for recent writes.
     #[serde(default, skip_serializing_if = "Maybe::is_unspecified")]
     #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
-    pub storage_class: Maybe<Option<CompactString>>,
+    pub storage_class: Maybe<Option<String>>,
     /// Retention policy for the stream.
     /// If unspecified, the default is to retain records for 7 days.
     #[serde(default, skip_serializing_if = "Maybe::is_unspecified")]
@@ -611,8 +609,8 @@ mod tests {
 
     use super::*;
 
-    fn gen_storage_class() -> impl Strategy<Value = CompactString> {
-        "[a-z][a-z0-9-]{0,30}".prop_map(CompactString::from)
+    fn gen_storage_class() -> impl Strategy<Value = String> {
+        "[a-z][a-z0-9-]{0,30}"
     }
 
     fn gen_timestamping_mode() -> impl Strategy<Value = TimestampingMode> {

@@ -51,6 +51,11 @@ impl<T: StrProps> AccessTokenIdStr<T> {
 
         Ok(())
     }
+
+    fn try_from_compact(name: CompactString) -> Result<Self, ValidationError> {
+        Self::validate_str(&name)?;
+        Ok(Self(name, PhantomData))
+    }
 }
 
 #[cfg(feature = "utoipa")]
@@ -85,7 +90,7 @@ impl<'de, T: StrProps> serde::Deserialize<'de> for AccessTokenIdStr<T> {
         D: serde::Deserializer<'de>,
     {
         let s = CompactString::deserialize(deserializer)?;
-        s.try_into().map_err(serde::de::Error::custom)
+        Self::try_from_compact(s).map_err(serde::de::Error::custom)
     }
 }
 
@@ -100,15 +105,6 @@ impl<T: StrProps> Deref for AccessTokenIdStr<T> {
 
     fn deref(&self) -> &Self::Target {
         &self.0
-    }
-}
-
-impl<T: StrProps> TryFrom<CompactString> for AccessTokenIdStr<T> {
-    type Error = ValidationError;
-
-    fn try_from(name: CompactString) -> Result<Self, Self::Error> {
-        Self::validate_str(&name)?;
-        Ok(Self(name, PhantomData))
     }
 }
 
@@ -150,9 +146,9 @@ impl<T: StrProps> std::fmt::Display for AccessTokenIdStr<T> {
     }
 }
 
-impl<T: StrProps> From<AccessTokenIdStr<T>> for CompactString {
+impl<T: StrProps> From<AccessTokenIdStr<T>> for String {
     fn from(value: AccessTokenIdStr<T>) -> Self {
-        value.0
+        value.0.into_string()
     }
 }
 
@@ -342,5 +338,19 @@ mod test {
     fn validate_start_after_err(#[case] start_after: String) {
         AccessTokenIdStr::<StartAfterProps>::validate_str(&start_after)
             .expect_err("expected validation error");
+    }
+
+    #[test]
+    fn string_conversions_and_serde_roundtrip() {
+        let from_str = super::AccessTokenId::try_from("my-token").unwrap();
+        let from_string = super::AccessTokenId::try_from("my-token".to_owned()).unwrap();
+        assert_eq!(from_str, from_string);
+        assert_eq!(String::from(from_string), "my-token");
+
+        let json = serde_json::to_string(&from_str).unwrap();
+        assert_eq!(json, r#""my-token""#);
+        let decoded: super::AccessTokenId = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, from_str);
+        assert!(serde_json::from_str::<super::AccessTokenId>(r#""""#).is_err());
     }
 }

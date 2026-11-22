@@ -83,6 +83,11 @@ impl<T: StrProps> BasinNameStr<T> {
 
         Ok(())
     }
+
+    fn try_from_compact(name: CompactString) -> Result<Self, ValidationError> {
+        Self::validate_str(&name)?;
+        Ok(Self(name, PhantomData))
+    }
 }
 
 #[cfg(feature = "utoipa")]
@@ -129,7 +134,7 @@ impl<'de, T: StrProps> serde::Deserialize<'de> for BasinNameStr<T> {
         D: serde::Deserializer<'de>,
     {
         let s = CompactString::deserialize(deserializer)?;
-        s.try_into().map_err(serde::de::Error::custom)
+        Self::try_from_compact(s).map_err(serde::de::Error::custom)
     }
 }
 
@@ -144,15 +149,6 @@ impl<T: StrProps> Deref for BasinNameStr<T> {
 
     fn deref(&self) -> &Self::Target {
         &self.0
-    }
-}
-
-impl<T: StrProps> TryFrom<CompactString> for BasinNameStr<T> {
-    type Error = ValidationError;
-
-    fn try_from(name: CompactString) -> Result<Self, Self::Error> {
-        Self::validate_str(&name)?;
-        Ok(Self(name, PhantomData))
     }
 }
 
@@ -194,9 +190,9 @@ impl<T: StrProps> std::fmt::Display for BasinNameStr<T> {
     }
 }
 
-impl<T: StrProps> From<BasinNameStr<T>> for CompactString {
+impl<T: StrProps> From<BasinNameStr<T>> for String {
     fn from(value: BasinNameStr<T>) -> Self {
-        value.0
+        value.0.into_string()
     }
 }
 
@@ -310,5 +306,19 @@ mod test {
     fn validate_start_after_err(#[case] start_after: String) {
         BasinNameStr::<StartAfterProps>::validate_str(&start_after)
             .expect_err("expected validation error");
+    }
+
+    #[test]
+    fn string_conversions_and_serde_roundtrip() {
+        let from_str = super::BasinName::try_from("my-basin").unwrap();
+        let from_string = super::BasinName::try_from("my-basin".to_owned()).unwrap();
+        assert_eq!(from_str, from_string);
+        assert_eq!(String::from(from_string), "my-basin");
+
+        let json = serde_json::to_string(&from_str).unwrap();
+        assert_eq!(json, r#""my-basin""#);
+        let decoded: super::BasinName = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, from_str);
+        assert!(serde_json::from_str::<super::BasinName>(r#""bad""#).is_err());
     }
 }

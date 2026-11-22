@@ -53,6 +53,11 @@ impl<T: StrProps> StreamNameStr<T> {
 
         Ok(())
     }
+
+    fn try_from_compact(name: CompactString) -> Result<Self, ValidationError> {
+        Self::validate_str(&name)?;
+        Ok(Self(name, PhantomData))
+    }
 }
 
 #[cfg(feature = "utoipa")]
@@ -87,7 +92,7 @@ impl<'de, T: StrProps> serde::Deserialize<'de> for StreamNameStr<T> {
         D: serde::Deserializer<'de>,
     {
         let s = CompactString::deserialize(deserializer)?;
-        s.try_into().map_err(serde::de::Error::custom)
+        Self::try_from_compact(s).map_err(serde::de::Error::custom)
     }
 }
 
@@ -102,15 +107,6 @@ impl<T: StrProps> Deref for StreamNameStr<T> {
 
     fn deref(&self) -> &Self::Target {
         &self.0
-    }
-}
-
-impl<T: StrProps> TryFrom<CompactString> for StreamNameStr<T> {
-    type Error = ValidationError;
-
-    fn try_from(name: CompactString) -> Result<Self, Self::Error> {
-        Self::validate_str(&name)?;
-        Ok(Self(name, PhantomData))
     }
 }
 
@@ -152,9 +148,9 @@ impl<T: StrProps> std::fmt::Display for StreamNameStr<T> {
     }
 }
 
-impl<T: StrProps> From<StreamNameStr<T>> for CompactString {
+impl<T: StrProps> From<StreamNameStr<T>> for String {
     fn from(value: StreamNameStr<T>) -> Self {
-        value.0
+        value.0.into_string()
     }
 }
 
@@ -476,5 +472,19 @@ mod test {
         let empty_batch: Result<AppendRecordBatch, _> = Vec::<AppendRecord>::new().try_into();
 
         assert_eq!(empty_batch.unwrap_err(), "record batch must not be empty");
+    }
+
+    #[test]
+    fn string_conversions_and_serde_roundtrip() {
+        let from_str = StreamName::try_from("my-stream").unwrap();
+        let from_string = StreamName::try_from("my-stream".to_owned()).unwrap();
+        assert_eq!(from_str, from_string);
+        assert_eq!(String::from(from_string), "my-stream");
+
+        let json = serde_json::to_string(&from_str).unwrap();
+        assert_eq!(json, r#""my-stream""#);
+        let decoded: StreamName = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, from_str);
+        assert!(serde_json::from_str::<StreamName>(r#""""#).is_err());
     }
 }

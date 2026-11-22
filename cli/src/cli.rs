@@ -1,7 +1,6 @@
 use std::{num::NonZeroU64, path::PathBuf, time::Duration};
 
 use clap::{Args, Parser, Subcommand, ValueEnum, builder::styling};
-use compact_str::CompactString;
 use s2_sdk::types::{
     AccessTokenId, AccessTokenIdPrefix, AccessTokenIdStartAfter, BasinName, BasinNamePrefix,
     BasinNameStartAfter, Cidr, EncryptionKey, FencingToken, NetworkPolicySelector,
@@ -1257,7 +1256,7 @@ pub struct BenchArgs {
 
     /// Storage class for the test stream. Uses basin default if not specified.
     #[arg(short = 'c', long)]
-    pub storage_class: Option<CompactString>,
+    pub storage_class: Option<String>,
 
     /// Total metered record size in bytes (includes headers and overhead).
     #[arg(

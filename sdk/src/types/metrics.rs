@@ -445,12 +445,12 @@ impl From<MaybeKnown<api::metrics::Metric>> for Metric {
         };
         match value {
             api::metrics::Metric::Scalar(sm) => Metric::Scalar(ScalarMetric {
-                name: sm.name.into(),
+                name: sm.name,
                 unit: sm.unit.into(),
                 value: sm.value,
             }),
             api::metrics::Metric::Accumulation(am) => Metric::Accumulation(AccumulationMetric {
-                name: am.name.into(),
+                name: am.name,
                 unit: am.unit.into(),
                 interval: am.interval.into(),
                 values: am
@@ -460,7 +460,7 @@ impl From<MaybeKnown<api::metrics::Metric>> for Metric {
                     .collect(),
             }),
             api::metrics::Metric::Gauge(gm) => Metric::Gauge(GaugeMetric {
-                name: gm.name.into(),
+                name: gm.name,
                 unit: gm.unit.into(),
                 values: gm
                     .values
@@ -469,11 +469,11 @@ impl From<MaybeKnown<api::metrics::Metric>> for Metric {
                     .collect(),
             }),
             api::metrics::Metric::Label(lm) => Metric::Label(LabelMetric {
-                name: lm.name.into(),
+                name: lm.name,
                 values: lm.values,
             }),
             api::metrics::Metric::Record(rm) => Metric::Record(RecordMetric {
-                name: rm.name.into(),
+                name: rm.name,
                 timestamp: timestamp_from_epoch_secs(rm.timestamp),
                 fields: rm.fields,
             }),

@@ -1,7 +1,5 @@
 use std::collections::BTreeMap;
 
-use compact_str::CompactString;
-
 use crate::access::AccessTokenId;
 
 #[derive(Clone, Copy, Debug)]
@@ -23,14 +21,14 @@ pub enum TimeseriesInterval {
 
 #[derive(Debug, Clone)]
 pub struct ScalarMetric {
-    pub name: CompactString,
+    pub name: String,
     pub unit: MetricUnit,
     pub value: f64,
 }
 
 #[derive(Debug, Clone)]
 pub struct AccumulationMetric {
-    pub name: CompactString,
+    pub name: String,
     pub unit: MetricUnit,
     pub interval: TimeseriesInterval,
     pub values: Vec<(u32, f64)>,
@@ -38,20 +36,20 @@ pub struct AccumulationMetric {
 
 #[derive(Debug, Clone)]
 pub struct GaugeMetric {
-    pub name: CompactString,
+    pub name: String,
     pub unit: MetricUnit,
     pub values: Vec<(u32, f64)>,
 }
 
 #[derive(Debug, Clone)]
 pub struct LabelMetric {
-    pub name: CompactString,
+    pub name: String,
     pub values: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct RecordMetric {
-    pub name: CompactString,
+    pub name: String,
     pub timestamp: u32,
     pub fields: BTreeMap<String, String>,
 }

@@ -1,4 +1,3 @@
-use compact_str::CompactString;
 use s2_common::{self, location::LocationName};
 use serde::{Deserialize, Serialize};
 
@@ -9,14 +8,12 @@ use super::MaybeKnown;
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct AwsPrivateNet {
     /// AWS PrivateLink endpoint service name, for creating a VPC endpoint.
-    #[cfg_attr(feature = "utoipa", schema(value_type = String))]
-    pub service_name: CompactString,
+    pub service_name: String,
     /// Private DNS name of the endpoint service. With private DNS enabled on the VPC endpoint,
     /// it resolves to the endpoint, and can be used as the account endpoint so that account
     /// requests also go over PrivateLink.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
-    pub private_dns_name: Option<CompactString>,
+    pub private_dns_name: Option<String>,
 }
 
 /// How the account can reach a location over a private network. Exactly one kind applies.
@@ -50,12 +47,10 @@ pub struct LocationInfo {
     pub is_private: bool,
     /// [Storage classes](https://s2.dev/docs/storage-classes) available to the account in this location.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "utoipa", schema(value_type = Option<Vec<String>>))]
-    pub storage_classes: Option<Vec<CompactString>>,
+    pub storage_classes: Option<Vec<String>>,
     /// Default [storage class](https://s2.dev/docs/storage-classes) for this location.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
-    pub default_storage_class: Option<CompactString>,
+    pub default_storage_class: Option<String>,
     /// [Private networking](https://s2.dev/docs/platform/private-networking) details for the
     /// account in this location, which can differ between accounts.
     /// Omitted until the account has a basin in this location, and when the location cannot be

@@ -26,8 +26,6 @@
 
 use std::time::Duration;
 
-use compact_str::CompactString;
-
 use crate::{ValidationError, encryption::EncryptionAlgorithm, maybe::Maybe};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,7 +90,7 @@ impl DeleteOnEmptyConfig {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StreamConfig {
-    pub storage_class: Option<CompactString>,
+    pub storage_class: Option<String>,
     pub retention_policy: RetentionPolicy,
     pub timestamping: TimestampingConfig,
     pub delete_on_empty: DeleteOnEmptyConfig,
@@ -111,7 +109,7 @@ pub struct DeleteOnEmptyReconfiguration {
 
 #[derive(Debug, Clone, Default)]
 pub struct StreamReconfiguration {
-    pub storage_class: Maybe<Option<CompactString>>,
+    pub storage_class: Maybe<Option<String>>,
     pub retention_policy: Maybe<Option<RetentionPolicy>>,
     pub timestamping: Maybe<Option<TimestampingReconfiguration>>,
     pub delete_on_empty: Maybe<Option<DeleteOnEmptyReconfiguration>>,
@@ -199,7 +197,7 @@ impl From<DeleteOnEmptyConfig> for OptionalDeleteOnEmptyConfig {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OptionalStreamConfig {
-    pub storage_class: Option<CompactString>,
+    pub storage_class: Option<String>,
     pub retention_policy: Option<RetentionPolicy>,
     pub timestamping: OptionalTimestampingConfig,
     pub delete_on_empty: OptionalDeleteOnEmptyConfig,

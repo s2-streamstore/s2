@@ -2,7 +2,6 @@ use std::{str::FromStr, time::Duration};
 
 use clap::{Args, Parser, ValueEnum};
 use colored::Colorize;
-use compact_str::CompactString;
 use s2_sdk::{
     self as sdk,
     types::{
@@ -177,7 +176,7 @@ pub struct StreamConfig {
     /// Storage class for a stream.
     ///
     /// `s2 location list` shows the storage classes available in each location, and the default.
-    pub storage_class: Option<CompactString>,
+    pub storage_class: Option<String>,
     #[arg(long, help("Example: 1d, 1w, 1y"))]
     /// Retention policy for a stream.
     pub retention_policy: Option<RetentionPolicy>,
@@ -514,7 +513,7 @@ impl From<sdk::types::BasinConfig> for BasinConfig {
 impl From<sdk::types::StreamConfig> for StreamConfig {
     fn from(config: sdk::types::StreamConfig) -> Self {
         StreamConfig {
-            storage_class: config.storage_class.map(Into::into),
+            storage_class: config.storage_class,
             retention_policy: config.retention_policy.map(Into::into),
             timestamping: config.timestamping.map(Into::into),
             delete_on_empty: config.delete_on_empty.map(Into::into),
