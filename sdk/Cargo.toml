@@ -26,7 +26,6 @@ async-stream = { workspace = true }
 async-trait = { workspace = true }
 base64ct = { workspace = true, features = ["alloc"] }
 bytes = { workspace = true }
-compact_str = { workspace = true, features = ["serde"] }
 futures-core = { workspace = true }
 futures-util = { workspace = true }
 h2 = "0.4"

@@ -137,16 +137,16 @@ dependencies = [
 
 [[package]]
 name = "antithesis_sdk"
-version = "0.2.9"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08410fcac93669a476c006cd6c4512ac1e2b30fd117231a5d55d8a2c76599b82"
+checksum = "a8ed6751597568a284314fd9e2db420665898600109dedc7d8d9b588f00ae9c4"
 dependencies = [
  "libc",
  "libloading",
  "linkme",
  "once_cell",
  "rand 0.8.8",
- "rand_core 0.6.4",
+ "rand_core 0.10.1",
  "rustc_version_runtime",
  "serde",
  "serde_json",
@@ -3717,7 +3717,6 @@ dependencies = [
  "async-trait",
  "base64ct",
  "bytes",
- "compact_str",
  "futures-core",
  "futures-util",
  "h2",
@@ -3798,13 +3797,13 @@ dependencies = [
 [[package]]
 name = "s2-verification"
 version = "0.4.0"
-source = "git+https://github.com/s2-streamstore/s2-verification?rev=e7c6ba78456806ef680bcde0c9d96cb566d93de0#e7c6ba78456806ef680bcde0c9d96cb566d93de0"
+source = "git+https://github.com/s2-streamstore/s2-verification?rev=eeafb5b17358c63ef145c7cb770121c20e4454d3#eeafb5b17358c63ef145c7cb770121c20e4454d3"
 dependencies = [
  "antithesis_sdk",
  "clap",
  "eyre",
  "futures",
- "rand 0.8.8",
+ "rand 0.10.4",
  "s2-sdk",
  "serde",
  "serde_json",

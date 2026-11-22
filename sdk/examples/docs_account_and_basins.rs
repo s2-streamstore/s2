@@ -2,7 +2,6 @@
 //!
 //! Run with: cargo run --example docs_account_and_basins
 
-use futures_util::StreamExt;
 use s2_sdk::{
     S2,
     types::{
@@ -63,7 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tokens = client.list_access_tokens(Default::default()).await?;
 
     // Issue a token scoped to streams under "users/1234/"
-    let result = client
+    let _token = client
         .issue_access_token(
             IssueAccessTokenInput::new(
                 "user-1234-rw-token".parse()?,
@@ -83,7 +82,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .revoke_access_token("user-1234-rw-token".parse()?)
         .await?;
     // ANCHOR_END: access-token-basic
-    println!("Tokens: {:?}, issued: {:?}", tokens, result);
+    println!("Tokens: {:?}", tokens);
 
     // ANCHOR: access-token-restricted
     client

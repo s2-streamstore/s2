@@ -15,10 +15,7 @@ use std::{
 };
 
 use futures_util::{StreamExt, stream::FuturesOrdered};
-use s2_common::{
-    caps::RECORD_BATCH_MAX,
-    record::{Metered, MeteredSize},
-};
+use s2_common::{caps::RECORD_BATCH_MAX, record::Metered};
 use tokio::{
     sync::{Notify, mpsc, oneshot},
     time::{Instant, Sleep},
@@ -26,7 +23,10 @@ use tokio::{
 
 use crate::{
     api::BasinClient,
-    batching::{MatchSeqState, validate_max_batch_bytes, validate_max_batch_records},
+    batching::{
+        MatchSeqState, batch_is_full, batch_would_overflow, validate_max_batch_bytes,
+        validate_max_batch_records,
+    },
     client::ShutdownSignal,
     error::{AbortedError, AppendSessionError, ErrorContext, SessionClosedError},
     session::{
@@ -72,7 +72,7 @@ impl Future for RecordSubmitTicket {
 }
 
 /// Acknowledgement for an appended record.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RecordAck {
     /// Sequence number assigned to the record.
@@ -91,7 +91,7 @@ impl RecordAck {
 }
 
 /// Configuration for a [`Producer`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProducerConfig {
     max_unacked_bytes: u32,
     linger: Duration,
@@ -120,6 +120,41 @@ impl ProducerConfig {
     /// Create a new [`ProducerConfig`] with default settings.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Return the limit on total metered bytes of unacknowledged [`AppendRecord`]s held in memory.
+    pub fn max_unacked_bytes(&self) -> u32 {
+        self.max_unacked_bytes
+    }
+
+    /// Return the configured linger duration.
+    pub fn linger(&self) -> Duration {
+        self.linger
+    }
+
+    /// Return the configured maximum records per batch.
+    pub fn max_batch_records(&self) -> usize {
+        self.max_batch_records
+    }
+
+    /// Return the configured maximum metered bytes per batch.
+    pub fn max_batch_bytes(&self) -> usize {
+        self.max_batch_bytes
+    }
+
+    /// Return the configured fencing token, if any.
+    pub fn fencing_token(&self) -> Option<&FencingToken> {
+        self.fencing_token.as_ref()
+    }
+
+    /// Return the configured starting `match_seq_num`, if any.
+    pub fn match_seq_num(&self) -> Option<u64> {
+        self.match_seq_num
+    }
+
+    /// Return the stream configuration to apply if the stream is created on append, if set.
+    pub fn stream_config(&self) -> Option<&StreamConfig> {
+        self.stream_config.as_ref()
     }
 
     /// Set the limit on total metered bytes of unacknowledged [`AppendRecord`]s held in memory.
@@ -203,10 +238,6 @@ impl ProducerConfig {
             ..self
         }
     }
-
-    pub(crate) fn stream_config(&self) -> Option<&StreamConfig> {
-        self.stream_config.as_ref()
-    }
 }
 
 struct ProducerGate {
@@ -227,6 +258,7 @@ pub struct Producer {
     max_batch_bytes: usize,
     acked_through_id: Arc<AtomicU64>,
     lifecycle: Arc<SessionLifecycle>,
+    session_lifecycle: Arc<SessionLifecycle>,
     client_shutdown: ShutdownSignal,
     abort_signal: ShutdownSignal,
     flush_partial_notify: Arc<Notify>,
@@ -237,7 +269,7 @@ impl fmt::Debug for Producer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Producer")
             .field("max_batch_bytes", &self.max_batch_bytes)
-            .field("closing_or_closed", &self.lifecycle.is_closing_or_closed())
+            .field("closing_or_closed", &self.is_closing_or_closed())
             .finish_non_exhaustive()
     }
 }
@@ -265,10 +297,12 @@ impl Producer {
         let abort_signal = ShutdownSignal::new();
         let flush_partial_notify = Arc::new(Notify::new());
         let session = AppendSessionInternal::new(client, stream, headers);
-        tokio::spawn(Self::run(
+        let session_lifecycle = session.lifecycle().clone();
+        let task = ProducerTask::new(
             session,
             config,
             cmd_rx,
+            permits.clone(),
             gate.clone(),
             acked_through_id.clone(),
             lifecycle.clone(),
@@ -276,7 +310,8 @@ impl Producer {
             abort_signal.clone(),
             flush_partial_notify.clone(),
             context.clone(),
-        ));
+        );
+        tokio::spawn(task.run());
         Self {
             gate,
             cmd_tx,
@@ -284,6 +319,7 @@ impl Producer {
             max_batch_bytes,
             acked_through_id,
             lifecycle,
+            session_lifecycle,
             client_shutdown,
             abort_signal,
             flush_partial_notify,
@@ -291,7 +327,21 @@ impl Producer {
         }
     }
 
+    fn is_closing_or_closed(&self) -> bool {
+        self.lifecycle.is_closing_or_closed() || self.session_lifecycle.is_closing_or_closed()
+    }
+
+    fn session_closed_err(&self) -> AppendSessionError {
+        let failure = self
+            .lifecycle
+            .terminal_err()
+            .or_else(|| self.session_lifecycle.terminal_err());
+        AppendSessionError::SessionClosed(SessionClosedError::new(failure, self.context.clone()))
+    }
+
     /// Submit a record for appending.
+    ///
+    /// Accepts an [`AppendRecord`] or [`CommandRecord`](crate::types::CommandRecord).
     ///
     /// Validates the record size against `max_batch_bytes` and `match_seq_num` bounds before
     /// waiting for capacity. Waits when the unacknowledged bytes limit is reached, providing
@@ -302,8 +352,9 @@ impl Producer {
     /// [`close`](Self::close) when finished to flush remaining records and release resources.
     pub async fn submit(
         &self,
-        record: AppendRecord,
+        record: impl Into<AppendRecord>,
     ) -> Result<RecordSubmitTicket, AppendSessionError> {
+        let record = record.into();
         let bytes = record.metered_bytes();
         if bytes > self.max_batch_bytes {
             return Err(AppendSessionError::Validation(ValidationError(format!(
@@ -315,7 +366,7 @@ impl Producer {
             let gate = self.gate.lock().unwrap();
             if gate.match_seq.is_exhausted() {
                 return Err(AppendSessionError::Validation(ValidationError(
-                    "match_seq_num overflow: sequence number exceeds u64::MAX".into(),
+                    "match_seq_num overflow: batch end sequence number exceeds u64::MAX".into(),
                 )));
             }
         }
@@ -341,36 +392,37 @@ impl Producer {
     pub async fn reserve(&self, bytes: u32) -> Result<RecordSubmitPermit, AppendSessionError> {
         validate_reserve_bytes(bytes, self.max_batch_bytes as u32)?;
 
-        if self.lifecycle.is_closing_or_closed() {
-            return Err(self.lifecycle.session_closed_err(&self.context));
+        if self.is_closing_or_closed() {
+            return Err(self.session_closed_err());
         }
         if self.client_shutdown.is_closed() || self.abort_signal.is_closed() {
             self.lifecycle.wait_closing_or_closed().await;
-            return Err(self.lifecycle.session_closed_err(&self.context));
+            return Err(self.session_closed_err());
         }
 
         let append_permit = if let Some(permit) = self.permits.try_acquire(bytes) {
             permit
         } else {
-            // Backpressure engaged: flush any buffered partial batch immediately so permits
-            // drain instead of waiting for `linger`.
-            self.flush_partial_notify.notify_one();
             let closing_fut = self.lifecycle.wait_closing_or_closed();
+            let session_closing_fut = self.session_lifecycle.wait_closing_or_closed();
             tokio::select! {
                 biased;
                 _ = closing_fut => {
-                    return Err(self.lifecycle.session_closed_err(&self.context));
+                    return Err(self.session_closed_err());
                 }
-                permit = self.permits.acquire(bytes) => permit,
+                _ = session_closing_fut => {
+                    return Err(self.session_closed_err());
+                }
+                permit = self.permits.acquire_notifying(bytes, &self.flush_partial_notify) => permit,
             }
         };
 
-        if self.lifecycle.is_closing_or_closed() {
-            return Err(self.lifecycle.session_closed_err(&self.context));
+        if self.is_closing_or_closed() {
+            return Err(self.session_closed_err());
         }
         if self.client_shutdown.is_closed() || self.abort_signal.is_closed() {
             self.lifecycle.wait_closing_or_closed().await;
-            return Err(self.lifecycle.session_closed_err(&self.context));
+            return Err(self.session_closed_err());
         }
 
         Ok(RecordSubmitPermit {
@@ -380,6 +432,7 @@ impl Producer {
             gate: self.gate.clone(),
             cmd_tx: self.cmd_tx.clone(),
             lifecycle: self.lifecycle.clone(),
+            session_lifecycle: self.session_lifecycle.clone(),
             client_shutdown: self.client_shutdown.clone(),
             abort_signal: self.abort_signal.clone(),
             context: self.context.clone(),
@@ -464,453 +517,6 @@ impl Producer {
         }
         self.lifecycle.wait_closed().await
     }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn run(
-        session: AppendSessionInternal,
-        config: ProducerConfig,
-        mut cmd_rx: mpsc::UnboundedReceiver<Command>,
-        gate: Arc<StdMutex<ProducerGate>>,
-        acked_through_id: Arc<AtomicU64>,
-        lifecycle: Arc<SessionLifecycle>,
-        client_shutdown: ShutdownSignal,
-        abort_signal: ShutdownSignal,
-        flush_partial_notify: Arc<Notify>,
-        context: ErrorContext,
-    ) {
-        let mut batcher = PartialBatch::new(
-            config.max_batch_records,
-            config.max_batch_bytes,
-            config.fencing_token.clone(),
-        );
-        let mut linger_sleep: Option<Pin<Box<Sleep>>> = None;
-        let mut linger_deadline: Option<Instant> = None;
-
-        let mut pending_batch_acks: FuturesOrdered<PendingBatchAck> = FuturesOrdered::new();
-        let mut pending_flushes: Vec<PendingFlush> = Vec::new();
-        let mut closing = false;
-        let mut client_closed_fut = client_shutdown.cancelled();
-        let mut abort_fut = abort_signal.cancelled();
-
-        loop {
-            if closing && batcher.is_empty() && pending_batch_acks.is_empty() {
-                break;
-            }
-
-            // For positive linger, flush before pulling more commands if deadline already elapsed.
-            if !batcher.is_empty()
-                && !config.linger.is_zero()
-                && linger_deadline.is_some_and(|d| Instant::now() >= d)
-            {
-                linger_deadline = None;
-                if let Some((input, max_id, records)) = batcher.take()
-                    && let Err(unsubmitted) = submit_batch_to_session(
-                        &session,
-                        input,
-                        max_id,
-                        records,
-                        &mut pending_batch_acks,
-                    )
-                {
-                    terminate_producer(
-                        &session,
-                        &gate,
-                        &acked_through_id,
-                        &lifecycle,
-                        &context,
-                        unsubmitted,
-                        &mut batcher,
-                        &mut pending_batch_acks,
-                        &mut pending_flushes,
-                        &mut cmd_rx,
-                    )
-                    .await;
-                    return;
-                }
-                continue;
-            }
-
-            let linger_active = linger_deadline.is_some() && !batcher.is_empty();
-
-            tokio::select! {
-                biased;
-
-                // Deliver completed batch outcomes strictly in submission order (A6d, A7).
-                Some((batch_ack, batch_max_id, batch_record_acks)) = pending_batch_acks.next() => {
-                    let is_err = batch_ack.is_err();
-                    let ok = !is_err;
-                    dispatch_acks(batch_ack, batch_record_acks);
-                    if ok {
-                        acked_through_id.store(batch_max_id, Ordering::Release);
-                        resolve_satisfied_flushes(&mut pending_flushes, batch_max_id);
-                    } else {
-                        terminate_producer(
-                            &session,
-                            &gate,
-                            &acked_through_id,
-                            &lifecycle,
-                            &context,
-                            Vec::new(),
-                            &mut batcher,
-                            &mut pending_batch_acks,
-                            &mut pending_flushes,
-                            &mut cmd_rx,
-                        )
-                        .await;
-                        return;
-                    }
-                }
-
-                _ = &mut client_closed_fut => {
-                    abort_producer(
-                        &session,
-                        &gate,
-                        &acked_through_id,
-                        &lifecycle,
-                        &context,
-                        &mut batcher,
-                        &mut pending_batch_acks,
-                        &mut pending_flushes,
-                        &mut cmd_rx,
-                        "client closed",
-                    )
-                    .await;
-                    return;
-                }
-
-                _ = &mut abort_fut => {
-                    abort_producer(
-                        &session,
-                        &gate,
-                        &acked_through_id,
-                        &lifecycle,
-                        &context,
-                        &mut batcher,
-                        &mut pending_batch_acks,
-                        &mut pending_flushes,
-                        &mut cmd_rx,
-                        "producer dropped without calling close",
-                    )
-                    .await;
-                    return;
-                }
-
-                _ = async {
-                    linger_sleep.as_mut().expect("linger_sleep armed").as_mut().await
-                }, if linger_active => {
-                    linger_deadline = None;
-                    if let Some((input, max_id, records)) = batcher.take()
-                        && let Err(unsubmitted) = submit_batch_to_session(
-                            &session,
-                            input,
-                            max_id,
-                            records,
-                            &mut pending_batch_acks,
-                        )
-                    {
-                        terminate_producer(
-                            &session,
-                            &gate,
-                            &acked_through_id,
-                            &lifecycle,
-                            &context,
-                            unsubmitted,
-                            &mut batcher,
-                            &mut pending_batch_acks,
-                            &mut pending_flushes,
-                            &mut cmd_rx,
-                        )
-                        .await;
-                        return;
-                    }
-                }
-
-                cmd = cmd_rx.recv() => {
-                    match cmd {
-                        Some(Command::Submit {
-                            record,
-                            acceptance_id,
-                            match_seq_num,
-                            ack_tx,
-                            permit,
-                        }) => {
-                            if closing {
-                                let _ = ack_tx.send(Err(AppendSessionError::SessionClosed(
-                                    SessionClosedError::new(None, context.clone()),
-                                )));
-                                continue;
-                            }
-                            let record = Metered::from(record);
-                            if !batcher.is_empty() && batcher.would_overflow(&record) {
-                                linger_deadline = None;
-                                if let Some((input, max_id, records)) = batcher.take()
-                                    && let Err(unsubmitted) = submit_batch_to_session(
-                                        &session,
-                                        input,
-                                        max_id,
-                                        records,
-                                        &mut pending_batch_acks,
-                                    )
-                                {
-                                    // Put current record into batcher so terminate_producer
-                                    // settles `unsubmitted` first, then this record, in order.
-                                    batcher.push(
-                                        record,
-                                        acceptance_id,
-                                        match_seq_num,
-                                        PendingRecordAck { ack_tx, _permit: permit },
-                                    );
-                                    terminate_producer(
-                                        &session,
-                                        &gate,
-                                        &acked_through_id,
-                                        &lifecycle,
-                                        &context,
-                                        unsubmitted,
-                                        &mut batcher,
-                                        &mut pending_batch_acks,
-                                        &mut pending_flushes,
-                                        &mut cmd_rx,
-                                    )
-                                    .await;
-                                    return;
-                                }
-                            }
-
-                            let was_empty = batcher.is_empty();
-                            batcher.push(
-                                record,
-                                acceptance_id,
-                                match_seq_num,
-                                PendingRecordAck { ack_tx, _permit: permit },
-                            );
-
-                            if batcher.is_full() {
-                                linger_deadline = None;
-                                if let Some((input, max_id, records)) = batcher.take()
-                                    && let Err(unsubmitted) = submit_batch_to_session(
-                                        &session,
-                                        input,
-                                        max_id,
-                                        records,
-                                        &mut pending_batch_acks,
-                                    )
-                                {
-                                    terminate_producer(
-                                        &session,
-                                        &gate,
-                                        &acked_through_id,
-                                        &lifecycle,
-                                        &context,
-                                        unsubmitted,
-                                        &mut batcher,
-                                        &mut pending_batch_acks,
-                                        &mut pending_flushes,
-                                        &mut cmd_rx,
-                                    )
-                                    .await;
-                                    return;
-                                }
-                            } else if was_empty
-                                && !config.linger.is_zero()
-                                && let Some(deadline) = Instant::now().checked_add(config.linger)
-                            {
-                                match linger_sleep.as_mut() {
-                                    Some(sleep) => sleep.as_mut().reset(deadline),
-                                    None => {
-                                        linger_sleep =
-                                            Some(Box::pin(tokio::time::sleep_until(deadline)))
-                                    }
-                                }
-                                linger_deadline = Some(deadline);
-                            }
-                        }
-                        Some(Command::Flush { target_id, done_tx }) => {
-                            if !batcher.is_empty() {
-                                linger_deadline = None;
-                                if let Some((input, max_id, records)) = batcher.take()
-                                    && let Err(unsubmitted) = submit_batch_to_session(
-                                        &session,
-                                        input,
-                                        max_id,
-                                        records,
-                                        &mut pending_batch_acks,
-                                    )
-                                {
-                                    pending_flushes.push(PendingFlush { target_id, done_tx });
-                                    terminate_producer(
-                                        &session,
-                                        &gate,
-                                        &acked_through_id,
-                                        &lifecycle,
-                                        &context,
-                                        unsubmitted,
-                                        &mut batcher,
-                                        &mut pending_batch_acks,
-                                        &mut pending_flushes,
-                                        &mut cmd_rx,
-                                    )
-                                    .await;
-                                    return;
-                                }
-                            }
-                            if acked_through_id.load(Ordering::Acquire) >= target_id {
-                                let _ = done_tx.send(Ok(()));
-                            } else {
-                                pending_flushes.push(PendingFlush { target_id, done_tx });
-                            }
-                        }
-                        Some(Command::Close) => {
-                            closing = true;
-                            if !batcher.is_empty() {
-                                linger_deadline = None;
-                                if let Some((input, max_id, records)) = batcher.take()
-                                    && let Err(unsubmitted) = submit_batch_to_session(
-                                        &session,
-                                        input,
-                                        max_id,
-                                        records,
-                                        &mut pending_batch_acks,
-                                    )
-                                {
-                                    terminate_producer(
-                                        &session,
-                                        &gate,
-                                        &acked_through_id,
-                                        &lifecycle,
-                                        &context,
-                                        unsubmitted,
-                                        &mut batcher,
-                                        &mut pending_batch_acks,
-                                        &mut pending_flushes,
-                                        &mut cmd_rx,
-                                    )
-                                    .await;
-                                    return;
-                                }
-                            }
-                        }
-                        None => {
-                            abort_producer(
-                                &session,
-                                &gate,
-                                &acked_through_id,
-                                &lifecycle,
-                                &context,
-                                &mut batcher,
-                                &mut pending_batch_acks,
-                                &mut pending_flushes,
-                                &mut cmd_rx,
-                                "producer dropped without calling close",
-                            )
-                            .await;
-                            return;
-                        }
-                    }
-                }
-
-                // When `linger == 0`, coalesce any immediately-queued commands above, then submit
-                // as soon as the command channel is drained without touching the timer wheel.
-                _ = std::future::ready(()), if config.linger.is_zero() && !batcher.is_empty() => {
-                    linger_deadline = None;
-                    if let Some((input, max_id, records)) = batcher.take()
-                        && let Err(unsubmitted) = submit_batch_to_session(
-                            &session,
-                            input,
-                            max_id,
-                            records,
-                            &mut pending_batch_acks,
-                        )
-                    {
-                        terminate_producer(
-                            &session,
-                            &gate,
-                            &acked_through_id,
-                            &lifecycle,
-                            &context,
-                            unsubmitted,
-                            &mut batcher,
-                            &mut pending_batch_acks,
-                            &mut pending_flushes,
-                            &mut cmd_rx,
-                        )
-                        .await;
-                        return;
-                    }
-                }
-
-                // Flush a partial batch immediately when a caller stalls waiting on capacity.
-                _ = flush_partial_notify.notified() => {
-                    if !batcher.is_empty() {
-                        linger_deadline = None;
-                        if let Some((input, max_id, records)) = batcher.take()
-                            && let Err(unsubmitted) = submit_batch_to_session(
-                                &session,
-                                input,
-                                max_id,
-                                records,
-                                &mut pending_batch_acks,
-                            )
-                        {
-                            terminate_producer(
-                                &session,
-                                &gate,
-                                &acked_through_id,
-                                &lifecycle,
-                                &context,
-                                unsubmitted,
-                                &mut batcher,
-                                &mut pending_batch_acks,
-                                &mut pending_flushes,
-                                &mut cmd_rx,
-                            )
-                            .await;
-                            return;
-                        }
-                    }
-                }
-            }
-        }
-
-        let session_close_res = session.close().await;
-        {
-            let mut g = gate.lock().unwrap();
-            g.closing = true;
-        }
-        lifecycle.mark_closing();
-
-        let acked = acked_through_id.load(Ordering::Acquire);
-        for flush in pending_flushes.drain(..) {
-            if acked >= flush.target_id {
-                let _ = flush.done_tx.send(Ok(()));
-            } else {
-                let _ = flush.done_tx.send(session_close_res.clone());
-            }
-        }
-
-        cmd_rx.close();
-        let closed_err = AppendSessionError::SessionClosed(SessionClosedError::new(
-            session_close_res.as_ref().err().cloned(),
-            context.clone(),
-        ));
-        while let Ok(cmd) = cmd_rx.try_recv() {
-            match cmd {
-                Command::Submit { ack_tx, .. } => {
-                    let _ = ack_tx.send(Err(closed_err.clone()));
-                }
-                Command::Flush { target_id, done_tx } => {
-                    if acked >= target_id {
-                        let _ = done_tx.send(Ok(()));
-                    } else {
-                        let _ = done_tx.send(session_close_res.clone());
-                    }
-                }
-                Command::Close => {}
-            }
-        }
-
-        lifecycle.finish(session_close_res);
-    }
 }
 
 impl Drop for Producer {
@@ -929,6 +535,7 @@ pub struct RecordSubmitPermit {
     gate: Arc<StdMutex<ProducerGate>>,
     cmd_tx: mpsc::UnboundedSender<Command>,
     lifecycle: Arc<SessionLifecycle>,
+    session_lifecycle: Arc<SessionLifecycle>,
     client_shutdown: ShutdownSignal,
     abort_signal: ShutdownSignal,
     context: ErrorContext,
@@ -943,7 +550,17 @@ impl fmt::Debug for RecordSubmitPermit {
 }
 
 impl RecordSubmitPermit {
+    fn session_closed_err(&self) -> AppendSessionError {
+        let failure = self
+            .lifecycle
+            .terminal_err()
+            .or_else(|| self.session_lifecycle.terminal_err());
+        AppendSessionError::SessionClosed(SessionClosedError::new(failure, self.context.clone()))
+    }
+
     /// Submit the record using this permit.
+    ///
+    /// Accepts an [`AppendRecord`] or [`CommandRecord`](crate::types::CommandRecord).
     ///
     /// Fails with [`ValidationError`] (releasing the reservation and leaving the producer open) if
     /// the record's metered size exceeds the reserved bytes or `max_batch_bytes`, or if advancing
@@ -951,8 +568,9 @@ impl RecordSubmitPermit {
     /// closed or began closing after the permit was reserved.
     pub fn submit(
         mut self,
-        record: AppendRecord,
+        record: impl Into<AppendRecord>,
     ) -> Result<RecordSubmitTicket, AppendSessionError> {
+        let record = record.into();
         let metered = record.metered_bytes();
         if metered > self.reserved_bytes as usize {
             return Err(AppendSessionError::Validation(ValidationError(format!(
@@ -975,15 +593,16 @@ impl RecordSubmitPermit {
             let mut gate = self.gate.lock().unwrap();
             if gate.match_seq.is_exhausted() {
                 return Err(AppendSessionError::Validation(ValidationError(
-                    "match_seq_num overflow: sequence number exceeds u64::MAX".into(),
+                    "match_seq_num overflow: batch end sequence number exceeds u64::MAX".into(),
                 )));
             }
             if gate.closing
                 || self.lifecycle.is_closing_or_closed()
+                || self.session_lifecycle.is_closing_or_closed()
                 || self.client_shutdown.is_closed()
                 || self.abort_signal.is_closed()
             {
-                return Err(self.lifecycle.session_closed_err(&self.context));
+                return Err(self.session_closed_err());
             }
             let match_seq_num = gate.match_seq.claim_next()?;
             let acceptance_id = gate.last_accepted_id + 1;
@@ -998,7 +617,14 @@ impl RecordSubmitPermit {
                 })
                 .is_err()
             {
-                return Err(self.lifecycle.session_closed_err(&self.context));
+                let failure = self
+                    .lifecycle
+                    .terminal_err()
+                    .or_else(|| self.session_lifecycle.terminal_err());
+                return Err(AppendSessionError::SessionClosed(SessionClosedError::new(
+                    failure,
+                    self.context,
+                )));
             }
             gate.last_accepted_id = acceptance_id;
         }
@@ -1008,6 +634,490 @@ impl RecordSubmitPermit {
             lifecycle: self.lifecycle,
             context: self.context,
         })
+    }
+}
+
+struct ProducerTask {
+    session: AppendSessionInternal,
+    linger: Duration,
+    cmd_rx: mpsc::UnboundedReceiver<Command>,
+    permits: AppendPermits,
+    gate: Arc<StdMutex<ProducerGate>>,
+    acked_through_id: Arc<AtomicU64>,
+    lifecycle: Arc<SessionLifecycle>,
+    client_shutdown: ShutdownSignal,
+    abort_signal: ShutdownSignal,
+    flush_partial_notify: Arc<Notify>,
+    context: ErrorContext,
+    batcher: PartialBatch,
+    linger_sleep: Option<Pin<Box<Sleep>>>,
+    linger_deadline: Option<Instant>,
+    pending_batch_acks: FuturesOrdered<PendingBatchAck>,
+    pending_flushes: Vec<PendingFlush>,
+}
+
+impl ProducerTask {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        session: AppendSessionInternal,
+        config: ProducerConfig,
+        cmd_rx: mpsc::UnboundedReceiver<Command>,
+        permits: AppendPermits,
+        gate: Arc<StdMutex<ProducerGate>>,
+        acked_through_id: Arc<AtomicU64>,
+        lifecycle: Arc<SessionLifecycle>,
+        client_shutdown: ShutdownSignal,
+        abort_signal: ShutdownSignal,
+        flush_partial_notify: Arc<Notify>,
+        context: ErrorContext,
+    ) -> Self {
+        let batcher = PartialBatch::new(
+            config.max_batch_records,
+            config.max_batch_bytes,
+            config.fencing_token,
+        );
+        Self {
+            session,
+            linger: config.linger,
+            cmd_rx,
+            permits,
+            gate,
+            acked_through_id,
+            lifecycle,
+            client_shutdown,
+            abort_signal,
+            flush_partial_notify,
+            context,
+            batcher,
+            linger_sleep: None,
+            linger_deadline: None,
+            pending_batch_acks: FuturesOrdered::new(),
+            pending_flushes: Vec::new(),
+        }
+    }
+
+    fn arm_linger(&mut self) {
+        if self.linger.is_zero() {
+            return;
+        }
+        let Some(deadline) = Instant::now().checked_add(self.linger) else {
+            return;
+        };
+        match self.linger_sleep.as_mut() {
+            Some(sleep) => sleep.as_mut().reset(deadline),
+            None => self.linger_sleep = Some(Box::pin(tokio::time::sleep_until(deadline))),
+        }
+        self.linger_deadline = Some(deadline);
+    }
+
+    /// Take the current partial batch and submit it to the owned session.
+    /// Returns `Err(records)` if the owned session has already closed/failed.
+    fn try_cut_and_submit(&mut self) -> Result<(), Vec<PendingRecordAck>> {
+        self.linger_deadline = None;
+        let Some((input, max_id, records)) = self.batcher.take() else {
+            return Ok(());
+        };
+        match self.session.submit(input) {
+            Ok(ticket) => {
+                self.pending_batch_acks.push_back(PendingBatchAck {
+                    ticket,
+                    batch_max_id: max_id,
+                    pending_record_acks: Some(records),
+                });
+                Ok(())
+            }
+            Err(_) => Err(records),
+        }
+    }
+
+    /// Cut the partial batch when backpressure is waiting and no other batch is in flight (`A5a`).
+    ///
+    /// Keeping the check level-triggered on current state (`pending_batch_acks.is_empty() &&
+    /// !batcher.is_empty() && permits.has_waiters()`) prevents lost wakeups while avoiding
+    /// small-batch fragmentation when other batches are already in flight.
+    fn should_flush_for_backpressure(&self) -> bool {
+        self.pending_batch_acks.is_empty() && !self.batcher.is_empty() && self.permits.has_waiters()
+    }
+
+    fn publish_closing_from_session(&self) {
+        if let Some(err) = self.session.terminal_err() {
+            self.lifecycle.set_terminal_err(err);
+        }
+        let mut g = self.gate.lock().unwrap();
+        g.closing = true;
+        self.lifecycle.mark_closing();
+    }
+
+    async fn run(mut self) {
+        let mut closing = false;
+        let mut client_closed_fut = self.client_shutdown.cancelled();
+        let mut abort_fut = self.abort_signal.cancelled();
+
+        loop {
+            if closing && self.batcher.is_empty() && self.pending_batch_acks.is_empty() {
+                break;
+            }
+
+            // For positive linger, flush before pulling more commands if deadline already elapsed.
+            if !self.batcher.is_empty()
+                && !self.linger.is_zero()
+                && self.linger_deadline.is_some_and(|d| Instant::now() >= d)
+            {
+                if let Err(unsubmitted) = self.try_cut_and_submit() {
+                    self.terminate(unsubmitted).await;
+                    return;
+                }
+                continue;
+            }
+
+            let linger_active = self.linger_deadline.is_some() && !self.batcher.is_empty();
+
+            tokio::select! {
+                biased;
+
+                // Deliver completed batch outcomes strictly in submission order (A6d, A7).
+                Some((batch_ack, batch_max_id, batch_record_acks)) = self.pending_batch_acks.next() => {
+                    if batch_ack.is_err() {
+                        // Publish terminal error and close acceptance gate BEFORE `dispatch_acks`
+                        // drops permits and unblocks waiting `reserve()` callers (`A4c`, `A9`).
+                        self.publish_closing_from_session();
+                        dispatch_acks(batch_ack, batch_record_acks);
+                        self.terminate(Vec::new()).await;
+                        return;
+                    }
+                    dispatch_acks(batch_ack, batch_record_acks);
+                    self.acked_through_id.store(batch_max_id, Ordering::Release);
+                    resolve_satisfied_flushes(&mut self.pending_flushes, batch_max_id);
+                    if self.should_flush_for_backpressure()
+                        && let Err(unsubmitted) = self.try_cut_and_submit()
+                    {
+                        self.terminate(unsubmitted).await;
+                        return;
+                    }
+                }
+
+                _ = &mut client_closed_fut => {
+                    self.abort("client closed").await;
+                    return;
+                }
+
+                _ = &mut abort_fut => {
+                    self.abort("producer dropped without calling close").await;
+                    return;
+                }
+
+                _ = async {
+                    self.linger_sleep.as_mut().expect("linger_sleep armed").as_mut().await
+                }, if linger_active => {
+                    if let Err(unsubmitted) = self.try_cut_and_submit() {
+                        self.terminate(unsubmitted).await;
+                        return;
+                    }
+                }
+
+                cmd = self.cmd_rx.recv() => {
+                    match cmd {
+                        Some(Command::Submit {
+                            record,
+                            acceptance_id,
+                            match_seq_num,
+                            ack_tx,
+                            permit,
+                        }) => {
+                            let record = Metered::from(record);
+                            if !self.batcher.is_empty() && self.batcher.would_overflow(&record)
+                                && let Err(unsubmitted) = self.try_cut_and_submit()
+                            {
+                                // Put current record into batcher so terminate settles
+                                // `unsubmitted` first, then this record, in order.
+                                self.batcher.push(
+                                    record,
+                                    acceptance_id,
+                                    match_seq_num,
+                                    PendingRecordAck { ack_tx, _permit: permit },
+                                );
+                                self.terminate(unsubmitted).await;
+                                return;
+                            }
+
+                            let was_empty = self.batcher.is_empty();
+                            self.batcher.push(
+                                record,
+                                acceptance_id,
+                                match_seq_num,
+                                PendingRecordAck { ack_tx, _permit: permit },
+                            );
+
+                            if self.batcher.is_full() || self.should_flush_for_backpressure() {
+                                if let Err(unsubmitted) = self.try_cut_and_submit() {
+                                    self.terminate(unsubmitted).await;
+                                    return;
+                                }
+                            } else if was_empty {
+                                self.arm_linger();
+                            }
+                        }
+                        Some(Command::Flush { target_id, done_tx }) => {
+                            if self.acked_through_id.load(Ordering::Acquire) >= target_id {
+                                let _ = done_tx.send(Ok(()));
+                                continue;
+                            }
+                            self.pending_flushes.push(PendingFlush { target_id, done_tx });
+                            if !self.batcher.is_empty()
+                                && let Err(unsubmitted) = self.try_cut_and_submit()
+                            {
+                                self.terminate(unsubmitted).await;
+                                return;
+                            }
+                        }
+                        Some(Command::Close) => {
+                            closing = true;
+                            if !self.batcher.is_empty()
+                                && let Err(unsubmitted) = self.try_cut_and_submit()
+                            {
+                                self.terminate(unsubmitted).await;
+                                return;
+                            }
+                        }
+                        None => {
+                            self.abort("producer dropped without calling close").await;
+                            return;
+                        }
+                    }
+                }
+
+                // When `linger == 0`, coalesce any immediately-queued commands above, then submit
+                // as soon as the command channel is drained without touching the timer wheel.
+                _ = std::future::ready(()), if self.linger.is_zero() && !self.batcher.is_empty() => {
+                    if let Err(unsubmitted) = self.try_cut_and_submit() {
+                        self.terminate(unsubmitted).await;
+                        return;
+                    }
+                }
+
+                // Wake when a caller begins waiting on capacity (`A5a`).
+                _ = self.flush_partial_notify.notified() => {
+                    if self.should_flush_for_backpressure()
+                        && let Err(unsubmitted) = self.try_cut_and_submit()
+                    {
+                        self.terminate(unsubmitted).await;
+                        return;
+                    }
+                }
+            }
+        }
+
+        self.finish_clean().await;
+    }
+
+    async fn finish_clean(mut self) {
+        let session_close_res = self.session.close().await;
+        {
+            let mut g = self.gate.lock().unwrap();
+            g.closing = true;
+        }
+        self.lifecycle.mark_closing();
+
+        let acked = self.acked_through_id.load(Ordering::Acquire);
+        for flush in self.pending_flushes.drain(..) {
+            if acked >= flush.target_id {
+                let _ = flush.done_tx.send(Ok(()));
+            } else {
+                let _ = flush.done_tx.send(session_close_res.clone());
+            }
+        }
+
+        self.cmd_rx.close();
+        let closed_err = AppendSessionError::SessionClosed(SessionClosedError::new(
+            session_close_res.as_ref().err().cloned(),
+            self.context.clone(),
+        ));
+        while let Ok(cmd) = self.cmd_rx.try_recv() {
+            match cmd {
+                Command::Submit { ack_tx, .. } => {
+                    let _ = ack_tx.send(Err(closed_err.clone()));
+                }
+                Command::Flush { target_id, done_tx } => {
+                    if acked >= target_id {
+                        let _ = done_tx.send(Ok(()));
+                    } else {
+                        let _ = done_tx.send(session_close_res.clone());
+                    }
+                }
+                Command::Close => {}
+            }
+        }
+
+        self.lifecycle.finish(session_close_res);
+    }
+
+    /// Settle all remaining batches using exact outcomes from the owned `AppendSession`
+    /// (`A6d`, `A9`), then fail any records still being batched or queued with
+    /// `SessionClosedError` (`A6a`).
+    async fn terminate(mut self, unsubmitted: Vec<PendingRecordAck>) {
+        self.publish_closing_from_session();
+
+        // Drain every remaining batch already submitted to the owned session so every record
+        // receives the exact outcome reported by AppendSession strictly in submission order (A6d).
+        while let Some((batch_ack, batch_max_id, batch_records)) =
+            self.pending_batch_acks.next().await
+        {
+            let ok = batch_ack.is_ok();
+            dispatch_acks(batch_ack, batch_records);
+            if ok {
+                self.acked_through_id.store(batch_max_id, Ordering::Release);
+                resolve_satisfied_flushes(&mut self.pending_flushes, batch_max_id);
+            }
+        }
+
+        // Obtain the owned session's exact failure (A9).
+        let session_failure = match self.session.close().await {
+            Err(err) => err,
+            Ok(()) => AppendSessionError::SessionClosed(SessionClosedError::new(
+                None,
+                self.context.clone(),
+            )),
+        };
+
+        self.lifecycle.set_terminal_err(session_failure.clone());
+        let unsent_err = AppendSessionError::SessionClosed(SessionClosedError::new(
+            Some(session_failure.clone()),
+            self.context.clone(),
+        ));
+
+        for pending in unsubmitted {
+            let _ = pending.ack_tx.send(Err(unsent_err.clone()));
+        }
+
+        for pending in self.batcher.drain_acks() {
+            let _ = pending.ack_tx.send(Err(unsent_err.clone()));
+        }
+
+        let acked = self.acked_through_id.load(Ordering::Acquire);
+        for flush in self.pending_flushes.drain(..) {
+            if acked >= flush.target_id {
+                let _ = flush.done_tx.send(Ok(()));
+            } else {
+                let _ = flush.done_tx.send(Err(session_failure.clone()));
+            }
+        }
+
+        self.cmd_rx.close();
+        while let Ok(cmd) = self.cmd_rx.try_recv() {
+            match cmd {
+                Command::Submit { ack_tx, .. } => {
+                    let _ = ack_tx.send(Err(unsent_err.clone()));
+                }
+                Command::Flush { target_id, done_tx } => {
+                    if acked >= target_id {
+                        let _ = done_tx.send(Ok(()));
+                    } else {
+                        let _ = done_tx.send(Err(session_failure.clone()));
+                    }
+                }
+                Command::Close => {}
+            }
+        }
+
+        self.lifecycle.finish(Err(session_failure));
+    }
+
+    async fn abort(mut self, reason: &'static str) {
+        let aborted = AppendSessionError::Aborted(AbortedError::new(reason, self.context.clone()));
+        let queued_cmds = {
+            let mut g = self.gate.lock().unwrap();
+            g.closing = true;
+            self.cmd_rx.close();
+            let mut queued = Vec::new();
+            while let Ok(cmd) = self.cmd_rx.try_recv() {
+                queued.push(cmd);
+            }
+            let has_unsubmitted = !self.batcher.is_empty()
+                || queued
+                    .iter()
+                    .any(|cmd| matches!(cmd, Command::Submit { .. }));
+            if has_unsubmitted {
+                // Publish failure before marking closing so waiting reserve()/submit() calls
+                // observe `SessionClosedError { failure: Some(..) }` (`E6`).
+                self.lifecycle.set_terminal_err(
+                    self.session
+                        .terminal_err()
+                        .unwrap_or_else(|| aborted.clone()),
+                );
+            } else if self.pending_batch_acks.is_empty() {
+                self.lifecycle.mark_closing();
+            }
+            queued
+        };
+
+        // Abort the owned AppendSession immediately (A3b, A8c) and forward its exact outcomes
+        // (A6d).
+        self.session.abort();
+        while let Some((batch_ack, batch_max_id, batch_records)) =
+            self.pending_batch_acks.next().await
+        {
+            let ok = batch_ack.is_ok();
+            dispatch_acks(batch_ack, batch_records);
+            if ok {
+                self.acked_through_id.store(batch_max_id, Ordering::Release);
+                resolve_satisfied_flushes(&mut self.pending_flushes, batch_max_id);
+            }
+        }
+        let session_res = self.session.close().await;
+
+        let unsubmitted_records = self.batcher.drain_acks();
+        let has_queued_submits = queued_cmds
+            .iter()
+            .any(|cmd| matches!(cmd, Command::Submit { .. }));
+        let has_unsubmitted = !unsubmitted_records.is_empty() || has_queued_submits;
+
+        let final_result = match session_res {
+            Err(session_err) => Err(session_err),
+            Ok(()) if has_unsubmitted => Err(aborted),
+            Ok(()) => Ok(()),
+        };
+
+        if let Err(err) = &final_result {
+            self.lifecycle.set_terminal_err(err.clone());
+        } else {
+            self.lifecycle.mark_closing();
+        }
+
+        let unsent_err = AppendSessionError::SessionClosed(SessionClosedError::new(
+            final_result.as_ref().err().cloned(),
+            self.context.clone(),
+        ));
+
+        for pending in unsubmitted_records {
+            let _ = pending.ack_tx.send(Err(unsent_err.clone()));
+        }
+
+        let acked = self.acked_through_id.load(Ordering::Acquire);
+        for flush in self.pending_flushes.drain(..) {
+            if acked >= flush.target_id {
+                let _ = flush.done_tx.send(Ok(()));
+            } else {
+                let _ = flush.done_tx.send(final_result.clone());
+            }
+        }
+
+        for cmd in queued_cmds {
+            match cmd {
+                Command::Submit { ack_tx, .. } => {
+                    let _ = ack_tx.send(Err(unsent_err.clone()));
+                }
+                Command::Flush { target_id, done_tx } => {
+                    if acked >= target_id {
+                        let _ = done_tx.send(Ok(()));
+                    } else {
+                        let _ = done_tx.send(final_result.clone());
+                    }
+                }
+                Command::Close => {}
+            }
+        }
+
+        self.lifecycle.finish(final_result);
     }
 }
 
@@ -1043,13 +1153,16 @@ impl PartialBatch {
     }
 
     fn is_full(&self) -> bool {
-        self.records.len() >= self.max_batch_records
-            || self.records.metered_size() >= self.max_batch_bytes
+        batch_is_full(&self.records, self.max_batch_records, self.max_batch_bytes)
     }
 
     fn would_overflow(&self, record: &Metered<AppendRecord>) -> bool {
-        self.records.len() + 1 > self.max_batch_records
-            || self.records.metered_size() + record.metered_size() > self.max_batch_bytes
+        batch_would_overflow(
+            &self.records,
+            record,
+            self.max_batch_records,
+            self.max_batch_bytes,
+        )
     }
 
     fn push(
@@ -1079,7 +1192,6 @@ impl PartialBatch {
             records: AppendRecordBatch::from(records),
             match_seq_num,
             fencing_token: self.fencing_token.clone(),
-            stream_config: None,
         };
         Some((input, max_id, pending_acks))
     }
@@ -1088,26 +1200,6 @@ impl PartialBatch {
         self.records = Metered::with_capacity(0);
         self.batch_match_seq_num = None;
         std::mem::take(&mut self.pending_acks)
-    }
-}
-
-fn submit_batch_to_session(
-    session: &AppendSessionInternal,
-    input: AppendInput,
-    batch_max_id: u64,
-    records: Vec<PendingRecordAck>,
-    pending_batch_acks: &mut FuturesOrdered<PendingBatchAck>,
-) -> Result<(), Vec<PendingRecordAck>> {
-    match session.submit(input) {
-        Ok(ticket) => {
-            pending_batch_acks.push_back(PendingBatchAck {
-                ticket,
-                batch_max_id,
-                pending_record_acks: Some(records),
-            });
-            Ok(())
-        }
-        Err(_) => Err(records),
     }
 }
 
@@ -1195,185 +1287,4 @@ fn resolve_satisfied_flushes(pending_flushes: &mut Vec<PendingFlush>, acked_thro
             i += 1;
         }
     }
-}
-
-/// Settle all remaining batches using exact outcomes from the owned `AppendSession` (`A6d`, `A9`),
-/// then fail any records still being batched or queued with `SessionClosedError` (`A6a`).
-#[allow(clippy::too_many_arguments)]
-async fn terminate_producer(
-    session: &AppendSessionInternal,
-    gate: &StdMutex<ProducerGate>,
-    acked_through_id: &AtomicU64,
-    lifecycle: &SessionLifecycle,
-    context: &ErrorContext,
-    unsubmitted: Vec<PendingRecordAck>,
-    batcher: &mut PartialBatch,
-    pending_batch_acks: &mut FuturesOrdered<PendingBatchAck>,
-    pending_flushes: &mut Vec<PendingFlush>,
-    cmd_rx: &mut mpsc::UnboundedReceiver<Command>,
-) {
-    // Publish the owned session's terminal error before closing the acceptance gate so concurrent
-    // reserve()/submit() callers observe SessionClosedError { failure: Some(..) } (A9).
-    if let Some(err) = session.terminal_err() {
-        lifecycle.set_terminal_err(err);
-    }
-    {
-        let mut g = gate.lock().unwrap();
-        g.closing = true;
-        lifecycle.mark_closing();
-    }
-
-    // Drain every remaining batch already submitted to the owned session so every record receives
-    // the exact outcome reported by AppendSession strictly in submission order (A6d).
-    while let Some((batch_ack, batch_max_id, batch_records)) = pending_batch_acks.next().await {
-        let ok = batch_ack.is_ok();
-        dispatch_acks(batch_ack, batch_records);
-        if ok {
-            acked_through_id.store(batch_max_id, Ordering::Release);
-            resolve_satisfied_flushes(pending_flushes, batch_max_id);
-        }
-    }
-
-    // Obtain the owned session's exact failure (A9).
-    let session_failure = match session.close().await {
-        Err(err) => err,
-        Ok(()) => AppendSessionError::SessionClosed(SessionClosedError::new(None, context.clone())),
-    };
-
-    lifecycle.set_terminal_err(session_failure.clone());
-    let unsent_err = AppendSessionError::SessionClosed(SessionClosedError::new(
-        Some(session_failure.clone()),
-        context.clone(),
-    ));
-
-    for pending in unsubmitted {
-        let _ = pending.ack_tx.send(Err(unsent_err.clone()));
-    }
-
-    for pending in batcher.drain_acks() {
-        let _ = pending.ack_tx.send(Err(unsent_err.clone()));
-    }
-
-    let acked = acked_through_id.load(Ordering::Acquire);
-    for flush in pending_flushes.drain(..) {
-        if acked >= flush.target_id {
-            let _ = flush.done_tx.send(Ok(()));
-        } else {
-            let _ = flush.done_tx.send(Err(session_failure.clone()));
-        }
-    }
-
-    cmd_rx.close();
-    while let Ok(cmd) = cmd_rx.try_recv() {
-        match cmd {
-            Command::Submit { ack_tx, .. } => {
-                let _ = ack_tx.send(Err(unsent_err.clone()));
-            }
-            Command::Flush { target_id, done_tx } => {
-                if acked >= target_id {
-                    let _ = done_tx.send(Ok(()));
-                } else {
-                    let _ = done_tx.send(Err(session_failure.clone()));
-                }
-            }
-            Command::Close => {}
-        }
-    }
-
-    lifecycle.finish(Err(session_failure));
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn abort_producer(
-    session: &AppendSessionInternal,
-    gate: &StdMutex<ProducerGate>,
-    acked_through_id: &AtomicU64,
-    lifecycle: &SessionLifecycle,
-    context: &ErrorContext,
-    batcher: &mut PartialBatch,
-    pending_batch_acks: &mut FuturesOrdered<PendingBatchAck>,
-    pending_flushes: &mut Vec<PendingFlush>,
-    cmd_rx: &mut mpsc::UnboundedReceiver<Command>,
-    reason: &'static str,
-) {
-    {
-        let mut g = gate.lock().unwrap();
-        g.closing = true;
-        lifecycle.mark_closing();
-    }
-
-    // Abort the owned AppendSession immediately (A3b, A8c) and forward its exact outcomes (A6d).
-    session.abort();
-    while let Some((batch_ack, batch_max_id, batch_records)) = pending_batch_acks.next().await {
-        let ok = batch_ack.is_ok();
-        dispatch_acks(batch_ack, batch_records);
-        if ok {
-            acked_through_id.store(batch_max_id, Ordering::Release);
-            resolve_satisfied_flushes(pending_flushes, batch_max_id);
-        }
-    }
-    let session_res = session.close().await;
-
-    cmd_rx.close();
-    let mut queued_cmds = Vec::new();
-    while let Ok(cmd) = cmd_rx.try_recv() {
-        queued_cmds.push(cmd);
-    }
-
-    let unsubmitted_records = batcher.drain_acks();
-    let has_queued_submits = queued_cmds
-        .iter()
-        .any(|cmd| matches!(cmd, Command::Submit { .. }));
-    let has_unsubmitted = !unsubmitted_records.is_empty() || has_queued_submits;
-
-    let final_result = match session_res {
-        Err(session_err) => Err(session_err),
-        Ok(()) if has_unsubmitted => Err(AppendSessionError::Aborted(AbortedError::new(
-            reason,
-            context.clone(),
-        ))),
-        Ok(()) => Ok(()),
-    };
-
-    if let Err(err) = &final_result {
-        lifecycle.set_terminal_err(err.clone());
-    } else {
-        lifecycle.mark_closing();
-    }
-
-    let unsent_err = AppendSessionError::SessionClosed(SessionClosedError::new(
-        final_result.as_ref().err().cloned(),
-        context.clone(),
-    ));
-
-    for pending in unsubmitted_records {
-        let _ = pending.ack_tx.send(Err(unsent_err.clone()));
-    }
-
-    let acked = acked_through_id.load(Ordering::Acquire);
-    for flush in pending_flushes.drain(..) {
-        if acked >= flush.target_id {
-            let _ = flush.done_tx.send(Ok(()));
-        } else {
-            let _ = flush.done_tx.send(final_result.clone());
-        }
-    }
-
-    for cmd in queued_cmds {
-        match cmd {
-            Command::Submit { ack_tx, .. } => {
-                let _ = ack_tx.send(Err(unsent_err.clone()));
-            }
-            Command::Flush { target_id, done_tx } => {
-                if acked >= target_id {
-                    let _ = done_tx.send(Ok(()));
-                } else {
-                    let _ = done_tx.send(final_result.clone());
-                }
-            }
-            Command::Close => {}
-        }
-    }
-
-    lifecycle.finish(final_result);
 }

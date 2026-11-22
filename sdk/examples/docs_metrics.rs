@@ -6,10 +6,7 @@ use std::time::Duration;
 
 use s2_sdk::{
     S2,
-    types::{
-        AccountMetricSet, BasinMetricSet, GetAccountMetricsInput, GetBasinMetricsInput,
-        GetStreamMetricsInput, S2Config, StreamMetricSet, TimeRange, Timestamp,
-    },
+    types::{AccountMetricSet, BasinMetricSet, S2Config, StreamMetricSet, TimeRange, Timestamp},
 };
 
 #[tokio::main]
@@ -25,26 +22,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Account-level: active basins over the last 30 days
     let account_metrics = client
-        .get_account_metrics(GetAccountMetricsInput::new(AccountMetricSet::ActiveBasins(
-            TimeRange::new(thirty_days_ago, now)?,
-        )))
+        .get_account_metrics(AccountMetricSet::ActiveBasins(TimeRange::new(
+            thirty_days_ago,
+            now,
+        )?))
         .await?;
 
     // Basin-level: storage usage with hourly resolution
     let basin_metrics = client
-        .get_basin_metrics(GetBasinMetricsInput::new(
+        .get_basin_metrics(
             "my-events".parse()?,
             BasinMetricSet::Storage(TimeRange::new(six_hours_ago, now)?),
-        ))
+        )
         .await?;
 
     // Stream-level: storage for a specific stream
     let stream_metrics = client
-        .get_stream_metrics(GetStreamMetricsInput::new(
+        .get_stream_metrics(
             "my-events".parse()?,
             "user-actions".parse()?,
             StreamMetricSet::Storage(TimeRange::new(hour_ago, now)?),
-        ))
+        )
         .await?;
     // ANCHOR_END: metrics
 

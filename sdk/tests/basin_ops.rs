@@ -4,7 +4,6 @@ use std::time::Duration;
 
 use assert_matches::assert_matches;
 use common::{S2Basin, SharedS2Basin, unique_stream_name, uuid};
-use futures_util::StreamExt;
 use s2_sdk::{
     error::{RequestError, ServerError},
     types::*,
@@ -93,15 +92,12 @@ async fn reconfigure_stream(basin: &S2Basin) -> Result<(), RequestError> {
     );
 
     let updated_config = basin
-        .reconfigure_stream(ReconfigureStreamInput::new(stream_name.clone(), new_config))
+        .reconfigure_stream(stream_name.clone(), new_config)
         .await?;
 
-    assert_matches!(
-        updated_config.delete_on_empty,
-        Some(DeleteOnEmptyConfig {
-            min_age_secs: 43200,
-            ..
-        })
+    assert_eq!(
+        updated_config.delete_on_empty.map(|d| d.min_age()),
+        Some(Duration::from_secs(43200))
     );
 
     Ok(())
@@ -604,12 +600,9 @@ async fn create_stream_with_full_config(basin: &SharedS2Basin) -> Result<(), Req
                 uncapped: Some(true),
                 ..
             }),
-            delete_on_empty: Some(DeleteOnEmptyConfig {
-                min_age_secs: 3600,
-                ..
-            }),
+            delete_on_empty: Some(ref delete_on_empty),
             ..
-        } if storage_class == "standard"
+        } if storage_class == "standard" && delete_on_empty.min_age() == Duration::from_secs(3600)
     );
 
     basin.delete_stream(stream_name).await?;
@@ -752,12 +745,9 @@ async fn create_stream_delete_on_empty_min_age(basin: &SharedS2Basin) -> Result<
         .await?;
 
     let retrieved = basin.get_stream_config(stream_name.clone()).await?;
-    assert_matches!(
-        retrieved.delete_on_empty,
-        Some(DeleteOnEmptyConfig {
-            min_age_secs: 3600,
-            ..
-        })
+    assert_eq!(
+        retrieved.delete_on_empty.map(|d| d.min_age()),
+        Some(Duration::from_secs(3600))
     );
 
     basin.delete_stream(stream_name).await?;
@@ -813,10 +803,10 @@ async fn reconfigure_stream_storage_class_standard(
         .await?;
 
     let config = basin
-        .reconfigure_stream(ReconfigureStreamInput::new(
+        .reconfigure_stream(
             stream_name.clone(),
             StreamReconfiguration::new().with_storage_class("standard"),
-        ))
+        )
         .await?;
 
     assert_matches!(config.storage_class.as_deref(), Some("standard"));
@@ -837,10 +827,10 @@ async fn reconfigure_stream_storage_class_express(
         .await?;
 
     let result = basin
-        .reconfigure_stream(ReconfigureStreamInput::new(
+        .reconfigure_stream(
             stream_name.clone(),
             StreamReconfiguration::new().with_storage_class("express"),
-        ))
+        )
         .await;
 
     let config = match result {
@@ -870,10 +860,10 @@ async fn reconfigure_stream_retention_policy_age(
         .await?;
 
     let config = basin
-        .reconfigure_stream(ReconfigureStreamInput::new(
+        .reconfigure_stream(
             stream_name.clone(),
             StreamReconfiguration::new().with_retention_policy(RetentionPolicy::Age(3600)),
-        ))
+        )
         .await?;
 
     assert_matches!(config.retention_policy, Some(RetentionPolicy::Age(3600)));
@@ -894,10 +884,10 @@ async fn reconfigure_stream_retention_policy_infinite(
         .await?;
 
     let result = basin
-        .reconfigure_stream(ReconfigureStreamInput::new(
+        .reconfigure_stream(
             stream_name.clone(),
             StreamReconfiguration::new().with_retention_policy(RetentionPolicy::Infinite),
-        ))
+        )
         .await;
 
     let config = match result {
@@ -932,11 +922,11 @@ async fn reconfigure_stream_timestamping_modes(basin: &SharedS2Basin) -> Result<
             .await?;
 
         let config = basin
-            .reconfigure_stream(ReconfigureStreamInput::new(
+            .reconfigure_stream(
                 stream_name.clone(),
                 StreamReconfiguration::new()
                     .with_timestamping(TimestampingReconfiguration::new().with_mode(mode.clone())),
-            ))
+            )
             .await?;
 
         match mode {
@@ -977,11 +967,11 @@ async fn reconfigure_stream_timestamping_uncapped(
             .await?;
 
         let config = basin
-            .reconfigure_stream(ReconfigureStreamInput::new(
+            .reconfigure_stream(
                 stream_name.clone(),
                 StreamReconfiguration::new()
                     .with_timestamping(TimestampingReconfiguration::new().with_uncapped(uncapped)),
-            ))
+            )
             .await?;
 
         let timestamping = config
@@ -1004,20 +994,17 @@ async fn reconfigure_stream_delete_on_empty(basin: &SharedS2Basin) -> Result<(),
         .await?;
 
     let config = basin
-        .reconfigure_stream(ReconfigureStreamInput::new(
+        .reconfigure_stream(
             stream_name.clone(),
             StreamReconfiguration::new().with_delete_on_empty(
                 DeleteOnEmptyReconfiguration::new().with_min_age(Duration::from_secs(3600))?,
             ),
-        ))
+        )
         .await?;
 
-    assert_matches!(
-        config.delete_on_empty,
-        Some(DeleteOnEmptyConfig {
-            min_age_secs: 3600,
-            ..
-        })
+    assert_eq!(
+        config.delete_on_empty.map(|d| d.min_age()),
+        Some(Duration::from_secs(3600))
     );
 
     basin.delete_stream(stream_name).await?;
@@ -1040,12 +1027,12 @@ async fn reconfigure_stream_disable_delete_on_empty(
         .await?;
 
     let config = basin
-        .reconfigure_stream(ReconfigureStreamInput::new(
+        .reconfigure_stream(
             stream_name.clone(),
             StreamReconfiguration::new().with_delete_on_empty(
                 DeleteOnEmptyReconfiguration::new().with_min_age(Duration::from_secs(0))?,
             ),
-        ))
+        )
         .await?;
 
     assert!(
@@ -1075,10 +1062,7 @@ async fn reconfigure_stream_empty_config_no_change(
         .await?;
 
     let _ = basin
-        .reconfigure_stream(ReconfigureStreamInput::new(
-            stream_name.clone(),
-            StreamReconfiguration::new(),
-        ))
+        .reconfigure_stream(stream_name.clone(), StreamReconfiguration::new())
         .await?;
 
     let retrieved = basin.get_stream_config(stream_name.clone()).await?;
@@ -1107,12 +1091,12 @@ async fn reconfigure_stream_partial_update(basin: &SharedS2Basin) -> Result<(), 
         .await?;
 
     let _ = basin
-        .reconfigure_stream(ReconfigureStreamInput::new(
+        .reconfigure_stream(
             stream_name.clone(),
             StreamReconfiguration::new().with_timestamping(
                 TimestampingReconfiguration::new().with_mode(TimestampingMode::Arrival),
             ),
-        ))
+        )
         .await?;
 
     let retrieved = basin.get_stream_config(stream_name.clone()).await?;
@@ -1141,10 +1125,10 @@ async fn reconfigure_stream_invalid_retention_age_zero(
         .await?;
 
     let result = basin
-        .reconfigure_stream(ReconfigureStreamInput::new(
+        .reconfigure_stream(
             stream_name.clone(),
             StreamReconfiguration::new().with_retention_policy(RetentionPolicy::Age(0)),
-        ))
+        )
         .await;
 
     assert_matches!(
@@ -1163,10 +1147,10 @@ async fn reconfigure_stream_invalid_retention_age_zero(
 #[tokio_shared_rt::test(shared)]
 async fn reconfigure_stream_nonexistent_errors(basin: &SharedS2Basin) -> Result<(), RequestError> {
     let result = basin
-        .reconfigure_stream(ReconfigureStreamInput::new(
+        .reconfigure_stream(
             unique_stream_name(),
             StreamReconfiguration::new().with_storage_class("standard"),
-        ))
+        )
         .await;
 
     assert_matches!(

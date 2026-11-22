@@ -1,9 +1,6 @@
 use s2_sdk::{
     S2,
-    types::{
-        BasinName, ReconfigureStreamInput, RetentionPolicy, S2Config, StreamName,
-        StreamReconfiguration,
-    },
+    types::{BasinName, RetentionPolicy, S2Config, StreamName, StreamReconfiguration},
 };
 
 #[tokio::main]
@@ -20,11 +17,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let s2 = S2::new(S2Config::new(access_token))?;
     let basin = s2.basin(basin_name);
 
-    let input = ReconfigureStreamInput::new(
-        stream_name,
-        StreamReconfiguration::new().with_retention_policy(RetentionPolicy::Age(10 * 24 * 60 * 60)),
-    );
-    let config = basin.reconfigure_stream(input).await?;
+    let config = basin
+        .reconfigure_stream(
+            stream_name,
+            StreamReconfiguration::new()
+                .with_retention_policy(RetentionPolicy::Age(10 * 24 * 60 * 60)),
+        )
+        .await?;
     println!("{config:#?}");
 
     Ok(())

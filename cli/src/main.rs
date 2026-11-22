@@ -397,8 +397,15 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
     )?);
     let token_source = Some(credential.source());
     let target = environment::Target::detect(&cli_config);
-    let s2 = S2::new(sdk_config.clone())
-        .map_err(|e| CliError::SdkInit(e.into()).with_token_source(token_source))?;
+    let s2 = S2::new(sdk_config.clone()).map_err(|e| {
+        if let Some(source) = token_source
+            && !error::is_valid_access_token(credential.access_token())
+        {
+            CliError::MalformedAccessToken(e.into(), source)
+        } else {
+            CliError::SdkInit(e.into())
+        }
+    })?;
     let mut exit_code = ExitCode::SUCCESS;
     let result: Result<(), CliError> = (async {
         match command {
@@ -621,7 +628,7 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
                 print_token_activity(&metrics);
             } else if billable_usage {
                 print_time_range(range.as_ref());
-                let by_interval = range.is_some_and(|range| range.interval.is_some());
+                let by_interval = range.is_some_and(|range| range.interval().is_some());
                 print_estimated_billable_usage(&metrics, by_interval);
             } else {
                 print_metrics(&metrics, output, range.as_ref());
@@ -924,7 +931,7 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
                         .with_mode(TimestampingMode::ClientRequire)
                         .with_uncapped(true),
                 );
-            stream_config.storage_class = args.storage_class;
+            stream_config.storage_class = args.storage_class.map(Into::into);
 
             let s2 = S2::new(sdk_config.clone().with_retry(
                 RetryConfig::new().with_append_retry_policy(AppendRetryPolicy::NoSideEffects),
@@ -1232,7 +1239,7 @@ fn print_metrics(
     }
 
     print_time_range(range);
-    let summed = range.is_some_and(|range| range.interval.is_none());
+    let summed = range.is_some_and(|range| range.interval().is_none());
     if summed {
         let series: Vec<_> = metrics
             .iter()

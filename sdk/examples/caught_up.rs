@@ -1,10 +1,9 @@
-use futures_util::StreamExt;
 use s2_sdk::{
     S2,
+    read_session::ReadSessionConfig,
     types::{
         AppendInput, AppendRecord, AppendRecordBatch, BasinName, CreateBasinInput,
-        CreateStreamInput, ReadFrom, ReadInput, ReadSessionConfig, ReadStart, S2Config,
-        S2Endpoints, StreamName,
+        CreateStreamInput, ReadFrom, ReadInput, S2Config, S2Endpoints, StreamName,
     },
 };
 
@@ -40,7 +39,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     let mut session = stream.read_session(
-        ReadInput::new().with_start(ReadStart::new().with_from(ReadFrom::TailOffset(2))),
+        ReadInput::new().with_from(ReadFrom::TailOffset(2)),
         ReadSessionConfig::default(),
     )?;
     let mut caught_up = session.caught_up();

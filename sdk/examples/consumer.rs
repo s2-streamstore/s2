@@ -1,7 +1,7 @@
-use futures_util::StreamExt;
 use s2_sdk::{
     S2,
-    types::{BasinName, ReadInput, ReadSessionConfig, S2Config, StreamName},
+    read_session::ReadSessionConfig,
+    types::{BasinName, ReadInput, S2Config, StreamName},
 };
 use tokio::select;
 

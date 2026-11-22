@@ -115,5 +115,8 @@ pub mod append_session {
 }
 /// Continuous read sessions.
 pub mod read_session {
-    pub use crate::session::read::{ReadBatchSession, ReadSession, ReadSessionState};
+    pub use crate::session::read::{
+        CaughtUp, ReadBatchSession, ReadSession, ReadSessionConfig, ReadSessionRetryPolicy,
+        ReadSessionState,
+    };
 }

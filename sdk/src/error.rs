@@ -21,14 +21,68 @@ use crate::{
     types::{FencingToken, StreamPosition},
 };
 
+/// Borrowed operation metadata kept on the stack during calls so the success path allocates
+/// nothing; converted into an [`ErrorContext`] only when an error actually occurs (`E7`).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct OpScope<'a> {
+    pub operation: &'static str,
+    pub basin: Option<&'a str>,
+    pub stream: Option<&'a str>,
+    pub read_only: bool,
+}
+
+impl<'a> OpScope<'a> {
+    pub(crate) const fn account(operation: &'static str, read_only: bool) -> Self {
+        Self {
+            operation,
+            basin: None,
+            stream: None,
+            read_only,
+        }
+    }
+
+    pub(crate) const fn basin(operation: &'static str, basin: &'a str, read_only: bool) -> Self {
+        Self {
+            operation,
+            basin: Some(basin),
+            stream: None,
+            read_only,
+        }
+    }
+
+    pub(crate) const fn stream(
+        operation: &'static str,
+        basin: &'a str,
+        stream: &'a str,
+        read_only: bool,
+    ) -> Self {
+        Self {
+            operation,
+            basin: Some(basin),
+            stream: Some(stream),
+            read_only,
+        }
+    }
+
+    pub(crate) fn context(self, attempts: u32) -> ErrorContext {
+        ErrorContext(Some(Arc::new(ErrorContextInner {
+            operation: Some(self.operation),
+            basin: self.basin.map(str::to_owned),
+            stream: self.stream.map(str::to_owned),
+            attempts,
+            read_only: self.read_only,
+        })))
+    }
+}
+
 /// Context attached to SDK errors for diagnostic display (`E7`) and read-only classification.
 ///
 /// Stored behind an `Option<Arc<...>>` so error values stay compact on the stack and `Clone` is
 /// O(1) without heap allocation on the default path.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct ErrorContext(Option<Arc<ErrorContextInner>>);
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default)]
 struct ErrorContextInner {
     operation: Option<&'static str>,
     basin: Option<String>,
@@ -39,42 +93,16 @@ struct ErrorContextInner {
 
 impl ErrorContext {
     pub(crate) fn account(operation: &'static str, read_only: bool) -> Self {
-        Self(Some(Arc::new(ErrorContextInner {
-            operation: Some(operation),
-            basin: None,
-            stream: None,
-            attempts: 1,
-            read_only,
-        })))
-    }
-
-    pub(crate) fn basin(
-        operation: &'static str,
-        basin: impl Into<String>,
-        read_only: bool,
-    ) -> Self {
-        Self(Some(Arc::new(ErrorContextInner {
-            operation: Some(operation),
-            basin: Some(basin.into()),
-            stream: None,
-            attempts: 1,
-            read_only,
-        })))
+        OpScope::account(operation, read_only).context(1)
     }
 
     pub(crate) fn stream(
         operation: &'static str,
-        basin: impl Into<String>,
-        stream: impl Into<String>,
+        basin: &str,
+        stream: &str,
         read_only: bool,
     ) -> Self {
-        Self(Some(Arc::new(ErrorContextInner {
-            operation: Some(operation),
-            basin: Some(basin.into()),
-            stream: Some(stream.into()),
-            attempts: 1,
-            read_only,
-        })))
+        OpScope::stream(operation, basin, stream, read_only).context(1)
     }
 
     fn inner_mut(&mut self) -> &mut ErrorContextInner {
@@ -223,12 +251,16 @@ impl ServerError {
         self
     }
 
-    /// Return the server error code when it is recognized by this SDK version.
+    /// Return the server error code when it is recognized by this SDK version **and** paired with
+    /// the HTTP status defined for it (`E4b`).
     ///
     /// The raw [`code`](Self::code) remains available so callers can preserve and report codes
-    /// introduced by newer servers.
+    /// introduced by newer servers or returned with unexpected statuses.
     pub fn known_code(&self) -> Option<ErrorCode> {
-        self.code.as_deref().and_then(|c| c.parse().ok())
+        self.code
+            .as_deref()
+            .and_then(|c| c.parse::<ErrorCode>().ok())
+            .filter(|known| known.status() == self.status)
     }
 
     /// Whether retrying the request may succeed.
@@ -646,8 +678,7 @@ impl fmt::Display for ProtocolError {
 impl std::error::Error for ProtocolError {}
 
 /// A call was made on a client after `close()`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
+#[derive(Debug, Clone)]
 pub struct ClientClosedError {
     pub(crate) context: ErrorContext,
 }
@@ -732,10 +763,8 @@ impl std::error::Error for AbortedError {}
 /// A definite final error on an append followed an earlier attempt that may have taken effect,
 /// making the overall append indeterminate.
 #[derive(Debug, Clone)]
-#[non_exhaustive]
 pub struct IndefiniteAppendError<E> {
-    /// The definite error returned by the final attempt.
-    pub final_attempt_error: Box<E>,
+    final_attempt_error: Box<E>,
 }
 
 impl<E> IndefiniteAppendError<E> {
@@ -762,26 +791,20 @@ impl<E> IndefiniteAppendError<E> {
     }
 }
 
-impl IndefiniteAppendError<AppendError> {
-    /// Whether retrying the underlying error may succeed.
-    pub fn is_retryable(&self) -> bool {
-        self.final_attempt_error.is_retryable()
-    }
+macro_rules! impl_indefinite_is_retryable {
+    ($($ty:ty),+ $(,)?) => {
+        $(
+            impl IndefiniteAppendError<$ty> {
+                /// Whether retrying the underlying error may succeed.
+                pub fn is_retryable(&self) -> bool {
+                    self.final_attempt_error.is_retryable()
+                }
+            }
+        )+
+    };
 }
 
-impl IndefiniteAppendError<AppendSessionError> {
-    /// Whether retrying the underlying error may succeed.
-    pub fn is_retryable(&self) -> bool {
-        self.final_attempt_error.is_retryable()
-    }
-}
-
-impl IndefiniteAppendError<S2Error> {
-    /// Whether retrying the underlying error may succeed.
-    pub fn is_retryable(&self) -> bool {
-        self.final_attempt_error.is_retryable()
-    }
-}
+impl_indefinite_is_retryable!(AppendError, AppendSessionError, S2Error);
 
 impl<E: fmt::Display> fmt::Display for IndefiniteAppendError<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -801,10 +824,8 @@ impl<E: std::error::Error + 'static> std::error::Error for IndefiniteAppendError
 
 /// A session closed or began closing before handling the requested operation.
 #[derive(Debug, Clone)]
-#[non_exhaustive]
 pub struct SessionClosedError<E> {
-    /// The session's failure, if it closed due to an error.
-    pub failure: Option<Box<E>>,
+    failure: Option<Box<E>>,
     pub(crate) context: ErrorContext,
 }
 
@@ -856,6 +877,28 @@ impl<E: std::error::Error + 'static> std::error::Error for SessionClosedError<E>
             .as_deref()
             .map(|e| e as &(dyn std::error::Error + 'static))
     }
+}
+
+macro_rules! delegate_is_retryable {
+    ($self:expr, [$($variant:ident),* $(,)?]) => {
+        match $self {
+            $(Self::$variant(e) => e.is_retryable(),)*
+            Self::Validation(_) => false,
+            #[cfg(feature = "_hidden")]
+            Self::AccessTokenProvider(e) => e.is_retryable(),
+        }
+    };
+}
+
+macro_rules! delegate_has_no_side_effects {
+    ($self:expr, [$($variant:ident),* $(,)?]) => {
+        match $self {
+            $(Self::$variant(e) => e.has_no_side_effects(),)*
+            Self::Validation(_) => true,
+            #[cfg(feature = "_hidden")]
+            Self::AccessTokenProvider(_) => true,
+        }
+    };
 }
 
 /// Base error type that every SDK operation error converts into.
@@ -910,44 +953,44 @@ pub enum S2Error {
 impl S2Error {
     /// Whether retrying the operation may succeed.
     pub fn is_retryable(&self) -> bool {
-        match self {
-            Self::Server(e) => e.is_retryable(),
-            Self::SeqNumMismatch(e) => e.is_retryable(),
-            Self::FencingTokenMismatch(e) => e.is_retryable(),
-            Self::ReadUnwritten(e) => e.is_retryable(),
-            Self::IndefiniteAppend(e) => e.is_retryable(),
-            Self::SessionClosed(e) => e.is_retryable(),
-            Self::Validation(_) => false,
-            Self::Connect(e) => e.is_retryable(),
-            Self::ConnectionLost(e) => e.is_retryable(),
-            Self::Timeout(e) => e.is_retryable(),
-            Self::Protocol(e) => e.is_retryable(),
-            Self::ClientClosed(e) => e.is_retryable(),
-            Self::Aborted(e) => e.is_retryable(),
-            #[cfg(feature = "_hidden")]
-            Self::AccessTokenProvider(e) => e.is_retryable(),
-        }
+        delegate_is_retryable!(
+            self,
+            [
+                Server,
+                SeqNumMismatch,
+                FencingTokenMismatch,
+                ReadUnwritten,
+                IndefiniteAppend,
+                SessionClosed,
+                Connect,
+                ConnectionLost,
+                Timeout,
+                Protocol,
+                ClientClosed,
+                Aborted,
+            ]
+        )
     }
 
     /// Whether the failed attempt certainly had no side effects.
     pub fn has_no_side_effects(&self) -> bool {
-        match self {
-            Self::Server(e) => e.has_no_side_effects(),
-            Self::SeqNumMismatch(e) => e.has_no_side_effects(),
-            Self::FencingTokenMismatch(e) => e.has_no_side_effects(),
-            Self::ReadUnwritten(e) => e.has_no_side_effects(),
-            Self::IndefiniteAppend(e) => e.has_no_side_effects(),
-            Self::SessionClosed(e) => e.has_no_side_effects(),
-            Self::Validation(_) => true,
-            Self::Connect(e) => e.has_no_side_effects(),
-            Self::ConnectionLost(e) => e.has_no_side_effects(),
-            Self::Timeout(e) => e.has_no_side_effects(),
-            Self::Protocol(e) => e.has_no_side_effects(),
-            Self::ClientClosed(e) => e.has_no_side_effects(),
-            Self::Aborted(e) => e.has_no_side_effects(),
-            #[cfg(feature = "_hidden")]
-            Self::AccessTokenProvider(_) => true,
-        }
+        delegate_has_no_side_effects!(
+            self,
+            [
+                Server,
+                SeqNumMismatch,
+                FencingTokenMismatch,
+                ReadUnwritten,
+                IndefiniteAppend,
+                SessionClosed,
+                Connect,
+                ConnectionLost,
+                Timeout,
+                Protocol,
+                ClientClosed,
+                Aborted,
+            ]
+        )
     }
 
     /// Return the underlying [`ServerError`] when this error is a direct server error
@@ -983,8 +1026,7 @@ impl S2Error {
     }
 }
 
-/// Errors returned by account, basin, stream-management, and metrics operations, as well as client
-/// construction.
+/// Errors returned by account, basin, stream-management, and metrics operations.
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum RequestError {
@@ -1021,34 +1063,34 @@ pub enum RequestError {
 impl RequestError {
     /// Whether retrying the operation may succeed.
     pub fn is_retryable(&self) -> bool {
-        match self {
-            Self::Server(e) => e.is_retryable(),
-            Self::Validation(_) => false,
-            Self::Connect(e) => e.is_retryable(),
-            Self::ConnectionLost(e) => e.is_retryable(),
-            Self::Timeout(e) => e.is_retryable(),
-            Self::Protocol(e) => e.is_retryable(),
-            Self::ClientClosed(e) => e.is_retryable(),
-            Self::Aborted(e) => e.is_retryable(),
-            #[cfg(feature = "_hidden")]
-            Self::AccessTokenProvider(e) => e.is_retryable(),
-        }
+        delegate_is_retryable!(
+            self,
+            [
+                Server,
+                Connect,
+                ConnectionLost,
+                Timeout,
+                Protocol,
+                ClientClosed,
+                Aborted,
+            ]
+        )
     }
 
     /// Whether the failed attempt certainly had no side effects.
     pub fn has_no_side_effects(&self) -> bool {
-        match self {
-            Self::Server(e) => e.has_no_side_effects(),
-            Self::Validation(_) => true,
-            Self::Connect(e) => e.has_no_side_effects(),
-            Self::ConnectionLost(e) => e.has_no_side_effects(),
-            Self::Timeout(e) => e.has_no_side_effects(),
-            Self::Protocol(e) => e.has_no_side_effects(),
-            Self::ClientClosed(e) => e.has_no_side_effects(),
-            Self::Aborted(e) => e.has_no_side_effects(),
-            #[cfg(feature = "_hidden")]
-            Self::AccessTokenProvider(_) => true,
-        }
+        delegate_has_no_side_effects!(
+            self,
+            [
+                Server,
+                Connect,
+                ConnectionLost,
+                Timeout,
+                Protocol,
+                ClientClosed,
+                Aborted,
+            ]
+        )
     }
 
     /// Return the server error, if present.
@@ -1091,9 +1133,9 @@ impl From<ApiError> for RequestError {
             ApiError::Protocol(e) => Self::Protocol(e),
             ApiError::ClientClosed(e) => Self::ClientClosed(e),
             ApiError::Aborted(e) => Self::Aborted(e),
-            ApiError::IndefiniteAppend {
-                final_attempt_error,
-            } => (*final_attempt_error).into(),
+            ApiError::IndefiniteAppend { .. } => {
+                unreachable!("IndefiniteAppend is only produced on append operations")
+            }
             #[cfg(feature = "_hidden")]
             ApiError::AccessTokenProvider(e) => Self::AccessTokenProvider(e),
         }
@@ -1140,19 +1182,19 @@ pub enum ReadError {
 impl ReadError {
     /// Whether retrying the operation may succeed.
     pub fn is_retryable(&self) -> bool {
-        match self {
-            Self::Server(e) => e.is_retryable(),
-            Self::ReadUnwritten(e) => e.is_retryable(),
-            Self::Validation(_) => false,
-            Self::Connect(e) => e.is_retryable(),
-            Self::ConnectionLost(e) => e.is_retryable(),
-            Self::Timeout(e) => e.is_retryable(),
-            Self::Protocol(e) => e.is_retryable(),
-            Self::ClientClosed(e) => e.is_retryable(),
-            Self::Aborted(e) => e.is_retryable(),
-            #[cfg(feature = "_hidden")]
-            Self::AccessTokenProvider(e) => e.is_retryable(),
-        }
+        delegate_is_retryable!(
+            self,
+            [
+                Server,
+                ReadUnwritten,
+                Connect,
+                ConnectionLost,
+                Timeout,
+                Protocol,
+                ClientClosed,
+                Aborted,
+            ]
+        )
     }
 
     /// Whether the failed attempt certainly had no side effects (always `true` for reads).
@@ -1203,9 +1245,9 @@ impl From<ApiError> for ReadError {
             ApiError::Protocol(e) => Self::Protocol(e),
             ApiError::ClientClosed(e) => Self::ClientClosed(e),
             ApiError::Aborted(e) => Self::Aborted(e),
-            ApiError::IndefiniteAppend {
-                final_attempt_error,
-            } => (*final_attempt_error).into(),
+            ApiError::IndefiniteAppend { .. } => {
+                unreachable!("IndefiniteAppend is only produced on append operations")
+            }
             #[cfg(feature = "_hidden")]
             ApiError::AccessTokenProvider(e) => Self::AccessTokenProvider(e),
         }
@@ -1258,40 +1300,40 @@ pub enum AppendError {
 impl AppendError {
     /// Whether retrying the operation may succeed.
     pub fn is_retryable(&self) -> bool {
-        match self {
-            Self::Server(e) => e.is_retryable(),
-            Self::SeqNumMismatch(e) => e.is_retryable(),
-            Self::FencingTokenMismatch(e) => e.is_retryable(),
-            Self::IndefiniteAppend(e) => e.is_retryable(),
-            Self::Validation(_) => false,
-            Self::Connect(e) => e.is_retryable(),
-            Self::ConnectionLost(e) => e.is_retryable(),
-            Self::Timeout(e) => e.is_retryable(),
-            Self::Protocol(e) => e.is_retryable(),
-            Self::ClientClosed(e) => e.is_retryable(),
-            Self::Aborted(e) => e.is_retryable(),
-            #[cfg(feature = "_hidden")]
-            Self::AccessTokenProvider(e) => e.is_retryable(),
-        }
+        delegate_is_retryable!(
+            self,
+            [
+                Server,
+                SeqNumMismatch,
+                FencingTokenMismatch,
+                IndefiniteAppend,
+                Connect,
+                ConnectionLost,
+                Timeout,
+                Protocol,
+                ClientClosed,
+                Aborted,
+            ]
+        )
     }
 
     /// Whether the failed attempt certainly had no side effects.
     pub fn has_no_side_effects(&self) -> bool {
-        match self {
-            Self::Server(e) => e.has_no_side_effects(),
-            Self::SeqNumMismatch(e) => e.has_no_side_effects(),
-            Self::FencingTokenMismatch(e) => e.has_no_side_effects(),
-            Self::IndefiniteAppend(e) => e.has_no_side_effects(),
-            Self::Validation(_) => true,
-            Self::Connect(e) => e.has_no_side_effects(),
-            Self::ConnectionLost(e) => e.has_no_side_effects(),
-            Self::Timeout(e) => e.has_no_side_effects(),
-            Self::Protocol(e) => e.has_no_side_effects(),
-            Self::ClientClosed(e) => e.has_no_side_effects(),
-            Self::Aborted(e) => e.has_no_side_effects(),
-            #[cfg(feature = "_hidden")]
-            Self::AccessTokenProvider(_) => true,
-        }
+        delegate_has_no_side_effects!(
+            self,
+            [
+                Server,
+                SeqNumMismatch,
+                FencingTokenMismatch,
+                IndefiniteAppend,
+                Connect,
+                ConnectionLost,
+                Timeout,
+                Protocol,
+                ClientClosed,
+                Aborted,
+            ]
+        )
     }
 
     /// Return the underlying [`ServerError`] for direct server errors (including `412` mismatches).
@@ -1409,42 +1451,42 @@ pub enum AppendSessionError {
 impl AppendSessionError {
     /// Whether retrying the operation may succeed.
     pub fn is_retryable(&self) -> bool {
-        match self {
-            Self::Server(e) => e.is_retryable(),
-            Self::SeqNumMismatch(e) => e.is_retryable(),
-            Self::FencingTokenMismatch(e) => e.is_retryable(),
-            Self::IndefiniteAppend(e) => e.is_retryable(),
-            Self::SessionClosed(e) => e.is_retryable(),
-            Self::Validation(_) => false,
-            Self::Connect(e) => e.is_retryable(),
-            Self::ConnectionLost(e) => e.is_retryable(),
-            Self::Timeout(e) => e.is_retryable(),
-            Self::Protocol(e) => e.is_retryable(),
-            Self::ClientClosed(e) => e.is_retryable(),
-            Self::Aborted(e) => e.is_retryable(),
-            #[cfg(feature = "_hidden")]
-            Self::AccessTokenProvider(e) => e.is_retryable(),
-        }
+        delegate_is_retryable!(
+            self,
+            [
+                Server,
+                SeqNumMismatch,
+                FencingTokenMismatch,
+                IndefiniteAppend,
+                SessionClosed,
+                Connect,
+                ConnectionLost,
+                Timeout,
+                Protocol,
+                ClientClosed,
+                Aborted,
+            ]
+        )
     }
 
     /// Whether the failed attempt certainly had no side effects.
     pub fn has_no_side_effects(&self) -> bool {
-        match self {
-            Self::Server(e) => e.has_no_side_effects(),
-            Self::SeqNumMismatch(e) => e.has_no_side_effects(),
-            Self::FencingTokenMismatch(e) => e.has_no_side_effects(),
-            Self::IndefiniteAppend(e) => e.has_no_side_effects(),
-            Self::SessionClosed(e) => e.has_no_side_effects(),
-            Self::Validation(_) => true,
-            Self::Connect(e) => e.has_no_side_effects(),
-            Self::ConnectionLost(e) => e.has_no_side_effects(),
-            Self::Timeout(e) => e.has_no_side_effects(),
-            Self::Protocol(e) => e.has_no_side_effects(),
-            Self::ClientClosed(e) => e.has_no_side_effects(),
-            Self::Aborted(e) => e.has_no_side_effects(),
-            #[cfg(feature = "_hidden")]
-            Self::AccessTokenProvider(_) => true,
-        }
+        delegate_has_no_side_effects!(
+            self,
+            [
+                Server,
+                SeqNumMismatch,
+                FencingTokenMismatch,
+                IndefiniteAppend,
+                SessionClosed,
+                Connect,
+                ConnectionLost,
+                Timeout,
+                Protocol,
+                ClientClosed,
+                Aborted,
+            ]
+        )
     }
 
     /// Return the underlying [`ServerError`] for direct server errors (including `412` mismatches).
@@ -1610,20 +1652,20 @@ pub enum ReadSessionError {
 impl ReadSessionError {
     /// Whether retrying the operation may succeed.
     pub fn is_retryable(&self) -> bool {
-        match self {
-            Self::Server(e) => e.is_retryable(),
-            Self::ReadUnwritten(e) => e.is_retryable(),
-            Self::SessionClosed(e) => e.is_retryable(),
-            Self::Validation(_) => false,
-            Self::Connect(e) => e.is_retryable(),
-            Self::ConnectionLost(e) => e.is_retryable(),
-            Self::Timeout(e) => e.is_retryable(),
-            Self::Protocol(e) => e.is_retryable(),
-            Self::ClientClosed(e) => e.is_retryable(),
-            Self::Aborted(e) => e.is_retryable(),
-            #[cfg(feature = "_hidden")]
-            Self::AccessTokenProvider(e) => e.is_retryable(),
-        }
+        delegate_is_retryable!(
+            self,
+            [
+                Server,
+                ReadUnwritten,
+                SessionClosed,
+                Connect,
+                ConnectionLost,
+                Timeout,
+                Protocol,
+                ClientClosed,
+                Aborted,
+            ]
+        )
     }
 
     /// Whether the failed attempt certainly had no side effects (always `true` for reads).
@@ -1745,10 +1787,9 @@ pub(crate) fn server_error_has_no_side_effects(status: StatusCode, code: Option<
 }
 
 pub(crate) fn classify_http_error(err: client::HttpError, context: ErrorContext) -> ApiError {
-    let err_msg = err.to_string();
     match err {
-        client::HttpError::Send(ref send_err) if send_err.is_connect() => {
-            ApiError::Connect(ConnectError::new(err_msg, context))
+        client::HttpError::Connect(message) => {
+            ApiError::Connect(ConnectError::new(message, context))
         }
         client::HttpError::Timeout => {
             ApiError::Timeout(TimeoutError::new("request timed out", context))
@@ -1757,27 +1798,14 @@ pub(crate) fn classify_http_error(err: client::HttpError, context: ErrorContext)
         client::HttpError::Aborted => {
             ApiError::Aborted(AbortedError::new("client closed", context))
         }
-        client::HttpError::Send(_) | client::HttpError::Receive(_) => {
-            if let Some(hyper_err) = source_err::<hyper::Error>(&err) {
-                let detail = format!("{hyper_err} -> {err_msg}");
-                if hyper_err.is_parse() || hyper_err.is_user() {
-                    return ApiError::Protocol(ProtocolError::new(detail, context));
-                }
-                if source_err::<h2::Error>(&err)
-                    .is_some_and(|e| e.reason() == Some(h2::Reason::REFUSED_STREAM))
-                {
-                    return ApiError::ConnectionLost(ConnectionLostError::new(
-                        detail, true, context,
-                    ));
-                }
-                return ApiError::ConnectionLost(ConnectionLostError::new(detail, false, context));
+        client::HttpError::Transport(hyper_err) => {
+            let detail = client::format_error_chain(&hyper_err);
+            if hyper_err.is_parse() || hyper_err.is_user() {
+                return ApiError::Protocol(ProtocolError::new(detail, context));
             }
-            if source_err::<h2::Error>(&err)
-                .is_some_and(|e| e.reason() == Some(h2::Reason::REFUSED_STREAM))
-            {
-                return ApiError::ConnectionLost(ConnectionLostError::new(err_msg, true, context));
-            }
-            ApiError::ConnectionLost(ConnectionLostError::new(err_msg, false, context))
+            let refused = source_err::<h2::Error>(&hyper_err)
+                .is_some_and(|e| e.reason() == Some(h2::Reason::REFUSED_STREAM));
+            ApiError::ConnectionLost(ConnectionLostError::new(detail, refused, context))
         }
         client::HttpError::RequestBuild(message) => ApiError::Protocol(ProtocolError::new(
             format!("request build: {message}"),
@@ -1843,10 +1871,12 @@ mod tests {
     #[test]
     fn server_classification_falls_back_to_status_on_status_mismatch() {
         let mismatch = response(StatusCode::INTERNAL_SERVER_ERROR, Some("rate_limited"));
+        assert_eq!(mismatch.known_code(), None);
         assert!(mismatch.is_retryable());
         assert!(!mismatch.has_no_side_effects());
 
         let non_retryable_status = response(StatusCode::BAD_REQUEST, Some("unavailable"));
+        assert_eq!(non_retryable_status.known_code(), None);
         assert!(!non_retryable_status.is_retryable());
         assert!(!non_retryable_status.has_no_side_effects());
     }
@@ -1872,6 +1902,13 @@ mod tests {
     // spec: r1 E3
     #[test]
     fn http_error_classification_matches_e3() {
+        assert!(matches!(
+            classify_http_error(
+                client::HttpError::Connect("dns failed".to_owned()),
+                ErrorContext::default()
+            ),
+            ApiError::Connect(ConnectError { message, .. }) if message.contains("dns failed")
+        ));
         assert!(matches!(
             classify_http_error(
                 client::HttpError::RequestBuild("bad request".to_owned()),

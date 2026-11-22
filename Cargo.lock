@@ -5123,7 +5123,6 @@ dependencies = [
  "async-trait",
  "base64ct",
  "bytes",
- "compact_str",
  "futures-core",
  "futures-util",
  "h2",

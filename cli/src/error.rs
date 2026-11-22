@@ -1,8 +1,5 @@
 use miette::Diagnostic;
-use s2_sdk::{
-    error::{ErrorCode, S2Error, ServerError},
-    types::ValidationError,
-};
+use s2_sdk::error::{ErrorCode, S2Error, ServerError};
 use thiserror::Error;
 
 use crate::environment::Target;
@@ -142,11 +139,6 @@ impl CliError {
             (CliError::Operation(kind, source), Some(token_source)) if is_auth_error(&source) => {
                 CliError::UnauthorizedAccessToken(kind, source, token_source)
             }
-            (CliError::SdkInit(source), Some(token_source))
-                if is_malformed_access_token(&source) =>
-            {
-                CliError::MalformedAccessToken(source, token_source)
-            }
             (err, _) => err,
         }
     }
@@ -274,11 +266,8 @@ fn is_not_implemented(err: &SdkError) -> bool {
         .is_some_and(|code| matches!(code, ErrorCode::NotImplemented))
 }
 
-fn is_malformed_access_token(err: &SdkError) -> bool {
-    matches!(
-        err,
-        S2Error::Validation(ValidationError(message)) if message.contains("access token")
-    )
+pub fn is_valid_access_token(token: &str) -> bool {
+    !token.is_empty() && reqwest::header::HeaderValue::from_str(&format!("Bearer {token}")).is_ok()
 }
 
 #[cfg(test)]
@@ -409,7 +398,11 @@ mod tests {
         #[case] token_source: TokenSource,
         #[case] expected: &str,
     ) {
-        let sdk_error = || S2Error::Validation(ValidationError("invalid access token: bad".into()));
+        let sdk_error = || {
+            S2Error::Validation(s2_sdk::types::ValidationError(
+                "invalid access token: bad".into(),
+            ))
+        };
         for error in [
             CliError::UnauthorizedAccessToken(OpKind::ListBasins, sdk_error(), token_source),
             CliError::MalformedAccessToken(sdk_error(), token_source),

@@ -115,6 +115,23 @@ impl<T: StrProps> TryFrom<CompactString> for NetworkPolicySlugStr<T> {
     }
 }
 
+impl<T: StrProps> TryFrom<String> for NetworkPolicySlugStr<T> {
+    type Error = ValidationError;
+
+    fn try_from(slug: String) -> Result<Self, Self::Error> {
+        Self::validate_str(&slug)?;
+        Ok(Self(CompactString::from(slug), PhantomData))
+    }
+}
+
+impl<T: StrProps> TryFrom<&str> for NetworkPolicySlugStr<T> {
+    type Error = ValidationError;
+
+    fn try_from(slug: &str) -> Result<Self, Self::Error> {
+        slug.parse()
+    }
+}
+
 impl<T: StrProps> FromStr for NetworkPolicySlugStr<T> {
     type Err = ValidationError;
 

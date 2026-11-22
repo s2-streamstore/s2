@@ -242,6 +242,46 @@ mod tests {
         assert_eq!(decoded.cipher, serde_value.cipher);
     }
 
+    #[test]
+    fn stream_meta_deser_legacy_time_rfc3339_json() {
+        let json = br#"{
+            "config": null,
+            "cipher": null,
+            "created_at": "2025-03-15T12:34:56.123456789Z",
+            "deleted_at": null,
+            "creation_idempotency_key": null
+        }"#;
+        let decoded = super::deser_value(Bytes::from_static(json)).unwrap();
+        assert_eq!(
+            decoded.created_at,
+            "2025-03-15T12:34:56.123456789Z"
+                .parse::<Timestamp>()
+                .unwrap()
+        );
+        assert_eq!(decoded.deleted_at, None);
+
+        let deleting_json = br#"{
+            "config": null,
+            "cipher": null,
+            "created_at": "2025-03-15T12:34:56Z",
+            "deleted_at": "2025-03-16T01:02:03.000000001Z",
+            "creation_idempotency_key": null
+        }"#;
+        let decoded = super::deser_value(Bytes::from_static(deleting_json)).unwrap();
+        assert_eq!(
+            decoded.created_at,
+            "2025-03-15T12:34:56Z".parse::<Timestamp>().unwrap()
+        );
+        assert_eq!(
+            decoded.deleted_at,
+            Some(
+                "2025-03-16T01:02:03.000000001Z"
+                    .parse::<Timestamp>()
+                    .unwrap()
+            )
+        );
+    }
+
     fn stream_name_prefix_strategy() -> impl Strategy<Value = StreamNamePrefix> {
         prop_oneof![
             Just(StreamNamePrefix::default()),

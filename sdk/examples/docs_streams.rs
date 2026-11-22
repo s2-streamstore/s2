@@ -4,14 +4,14 @@
 
 use std::time::Duration;
 
-use futures_util::StreamExt;
 use s2_sdk::{
     S2,
     append_session::AppendSessionConfig,
     producer::ProducerConfig,
+    read_session::ReadSessionConfig,
     types::{
-        AppendInput, AppendRecord, AppendRecordBatch, BasinName, ReadFrom, ReadInput, ReadLimits,
-        ReadSessionConfig, ReadStart, ReadStop, S2Config, StreamName,
+        AppendInput, AppendRecord, AppendRecordBatch, BasinName, ReadFrom, ReadInput, S2Config,
+        StreamName,
     },
 };
 
@@ -57,8 +57,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let batch = stream
         .read(
             ReadInput::new()
-                .with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0)))
-                .with_stop(ReadStop::new().with_limits(ReadLimits::new().with_count(100))),
+                .with_from(ReadFrom::SeqNum(0))
+                .with_count(100),
         )
         .await?;
 
@@ -118,7 +118,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ANCHOR: read-session
     let mut session = stream.read_session(
-        ReadInput::new().with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0))),
+        ReadInput::new().with_from(ReadFrom::SeqNum(0)),
         ReadSessionConfig::default(),
     )?;
 
@@ -131,7 +131,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ANCHOR: read-session-tail-offset
     // Start reading from 10 records before the current tail
     let mut session = stream.read_session(
-        ReadInput::new().with_start(ReadStart::new().with_from(ReadFrom::TailOffset(10))),
+        ReadInput::new().with_from(ReadFrom::TailOffset(10)),
         ReadSessionConfig::default(),
     )?;
 
@@ -148,7 +148,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .as_millis() as u64
         - 3600 * 1000;
     let mut session = stream.read_session(
-        ReadInput::new().with_start(ReadStart::new().with_from(ReadFrom::Timestamp(one_hour_ago))),
+        ReadInput::new().with_from(ReadFrom::Timestamp(one_hour_ago)),
         ReadSessionConfig::default(),
     )?;
 
@@ -166,8 +166,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         - 3600 * 1000;
     let mut session = stream.read_session(
         ReadInput::new()
-            .with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0)))
-            .with_stop(ReadStop::new().with_until(..one_hour_ago)),
+            .with_from(ReadFrom::SeqNum(0))
+            .with_until(one_hour_ago),
         ReadSessionConfig::default(),
     )?;
 
@@ -182,8 +182,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // for new ones
     let mut session = stream.read_session(
         ReadInput::new()
-            .with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0)))
-            .with_stop(ReadStop::new().with_wait(Duration::from_secs(30))?),
+            .with_from(ReadFrom::SeqNum(0))
+            .with_wait(Duration::from_secs(30))?,
         ReadSessionConfig::default(),
     )?;
 

@@ -85,15 +85,12 @@ async fn basin_config_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
         BasinConfig {
             default_stream_config: Some(StreamConfig {
                 storage_class: Some(ref storage_class),
-                delete_on_empty: Some(DeleteOnEmptyConfig {
-                    min_age_secs: 60,
-                    ..
-                }),
+                delete_on_empty: Some(ref delete_on_empty),
                 ..
             }),
             create_stream_on_read: true,
             ..
-        } if storage_class == "express"
+        } if storage_class == "express" && delete_on_empty.min_age() == Duration::from_secs(60)
     );
 
     s2.delete_basin(basin_name).await?;
@@ -116,9 +113,7 @@ async fn reconfigure_basin() -> Result<(), Box<dyn std::error::Error>> {
         .with_default_stream_config(StreamReconfiguration::new().with_storage_class("standard"))
         .with_create_stream_on_append(false);
 
-    let updated_config = s2
-        .reconfigure_basin(ReconfigureBasinInput::new(basin_name.clone(), new_config))
-        .await?;
+    let updated_config = s2.reconfigure_basin(basin_name.clone(), new_config).await?;
 
     assert_matches!(
         updated_config,

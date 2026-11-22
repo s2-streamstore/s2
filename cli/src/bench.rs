@@ -23,9 +23,10 @@ use s2_sdk::{
     S2Stream,
     error::AppendSessionError,
     producer::{ProducerConfig, RecordAck},
+    read_session::ReadSessionConfig,
     types::{
         AppendRecord, Header, MeteredBytes as _, RECORD_BATCH_MAX, ReadFrom, ReadInput,
-        ReadSessionConfig, ReadStart, ReadStop, SequencedRecord,
+        SequencedRecord,
     },
 };
 use tokio::{
@@ -573,7 +574,7 @@ pub fn bench_read(
     bench_read_inner(
         stream,
         record_size,
-        ReadStop::new(),
+        ReadInput::new().with_from(ReadFrom::SeqNum(0)),
         write_done_records,
         bench_start,
     )
@@ -587,7 +588,8 @@ pub fn bench_read_catchup(
     bench_read_inner(
         stream,
         record_size,
-        ReadStop::new()
+        ReadInput::new()
+            .with_from(ReadFrom::SeqNum(0))
             .with_wait(Duration::ZERO)
             .expect("whole-second duration"),
         Arc::new(AtomicU64::new(WRITE_DONE_SENTINEL)),
@@ -598,14 +600,11 @@ pub fn bench_read_catchup(
 fn bench_read_inner(
     stream: S2Stream,
     record_size: usize,
-    stop: ReadStop,
+    read_input: ReadInput,
     write_done_records: Arc<AtomicU64>,
     bench_start: Instant,
 ) -> impl Stream<Item = Result<BenchReadSample, CliError>> + Send {
     async_stream::stream! {
-        let read_input = ReadInput::new()
-            .with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0)))
-            .with_stop(stop);
         let mut read_session = stream
             .read_batch_session(read_input, ReadSessionConfig::default())
             .map_err(|e| CliError::op(OpKind::Bench, e))?;
@@ -704,8 +703,8 @@ fn bench_read_inner(
                                 break;
                             }
                         }
-                        Some(Err(s2_sdk::error::ReadSessionError::ReadUnwritten(e)))
-                            if total_records == 0 && e.tail.seq_num == 0 =>
+                        Some(Err(s2_sdk::error::ReadSessionError::ReadUnwritten(_)))
+                            if total_records == 0 =>
                         {
                             break;
                         }

@@ -8,6 +8,7 @@ use std::{
     time::Duration,
 };
 
+use futures_core::Stream;
 use futures_util::{
     StreamExt,
     future::{FutureExt, Shared},
@@ -32,10 +33,51 @@ use crate::{
     retry::RetryBackoff,
     session::StreamHeaders,
     types::{
-        AccessTokenMode, MeteredBytes, ReadBatch, ReadInput, ReadSessionConfig,
-        ReadSessionRetryPolicy, SequencedRecord, StreamName, StreamPosition,
+        AccessTokenMode, MeteredBytes, ReadBatch, ReadInput, SequencedRecord, StreamName,
+        StreamPosition,
     },
 };
+
+/// Retry policy for a continuous read session.
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+pub enum ReadSessionRetryPolicy {
+    /// Stop after the retry budget configured by [`RetryConfig`](crate::types::RetryConfig) is
+    /// exhausted.
+    #[default]
+    Budgeted,
+    /// Keep retrying retryable failures after the configured retry budget is exhausted.
+    ///
+    /// This also applies to the initial attempt, so iteration may remain pending through
+    /// retryable failures until it connects or the session is dropped or aborted.
+    Unbounded,
+}
+
+/// Configuration for a continuous read session.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReadSessionConfig {
+    retry_policy: ReadSessionRetryPolicy,
+}
+
+impl ReadSessionConfig {
+    /// Create a new [`ReadSessionConfig`] with default settings.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Return the configured retry policy.
+    pub fn retry_policy(&self) -> ReadSessionRetryPolicy {
+        self.retry_policy
+    }
+
+    /// Set the policy for retrying retryable failures.
+    ///
+    /// Clean stream ends and non-retryable failures always terminate the session.
+    ///
+    /// Defaults to [`ReadSessionRetryPolicy::Budgeted`].
+    pub fn with_retry_policy(self, retry_policy: ReadSessionRetryPolicy) -> Self {
+        Self { retry_policy }
+    }
+}
 
 /// The server heartbeats a tailing read session at a randomized gap of at most
 /// 15 seconds (<https://s2.dev/docs/api/protocol#data-flow>), plus some buffer (`T7d`).
@@ -127,6 +169,28 @@ impl Future for CaughtUpFuture {
             }
             Self::Ready(result) => Poll::Ready(result.clone()),
         }
+    }
+}
+
+/// Future returned by [`ReadSession::caught_up`], [`ReadBatchSession::caught_up`], and
+/// [`ReadSessionState::caught_up`] (`R8`).
+///
+/// Resolves to the stream tail position when the session is caught up, or fails with the session's
+/// terminal error (or [`SessionClosedError`] if the session closes cleanly before catching up).
+#[derive(Clone)]
+pub struct CaughtUp(CaughtUpFuture);
+
+impl fmt::Debug for CaughtUp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CaughtUp").finish_non_exhaustive()
+    }
+}
+
+impl Future for CaughtUp {
+    type Output = Result<StreamPosition, ReadSessionError>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        Pin::new(&mut self.0).poll(cx)
     }
 }
 
@@ -393,14 +457,7 @@ impl ReadSessionState {
     /// session while awaiting it. Remains pending across retries and handovers. Fails with the
     /// session's failure, or [`SessionClosedError`] if the session closes cleanly before catching
     /// up.
-    pub fn caught_up(
-        &self,
-    ) -> impl Future<Output = Result<StreamPosition, ReadSessionError>>
-    + Clone
-    + Send
-    + Sync
-    + Unpin
-    + 'static {
+    pub fn caught_up(&self) -> CaughtUp {
         let mut inner = self.inner.lock().unwrap();
         if self.shutdown.is_closed() && inner.request_state != RequestState::Ended {
             let err = ReadSessionError::Aborted(AbortedError::new(
@@ -409,7 +466,7 @@ impl ReadSessionState {
             ));
             inner.on_ended(Some(err));
         }
-        inner.caught_up_future.clone()
+        CaughtUp(inner.caught_up_future.clone())
     }
 
     fn on_message_fetched(
@@ -476,13 +533,7 @@ impl ReadSessionCore {
     ) -> Self {
         let context = ErrorContext::stream(op_name, client.name.as_ref(), name.as_ref(), true);
         let shutdown = client.shutdown_signal();
-        let ReadInput {
-            start,
-            stop,
-            stream_config: _,
-        } = input;
-        let start: ReadStart = start.into();
-        let end: ReadEnd = stop.into();
+        let (start, end, _) = input.into_api_parts();
         let initial_next_seq_num = if start.clamp == Some(true) {
             None
         } else {
@@ -561,6 +612,15 @@ impl fmt::Debug for ReadSession {
 }
 
 impl ReadSession {
+    /// Return the next sequenced record from the session, or `None` when the session ends cleanly.
+    ///
+    /// # Cancel safety
+    ///
+    /// This method is cancel safe and can be used inside [`tokio::select!`].
+    pub async fn next(&mut self) -> Option<Result<SequencedRecord, ReadSessionError>> {
+        std::future::poll_fn(|cx| Pin::new(&mut *self).poll_next(cx)).await
+    }
+
     /// Return a cloneable handle to this session's concurrent progress state (`R6c`).
     pub fn state(&self) -> ReadSessionState {
         self.core.state.clone()
@@ -583,19 +643,12 @@ impl ReadSession {
     }
 
     /// Return a future for the current or next caught-up tail (`R8`).
-    pub fn caught_up(
-        &self,
-    ) -> impl Future<Output = Result<StreamPosition, ReadSessionError>>
-    + Clone
-    + Send
-    + Sync
-    + Unpin
-    + 'static {
+    pub fn caught_up(&self) -> CaughtUp {
         self.core.state.caught_up()
     }
 }
 
-impl futures_core::Stream for ReadSession {
+impl Stream for ReadSession {
     type Item = Result<SequencedRecord, ReadSessionError>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -664,6 +717,15 @@ impl fmt::Debug for ReadBatchSession {
 }
 
 impl ReadBatchSession {
+    /// Return the next non-empty batch from the session, or `None` when the session ends cleanly.
+    ///
+    /// # Cancel safety
+    ///
+    /// This method is cancel safe and can be used inside [`tokio::select!`].
+    pub async fn next(&mut self) -> Option<Result<ReadBatch, ReadSessionError>> {
+        std::future::poll_fn(|cx| Pin::new(&mut *self).poll_next(cx)).await
+    }
+
     /// Return a cloneable handle to this session's concurrent progress state (`R6c`).
     pub fn state(&self) -> ReadSessionState {
         self.core.state.clone()
@@ -686,19 +748,12 @@ impl ReadBatchSession {
     }
 
     /// Return a future for the current or next caught-up tail (`R8`).
-    pub fn caught_up(
-        &self,
-    ) -> impl Future<Output = Result<StreamPosition, ReadSessionError>>
-    + Clone
-    + Send
-    + Sync
-    + Unpin
-    + 'static {
+    pub fn caught_up(&self) -> CaughtUp {
         self.core.state.caught_up()
     }
 }
 
-impl futures_core::Stream for ReadBatchSession {
+impl Stream for ReadBatchSession {
     type Item = Result<ReadBatch, ReadSessionError>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -790,7 +845,6 @@ async fn run_read_driver(
 
     let mut active: Option<(AttemptStream, ReconnectAdvice, bool)> = None;
     let mut attempts: u32 = 0;
-    let mut retries_since_reset: u32 = 0;
     let mut made_progress_in_attempt = false;
     let mut fetched_record_in_attempt = false;
     let mut last_fetched_seq: Option<u64> = None;
@@ -806,7 +860,7 @@ async fn run_read_driver(
 
         if active.is_none() {
             end.wait = remaining_wait(baseline_wait, idle_since);
-            let attempt_num = retries_since_reset.saturating_add(1);
+            let attempt_num = retry_backoff.used().saturating_add(1);
             let reconnect = ReconnectAdvice::default();
 
             let open_res = tokio::select! {
@@ -841,12 +895,9 @@ async fn run_read_driver(
                 Err(api_err) => {
                     let err = ReadSessionFailure::Api(api_err);
                     // R11d: once the start has been resolved by a prior response, a resumed
-                    // request with no wait remaining that receives 416 has reached the tail on a
-                    // stop condition.
-                    if has_received_response
-                        && has_no_wait_remaining(&end)
-                        && let Some(tail) = err.range_not_satisfiable_tail()
-                    {
+                    // request with no wait remaining that receives 416 with `tail >= resume` has
+                    // reached the tail on a stop condition.
+                    if let Some(tail) = r11d_stop_tail(has_received_response, &start, &end, &err) {
                         state.on_clean_stop(tail);
                         if let Some(tail) = tail
                             && !state.is_caught_up()
@@ -875,7 +926,6 @@ async fn run_read_driver(
                     if let Some(backoff) =
                         retry_delay(&err, &mut retry_backoff, retry_policy, access_token_mode)
                     {
-                        retries_since_reset = retries_since_reset.saturating_add(1);
                         if sleep_or_stop(backoff, &shutdown, &tx, &state, &context).await {
                             return;
                         }
@@ -959,7 +1009,6 @@ async fn run_read_driver(
                 if retry_backoff.used() > 0 {
                     retry_backoff.reset();
                 }
-                retries_since_reset = 0;
                 attempts = 0;
 
                 // R11c: restart idle clock only when a record is fetched; if no record has been
@@ -1063,7 +1112,6 @@ async fn run_read_driver(
                     retry_delay(&err, &mut retry_backoff, retry_policy, access_token_mode)
                 {
                     drop(permit);
-                    retries_since_reset = retries_since_reset.saturating_add(1);
                     if sleep_or_stop(backoff, &shutdown, &tx, &state, &context).await {
                         return;
                     }
@@ -1077,11 +1125,9 @@ async fn run_read_driver(
                 // T10: drop underlying attempt stream immediately.
                 active = None;
 
-                // R11d: 416 on a resumed request with no remaining wait is a clean stop.
-                if has_received_response
-                    && has_no_wait_remaining(&end)
-                    && let Some(tail) = err.range_not_satisfiable_tail()
-                {
+                // R11d: 416 on a resumed request with no remaining wait is a clean stop unless the
+                // reported tail regressed below our resume position.
+                if let Some(tail) = r11d_stop_tail(has_received_response, &start, &end, &err) {
                     state.on_clean_stop(tail);
                     if let Some(tail) = tail
                         && !state.is_caught_up()
@@ -1126,7 +1172,6 @@ async fn run_read_driver(
                     retry_delay(&err, &mut retry_backoff, retry_policy, access_token_mode)
                 {
                     drop(permit);
-                    retries_since_reset = retries_since_reset.saturating_add(1);
                     if sleep_or_stop(backoff, &shutdown, &tx, &state, &context).await {
                         return;
                     }
@@ -1139,6 +1184,26 @@ async fn run_read_driver(
             }
         }
     }
+}
+
+/// Check whether an error is a clean `R11d` stop condition (resumed request with no remaining
+/// `wait` receiving `416` whose tail has not regressed below `start.seq_num`).
+fn r11d_stop_tail(
+    has_received_response: bool,
+    start: &ReadStart,
+    end: &ReadEnd,
+    err: &ReadSessionFailure,
+) -> Option<Option<StreamPosition>> {
+    if !has_received_response || !has_no_wait_remaining(end) {
+        return None;
+    }
+    let tail = err.range_not_satisfiable_tail()?;
+    if let (Some(tail_pos), Some(resume_seq)) = (tail, start.seq_num)
+        && tail_pos.seq_num < resume_seq
+    {
+        return None;
+    }
+    Some(tail)
 }
 
 async fn send_terminal_event(
@@ -1295,10 +1360,10 @@ fn retry_delay(
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
-    use futures_util::{StreamExt, poll};
+    use futures_util::poll;
 
     use super::*;
-    use crate::types::Header;
+    use crate::{error::ReadUnwrittenError, types::Header};
 
     fn position(seq_num: u64) -> StreamPosition {
         StreamPosition {
@@ -1340,6 +1405,48 @@ mod tests {
         assert_eq!(start.timestamp, None);
         assert_eq!(start.tail_offset, None);
         assert_eq!(start.clamp, None);
+    }
+
+    // spec: r1 R11d
+    #[test]
+    fn r11d_rejects_416_when_tail_regressed_below_resume_seq_num() {
+        let start = ReadStart {
+            seq_num: Some(10),
+            timestamp: None,
+            tail_offset: None,
+            clamp: None,
+        };
+        let end = ReadEnd {
+            count: Some(5),
+            bytes: None,
+            until: None,
+            wait: None,
+        };
+        let server_416 = || {
+            crate::error::ServerError::new_for_test(StatusCode::RANGE_NOT_SATISFIABLE, None, "416")
+        };
+
+        let at_tail = ReadSessionFailure::Api(ApiError::ReadUnwritten(ReadUnwrittenError::new(
+            position(10),
+            server_416(),
+        )));
+        assert_eq!(
+            r11d_stop_tail(true, &start, &end, &at_tail),
+            Some(Some(position(10)))
+        );
+
+        let trimmed_past = ReadSessionFailure::Api(ApiError::ReadUnwritten(
+            ReadUnwrittenError::new(position(15), server_416()),
+        ));
+        assert_eq!(
+            r11d_stop_tail(true, &start, &end, &trimmed_past),
+            Some(Some(position(15)))
+        );
+
+        let recreated_lower = ReadSessionFailure::Api(ApiError::ReadUnwritten(
+            ReadUnwrittenError::new(position(3), server_416()),
+        ));
+        assert_eq!(r11d_stop_tail(true, &start, &end, &recreated_lower), None);
     }
 
     // spec: r1 R11c

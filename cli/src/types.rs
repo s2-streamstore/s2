@@ -206,7 +206,7 @@ impl StreamConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedStreamConfig {
-    pub storage_class: Option<CompactString>,
+    pub storage_class: Option<String>,
     pub retention_policy: sdk::types::RetentionPolicy,
     pub timestamping_mode: sdk::types::TimestampingMode,
     pub timestamping_uncapped: bool,
@@ -219,7 +219,22 @@ pub fn resolve_stream_config(
     config: sdk::types::StreamConfig,
     basin_defaults: sdk::types::StreamConfig,
 ) -> ResolvedStreamConfig {
-    const DEFAULT_RETENTION_SECS: u64 = 7 * 24 * 60 * 60;
+    let defaults = s2_common::config::StreamConfig::default();
+    let default_retention = match defaults.retention_policy {
+        s2_common::config::RetentionPolicy::Age(duration) => {
+            sdk::types::RetentionPolicy::Age(duration.as_secs())
+        }
+        s2_common::config::RetentionPolicy::Infinite() => sdk::types::RetentionPolicy::Infinite,
+    };
+    let default_timestamping_mode = match defaults.timestamping.mode {
+        s2_common::config::TimestampingMode::ClientPrefer => {
+            sdk::types::TimestampingMode::ClientPrefer
+        }
+        s2_common::config::TimestampingMode::ClientRequire => {
+            sdk::types::TimestampingMode::ClientRequire
+        }
+        s2_common::config::TimestampingMode::Arrival => sdk::types::TimestampingMode::Arrival,
+    };
 
     let ts = config.timestamping;
     let default_ts = basin_defaults.timestamping;
@@ -229,22 +244,20 @@ pub fn resolve_stream_config(
         retention_policy: config
             .retention_policy
             .or(basin_defaults.retention_policy)
-            .unwrap_or(sdk::types::RetentionPolicy::Age(DEFAULT_RETENTION_SECS)),
+            .unwrap_or(default_retention),
         timestamping_mode: ts
             .as_ref()
             .and_then(|t| t.mode.clone())
             .or_else(|| default_ts.as_ref().and_then(|t| t.mode.clone()))
-            .unwrap_or(sdk::types::TimestampingMode::ClientPrefer),
+            .unwrap_or(default_timestamping_mode),
         timestamping_uncapped: ts
             .and_then(|t| t.uncapped)
             .or_else(|| default_ts.and_then(|t| t.uncapped))
-            .unwrap_or(false),
-        delete_on_empty_min_age: Duration::from_secs(
-            config
-                .delete_on_empty
-                .or(basin_defaults.delete_on_empty)
-                .map_or(0, |d| d.min_age_secs),
-        ),
+            .unwrap_or(defaults.timestamping.uncapped),
+        delete_on_empty_min_age: config
+            .delete_on_empty
+            .or(basin_defaults.delete_on_empty)
+            .map_or(defaults.delete_on_empty.min_age, |d| d.min_age()),
     }
 }
 
@@ -379,7 +392,7 @@ impl From<DeleteOnEmptyConfig> for sdk::types::DeleteOnEmptyReconfiguration {
 impl From<sdk::types::DeleteOnEmptyConfig> for DeleteOnEmptyConfig {
     fn from(value: sdk::types::DeleteOnEmptyConfig) -> Self {
         Self {
-            delete_on_empty_min_age: Duration::from_secs(value.min_age_secs),
+            delete_on_empty_min_age: value.min_age(),
         }
     }
 }
@@ -501,7 +514,7 @@ impl From<sdk::types::BasinConfig> for BasinConfig {
 impl From<sdk::types::StreamConfig> for StreamConfig {
     fn from(config: sdk::types::StreamConfig) -> Self {
         StreamConfig {
-            storage_class: config.storage_class,
+            storage_class: config.storage_class.map(Into::into),
             retention_policy: config.retention_policy.map(Into::into),
             timestamping: config.timestamping.map(Into::into),
             delete_on_empty: config.delete_on_empty.map(Into::into),

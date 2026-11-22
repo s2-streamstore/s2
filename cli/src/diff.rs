@@ -1,7 +1,6 @@
 //! Diffing over typed presentation views of basins, streams, and access tokens.
 
 use colored::Colorize;
-use compact_str::CompactString;
 use s2_api::v1::{MaybeKnown, access::AccessTokenInfo as ApiAccessTokenInfo};
 use s2_common::access::{PermittedOperationGroups, ReadWritePermissions, ResourceSet};
 use s2_sdk::types::AccessTokenId;
@@ -299,7 +298,7 @@ fn resource_kind(resource: &DiffResource) -> DiffResourceKind {
 ///   duration.
 #[derive(Serialize)]
 struct StreamConfigView {
-    storage_class: Option<CompactString>,
+    storage_class: Option<String>,
     retention_policy: String,
     timestamping: TimestampingConfigView,
     delete_on_empty: DeleteOnEmptyConfigView,

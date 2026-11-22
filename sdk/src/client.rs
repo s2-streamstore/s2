@@ -2,14 +2,12 @@ use std::{
     collections::HashMap,
     convert::Infallible,
     future::Future,
-    io,
     pin::Pin,
     sync::{
-        Arc, Mutex, OnceLock, RwLock as StdRwLock,
+        Arc, Mutex, OnceLock, RwLock as StdRwLock, Weak,
         atomic::{AtomicU64, Ordering},
     },
-    task::{Context, Poll},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use async_compression::{
@@ -30,23 +28,19 @@ use http::{
 use http_body_util::{BodyExt, Empty, Full, StreamBody, combinators::UnsyncBoxBody};
 use hyper::{
     body::{Frame, Incoming},
-    rt::{Read as HyperRead, ReadBufCursor, Write as HyperWrite},
+    client::conn::http2,
+    rt::{Read as HyperRead, Write as HyperWrite},
 };
 use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
-pub use hyper_util::client::legacy::connect::Connect;
 use hyper_util::{
-    client::legacy::{
-        Client as HyperClient,
-        connect::{Connected, Connection, HttpConnector},
-    },
+    client::legacy::connect::HttpConnector,
     rt::{TokioExecutor, TokioTimer},
 };
-use pin_project_lite::pin_project;
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    sync::watch,
-    time::timeout,
+    sync::{Notify, watch},
+    time::{Instant, timeout, timeout_at},
 };
 use tokio_util::task::AbortOnDropHandle;
 use tower_service::Service;
@@ -59,10 +53,50 @@ use crate::{
 const APPLICATION_JSON: HeaderValue = HeaderValue::from_static("application/json");
 const MAX_CONCURRENT_REQUESTS_PER_CLIENT: usize = 50;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(90);
-const REAPER_INTERVAL: Duration = Duration::from_secs(30);
+const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(20);
+const KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(10);
 
-type BoxError = Box<dyn std::error::Error + Send + Sync>;
+pub(crate) type BoxError = Box<dyn std::error::Error + Send + Sync>;
 type BoxBody = UnsyncBoxBody<Bytes, BoxError>;
+
+pub(crate) fn format_error_chain(err: &(dyn std::error::Error + 'static)) -> String {
+    let mut out = err.to_string();
+    let mut source = err.source();
+    while let Some(cur) = source {
+        let part = cur.to_string();
+        if !part.is_empty() && !out.contains(&part) {
+            out.push_str(": ");
+            out.push_str(&part);
+        }
+        source = cur.source();
+    }
+    out
+}
+
+/// Connector bound for establishing raw HTTP/2 transports (TCP, TLS, or simulated streams).
+pub(crate) trait Connect:
+    Service<Uri, Response = Self::Io, Error = Self::Err, Future = Self::Fut>
+    + Clone
+    + Send
+    + Sync
+    + 'static
+{
+    type Io: HyperRead + HyperWrite + Unpin + Send + 'static;
+    type Err: Into<BoxError>;
+    type Fut: Future<Output = Result<Self::Io, Self::Err>> + Send + 'static;
+}
+
+impl<C> Connect for C
+where
+    C: Service<Uri> + Clone + Send + Sync + 'static,
+    C::Response: HyperRead + HyperWrite + Unpin + Send + 'static,
+    C::Error: Into<BoxError>,
+    C::Future: Send + 'static,
+{
+    type Io = C::Response;
+    type Err = C::Error;
+    type Fut = C::Future;
+}
 
 #[derive(Debug, Clone, Copy, Default)]
 pub enum Compression {
@@ -118,232 +152,12 @@ impl ShutdownSignal {
     }
 }
 
-pin_project! {
-    /// Connection wrapper that immediately drops the underlying transport when [`ShutdownSignal`]
-    /// triggers (`C12`), terminating established connections without waiting for the server.
-    pub(crate) struct AbortableIo<T> {
-        #[pin]
-        inner: Option<T>,
-        shutdown_fut: Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
-    }
-}
-
-impl<T> AbortableIo<T> {
-    fn new(inner: T, shutdown: ShutdownSignal) -> Self {
-        Self {
-            inner: Some(inner),
-            shutdown_fut: shutdown.cancelled(),
-        }
-    }
-
-    fn poll_not_closed(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> io::Result<()> {
-        let mut this = self.as_mut().project();
-        if this.inner.is_none() {
-            return Err(io::Error::new(
-                io::ErrorKind::ConnectionAborted,
-                "client closed",
-            ));
-        }
-        if this.shutdown_fut.as_mut().poll(cx).is_ready() {
-            this.inner.set(None);
-            return Err(io::Error::new(
-                io::ErrorKind::ConnectionAborted,
-                "client closed",
-            ));
-        }
-        Ok(())
-    }
-}
-
-impl<T: HyperRead> HyperRead for AbortableIo<T> {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: ReadBufCursor<'_>,
-    ) -> Poll<io::Result<()>> {
-        if let Err(err) = self.as_mut().poll_not_closed(cx) {
-            return Poll::Ready(Err(err));
-        }
-        match self.project().inner.as_pin_mut() {
-            Some(inner) => inner.poll_read(cx, buf),
-            None => Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::ConnectionAborted,
-                "client closed",
-            ))),
-        }
-    }
-}
-
-impl<T: HyperWrite> HyperWrite for AbortableIo<T> {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        if let Err(err) = self.as_mut().poll_not_closed(cx) {
-            return Poll::Ready(Err(err));
-        }
-        match self.project().inner.as_pin_mut() {
-            Some(inner) => inner.poll_write(cx, buf),
-            None => Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::ConnectionAborted,
-                "client closed",
-            ))),
-        }
-    }
-
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        if let Err(err) = self.as_mut().poll_not_closed(cx) {
-            return Poll::Ready(Err(err));
-        }
-        match self.project().inner.as_pin_mut() {
-            Some(inner) => inner.poll_flush(cx),
-            None => Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::ConnectionAborted,
-                "client closed",
-            ))),
-        }
-    }
-
-    fn is_write_vectored(&self) -> bool {
-        self.inner
-            .as_ref()
-            .is_some_and(HyperWrite::is_write_vectored)
-    }
-
-    fn poll_write_vectored(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        bufs: &[io::IoSlice<'_>],
-    ) -> Poll<io::Result<usize>> {
-        if let Err(err) = self.as_mut().poll_not_closed(cx) {
-            return Poll::Ready(Err(err));
-        }
-        match self.project().inner.as_pin_mut() {
-            Some(inner) => inner.poll_write_vectored(cx, bufs),
-            None => Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::ConnectionAborted,
-                "client closed",
-            ))),
-        }
-    }
-
-    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        if let Err(err) = self.as_mut().poll_not_closed(cx) {
-            return Poll::Ready(Err(err));
-        }
-        match self.project().inner.as_pin_mut() {
-            Some(inner) => inner.poll_shutdown(cx),
-            None => Poll::Ready(Ok(())),
-        }
-    }
-}
-
-impl<T: Connection> Connection for AbortableIo<T> {
-    fn connected(&self) -> Connected {
-        self.inner
-            .as_ref()
-            .map_or_else(Connected::new, Connection::connected)
-    }
-}
-
-/// Connector wrapper enforcing `connection_timeout` across TCP + TLS (`T7a`) and aborting
-/// in-progress dials immediately on client close (`C12`).
-#[derive(Clone)]
-pub(crate) struct ManagedConnector<C> {
-    inner: C,
-    connect_timeout: Option<Duration>,
-    shutdown: ShutdownSignal,
-}
-
-impl<C> ManagedConnector<C> {
-    pub(crate) fn new(
-        inner: C,
-        connect_timeout: Option<Duration>,
-        shutdown: ShutdownSignal,
-    ) -> Self {
-        Self {
-            inner,
-            connect_timeout,
-            shutdown,
-        }
-    }
-}
-
-impl<C> Service<Uri> for ManagedConnector<C>
-where
-    C: Service<Uri> + Clone + Send + Sync + 'static,
-    C::Response: HyperRead + HyperWrite + Connection + Unpin + Send + 'static,
-    C::Error: Into<BoxError>,
-    C::Future: Send + 'static,
-{
-    type Response = AbortableIo<C::Response>;
-    type Error = BoxError;
-    type Future =
-        Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send + 'static>>;
-
-    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.inner.poll_ready(cx).map_err(Into::into)
-    }
-
-    fn call(&mut self, dst: Uri) -> Self::Future {
-        let connect_timeout = self.connect_timeout;
-        let shutdown = self.shutdown.clone();
-        if shutdown.is_closed() {
-            return Box::pin(async {
-                Err(Box::new(io::Error::new(
-                    io::ErrorKind::ConnectionAborted,
-                    "client closed",
-                )) as BoxError)
-            });
-        }
-        let inner_fut = self.inner.call(dst);
-        Box::pin(async move {
-            let connect_fut = async {
-                if let Some(dur) = connect_timeout {
-                    timeout(dur, inner_fut)
-                        .await
-                        .map_err(|_| -> BoxError {
-                            Box::new(io::Error::new(
-                                io::ErrorKind::TimedOut,
-                                "connection timed out",
-                            ))
-                        })?
-                        .map_err(Into::into)
-                } else {
-                    inner_fut.await.map_err(Into::into)
-                }
-            };
-
-            let io = tokio::select! {
-                biased;
-                _ = shutdown.cancelled() => {
-                    return Err(Box::new(io::Error::new(
-                        io::ErrorKind::ConnectionAborted,
-                        "client closed",
-                    )) as BoxError);
-                }
-                res = connect_fut => res?,
-            };
-
-            if shutdown.is_closed() {
-                return Err(Box::new(io::Error::new(
-                    io::ErrorKind::ConnectionAborted,
-                    "client closed",
-                )) as BoxError);
-            }
-
-            Ok(AbortableIo::new(io, shutdown))
-        })
-    }
-}
-
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum HttpError {
-    #[error("send error: {0}")]
-    Send(#[from] hyper_util::client::legacy::Error),
-    #[error("receive error: {0}")]
-    Receive(#[from] hyper::Error),
+    #[error("connect error: {0}")]
+    Connect(String),
+    #[error("transport error: {0}")]
+    Transport(#[from] hyper::Error),
     #[error("request build error: {0}")]
     RequestBuild(String),
     #[error("response decode error: {0}")]
@@ -454,7 +268,7 @@ impl Request {
         })
     }
 
-    pub fn origin(&self) -> String {
+    pub fn origin_uri(&self) -> (String, Uri) {
         let scheme = self
             .uri
             .scheme_str()
@@ -465,10 +279,12 @@ impl Request {
             .uri
             .port_u16()
             .filter(|&p| !((scheme == "http" && p == 80) || (scheme == "https" && p == 443)));
-        match port {
+        let origin = match port {
             Some(port) => format!("{scheme}://{host}:{port}"),
             None => format!("{scheme}://{host}"),
-        }
+        };
+        let uri = origin.parse::<Uri>().unwrap_or_else(|_| self.uri.clone());
+        (origin, uri)
     }
 
     pub fn try_clone(&self) -> Option<Self> {
@@ -662,8 +478,8 @@ impl UnaryResponse {
     }
 }
 
-/// Identifies a pooled connection within its host pool, so poisoning drops
-/// just the connection reconnect advice arrived on.
+/// Identifies a pooled HTTP/2 connection within its origin pool, so retiring or
+/// evicting it drops only that TCP connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ConnectionId(u64);
 
@@ -674,49 +490,40 @@ impl ConnectionId {
     }
 }
 
-/// Grants its holder the ability to poison the pooled connection a streaming
-/// response was served on, dropping it from the pool so no new request reuses
-/// it. Requests already in flight keep the connection.
+trait PoisonTarget: Send + Sync {
+    fn poison(&self, id: ConnectionId);
+}
+
+/// Grants its holder the ability to retire the pooled HTTP/2 connection a response
+/// arrived on so no new request reuses it while in-flight requests finish (`T6`, `C13`).
 ///
-/// Poisoning is idempotent: the connection is identified by its
-/// [`ConnectionId`], so poisoning it again — including from another session
-/// sharing the connection — is a no-op.
+/// Poisoning is idempotent and allocates nothing per request.
 #[derive(Clone)]
 pub struct PoisonHandle {
-    poison: Arc<dyn Fn() + Send + Sync>,
+    target: Weak<dyn PoisonTarget>,
+    id: ConnectionId,
 }
 
 impl PoisonHandle {
-    fn new(poison: impl Fn() + Send + Sync + 'static) -> Self {
-        Self {
-            poison: Arc::new(poison),
-        }
+    fn new(target: Weak<dyn PoisonTarget>, id: ConnectionId) -> Self {
+        Self { target, id }
     }
 
     pub(crate) fn poison(&self) {
-        (self.poison)();
+        if let Some(target) = self.target.upgrade() {
+            target.poison(self.id);
+        }
     }
 }
 
 fn is_dead_connection_hyper_error(err: &hyper::Error) -> bool {
-    if err.is_timeout() {
+    if err.is_timeout() || err.is_closed() {
         return true;
     }
     let mut source: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(err);
     while let Some(cur) = source {
         if let Some(h2_err) = cur.downcast_ref::<h2::Error>() {
             return h2_err.is_io() || h2_err.is_go_away();
-        }
-        source = cur.source();
-    }
-    err.is_closed()
-}
-
-fn is_dead_connection_legacy_error(err: &hyper_util::client::legacy::Error) -> bool {
-    let mut source: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(err);
-    while let Some(cur) = source {
-        if let Some(hyper_err) = cur.downcast_ref::<hyper::Error>() {
-            return is_dead_connection_hyper_error(hyper_err);
         }
         source = cur.source();
     }
@@ -729,7 +536,7 @@ pub struct StreamingResponse {
     body: Incoming,
     permit: RequestPermit,
     poison_handle: PoisonHandle,
-    timeout: Option<Duration>,
+    deadline: Option<Instant>,
 }
 
 impl StreamingResponse {
@@ -739,7 +546,7 @@ impl StreamingResponse {
         body: Incoming,
         permit: RequestPermit,
         poison_handle: PoisonHandle,
-        timeout: Option<Duration>,
+        deadline: Option<Instant>,
     ) -> Self {
         Self {
             status,
@@ -747,7 +554,7 @@ impl StreamingResponse {
             body,
             permit,
             poison_handle,
-            timeout,
+            deadline,
         }
     }
 
@@ -755,42 +562,28 @@ impl StreamingResponse {
         self.status
     }
 
-    pub(crate) async fn into_bytes_with_poison_handle(
-        self,
-    ) -> Result<(Bytes, PoisonHandle), HttpError> {
+    /// Collect the body of a non-2xx streaming response (`E2`).
+    ///
+    /// Once non-2xx headers have arrived, a timeout or body read/decompression failure poisons
+    /// the connection/stream and falls back to empty bytes so
+    /// [`ServerError`](crate::error::ServerError) preserves the HTTP status instead of turning e.g.
+    /// `404` or `412` into a retryable timeout.
+    pub(crate) async fn into_bytes_with_poison_handle(self) -> (Bytes, PoisonHandle) {
         let Self {
             headers,
             body,
             permit,
             poison_handle,
-            timeout: body_timeout,
+            deadline,
             ..
         } = self;
-        let collect_res = if let Some(duration) = body_timeout {
-            match timeout(duration, body.collect()).await {
-                Ok(res) => res,
-                Err(_) => {
-                    poison_handle.poison();
-                    drop(permit);
-                    return Err(HttpError::Timeout);
-                }
-            }
-        } else {
-            body.collect().await
-        };
-        let bytes = match collect_res {
-            Ok(collected) => collected.to_bytes(),
-            Err(_) => {
-                poison_handle.poison();
-                Bytes::new()
-            }
-        };
+        let bytes = collect_error_body(body, deadline, &poison_handle).await;
         let bytes = match decompress_body(&headers, bytes).await {
             Ok(bytes) => bytes,
             Err(_) => Bytes::new(),
         };
         drop(permit);
-        Ok((bytes, poison_handle))
+        (bytes, poison_handle)
     }
 
     pub fn into_stream(self) -> (impl Stream<Item = Result<Bytes, HttpError>>, PoisonHandle) {
@@ -809,11 +602,39 @@ impl StreamingResponse {
                     if is_dead_connection_hyper_error(&e) {
                         stream_poison.poison();
                     }
-                    Some(Err(HttpError::Receive(e)))
+                    Some(Err(HttpError::Transport(e)))
                 }
             })
         });
         (stream, poison_handle)
+    }
+}
+
+async fn collect_error_body(
+    body: Incoming,
+    deadline: Option<Instant>,
+    poison_handle: &PoisonHandle,
+) -> Bytes {
+    let collect_res = match deadline {
+        Some(dl) => match timeout_at(dl, body.collect()).await {
+            Ok(res) => res,
+            Err(_) => {
+                // Dropping `body` resets the HTTP/2 stream; retiring the connection prevents
+                // reusing a stalled peer while preserving the already-received HTTP status.
+                poison_handle.poison();
+                return Bytes::new();
+            }
+        },
+        None => body.collect().await,
+    };
+    match collect_res {
+        Ok(collected) => collected.to_bytes(),
+        Err(err) => {
+            if is_dead_connection_hyper_error(&err) {
+                poison_handle.poison();
+            }
+            Bytes::new()
+        }
     }
 }
 
@@ -930,145 +751,16 @@ fn build_http_request(
     uri: &Uri,
     headers: HeaderMap,
     body: BoxBody,
-    content_encoding: Option<HeaderValue>,
 ) -> Result<http::Request<BoxBody>, HttpError> {
     let mut builder = http::Request::builder().method(method).uri(uri.clone());
 
     if let Some(req_headers) = builder.headers_mut() {
         *req_headers = headers;
-        if let Some(encoding) = content_encoding {
-            req_headers.insert(CONTENT_ENCODING, encoding);
-        }
     }
 
     builder
         .body(body)
         .map_err(|error| HttpError::RequestBuild(error.to_string()))
-}
-
-async fn execute_unary_with<C>(
-    client: &HyperClient<C, BoxBody>,
-    request: Request,
-    poison_handle: PoisonHandle,
-) -> Result<UnaryResponse, HttpError>
-where
-    C: Connect + Clone + Send + Sync + 'static,
-{
-    let request_timeout = request.timeout;
-
-    let (body, content_encoding) = compress_body(request.body, request.compression).await?;
-
-    let http_request = build_http_request(
-        request.method,
-        &request.uri,
-        request.headers,
-        body.into_http_body(),
-        content_encoding,
-    )?;
-
-    let operation = async {
-        let response = client.request(http_request).await.inspect_err(|e| {
-            if is_dead_connection_legacy_error(e) {
-                poison_handle.poison();
-            }
-        })?;
-        let (parts, body) = response.into_parts();
-        let bytes = if parts.status.is_success() {
-            body.collect()
-                .await
-                .inspect_err(|e| {
-                    if is_dead_connection_hyper_error(e) {
-                        poison_handle.poison();
-                    }
-                })?
-                .to_bytes()
-        } else {
-            match body.collect().await {
-                Ok(collected) => collected.to_bytes(),
-                Err(_) => {
-                    poison_handle.poison();
-                    Bytes::new()
-                }
-            }
-        };
-
-        Ok::<_, HttpError>((parts.status, parts.headers, bytes))
-    };
-
-    let (status, headers, bytes) = if let Some(timeout_duration) = request_timeout {
-        timeout(timeout_duration, operation)
-            .await
-            .map_err(|_| HttpError::Timeout)??
-    } else {
-        operation.await?
-    };
-
-    let bytes = if status.is_success() {
-        decompress_body(&headers, bytes).await?
-    } else {
-        match decompress_body(&headers, bytes).await {
-            Ok(bytes) => bytes,
-            Err(_) => Bytes::new(),
-        }
-    };
-
-    Ok(UnaryResponse {
-        status,
-        headers,
-        bytes,
-        poison_handle: Some(poison_handle),
-    })
-}
-
-async fn init_streaming_with<C>(
-    client: &HyperClient<C, BoxBody>,
-    request: Request,
-    permit: RequestPermit,
-    poison_handle: PoisonHandle,
-) -> Result<StreamingResponse, HttpError>
-where
-    C: Connect + Clone + Send + Sync + 'static,
-{
-    let request_timeout = request.timeout;
-
-    let http_request = build_http_request(
-        request.method,
-        &request.uri,
-        request.headers,
-        request.body.into_http_body(),
-        None,
-    )?;
-
-    let started = Instant::now();
-    let operation = async {
-        let response = client.request(http_request).await.inspect_err(|e| {
-            if is_dead_connection_legacy_error(e) {
-                poison_handle.poison();
-            }
-        })?;
-        let (parts, body) = response.into_parts();
-        let remaining_timeout = request_timeout.map(|d| {
-            d.saturating_sub(started.elapsed())
-                .max(Duration::from_millis(1))
-        });
-
-        Ok::<_, HttpError>(StreamingResponse::new(
-            parts.status,
-            parts.headers,
-            body,
-            permit,
-            poison_handle,
-            remaining_timeout,
-        ))
-    };
-
-    if let Some(duration) = request_timeout {
-        timeout(duration, operation)
-            .await
-            .map_err(|_| HttpError::Timeout)?
-    } else {
-        operation.await
-    }
 }
 
 /// Builds a URI from `base`'s scheme and authority, replacing any path/query.
@@ -1219,39 +911,92 @@ struct PermitState {
 
 struct RequestPermit {
     state: Arc<Mutex<PermitState>>,
+    reaper_notify: Arc<Notify>,
 }
 
 impl Drop for RequestPermit {
     fn drop(&mut self) {
-        let mut state = self.state.lock().unwrap();
-        state.active_requests = state.active_requests.saturating_sub(1);
-        if state.active_requests == 0 {
-            state.idle_since = Some(Instant::now());
+        let became_idle = {
+            let mut state = self.state.lock().unwrap();
+            state.active_requests = state.active_requests.saturating_sub(1);
+            if state.active_requests == 0 {
+                state.idle_since = Some(Instant::now());
+                true
+            } else {
+                false
+            }
+        };
+        if became_idle {
+            self.reaper_notify.notify_one();
         }
     }
 }
 
-struct PooledClient<C> {
-    max_concurrent_requests: usize,
+#[derive(Clone)]
+enum DialOutcome {
+    Pending,
+    Ready(http2::SendRequest<BoxBody>),
+    Failed(Arc<String>),
+    Aborted,
+}
+
+enum DialError {
+    Connect(String),
+    Aborted,
+}
+
+enum ConnectionState {
+    Connecting(watch::Receiver<DialOutcome>),
+    Ready(http2::SendRequest<BoxBody>),
+}
+
+struct PooledConnection {
     id: ConnectionId,
-    client: Arc<HyperClient<C, BoxBody>>,
+    max_concurrent_requests: usize,
     state: Arc<Mutex<PermitState>>,
+    reaper_notify: Arc<Notify>,
+    conn: ConnectionState,
 }
 
-impl<C> PooledClient<C> {
-    fn new(client: HyperClient<C, BoxBody>, max_concurrent_requests: usize) -> Self {
-        Self {
-            max_concurrent_requests,
-            id: ConnectionId::next(),
-            client: Arc::new(client),
-            state: Arc::new(Mutex::new(PermitState {
-                active_requests: 0,
-                idle_since: Some(Instant::now()),
-            })),
+impl PooledConnection {
+    fn new_connecting(
+        id: ConnectionId,
+        max_concurrent_requests: usize,
+        rx: watch::Receiver<DialOutcome>,
+        reaper_notify: Arc<Notify>,
+    ) -> (Self, RequestPermit) {
+        let state = Arc::new(Mutex::new(PermitState {
+            active_requests: 1,
+            idle_since: None,
+        }));
+        let permit = RequestPermit {
+            state: state.clone(),
+            reaper_notify: reaper_notify.clone(),
+        };
+        (
+            Self {
+                id,
+                max_concurrent_requests,
+                state,
+                reaper_notify,
+                conn: ConnectionState::Connecting(rx),
+            },
+            permit,
+        )
+    }
+
+    fn is_live(&self) -> bool {
+        match &self.conn {
+            ConnectionState::Ready(sender) => !sender.is_closed(),
+            ConnectionState::Connecting(rx) => match &*rx.borrow() {
+                DialOutcome::Pending => true,
+                DialOutcome::Ready(sender) => !sender.is_closed(),
+                DialOutcome::Failed(_) | DialOutcome::Aborted => false,
+            },
         }
     }
 
-    fn request_permit(&self) -> Option<RequestPermit> {
+    fn try_acquire_permit(&self) -> Option<RequestPermit> {
         let mut state = self.state.lock().unwrap();
         if state.active_requests >= self.max_concurrent_requests {
             return None;
@@ -1260,143 +1005,355 @@ impl<C> PooledClient<C> {
         state.idle_since = None;
         Some(RequestPermit {
             state: self.state.clone(),
+            reaper_notify: self.reaper_notify.clone(),
         })
     }
 
-    fn should_reap(&self, idle_timeout: Duration) -> bool {
+    fn idle_deadline(&self, idle_timeout: Duration) -> Option<Instant> {
         let state = self.state.lock().unwrap();
-        state.active_requests == 0
-            && state
-                .idle_since
-                .is_some_and(|idle_since| idle_since.elapsed() >= idle_timeout)
+        if state.active_requests == 0 {
+            state.idle_since.map(|since| since + idle_timeout)
+        } else {
+            None
+        }
     }
 }
 
-struct CheckedOutClient<C> {
-    client: Arc<HyperClient<C, BoxBody>>,
-    permit: RequestPermit,
-    id: ConnectionId,
+enum Checkout {
+    Ready {
+        id: ConnectionId,
+        sender: http2::SendRequest<BoxBody>,
+        permit: RequestPermit,
+    },
+    Connecting {
+        id: ConnectionId,
+        rx: watch::Receiver<DialOutcome>,
+        permit: RequestPermit,
+    },
 }
 
-struct HostPoolState<C> {
-    clients: Vec<PooledClient<C>>,
+struct CheckedOutSender {
+    sender: http2::SendRequest<BoxBody>,
+    permit: RequestPermit,
+    poison_handle: PoisonHandle,
+}
+
+struct HostPoolState {
+    connections: Vec<PooledConnection>,
     detached: bool,
 }
 
 struct HostPool<C> {
+    origin: String,
+    origin_uri: Uri,
+    connection_timeout: Duration,
     http2: Http2Config,
-    state: StdRwLock<HostPoolState<C>>,
+    state: StdRwLock<HostPoolState>,
     connector: C,
+    shutdown: ShutdownSignal,
+    reaper_notify: Arc<Notify>,
+}
+
+impl<C> PoisonTarget for HostPool<C>
+where
+    C: Send + Sync,
+{
+    fn poison(&self, id: ConnectionId) {
+        let mut state = self.state.write().unwrap();
+        let before = state.connections.len();
+        state.connections.retain(|conn| conn.id != id);
+        let removed = before - state.connections.len();
+        tracing::debug!(
+            origin = %self.origin,
+            connection = ?id,
+            removed,
+            "retired pooled connection"
+        );
+    }
 }
 
 impl<C> HostPool<C>
 where
-    C: Connect + Clone + Send + Sync + 'static,
+    C: Connect,
 {
-    fn new(connector: C, http2: Http2Config) -> Self {
+    fn new(
+        origin: String,
+        origin_uri: Uri,
+        connector: C,
+        connection_timeout: Duration,
+        http2: Http2Config,
+        shutdown: ShutdownSignal,
+        reaper_notify: Arc<Notify>,
+    ) -> Self {
         Self {
+            origin,
+            origin_uri,
+            connection_timeout,
             http2,
             state: StdRwLock::new(HostPoolState {
-                clients: Vec::new(),
+                connections: Vec::new(),
                 detached: false,
             }),
             connector,
+            shutdown,
+            reaper_notify,
         }
     }
 
-    fn create_client(&self) -> PooledClient<C> {
-        let mut builder = HyperClient::builder(TokioExecutor::new());
-        builder
-            .timer(TokioTimer::new())
-            .http2_only(true)
-            .http2_keep_alive_interval(Duration::from_secs(20))
-            .http2_keep_alive_timeout(Duration::from_secs(10))
-            .http2_initial_stream_window_size(self.http2.stream_receive_window)
-            .http2_initial_connection_window_size(self.http2.connection_receive_window);
-        let max_concurrent_requests = self
-            .http2
+    fn max_concurrent_requests(&self) -> usize {
+        self.http2
             .max_concurrent_requests
-            .unwrap_or(MAX_CONCURRENT_REQUESTS_PER_CLIENT);
-        PooledClient::new(
-            builder.build(self.connector.clone()),
-            max_concurrent_requests,
-        )
+            .unwrap_or(MAX_CONCURRENT_REQUESTS_PER_CLIENT)
     }
 
-    fn checkout(&self) -> Option<CheckedOutClient<C>> {
+    fn try_checkout_existing(connections: &[PooledConnection]) -> Option<Checkout> {
+        for pooled in connections {
+            if !pooled.is_live() {
+                continue;
+            }
+            if let Some(permit) = pooled.try_acquire_permit() {
+                return Some(match &pooled.conn {
+                    ConnectionState::Ready(sender) => Checkout::Ready {
+                        id: pooled.id,
+                        sender: sender.clone(),
+                        permit,
+                    },
+                    ConnectionState::Connecting(rx) => match &*rx.borrow() {
+                        DialOutcome::Ready(sender) => Checkout::Ready {
+                            id: pooled.id,
+                            sender: sender.clone(),
+                            permit,
+                        },
+                        _ => Checkout::Connecting {
+                            id: pooled.id,
+                            rx: rx.clone(),
+                            permit,
+                        },
+                    },
+                });
+            }
+        }
+        None
+    }
+
+    fn checkout(self: &Arc<Self>) -> Option<Checkout> {
         {
             let state = self.state.read().unwrap();
             if state.detached {
                 return None;
             }
-            for pooled in &state.clients {
-                if let Some(permit) = pooled.request_permit() {
-                    return Some(CheckedOutClient {
-                        client: pooled.client.clone(),
-                        permit,
-                        id: pooled.id,
-                    });
-                }
+            if let Some(checkout) = Self::try_checkout_existing(&state.connections) {
+                return Some(checkout);
             }
         }
+
         let mut state = self.state.write().unwrap();
         if state.detached {
             return None;
         }
-        for pooled in &state.clients {
-            if let Some(permit) = pooled.request_permit() {
-                return Some(CheckedOutClient {
-                    client: pooled.client.clone(),
-                    permit,
-                    id: pooled.id,
-                });
-            }
+        // Evict closed/failed connections before checking capacity or dialing.
+        state.connections.retain(PooledConnection::is_live);
+        if let Some(checkout) = Self::try_checkout_existing(&state.connections) {
+            return Some(checkout);
         }
-        let new_client = self.create_client();
-        let permit = new_client
-            .request_permit()
-            .expect("new client must have a permit");
-        let client = new_client.client.clone();
-        let id = new_client.id;
-        state.clients.push(new_client);
-        Some(CheckedOutClient { client, permit, id })
+
+        let id = ConnectionId::next();
+        let (tx, rx) = watch::channel(DialOutcome::Pending);
+        let (pooled, permit) = PooledConnection::new_connecting(
+            id,
+            self.max_concurrent_requests(),
+            rx.clone(),
+            self.reaper_notify.clone(),
+        );
+        state.connections.push(pooled);
+        drop(state);
+
+        self.spawn_connection(id, tx);
+
+        Some(Checkout::Connecting { id, rx, permit })
     }
 
-    /// Drop the pooled client identified by `id` so no new request reuses it.
-    /// Clients pinned to servers that are not going away stay pooled, requests
-    /// already in flight keep their connection, and poisoning the same
-    /// connection again is a no-op.
-    fn poison(&self, host: &str, id: ConnectionId) {
+    fn spawn_connection(self: &Arc<Self>, id: ConnectionId, tx: watch::Sender<DialOutcome>) {
+        let weak_pool = Arc::downgrade(self);
+        let connector = self.connector.clone();
+        let origin_uri = self.origin_uri.clone();
+        let connection_timeout = self.connection_timeout;
+        let http2 = self.http2;
+        let shutdown = self.shutdown.clone();
+
+        tokio::spawn(async move {
+            let (sender, conn) = match dial_http2(
+                connector,
+                origin_uri,
+                connection_timeout,
+                http2,
+                shutdown.clone(),
+            )
+            .await
+            {
+                Ok(pair) => pair,
+                Err(DialError::Aborted) => {
+                    let _ = tx.send(DialOutcome::Aborted);
+                    if let Some(pool) = weak_pool.upgrade() {
+                        pool.remove(id);
+                    }
+                    return;
+                }
+                Err(DialError::Connect(msg)) => {
+                    let _ = tx.send(DialOutcome::Failed(Arc::new(msg)));
+                    if let Some(pool) = weak_pool.upgrade() {
+                        pool.remove(id);
+                    }
+                    return;
+                }
+            };
+
+            if let Some(pool) = weak_pool.upgrade() {
+                pool.promote_ready(id, sender.clone());
+            }
+            let _ = tx.send(DialOutcome::Ready(sender));
+
+            // Drive the HTTP/2 connection until all handles close, an error occurs, or
+            // client shutdown fires (`C12`, dropping `conn` and its socket immediately).
+            tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => {}
+                res = conn => {
+                    if let Err(err) = res {
+                        tracing::debug!(
+                            connection = ?id,
+                            error = %format_error_chain(&err),
+                            "HTTP/2 connection closed"
+                        );
+                    }
+                }
+            }
+
+            if let Some(pool) = weak_pool.upgrade() {
+                pool.remove(id);
+            }
+        });
+    }
+
+    fn promote_ready(&self, id: ConnectionId, sender: http2::SendRequest<BoxBody>) {
         let mut state = self.state.write().unwrap();
-        let pooled = state.clients.len();
-        state.clients.retain(|pooled| pooled.id != id);
-        let removed = pooled - state.clients.len();
-        tracing::debug!(host, connection = ?id, removed, "poisoned pooled connections");
+        if let Some(entry) = state.connections.iter_mut().find(|c| c.id == id) {
+            entry.conn = ConnectionState::Ready(sender);
+        }
+    }
+
+    fn remove(&self, id: ConnectionId) {
+        let mut state = self.state.write().unwrap();
+        state.connections.retain(|c| c.id != id);
     }
 
     fn clear_and_detach(&self) {
         let mut state = self.state.write().unwrap();
-        state.clients.clear();
+        state.connections.clear();
         state.detached = true;
     }
 
-    fn reap_idle_clients(&self) {
+    /// Reap connections idle for at least `idle_timeout` and return the earliest
+    /// future deadline among remaining idle connections (`C13c`).
+    fn reap_idle(&self, now: Instant, idle_timeout: Duration) -> Option<Instant> {
         let mut state = self.state.write().unwrap();
-        state
-            .clients
-            .retain(|pooled| !pooled.should_reap(IDLE_TIMEOUT));
+        let mut next_deadline: Option<Instant> = None;
+        state.connections.retain(|conn| {
+            if !conn.is_live() {
+                return false;
+            }
+            if let Some(deadline) = conn.idle_deadline(idle_timeout) {
+                if deadline <= now {
+                    return false;
+                }
+                next_deadline = Some(match next_deadline {
+                    Some(earliest) => earliest.min(deadline),
+                    None => deadline,
+                });
+            }
+            true
+        });
+        next_deadline
     }
 
-    /// Atomically detach this host pool if it currently has no pooled clients.
+    /// Atomically detach this host pool if it currently has no pooled connections.
     fn detach_if_empty(&self) -> bool {
         let Ok(mut state) = self.state.try_write() else {
             return false;
         };
-        if state.clients.is_empty() {
+        if state.connections.is_empty() {
             state.detached = true;
             true
         } else {
             false
+        }
+    }
+}
+
+async fn dial_http2<C: Connect>(
+    mut connector: C,
+    origin_uri: Uri,
+    connection_timeout: Duration,
+    http2_config: Http2Config,
+    shutdown: ShutdownSignal,
+) -> Result<
+    (
+        http2::SendRequest<BoxBody>,
+        http2::Connection<C::Io, BoxBody, TokioExecutor>,
+    ),
+    DialError,
+> {
+    let dial = async {
+        futures_util::future::poll_fn(|cx| connector.poll_ready(cx))
+            .await
+            .map_err(|e| format_error_chain(e.into().as_ref()))?;
+        let io = connector
+            .call(origin_uri)
+            .await
+            .map_err(|e| format_error_chain(e.into().as_ref()))?;
+        let mut builder = http2::Builder::new(TokioExecutor::new());
+        builder
+            .timer(TokioTimer::new())
+            .keep_alive_interval(KEEP_ALIVE_INTERVAL)
+            .keep_alive_timeout(KEEP_ALIVE_TIMEOUT)
+            .initial_stream_window_size(http2_config.stream_receive_window)
+            .initial_connection_window_size(http2_config.connection_receive_window);
+        builder
+            .handshake(io)
+            .await
+            .map_err(|e| format_error_chain(&e))
+    };
+
+    tokio::select! {
+        biased;
+        _ = shutdown.cancelled() => Err(DialError::Aborted),
+        res = timeout(connection_timeout, dial) => match res {
+            Ok(Ok(pair)) => Ok(pair),
+            Ok(Err(msg)) => Err(DialError::Connect(msg)),
+            Err(_) => Err(DialError::Connect("connection timed out".to_owned())),
+        },
+    }
+}
+
+async fn wait_for_dial(
+    rx: &mut watch::Receiver<DialOutcome>,
+    shutdown: &ShutdownSignal,
+) -> Result<http2::SendRequest<BoxBody>, HttpError> {
+    loop {
+        match &*rx.borrow_and_update() {
+            DialOutcome::Pending => {}
+            DialOutcome::Ready(sender) => return Ok(sender.clone()),
+            DialOutcome::Failed(msg) => return Err(HttpError::Connect((**msg).clone())),
+            DialOutcome::Aborted => return Err(HttpError::Aborted),
+        }
+        tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => return Err(HttpError::Aborted),
+            changed = rx.changed() => {
+                if changed.is_err() {
+                    return Err(HttpError::Aborted);
+                }
+            }
         }
     }
 }
@@ -1407,28 +1364,37 @@ struct PoolHosts<C> {
 }
 
 pub struct Pool<C> {
+    connection_timeout: Duration,
     http2: Http2Config,
     hosts: Arc<StdRwLock<PoolHosts<C>>>,
     connector: C,
     shutdown: ShutdownSignal,
+    reaper_notify: Arc<Notify>,
     reaper: OnceLock<AbortOnDropHandle<()>>,
 }
 
 impl<C> Pool<C>
 where
-    C: Connect + Clone + Send + Sync + 'static,
+    C: Connect,
 {
-    pub(crate) fn new(connector: C, http2: Http2Config, shutdown: ShutdownSignal) -> Self {
+    pub(crate) fn new(
+        connector: C,
+        connection_timeout: Duration,
+        http2: Http2Config,
+        shutdown: ShutdownSignal,
+    ) -> Self {
         let hosts = Arc::new(StdRwLock::new(PoolHosts {
             closed: false,
             map: HashMap::new(),
         }));
 
         Self {
+            connection_timeout,
             http2,
             hosts,
             connector,
             shutdown,
+            reaper_notify: Arc::new(Notify::new()),
             reaper: OnceLock::new(),
         }
     }
@@ -1437,15 +1403,26 @@ where
         self.reaper.get_or_init(|| {
             let hosts = self.hosts.clone();
             let shutdown = self.shutdown.clone();
+            let notify = self.reaper_notify.clone();
             AbortOnDropHandle::new(tokio::spawn(async move {
-                let mut interval = tokio::time::interval(REAPER_INTERVAL);
                 let mut shutdown_fut = shutdown.cancelled();
                 loop {
-                    tokio::select! {
-                        biased;
-                        _ = &mut shutdown_fut => break,
-                        _ = interval.tick() => {
-                            reap_idle_clients(&hosts);
+                    let next_deadline = reap_idle_connections(&hosts, Instant::now(), IDLE_TIMEOUT);
+                    match next_deadline {
+                        Some(deadline) => {
+                            tokio::select! {
+                                biased;
+                                _ = &mut shutdown_fut => break,
+                                _ = tokio::time::sleep_until(deadline) => {}
+                                _ = notify.notified() => {}
+                            }
+                        }
+                        None => {
+                            tokio::select! {
+                                biased;
+                                _ = &mut shutdown_fut => break,
+                                _ = notify.notified() => {}
+                            }
                         }
                     }
                 }
@@ -1453,13 +1430,17 @@ where
         });
     }
 
-    fn get_or_create_host_pool(&self, host: &str) -> Result<Arc<HostPool<C>>, HttpError> {
+    fn get_or_create_host_pool(
+        &self,
+        origin: &str,
+        origin_uri: &Uri,
+    ) -> Result<Arc<HostPool<C>>, HttpError> {
         {
             let hosts = self.hosts.read().unwrap();
             if hosts.closed {
                 return Err(HttpError::ClientClosed);
             }
-            if let Some(pool) = hosts.map.get(host) {
+            if let Some(pool) = hosts.map.get(origin) {
                 return Ok(pool.clone());
             }
         }
@@ -1469,51 +1450,108 @@ where
         }
         Ok(hosts
             .map
-            .entry(host.to_owned())
-            .or_insert_with(|| Arc::new(HostPool::new(self.connector.clone(), self.http2)))
+            .entry(origin.to_owned())
+            .or_insert_with(|| {
+                Arc::new(HostPool::new(
+                    origin.to_owned(),
+                    origin_uri.clone(),
+                    self.connector.clone(),
+                    self.connection_timeout,
+                    self.http2,
+                    self.shutdown.clone(),
+                    self.reaper_notify.clone(),
+                ))
+            })
             .clone())
     }
 
-    fn checkout_for_host(
+    fn checkout_for_origin(
         &self,
-        host: &str,
-    ) -> Result<(Arc<HostPool<C>>, CheckedOutClient<C>), HttpError> {
+        origin: &str,
+        origin_uri: &Uri,
+    ) -> Result<(Arc<HostPool<C>>, Checkout), HttpError> {
         loop {
-            let pool = self.get_or_create_host_pool(host)?;
-            if let Some(checked_out) = pool.checkout() {
-                return Ok((pool, checked_out));
+            let pool = self.get_or_create_host_pool(origin, origin_uri)?;
+            if let Some(checkout) = pool.checkout() {
+                return Ok((pool, checkout));
             }
             // The host pool was detached concurrently by the idle reaper or close(); loop to
             // re-check closed state or allocate a fresh host pool.
         }
     }
 
-    #[cfg(test)]
-    fn checkout(&self, host: &str) -> (Arc<HyperClient<C, BoxBody>>, RequestPermit, ConnectionId) {
-        let (_pool, checked_out) = self.checkout_for_host(host).expect("pool open");
-        (checked_out.client, checked_out.permit, checked_out.id)
-    }
+    /// Acquire a live, ready HTTP/2 `SendRequest` for `origin_uri`.
+    ///
+    /// Phase 1 (`T7a`): connection establishment (DNS/TCP/TLS/H2 handshake) is bounded by
+    /// `connection_timeout`, completely independent of `request_timeout`.
+    /// If a reused idle connection closed right before `ready()`, transparently evict it and
+    /// dial once so the caller sees no spurious error.
+    async fn checkout_ready(
+        &self,
+        origin: &str,
+        origin_uri: &Uri,
+        request_timeout: Option<Duration>,
+    ) -> Result<CheckedOutSender, HttpError> {
+        for attempt in 0..2 {
+            let (pool, checkout) = self.checkout_for_origin(origin, origin_uri)?;
+            let (id, mut sender, permit, reused) = match checkout {
+                Checkout::Ready { id, sender, permit } => (id, sender, permit, true),
+                Checkout::Connecting { id, mut rx, permit } => {
+                    let sender = wait_for_dial(&mut rx, &self.shutdown).await?;
+                    (id, sender, permit, false)
+                }
+            };
 
-    fn make_poison_handle(pool: &Arc<HostPool<C>>, host: String, id: ConnectionId) -> PoisonHandle {
-        // Weak: the handle can outlive the pool (a session holds it for the
-        // connection's lifetime) and must not keep a reaped pool alive.
-        let weak = Arc::downgrade(pool);
-        PoisonHandle::new(move || {
-            if let Some(pool) = weak.upgrade() {
-                pool.poison(&host, id);
+            let ready_res = match request_timeout {
+                Some(dur) => timeout(dur, sender.ready())
+                    .await
+                    .map_err(|_| HttpError::Timeout)?,
+                None => sender.ready().await,
+            };
+
+            match ready_res {
+                Ok(()) => {
+                    let weak: Weak<dyn PoisonTarget> =
+                        Arc::downgrade(&(pool as Arc<dyn PoisonTarget>));
+                    let poison_handle = PoisonHandle::new(weak, id);
+                    return Ok(CheckedOutSender {
+                        sender,
+                        permit,
+                        poison_handle,
+                    });
+                }
+                Err(err) => {
+                    pool.remove(id);
+                    drop(permit);
+                    if reused && attempt == 0 {
+                        continue;
+                    }
+                    return Err(HttpError::Transport(err));
+                }
             }
-        })
+        }
+        unreachable!("at most two checkout attempts")
     }
 }
 
-fn reap_idle_clients<C: Connect + Clone + Send + Sync + 'static>(hosts: &StdRwLock<PoolHosts<C>>) {
+fn reap_idle_connections<C: Connect>(
+    hosts: &StdRwLock<PoolHosts<C>>,
+    now: Instant,
+    idle_timeout: Duration,
+) -> Option<Instant> {
     let pools: Vec<Arc<HostPool<C>>> = {
         let hosts = hosts.read().unwrap();
         hosts.map.values().cloned().collect()
     };
 
+    let mut next_deadline: Option<Instant> = None;
     for pool in &pools {
-        pool.reap_idle_clients();
+        if let Some(deadline) = pool.reap_idle(now, idle_timeout) {
+            next_deadline = Some(match next_deadline {
+                Some(earliest) => earliest.min(deadline),
+                None => deadline,
+            });
+        }
     }
 
     hosts
@@ -1521,33 +1559,139 @@ fn reap_idle_clients<C: Connect + Clone + Send + Sync + 'static>(hosts: &StdRwLo
         .unwrap()
         .map
         .retain(|_, pool| !pool.detach_if_empty());
+
+    next_deadline
+}
+
+async fn execute_unary_with(
+    mut sender: http2::SendRequest<BoxBody>,
+    request: Request,
+    poison_handle: PoisonHandle,
+) -> Result<UnaryResponse, HttpError> {
+    let request_timeout = request.timeout;
+    let http_request = build_http_request(
+        request.method,
+        &request.uri,
+        request.headers,
+        request.body.into_http_body(),
+    )?;
+
+    let deadline = request_timeout.map(|d| Instant::now() + d);
+
+    let send_fut = sender.send_request(http_request);
+    let response = match deadline {
+        Some(dl) => timeout_at(dl, send_fut)
+            .await
+            .map_err(|_| HttpError::Timeout)?,
+        None => send_fut.await,
+    }
+    .map_err(|err| {
+        if is_dead_connection_hyper_error(&err) {
+            poison_handle.poison();
+        }
+        HttpError::Transport(err)
+    })?;
+
+    let (parts, body) = response.into_parts();
+    let bytes = if parts.status.is_success() {
+        let collect = match deadline {
+            Some(dl) => timeout_at(dl, body.collect())
+                .await
+                .map_err(|_| HttpError::Timeout)?,
+            None => body.collect().await,
+        };
+        let bytes = collect
+            .map_err(|err| {
+                if is_dead_connection_hyper_error(&err) {
+                    poison_handle.poison();
+                }
+                HttpError::Transport(err)
+            })?
+            .to_bytes();
+        decompress_body(&parts.headers, bytes).await?
+    } else {
+        // Non-2xx headers already received (`E2`): preserve HTTP status even if collecting
+        // or decompressing the error body stalls or fails.
+        let bytes = collect_error_body(body, deadline, &poison_handle).await;
+        match decompress_body(&parts.headers, bytes).await {
+            Ok(bytes) => bytes,
+            Err(_) => Bytes::new(),
+        }
+    };
+
+    Ok(UnaryResponse {
+        status: parts.status,
+        headers: parts.headers,
+        bytes,
+        poison_handle: Some(poison_handle),
+    })
+}
+
+async fn init_streaming_with(
+    mut sender: http2::SendRequest<BoxBody>,
+    request: Request,
+    permit: RequestPermit,
+    poison_handle: PoisonHandle,
+) -> Result<StreamingResponse, HttpError> {
+    let request_timeout = request.timeout;
+    let http_request = build_http_request(
+        request.method,
+        &request.uri,
+        request.headers,
+        request.body.into_http_body(),
+    )?;
+
+    let deadline = request_timeout.map(|d| Instant::now() + d);
+
+    let send_fut = sender.send_request(http_request);
+    let response = match deadline {
+        Some(dl) => timeout_at(dl, send_fut)
+            .await
+            .map_err(|_| HttpError::Timeout)?,
+        None => send_fut.await,
+    }
+    .map_err(|err| {
+        if is_dead_connection_hyper_error(&err) {
+            poison_handle.poison();
+        }
+        HttpError::Transport(err)
+    })?;
+
+    let (parts, body) = response.into_parts();
+    Ok(StreamingResponse::new(
+        parts.status,
+        parts.headers,
+        body,
+        permit,
+        poison_handle,
+        deadline,
+    ))
 }
 
 #[async_trait]
 impl<C> RequestExecutor for Pool<C>
 where
-    C: Connect + Clone + Send + Sync + 'static,
+    C: Connect,
 {
     async fn execute_unary(&self, request: Request) -> Result<UnaryResponse, HttpError> {
         if self.shutdown.is_closed() {
             return Err(HttpError::ClientClosed);
         }
         self.ensure_reaper_started();
-        let origin = request.origin();
-        let (
-            pool,
-            CheckedOutClient {
-                client,
-                permit: _permit,
-                id,
-            },
-        ) = self.checkout_for_host(&origin)?;
-        let poison_handle = Self::make_poison_handle(&pool, origin, id);
+        let (origin, origin_uri) = request.origin_uri();
+        let request_timeout = request.timeout;
         let shutdown = self.shutdown.clone();
         tokio::select! {
             biased;
             _ = shutdown.cancelled() => Err(HttpError::Aborted),
-            res = execute_unary_with(&client, request, poison_handle) => res,
+            res = async {
+                let CheckedOutSender {
+                    sender,
+                    permit: _permit,
+                    poison_handle,
+                } = self.checkout_ready(&origin, &origin_uri, request_timeout).await?;
+                execute_unary_with(sender, request, poison_handle).await
+            } => res,
         }
     }
 
@@ -1556,14 +1700,20 @@ where
             return Err(HttpError::ClientClosed);
         }
         self.ensure_reaper_started();
-        let origin = request.origin();
-        let (pool, CheckedOutClient { client, permit, id }) = self.checkout_for_host(&origin)?;
-        let poison_handle = Self::make_poison_handle(&pool, origin, id);
+        let (origin, origin_uri) = request.origin_uri();
+        let request_timeout = request.timeout;
         let shutdown = self.shutdown.clone();
         tokio::select! {
             biased;
             _ = shutdown.cancelled() => Err(HttpError::Aborted),
-            res = init_streaming_with(&client, request, permit, poison_handle) => res,
+            res = async {
+                let CheckedOutSender {
+                    sender,
+                    permit,
+                    poison_handle,
+                } = self.checkout_ready(&origin, &origin_uri, request_timeout).await?;
+                init_streaming_with(sender, request, permit, poison_handle).await
+            } => res,
         }
     }
 
@@ -1582,19 +1732,122 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        sync::atomic::{AtomicUsize, Ordering},
+        task::{Context, Poll},
+    };
+
+    use hyper_util::rt::TokioIo;
     #[cfg(any(feature = "rustls-aws-lc-rs", feature = "rustls-ring"))]
     use rustls::client::danger::ServerCertVerifier;
+    use tokio::io::DuplexStream;
 
     use super::*;
 
-    const TEST_HOST: &str = "localhost:8080";
+    const TEST_ORIGIN: &str = "http://localhost:8080";
 
-    fn test_pool() -> Pool<HttpConnector> {
+    #[derive(Clone)]
+    struct DuplexH2Connector {
+        dials: Arc<AtomicUsize>,
+        dial_delay: Duration,
+        stall_error_body: bool,
+    }
+
+    impl DuplexH2Connector {
+        fn new() -> Self {
+            Self {
+                dials: Arc::new(AtomicUsize::new(0)),
+                dial_delay: Duration::ZERO,
+                stall_error_body: false,
+            }
+        }
+    }
+
+    impl Service<Uri> for DuplexH2Connector {
+        type Response = TokioIo<DuplexStream>;
+        type Error = std::io::Error;
+        type Future =
+            Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send + 'static>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _dst: Uri) -> Self::Future {
+            let dials = self.dials.clone();
+            let dial_delay = self.dial_delay;
+            let stall_error_body = self.stall_error_body;
+            Box::pin(async move {
+                dials.fetch_add(1, Ordering::SeqCst);
+                if !dial_delay.is_zero() {
+                    tokio::time::sleep(dial_delay).await;
+                }
+                let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+                tokio::spawn(async move {
+                    let Ok(mut conn) = h2::server::handshake(server_io).await else {
+                        return;
+                    };
+                    while let Some(Ok((_req, mut respond))) = conn.accept().await {
+                        if stall_error_body {
+                            let resp = http::Response::builder()
+                                .status(StatusCode::PRECONDITION_FAILED)
+                                .body(())
+                                .unwrap();
+                            if let Ok(mut send) = respond.send_response(resp, false) {
+                                tokio::spawn(async move {
+                                    let _ = std::future::poll_fn(|cx| send.poll_reset(cx)).await;
+                                });
+                            }
+                        } else {
+                            let resp = http::Response::builder()
+                                .status(StatusCode::OK)
+                                .body(())
+                                .unwrap();
+                            if let Ok(mut send) = respond.send_response(resp, false) {
+                                let _ = send.send_data(Bytes::from_static(b"ok"), true);
+                            }
+                        }
+                    }
+                });
+                Ok(TokioIo::new(client_io))
+            })
+        }
+    }
+
+    fn test_pool_with(connector: DuplexH2Connector, http2: Http2Config) -> Pool<DuplexH2Connector> {
         Pool::new(
-            HttpConnector::new(),
-            Http2Config::new(),
+            connector,
+            Duration::from_secs(3),
+            http2,
             ShutdownSignal::new(),
         )
+    }
+
+    fn test_pool() -> Pool<DuplexH2Connector> {
+        test_pool_with(DuplexH2Connector::new(), Http2Config::new())
+    }
+
+    fn host_connection_count<C: Connect>(pool: &Pool<C>, origin: &str) -> usize {
+        let hosts = pool.hosts.read().unwrap();
+        match hosts.map.get(origin) {
+            Some(pool) => pool.state.read().unwrap().connections.len(),
+            None => 0,
+        }
+    }
+
+    async fn checkout_permit(
+        pool: &Pool<DuplexH2Connector>,
+        origin: &str,
+    ) -> (ConnectionId, RequestPermit) {
+        let uri: Uri = origin.parse().unwrap();
+        let (_host_pool, checkout) = pool.checkout_for_origin(origin, &uri).unwrap();
+        match checkout {
+            Checkout::Ready { id, permit, .. } => (id, permit),
+            Checkout::Connecting { id, mut rx, permit } => {
+                wait_for_dial(&mut rx, &pool.shutdown).await.unwrap();
+                (id, permit)
+            }
+        }
     }
 
     #[test]
@@ -1604,7 +1857,7 @@ mod tests {
         let mut second = HeaderValue::from_static("second");
         second.set_sensitive(true);
         headers.append("x-tag", second);
-        headers.insert(CONTENT_ENCODING, HeaderValue::from_static("wrong-encoding"));
+        headers.insert(CONTENT_ENCODING, HeaderValue::from_static("gzip"));
 
         let request = RequestBuilder::get("http://example.test".parse().unwrap())
             .header("x-tag", "replaced")
@@ -1617,7 +1870,6 @@ mod tests {
             &cloned.uri,
             cloned.headers,
             cloned.body.into_http_body(),
-            Some(HeaderValue::from_static("gzip")),
         )
         .unwrap();
         let values = http.headers().get_all("x-tag").iter().collect::<Vec<_>>();
@@ -1657,14 +1909,6 @@ mod tests {
             request.uri,
             "https://example.com/v1/streams?limit=1&prefix=a%2Fb+c"
         );
-    }
-
-    fn host_client_count(pool: &Pool<HttpConnector>, host: &str) -> usize {
-        let hosts = pool.hosts.read().unwrap();
-        match hosts.map.get(host) {
-            Some(pool) => pool.state.read().unwrap().clients.len(),
-            None => 0,
-        }
     }
 
     #[cfg(feature = "rustls-aws-lc-rs")]
@@ -1707,65 +1951,66 @@ mod tests {
         let pool = test_pool();
         let mut permits = Vec::new();
         for _ in 0..MAX_CONCURRENT_REQUESTS_PER_CLIENT {
-            let (_client, permit, _) = pool.checkout(TEST_HOST);
+            let (_, permit) = checkout_permit(&pool, TEST_ORIGIN).await;
             permits.push(permit);
         }
-        assert_eq!(host_client_count(&pool, TEST_HOST), 1);
+        assert_eq!(host_connection_count(&pool, TEST_ORIGIN), 1);
     }
 
     // spec: r1 C13a
     #[tokio::test]
-    async fn overflow_creates_new_client() {
+    async fn overflow_creates_new_connection() {
         let pool = test_pool();
         let mut permits = Vec::new();
         for _ in 0..MAX_CONCURRENT_REQUESTS_PER_CLIENT {
-            let (_client, permit, _) = pool.checkout(TEST_HOST);
+            let (_, permit) = checkout_permit(&pool, TEST_ORIGIN).await;
             permits.push(permit);
         }
-        assert_eq!(host_client_count(&pool, TEST_HOST), 1);
+        assert_eq!(host_connection_count(&pool, TEST_ORIGIN), 1);
 
-        let (_client, permit, _) = pool.checkout(TEST_HOST);
+        let (_, permit) = checkout_permit(&pool, TEST_ORIGIN).await;
         permits.push(permit);
-        assert_eq!(host_client_count(&pool, TEST_HOST), 2);
+        assert_eq!(host_connection_count(&pool, TEST_ORIGIN), 2);
     }
 
     // spec: r1 C13
     #[tokio::test]
     async fn poison_evicts_only_targeted_connection_preserving_siblings() {
         let http2 = Http2Config::new().with_max_concurrent_requests(1).unwrap();
-        let pool = Pool::new(HttpConnector::new(), http2, ShutdownSignal::new());
-        let (_c1, p1, id1) = pool.checkout(TEST_HOST);
-        let (_c2, p2, id2) = pool.checkout(TEST_HOST);
+        let pool = test_pool_with(DuplexH2Connector::new(), http2);
+        let (id1, p1) = checkout_permit(&pool, TEST_ORIGIN).await;
+        let (id2, p2) = checkout_permit(&pool, TEST_ORIGIN).await;
         assert_ne!(id1, id2);
-        assert_eq!(host_client_count(&pool, TEST_HOST), 2);
+        assert_eq!(host_connection_count(&pool, TEST_ORIGIN), 2);
 
-        let host_pool = pool.get_or_create_host_pool(TEST_HOST).unwrap();
-        host_pool.poison(TEST_HOST, id1);
-        assert_eq!(host_client_count(&pool, TEST_HOST), 1);
+        let uri: Uri = TEST_ORIGIN.parse().unwrap();
+        let host_pool = pool.get_or_create_host_pool(TEST_ORIGIN, &uri).unwrap();
+        host_pool.poison(id1);
+        assert_eq!(host_connection_count(&pool, TEST_ORIGIN), 1);
 
         // Freeing the healthy sibling's permit allows reusing it rather than dialing a new one.
         drop(p2);
-        let (_c3, p3, id3) = pool.checkout(TEST_HOST);
+        let (id3, p3) = checkout_permit(&pool, TEST_ORIGIN).await;
         assert_eq!(id3, id2);
-        assert_eq!(host_client_count(&pool, TEST_HOST), 1);
+        assert_eq!(host_connection_count(&pool, TEST_ORIGIN), 1);
         drop((p1, p3));
     }
 
     // spec: r1 C13a
     #[tokio::test]
-    async fn custom_request_cap_bounds_client() {
+    async fn custom_request_cap_bounds_connection() {
         let http2 = Http2Config::new().with_max_concurrent_requests(2).unwrap();
-        let pool = Pool::new(HttpConnector::new(), http2, ShutdownSignal::new());
+        let pool = test_pool_with(DuplexH2Connector::new(), http2);
         let mut permits = Vec::new();
         for _ in 0..2 {
-            let (_client, permit, _) = pool.checkout(TEST_HOST);
+            let (_, permit) = checkout_permit(&pool, TEST_ORIGIN).await;
             permits.push(permit);
         }
-        assert_eq!(host_client_count(&pool, TEST_HOST), 1);
+        assert_eq!(host_connection_count(&pool, TEST_ORIGIN), 1);
 
-        let (_client, permit, _) = pool.checkout(TEST_HOST);
+        let (_, permit) = checkout_permit(&pool, TEST_ORIGIN).await;
         permits.push(permit);
-        assert_eq!(host_client_count(&pool, TEST_HOST), 2);
+        assert_eq!(host_connection_count(&pool, TEST_ORIGIN), 2);
     }
 
     // spec: r1 C13a
@@ -1774,94 +2019,129 @@ mod tests {
         let pool = test_pool();
         let mut permits = Vec::new();
         for _ in 0..MAX_CONCURRENT_REQUESTS_PER_CLIENT {
-            let (_client, permit, _) = pool.checkout(TEST_HOST);
+            let (_, permit) = checkout_permit(&pool, TEST_ORIGIN).await;
             permits.push(permit);
         }
         permits.pop();
 
-        let (_client, permit, _) = pool.checkout(TEST_HOST);
+        let (_, permit) = checkout_permit(&pool, TEST_ORIGIN).await;
         permits.push(permit);
-        assert_eq!(host_client_count(&pool, TEST_HOST), 1);
+        assert_eq!(host_connection_count(&pool, TEST_ORIGIN), 1);
     }
 
     // spec: r1 C13c
-    #[tokio::test]
-    async fn reaper_removes_idle_clients() {
+    #[tokio::test(start_paused = true)]
+    async fn reaper_removes_idle_connections_at_90s() {
         let pool = test_pool();
-        let mut permits = Vec::new();
-        for _ in 0..MAX_CONCURRENT_REQUESTS_PER_CLIENT {
-            let (_client, permit, _) = pool.checkout(TEST_HOST);
-            permits.push(permit);
-        }
-        let (_client, permit, _) = pool.checkout(TEST_HOST);
-        permits.push(permit);
-        assert_eq!(host_client_count(&pool, TEST_HOST), 2);
+        let req = RequestBuilder::get("http://localhost:8080/test".parse().unwrap())
+            .build()
+            .unwrap();
+        let resp = pool.execute_unary(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(host_connection_count(&pool, TEST_ORIGIN), 1);
 
-        permits.clear();
-        {
-            let hosts = pool.hosts.read().unwrap();
-            let pool = hosts.map.get(TEST_HOST).unwrap();
-            let state = pool.state.read().unwrap();
-            for pooled in &state.clients {
-                pooled.state.lock().unwrap().idle_since =
-                    Some(Instant::now() - IDLE_TIMEOUT - Duration::from_secs(1));
-            }
-        }
+        // Just before 90s: still pooled.
+        tokio::time::advance(IDLE_TIMEOUT - Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(host_connection_count(&pool, TEST_ORIGIN), 1);
 
-        reap_idle_clients(&pool.hosts);
-        assert_eq!(host_client_count(&pool, TEST_HOST), 0);
-        assert!(!pool.hosts.read().unwrap().map.contains_key(TEST_HOST));
+        // At 90s: reaped promptly without waiting an extra 30s tick.
+        tokio::time::advance(Duration::from_secs(2)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(host_connection_count(&pool, TEST_ORIGIN), 0);
+        assert!(!pool.hosts.read().unwrap().map.contains_key(TEST_ORIGIN));
     }
 
     // spec: r1 C13
     #[tokio::test]
     async fn different_hosts_get_independent_pools() {
         let pool = test_pool();
-        let host_a = "https://host-a:443";
-        let host_b = "https://host-b:443";
+        let host_a = "https://host-a";
+        let host_b = "https://host-b";
 
         let mut permits_a = Vec::new();
         for _ in 0..MAX_CONCURRENT_REQUESTS_PER_CLIENT {
-            let (_client, permit, _) = pool.checkout(host_a);
+            let (_, permit) = checkout_permit(&pool, host_a).await;
             permits_a.push(permit);
         }
-        assert_eq!(host_client_count(&pool, host_a), 1);
+        assert_eq!(host_connection_count(&pool, host_a), 1);
 
-        let (_client, permit_b, _) = pool.checkout(host_b);
-        assert_eq!(host_client_count(&pool, host_b), 1);
-        assert_eq!(host_client_count(&pool, host_a), 1);
+        let (_, permit_b) = checkout_permit(&pool, host_b).await;
+        assert_eq!(host_connection_count(&pool, host_b), 1);
+        assert_eq!(host_connection_count(&pool, host_a), 1);
 
         drop(permit_b);
         drop(permits_a);
     }
 
-    // spec: r1 C13c
-    #[tokio::test]
-    async fn reaper_removes_empty_host_entries() {
-        let pool = test_pool();
+    // spec: r1 T7a, T7b
+    #[tokio::test(start_paused = true)]
+    async fn connection_timeout_is_separate_from_request_timeout() {
+        let mut connector = DuplexH2Connector::new();
+        connector.dial_delay = Duration::from_millis(300);
+        // connection_timeout (1s) > dial_delay (300ms) > request_timeout (100ms):
+        // Phase 1 dial must NOT trigger request_timeout.
+        let pool = Pool::new(
+            connector,
+            Duration::from_secs(1),
+            Http2Config::new(),
+            ShutdownSignal::new(),
+        );
+        let req = RequestBuilder::get("http://localhost:8080/test".parse().unwrap())
+            .timeout(Duration::from_millis(100))
+            .build()
+            .unwrap();
+        let resp = pool.execute_unary(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
 
-        let (_client, permit_a, _) = pool.checkout("https://host-a");
-        let (_client, permit_b, _) = pool.checkout("https://host-b");
-        assert_eq!(pool.hosts.read().unwrap().map.len(), 2);
+        // Now dial_delay (500ms) > connection_timeout (100ms) with huge request_timeout (10s):
+        // must fail with HttpError::Connect (not HttpError::Timeout).
+        let mut slow_connector = DuplexH2Connector::new();
+        slow_connector.dial_delay = Duration::from_millis(500);
+        let pool = Pool::new(
+            slow_connector,
+            Duration::from_millis(100),
+            Http2Config::new(),
+            ShutdownSignal::new(),
+        );
+        let req = RequestBuilder::get("http://localhost:8080/test".parse().unwrap())
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap();
+        let err = pool.execute_unary(req).await.err().unwrap();
+        assert!(
+            matches!(err, HttpError::Connect(ref m) if m.contains("timed out")),
+            "expected Connect timeout, got {err:?}"
+        );
+    }
 
-        drop(permit_a);
-        {
-            let hosts = pool.hosts.read().unwrap();
-            let pool_a = hosts.map.get("https://host-a").unwrap();
-            let state = pool_a.state.read().unwrap();
-            for pooled in &state.clients {
-                pooled.state.lock().unwrap().idle_since =
-                    Some(Instant::now() - IDLE_TIMEOUT - Duration::from_secs(1));
-            }
-        }
+    // spec: r1 E2
+    #[tokio::test(start_paused = true)]
+    async fn stalled_non_2xx_error_body_preserves_status_for_unary_and_streaming() {
+        let mut connector = DuplexH2Connector::new();
+        connector.stall_error_body = true;
+        let pool = test_pool_with(connector, Http2Config::new());
 
-        reap_idle_clients(&pool.hosts);
+        // Unary: 412 headers arrive, body stalls past request_timeout -> preserves 412 with empty
+        // body.
+        let unary_req = RequestBuilder::post("http://localhost:8080/append".parse().unwrap())
+            .timeout(Duration::from_millis(50))
+            .build()
+            .unwrap();
+        let unary_resp = pool.execute_unary(unary_req).await.unwrap();
+        assert_eq!(unary_resp.status(), StatusCode::PRECONDITION_FAILED);
+        assert!(unary_resp.into_bytes().is_empty());
 
-        let hosts = pool.hosts.read().unwrap();
-        assert!(!hosts.map.contains_key("https://host-a"));
-        assert!(hosts.map.contains_key("https://host-b"));
-
-        drop(permit_b);
+        // Streaming: 412 headers arrive, error-body collection stalls -> preserves 412 with empty
+        // body.
+        let stream_req = RequestBuilder::post("http://localhost:8080/append".parse().unwrap())
+            .timeout(Duration::from_millis(50))
+            .build()
+            .unwrap();
+        let stream_resp = pool.init_streaming(stream_req).await.unwrap();
+        assert_eq!(stream_resp.status(), StatusCode::PRECONDITION_FAILED);
+        let (bytes, _poison) = stream_resp.into_bytes_with_poison_handle().await;
+        assert!(bytes.is_empty());
     }
 
     #[test]
@@ -1874,7 +2154,12 @@ mod tests {
 
     #[test]
     fn pool_construction_does_not_require_tokio_runtime() {
-        let pool = test_pool();
+        let pool = Pool::new(
+            HttpConnector::new(),
+            Duration::from_secs(3),
+            Http2Config::new(),
+            ShutdownSignal::new(),
+        );
         pool.close();
     }
 
@@ -1886,8 +2171,8 @@ mod tests {
         let r2 = RequestBuilder::get("http://example.com/v1".parse().unwrap())
             .build()
             .unwrap();
-        assert_eq!(r1.origin(), "http://example.com");
-        assert_eq!(r1.origin(), r2.origin());
+        assert_eq!(r1.origin_uri().0, "http://example.com");
+        assert_eq!(r1.origin_uri().0, r2.origin_uri().0);
 
         let r3 = RequestBuilder::get("HTTPS://A.S2.DEV:443/v1".parse().unwrap())
             .build()
@@ -1895,13 +2180,13 @@ mod tests {
         let r4 = RequestBuilder::get("https://a.s2.dev/v1".parse().unwrap())
             .build()
             .unwrap();
-        assert_eq!(r3.origin(), "https://a.s2.dev");
-        assert_eq!(r3.origin(), r4.origin());
+        assert_eq!(r3.origin_uri().0, "https://a.s2.dev");
+        assert_eq!(r3.origin_uri().0, r4.origin_uri().0);
 
         let r5 = RequestBuilder::get("https://a.s2.dev:8443/v1".parse().unwrap())
             .build()
             .unwrap();
-        assert_eq!(r5.origin(), "https://a.s2.dev:8443");
+        assert_eq!(r5.origin_uri().0, "https://a.s2.dev:8443");
     }
 
     #[tokio::test]

@@ -156,6 +156,23 @@ impl<T: StrProps> TryFrom<CompactString> for BasinNameStr<T> {
     }
 }
 
+impl<T: StrProps> TryFrom<String> for BasinNameStr<T> {
+    type Error = ValidationError;
+
+    fn try_from(name: String) -> Result<Self, Self::Error> {
+        Self::validate_str(&name)?;
+        Ok(Self(CompactString::from(name), PhantomData))
+    }
+}
+
+impl<T: StrProps> TryFrom<&str> for BasinNameStr<T> {
+    type Error = ValidationError;
+
+    fn try_from(name: &str) -> Result<Self, Self::Error> {
+        name.parse()
+    }
+}
+
 impl<T: StrProps> FromStr for BasinNameStr<T> {
     type Err = ValidationError;
 

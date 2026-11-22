@@ -1,6 +1,6 @@
 use s2_sdk::{
     S2,
-    types::{AppendInput, AppendRecordBatch, BasinName, CommandRecord, S2Config, StreamName},
+    types::{BasinName, CommandRecord, S2Config, StreamName},
 };
 
 #[tokio::main]
@@ -23,11 +23,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let input = AppendInput::new(AppendRecordBatch::try_from_iter([CommandRecord::trim(
-        tail.seq_num - 1,
-    )
-    .into()])?);
-    stream.append(input).await?;
+    stream.append(CommandRecord::trim(tail.seq_num - 1)).await?;
     println!("Trim requested");
 
     Ok(())

@@ -114,6 +114,23 @@ impl<T: StrProps> TryFrom<CompactString> for StreamNameStr<T> {
     }
 }
 
+impl<T: StrProps> TryFrom<String> for StreamNameStr<T> {
+    type Error = ValidationError;
+
+    fn try_from(name: String) -> Result<Self, Self::Error> {
+        Self::validate_str(&name)?;
+        Ok(Self(CompactString::from(name), PhantomData))
+    }
+}
+
+impl<T: StrProps> TryFrom<&str> for StreamNameStr<T> {
+    type Error = ValidationError;
+
+    fn try_from(name: &str) -> Result<Self, Self::Error> {
+        name.parse()
+    }
+}
+
 impl<T: StrProps> FromStr for StreamNameStr<T> {
     type Err = ValidationError;
 

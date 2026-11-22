@@ -5,9 +5,8 @@
 use s2_sdk::{
     S2,
     types::{
-        AppendInput, AppendRecord, AppendRecordBatch, BasinConfig, BasinName, BasinReconfiguration,
-        CreateBasinInput, CreateStreamInput, EncryptionAlgorithm, ReadFrom, ReadInput, ReadLimits,
-        ReadStart, ReadStop, ReconfigureBasinInput, S2Config, StreamName,
+        AppendRecord, BasinConfig, BasinName, BasinReconfiguration, CreateBasinInput,
+        CreateStreamInput, EncryptionAlgorithm, ReadFrom, ReadInput, S2Config, StreamName,
     },
 };
 
@@ -34,10 +33,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     client
-        .reconfigure_basin(ReconfigureBasinInput::new(
+        .reconfigure_basin(
             basin_name.clone(),
             BasinReconfiguration::new().with_stream_cipher(EncryptionAlgorithm::Aes256Gcm),
-        ))
+        )
         .await?;
     // ANCHOR_END: basin-cipher
 
@@ -51,17 +50,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .stream(stream_name.clone())
         .with_encryption_key(std::env::var("S2_ENCRYPTION_KEY")?.parse()?);
 
-    stream
-        .append(AppendInput::new(AppendRecordBatch::try_from_iter([
-            AppendRecord::new("top secret")?,
-        ])?))
-        .await?;
+    stream.append(AppendRecord::new("top secret")?).await?;
 
     let batch = stream
         .read(
             ReadInput::new()
-                .with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0)))
-                .with_stop(ReadStop::new().with_limits(ReadLimits::new().with_count(10))),
+                .with_from(ReadFrom::SeqNum(0))
+                .with_count(10),
         )
         .await?;
     // ANCHOR_END: append-read

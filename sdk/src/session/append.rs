@@ -16,7 +16,7 @@ use futures_core::Stream;
 use futures_util::{FutureExt, StreamExt};
 use s2_api::v1::stream::s2s;
 use tokio::{
-    sync::{mpsc, oneshot, watch},
+    sync::{Notify, mpsc, oneshot, watch},
     time::{Instant, Sleep},
 };
 use tracing::debug;
@@ -74,7 +74,7 @@ impl Future for BatchSubmitTicket {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 /// Configuration for an [`AppendSession`].
 pub struct AppendSessionConfig {
     max_unacked_bytes: u32,
@@ -96,6 +96,21 @@ impl AppendSessionConfig {
     /// Create a new [`AppendSessionConfig`] with default settings.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Return the limit on total metered bytes of unacknowledged [`AppendInput`]s held in memory.
+    pub fn max_unacked_bytes(&self) -> u32 {
+        self.max_unacked_bytes
+    }
+
+    /// Return the limit on number of unacknowledged [`AppendInput`]s held in memory, if set.
+    pub fn max_unacked_batches(&self) -> Option<u32> {
+        self.max_unacked_batches
+    }
+
+    /// Return the stream configuration to apply if the stream is created on append, if set.
+    pub fn stream_config(&self) -> Option<&StreamConfig> {
+        self.stream_config.as_ref()
     }
 
     /// Set the limit on total metered bytes of unacknowledged [`AppendInput`]s held in memory.
@@ -142,10 +157,6 @@ impl AppendSessionConfig {
             stream_config: Some(stream_config),
             ..self
         }
-    }
-
-    pub(crate) fn stream_config(&self) -> Option<&StreamConfig> {
-        self.stream_config.as_ref()
     }
 }
 
@@ -317,6 +328,10 @@ impl AppendSession {
 
     /// Submit a batch of records for appending.
     ///
+    /// Accepts an [`AppendInput`], [`AppendRecordBatch`](crate::types::AppendRecordBatch),
+    /// [`AppendRecord`](crate::types::AppendRecord), or
+    /// [`CommandRecord`](crate::types::CommandRecord).
+    ///
     /// Internally, it waits on [`reserve`](Self::reserve), then submits using the permit.
     /// This provides backpressure when unacknowledged limits are reached.
     /// For explicit control, use [`reserve`](Self::reserve) followed by
@@ -326,8 +341,9 @@ impl AppendSession {
     /// appended. Dropping the session without closing aborts it.
     pub async fn submit(
         &self,
-        input: AppendInput,
+        input: impl Into<AppendInput>,
     ) -> Result<BatchSubmitTicket, AppendSessionError> {
+        let input = input.into();
         let bytes = input.records.metered_bytes() as u32;
         let permit = self.reserve(bytes).await?;
         permit.submit(input)
@@ -356,13 +372,17 @@ impl AppendSession {
             return Err(self.lifecycle.session_closed_err(&self.context));
         }
 
-        let closing_fut = self.lifecycle.wait_closing_or_closed();
-        let append_permit = tokio::select! {
-            biased;
-            _ = closing_fut => {
-                return Err(self.lifecycle.session_closed_err(&self.context));
+        let append_permit = if let Some(permit) = self.permits.try_acquire(bytes) {
+            permit
+        } else {
+            let closing_fut = self.lifecycle.wait_closing_or_closed();
+            tokio::select! {
+                biased;
+                _ = closing_fut => {
+                    return Err(self.lifecycle.session_closed_err(&self.context));
+                }
+                permit = self.permits.acquire(bytes) => permit,
             }
-            permit = self.permits.acquire(bytes) => permit,
         };
 
         if self.lifecycle.is_closing_or_closed() {
@@ -440,7 +460,11 @@ impl BatchSubmitPermit {
     /// Fails with [`ValidationError`] (releasing the reservation and leaving the session open) if
     /// the batch's metered size exceeds the reserved bytes. Fails with [`SessionClosedError`] if
     /// the session closed or began closing after the permit was reserved.
-    pub fn submit(mut self, input: AppendInput) -> Result<BatchSubmitTicket, AppendSessionError> {
+    pub fn submit(
+        mut self,
+        input: impl Into<AppendInput>,
+    ) -> Result<BatchSubmitTicket, AppendSessionError> {
+        let input = input.into();
         let metered = input.records.metered_bytes();
         if metered > self.reserved_bytes as usize {
             return Err(AppendSessionError::Validation(ValidationError(format!(
@@ -519,6 +543,10 @@ impl AppendSessionInternal {
             abort_signal,
             context,
         }
+    }
+
+    pub(crate) fn lifecycle(&self) -> &Arc<SessionLifecycle> {
+        &self.lifecycle
     }
 
     pub(crate) fn terminal_err(&self) -> Option<AppendSessionError> {
@@ -695,6 +723,10 @@ impl AppendPermits {
         }
     }
 
+    pub(crate) fn has_waiters(&self) -> bool {
+        !self.inner.lock().unwrap().waiters.is_empty()
+    }
+
     pub(crate) fn try_acquire(&self, bytes: u32) -> Option<AppendPermit> {
         let mut state = self.inner.lock().unwrap();
         if state.waiters.is_empty() && state.can_satisfy(bytes) {
@@ -709,6 +741,16 @@ impl AppendPermits {
     }
 
     pub(crate) async fn acquire(&self, bytes: u32) -> AppendPermit {
+        self.acquire_inner(bytes, None).await
+    }
+
+    /// Acquire capacity FIFO, notifying `on_wait` strictly after enqueueing this waiter so a
+    /// woken consumer is guaranteed to observe `has_waiters() == true` (`A5a`).
+    pub(crate) async fn acquire_notifying(&self, bytes: u32, on_wait: &Notify) -> AppendPermit {
+        self.acquire_inner(bytes, Some(on_wait)).await
+    }
+
+    async fn acquire_inner(&self, bytes: u32, on_wait: Option<&Notify>) -> AppendPermit {
         struct AcquireGuard<'a> {
             inner: &'a StdMutex<PermitsState>,
             id: u64,
@@ -759,7 +801,13 @@ impl AppendPermits {
             }
         };
 
-        let _ = (&mut guard.rx).await;
+        if let Some(notify) = on_wait {
+            notify.notify_one();
+        }
+
+        (&mut guard.rx)
+            .await
+            .expect("permit waiter sender stays alive while AppendPermits is borrowed");
         guard.acquired = true;
         AppendPermit {
             inner: self.inner.clone(),
@@ -771,10 +819,7 @@ impl AppendPermits {
 struct SessionState {
     cmd_rx: mpsc::UnboundedReceiver<Command>,
     inflight_appends: VecDeque<InflightAppend>,
-    inflight_bytes: usize,
     closing: bool,
-    total_records: u64,
-    total_acked_records: u64,
     prev_ack_end: Option<StreamPosition>,
 }
 
@@ -788,22 +833,30 @@ impl SessionState {
         input: AppendInput,
         ack_tx: oneshot::Sender<Result<AppendAck, AppendSessionError>>,
         permit: Option<AppendPermit>,
+        compression: s2s::CompressionAlgorithm,
         context: &ErrorContext,
-    ) {
+    ) -> Result<(), AppendSessionError> {
         if self.closing {
             let _ = ack_tx.send(Err(AppendSessionError::SessionClosed(
                 SessionClosedError::new(None, context.clone()),
             )));
-            return;
+            return Ok(());
         }
-        let input_metered_bytes = input.records.metered_bytes();
-        self.total_records = self
-            .total_records
-            .saturating_add(input.records.len() as u64);
-        self.inflight_bytes += input_metered_bytes;
+        let record_count = input.records.len() as u64;
+        let api_input: s2_api::v1::stream::proto::AppendInput = input.into();
+        let (frame, encode_err) = match s2s::SessionMessage::regular(compression, &api_input) {
+            Ok(msg) => (msg.encode(), None),
+            Err(err) => (
+                Bytes::new(),
+                Some(AppendSessionError::Protocol(ProtocolError::new(
+                    format!("failed to encode append frame: {err}"),
+                    context.clone(),
+                ))),
+            ),
+        };
         self.inflight_appends.push_back(InflightAppend {
-            input,
-            input_metered_bytes,
+            frame,
+            record_count,
             ack_tx,
             _permit: permit,
             sent_ever: false,
@@ -811,12 +864,17 @@ impl SessionState {
             attempt_last_byte_rx: None,
             attempt_last_byte_at: None,
         });
+        match encode_err {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
     }
 }
 
 struct InflightAppend {
-    input: AppendInput,
-    input_metered_bytes: usize,
+    /// Pre-encoded and compressed S2S frame; cloning on resend is O(1).
+    frame: Bytes,
+    record_count: u64,
     ack_tx: oneshot::Sender<Result<AppendAck, AppendSessionError>>,
     _permit: Option<AppendPermit>,
     sent_ever: bool,
@@ -976,7 +1034,7 @@ enum AttemptResult {
     /// Connection ended cleanly or broke while nothing was unacked (`A3`, `T9`).
     IdleEnded,
     /// Server advised reconnecting and all sent batches drained cleanly (`T6a`).
-    ReconnectAdvised { made_progress: bool },
+    ReconnectAdvised,
     /// Session was aborted (`C12`, `A8c`).
     Aborted { reason: AbortReason },
     /// Attempt failed with an error.
@@ -1001,15 +1059,13 @@ async fn run_session_with_retry(
     context: ErrorContext,
 ) {
     let access_token_mode = client.config.access_token.mode();
+    let compression: s2s::CompressionAlgorithm = client.config.compression.into();
     let client_shutdown = client.shutdown_signal();
 
     let mut state = SessionState {
         cmd_rx,
         inflight_appends: VecDeque::new(),
-        inflight_bytes: 0,
         closing: false,
-        total_records: 0,
-        total_acked_records: 0,
         prev_ack_end: None,
     };
     let mut retry_backoff = retry_builder.build();
@@ -1033,6 +1089,7 @@ async fn run_session_with_retry(
                 &client_shutdown,
                 &abort_signal,
                 dropped_abort_msg,
+                compression,
                 &context,
             )
             .await
@@ -1046,6 +1103,10 @@ async fn run_session_with_retry(
                     abort_session(&mut state, &gate, &lifecycle, &context, reason);
                     return;
                 }
+                IdleWait::EncodeError(err) => {
+                    settle_terminal_error(&mut state, &gate, &lifecycle, &context, err, 0);
+                    return;
+                }
             }
         }
 
@@ -1056,6 +1117,7 @@ async fn run_session_with_retry(
             &headers,
             &mut state,
             advised_reconnects,
+            compression,
             &client_shutdown,
             &abort_signal,
             dropped_abort_msg,
@@ -1077,35 +1139,17 @@ async fn run_session_with_retry(
                 attempts = 0;
                 continue;
             }
-            AttemptResult::ReconnectAdvised { made_progress } => {
+            AttemptResult::ReconnectAdvised => {
+                // Advice is only ever carried on a decoded server response frame, so progress was
+                // made before draining (`T6a`).
                 advised_reconnects.record();
-                if made_progress {
-                    retry_backoff.reset();
-                    attempts = 0;
-                    debug!(
-                        inflight_appends_len = state.inflight_appends.len(),
-                        advised_reconnects = advised_reconnects.count(),
-                        "reconnecting append session on server advice"
-                    );
-                } else if let Some(backoff) = retry_backoff.next() {
-                    if let Some(reason) =
-                        sleep_or_abort(backoff, &client_shutdown, &abort_signal, dropped_abort_msg)
-                            .await
-                    {
-                        abort_session(&mut state, &gate, &lifecycle, &context, reason);
-                        return;
-                    }
-                } else {
-                    attempts += 1;
-                    let attempt_ctx = context.clone().with_attempts(attempts);
-                    let err = AppendSessionError::ConnectionLost(ConnectionLostError::new(
-                        "server repeatedly advised reconnecting without progress",
-                        true,
-                        attempt_ctx,
-                    ));
-                    settle_terminal_error(&mut state, &gate, &lifecycle, &context, err, 0);
-                    return;
-                }
+                retry_backoff.reset();
+                attempts = 0;
+                debug!(
+                    inflight_appends_len = state.inflight_appends.len(),
+                    advised_reconnects = advised_reconnects.count(),
+                    "reconnecting append session on server advice"
+                );
             }
             AttemptResult::Aborted { reason } => {
                 abort_session(&mut state, &gate, &lifecycle, &context, reason);
@@ -1201,6 +1245,7 @@ enum IdleWait {
     WorkReady,
     Closed,
     Aborted(AbortReason),
+    EncodeError(AppendSessionError),
 }
 
 async fn wait_for_work(
@@ -1208,6 +1253,7 @@ async fn wait_for_work(
     client_shutdown: &ShutdownSignal,
     abort_signal: &ShutdownSignal,
     dropped_abort_msg: &'static str,
+    compression: s2s::CompressionAlgorithm,
     context: &ErrorContext,
 ) -> IdleWait {
     let mut client_closed = client_shutdown.cancelled();
@@ -1221,7 +1267,9 @@ async fn wait_for_work(
             cmd = state.cmd_rx.recv() => {
                 match cmd {
                     Some(Command::Submit { input, ack_tx, permit }) => {
-                        state.push_submit(input, ack_tx, permit, context);
+                        if let Err(err) = state.push_submit(input, ack_tx, permit, compression, context) {
+                            return IdleWait::EncodeError(err);
+                        }
                         if !state.inflight_appends.is_empty() {
                             return IdleWait::WorkReady;
                         }
@@ -1343,7 +1391,6 @@ fn abort_session(
         };
         let _ = append.ack_tx.send(Err(outcome));
     }
-    state.inflight_bytes = 0;
 
     for cmd in queued {
         if let Command::Submit { ack_tx, .. } = cmd {
@@ -1421,7 +1468,6 @@ fn settle_terminal_error(
         let outcome = base_outcome.with_prior_uncertainty(append.prior_uncertainty);
         let _ = append.ack_tx.send(Err(outcome));
     }
-    state.inflight_bytes = 0;
 
     for cmd in drain_queued_commands(state) {
         if let Command::Submit { ack_tx, .. } = cmd {
@@ -1439,6 +1485,7 @@ async fn run_attempt(
     headers: &StreamHeaders,
     state: &mut SessionState,
     advised_reconnects: AdvisedReconnects,
+    compression: s2s::CompressionAlgorithm,
     client_shutdown: &ShutdownSignal,
     abort_signal: &ShutdownSignal,
     dropped_abort_msg: &'static str,
@@ -1503,7 +1550,6 @@ async fn run_attempt(
     }));
 
     let ack_timeout = client.config.request_timeout;
-    let compression: s2s::CompressionAlgorithm = client.config.compression.into();
     let mut input_tx = Some(input_tx);
     let mut send_cursor: usize = 0;
     let mut acked_in_attempt: usize = 0;
@@ -1535,9 +1581,7 @@ async fn run_attempt(
                 if send_cursor == 0 {
                     finish_attempt_gate(&send_gate, acked_in_attempt, state);
                     drop(acks);
-                    return AttemptResult::ReconnectAdvised {
-                        made_progress: acked_in_attempt > 0,
-                    };
+                    return AttemptResult::ReconnectAdvised;
                 }
             } else {
                 declined_advice = true;
@@ -1590,9 +1634,7 @@ async fn run_attempt(
                                     // immediately rather than waiting indefinitely for server EOF.
                                     finish_attempt_gate(&send_gate, acked_in_attempt, state);
                                     drop(acks);
-                                    return AttemptResult::ReconnectAdvised {
-                                        made_progress: acked_in_attempt > 0,
-                                    };
+                                    return AttemptResult::ReconnectAdvised;
                                 }
                             }
                             Err(err) => {
@@ -1623,9 +1665,7 @@ async fn run_attempt(
                         }
 
                         if draining_for_reconnect && err.is_server_draining() && unacked_sent == 0 {
-                            return AttemptResult::ReconnectAdvised {
-                                made_progress: acked_in_attempt > 0,
-                            };
+                            return AttemptResult::ReconnectAdvised;
                         }
 
                         return AttemptResult::Error {
@@ -1643,9 +1683,7 @@ async fn run_attempt(
 
                         if draining_for_reconnect {
                             if unacked_sent == 0 {
-                                return AttemptResult::ReconnectAdvised {
-                                    made_progress: acked_in_attempt > 0,
-                                };
+                                return AttemptResult::ReconnectAdvised;
                             }
                             return AttemptResult::Error {
                                 err: AppendSessionError::ConnectionLost(ConnectionLostError::new(
@@ -1744,27 +1782,10 @@ async fn run_attempt(
                 match permit {
                     Ok(permit) => {
                         let append = &mut state.inflight_appends[send_cursor];
-                        let api_input: s2_api::v1::stream::proto::AppendInput =
-                            append.input.clone().into();
-                        let encoded = match s2s::SessionMessage::regular(compression, &api_input) {
-                            Ok(msg) => msg.encode(),
-                            Err(err) => {
-                                let unacked_sent =
-                                    finish_attempt_gate(&send_gate, acked_in_attempt, state);
-                                return AttemptResult::Error {
-                                    err: AppendSessionError::Protocol(ProtocolError::new(
-                                        format!("failed to encode append frame: {err}"),
-                                        context.clone(),
-                                    )),
-                                    made_progress: acked_in_attempt > 0,
-                                    unacked_sent_in_attempt: unacked_sent,
-                                };
-                            }
-                        };
                         let (last_byte_tx, last_byte_rx) = oneshot::channel();
                         append.attempt_last_byte_rx = Some(last_byte_rx);
                         permit.send(OutboundBatch {
-                            frame: encoded,
+                            frame: append.frame.clone(),
                             last_byte_tx: Some(last_byte_tx),
                         });
                         send_cursor += 1;
@@ -1787,7 +1808,14 @@ async fn run_attempt(
                 match cmd {
                     Some(Command::Submit { input, ack_tx, permit }) => {
                         let was_empty = state.inflight_appends.is_empty();
-                        state.push_submit(input, ack_tx, permit, context);
+                        if let Err(err) = state.push_submit(input, ack_tx, permit, compression, context) {
+                            let unacked_sent = finish_attempt_gate(&send_gate, acked_in_attempt, state);
+                            return AttemptResult::Error {
+                                err,
+                                made_progress: acked_in_attempt > 0,
+                                unacked_sent_in_attempt: unacked_sent,
+                            };
+                        }
                         if was_empty && !state.inflight_appends.is_empty() {
                             became_oldest_at = Some(Instant::now());
                         }
@@ -1870,7 +1898,9 @@ fn drain_ready_acks(
     send_cursor: &mut usize,
     context: &ErrorContext,
 ) {
-    while let Some(Some(Ok(ack))) = acks.next().now_or_never() {
+    // Use `coop::unconstrained` so Tokio cooperative preemption cannot spuriously return
+    // `Pending` and drop an already-buffered ack during abort (`T10`).
+    while let Some(Some(Ok(ack))) = tokio::task::coop::unconstrained(acks.next()).now_or_never() {
         if process_ack(ack, state, *send_cursor, context).is_err() {
             break;
         }
@@ -1909,27 +1939,16 @@ fn process_ack(
         )));
     }
 
-    let expected_records = corresponding_append.input.records.len() as u64;
-    ack.validate_record_count(expected_records, context)
+    ack.validate_record_count(corresponding_append.record_count, context)
         .map_err(AppendSessionError::Protocol)?;
-    let num_acked_records = ack.end.seq_num - ack.start.seq_num;
 
     let corresponding_append = state
         .inflight_appends
         .pop_front()
         .expect("inflight front was checked above");
-    state.total_acked_records = state.total_acked_records.saturating_add(num_acked_records);
-    state.inflight_bytes -= corresponding_append.input_metered_bytes;
     state.prev_ack_end = Some(ack.end);
 
     let _ = corresponding_append.ack_tx.send(Ok(ack));
-
-    if state.inflight_appends.is_empty() {
-        debug_assert_eq!(
-            state.total_records, state.total_acked_records,
-            "all records should be acked when inflight is empty"
-        );
-    }
 
     Ok(())
 }
@@ -1953,6 +1972,7 @@ fn is_safe_to_retry(
 mod tests {
     use std::error::Error;
 
+    use bytes::Bytes;
     use http::StatusCode;
 
     use super::{AppendSessionError, is_safe_to_retry};
@@ -2102,6 +2122,7 @@ mod tests {
         tokio::task::yield_now().await;
 
         // A small waiter needing 10 bytes MUST NOT jump ahead of the queued 60-byte waiter!
+        assert!(permits.has_waiters());
         assert!(permits.try_acquire(10).is_none());
 
         // Shrinking p1 from 80 -> 20 releases 60 bytes (80 available) and immediately wakes
@@ -2111,13 +2132,16 @@ mod tests {
             .await
             .expect("shrink should wake blocked FIFO waiter")
             .unwrap();
+        assert!(!permits.has_waiters());
 
         // Now 2 batches held (0 batch slots left) and 20 bytes left.
         // Queue a third waiter, cancel it, then drop p1 & p_large and ensure no leak.
         let cancel_permits = permits.clone();
         let mut cancel_fut = Box::pin(cancel_permits.acquire(10));
         assert!(futures_util::FutureExt::now_or_never(&mut cancel_fut).is_none());
+        assert!(permits.has_waiters());
         drop(cancel_fut);
+        assert!(!permits.has_waiters());
 
         drop(p1);
         drop(p_large);
@@ -2132,19 +2156,15 @@ mod tests {
         use std::collections::VecDeque;
 
         use super::{InflightAppend, SessionState, process_ack};
-        use crate::types::{
-            AppendAck, AppendInput, AppendRecord, AppendRecordBatch, StreamPosition,
-        };
+        use crate::types::{AppendAck, StreamPosition};
 
         let (_cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
         let (ack_tx, mut ack_rx) = tokio::sync::oneshot::channel();
-        let batch = AppendRecordBatch::try_from_iter([AppendRecord::new("a").unwrap()]).unwrap();
-        let input = AppendInput::new(batch);
         let mut state = SessionState {
             cmd_rx,
             inflight_appends: VecDeque::from([InflightAppend {
-                input,
-                input_metered_bytes: 9,
+                frame: Bytes::new(),
+                record_count: 1,
                 ack_tx,
                 _permit: None,
                 sent_ever: true,
@@ -2152,10 +2172,7 @@ mod tests {
                 attempt_last_byte_rx: None,
                 attempt_last_byte_at: None,
             }]),
-            inflight_bytes: 9,
             closing: false,
-            total_records: 1,
-            total_acked_records: 0,
             prev_ack_end: None,
         };
         let ctx = ErrorContext::default();

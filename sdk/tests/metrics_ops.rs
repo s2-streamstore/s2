@@ -66,8 +66,8 @@ async fn read_sample(stream: &S2Stream) -> Result<(), Box<dyn std::error::Error>
     let _ = stream
         .read(
             ReadInput::new()
-                .with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0)))
-                .with_stop(ReadStop::new().with_limits(ReadLimits::new().with_count(1))),
+                .with_from(ReadFrom::SeqNum(0))
+                .with_count(1),
         )
         .await?;
     Ok(())
@@ -147,9 +147,7 @@ async fn account_metrics_active_basins(
             || async {
                 tokio::time::timeout(
                     METRICS_TIMEOUT,
-                    client.get_account_metrics(GetAccountMetricsInput::new(
-                        AccountMetricSet::ActiveBasins(time_range(1)),
-                    )),
+                    client.get_account_metrics(AccountMetricSet::ActiveBasins(time_range(1))),
                 )
                 .await
                 .expect("account metrics request timed out")
@@ -164,9 +162,7 @@ async fn account_metrics_active_basins(
     } else {
         tokio::time::timeout(
             METRICS_TIMEOUT,
-            client.get_account_metrics(GetAccountMetricsInput::new(
-                AccountMetricSet::ActiveBasins(time_range(1)),
-            )),
+            client.get_account_metrics(AccountMetricSet::ActiveBasins(time_range(1))),
         )
         .await
         .expect("account metrics request timed out")?
@@ -198,9 +194,9 @@ async fn account_metrics_account_ops_default_interval(
         || async {
             tokio::time::timeout(
                 METRICS_TIMEOUT,
-                client.get_account_metrics(GetAccountMetricsInput::new(
-                    AccountMetricSet::AccountOps(time_range_and_interval(1, None)),
-                )),
+                client.get_account_metrics(AccountMetricSet::AccountOps(time_range_and_interval(
+                    1, None,
+                ))),
             )
             .await
             .expect("account metrics request timed out")
@@ -235,12 +231,10 @@ async fn account_metrics_account_ops_minute_interval(
         || async {
             tokio::time::timeout(
                 METRICS_TIMEOUT,
-                client.get_account_metrics(GetAccountMetricsInput::new(
-                    AccountMetricSet::AccountOps(time_range_and_interval(
-                        1,
-                        Some(TimeseriesInterval::Minute),
-                    )),
-                )),
+                client.get_account_metrics(AccountMetricSet::AccountOps(time_range_and_interval(
+                    1,
+                    Some(TimeseriesInterval::Minute),
+                ))),
             )
             .await
             .expect("account metrics request timed out")
@@ -274,12 +268,10 @@ async fn account_metrics_account_ops_hour_interval(
         || async {
             tokio::time::timeout(
                 METRICS_TIMEOUT,
-                client.get_account_metrics(GetAccountMetricsInput::new(
-                    AccountMetricSet::AccountOps(time_range_and_interval(
-                        24,
-                        Some(TimeseriesInterval::Hour),
-                    )),
-                )),
+                client.get_account_metrics(AccountMetricSet::AccountOps(time_range_and_interval(
+                    24,
+                    Some(TimeseriesInterval::Hour),
+                ))),
             )
             .await
             .expect("account metrics request timed out")
@@ -313,12 +305,10 @@ async fn account_metrics_account_ops_day_interval(
         || async {
             tokio::time::timeout(
                 METRICS_TIMEOUT,
-                client.get_account_metrics(GetAccountMetricsInput::new(
-                    AccountMetricSet::AccountOps(time_range_and_interval(
-                        24 * 7,
-                        Some(TimeseriesInterval::Day),
-                    )),
-                )),
+                client.get_account_metrics(AccountMetricSet::AccountOps(time_range_and_interval(
+                    24 * 7,
+                    Some(TimeseriesInterval::Day),
+                ))),
             )
             .await
             .expect("account metrics request timed out")
@@ -348,9 +338,10 @@ async fn account_metrics_empty_time_range(
     let client = s2();
     let metrics = tokio::time::timeout(
         METRICS_TIMEOUT,
-        client.get_account_metrics(GetAccountMetricsInput::new(AccountMetricSet::ActiveBasins(
-            TimeRange::new(ts(0), ts(3600))?,
-        ))),
+        client.get_account_metrics(AccountMetricSet::ActiveBasins(TimeRange::new(
+            ts(0),
+            ts(3600),
+        )?)),
     )
     .await
     .expect("account metrics request timed out")?;
@@ -374,10 +365,10 @@ async fn basin_metrics_storage(stream: &S2Stream) -> Result<(), Box<dyn std::err
             || async {
                 tokio::time::timeout(
                     METRICS_TIMEOUT,
-                    client.get_basin_metrics(GetBasinMetricsInput::new(
+                    client.get_basin_metrics(
                         stream.basin_name().clone(),
                         BasinMetricSet::Storage(time_range(1)),
-                    )),
+                    ),
                 )
                 .await
                 .expect("basin metrics request timed out")
@@ -388,10 +379,10 @@ async fn basin_metrics_storage(stream: &S2Stream) -> Result<(), Box<dyn std::err
     } else {
         tokio::time::timeout(
             METRICS_TIMEOUT,
-            client.get_basin_metrics(GetBasinMetricsInput::new(
+            client.get_basin_metrics(
                 stream.basin_name().clone(),
                 BasinMetricSet::Storage(time_range(1)),
-            )),
+            ),
         )
         .await
         .expect("basin metrics request timed out")?
@@ -421,10 +412,10 @@ async fn basin_metrics_append_ops(stream: &S2Stream) -> Result<(), Box<dyn std::
         || async {
             tokio::time::timeout(
                 METRICS_TIMEOUT,
-                client.get_basin_metrics(GetBasinMetricsInput::new(
+                client.get_basin_metrics(
                     stream.basin_name().clone(),
                     BasinMetricSet::AppendOps(time_range_and_interval(1, None)),
-                )),
+                ),
             )
             .await
             .expect("basin metrics request timed out")
@@ -455,10 +446,10 @@ async fn basin_metrics_read_ops(stream: &S2Stream) -> Result<(), Box<dyn std::er
         || async {
             tokio::time::timeout(
                 METRICS_TIMEOUT,
-                client.get_basin_metrics(GetBasinMetricsInput::new(
+                client.get_basin_metrics(
                     stream.basin_name().clone(),
                     BasinMetricSet::ReadOps(time_range_and_interval(1, None)),
-                )),
+                ),
             )
             .await
             .expect("basin metrics request timed out")
@@ -491,10 +482,10 @@ async fn basin_metrics_read_throughput(
         || async {
             tokio::time::timeout(
                 METRICS_TIMEOUT,
-                client.get_basin_metrics(GetBasinMetricsInput::new(
+                client.get_basin_metrics(
                     stream.basin_name().clone(),
                     BasinMetricSet::ReadThroughput(time_range_and_interval(1, None)),
-                )),
+                ),
             )
             .await
             .expect("basin metrics request timed out")
@@ -526,10 +517,10 @@ async fn basin_metrics_append_throughput(
         || async {
             tokio::time::timeout(
                 METRICS_TIMEOUT,
-                client.get_basin_metrics(GetBasinMetricsInput::new(
+                client.get_basin_metrics(
                     stream.basin_name().clone(),
                     BasinMetricSet::AppendThroughput(time_range_and_interval(1, None)),
-                )),
+                ),
             )
             .await
             .expect("basin metrics request timed out")
@@ -559,10 +550,10 @@ async fn basin_metrics_basin_ops(stream: &S2Stream) -> Result<(), Box<dyn std::e
         || async {
             tokio::time::timeout(
                 METRICS_TIMEOUT,
-                client.get_basin_metrics(GetBasinMetricsInput::new(
+                client.get_basin_metrics(
                     stream.basin_name().clone(),
                     BasinMetricSet::BasinOps(time_range_and_interval(1, None)),
-                )),
+                ),
             )
             .await
             .expect("basin metrics request timed out")
@@ -594,11 +585,11 @@ async fn stream_metrics_storage(stream: &S2Stream) -> Result<(), Box<dyn std::er
             || async {
                 tokio::time::timeout(
                     METRICS_TIMEOUT,
-                    client.get_stream_metrics(GetStreamMetricsInput::new(
+                    client.get_stream_metrics(
                         stream.basin_name().clone(),
                         stream.stream_name().clone(),
                         StreamMetricSet::Storage(time_range(1)),
-                    )),
+                    ),
                 )
                 .await
                 .expect("stream metrics request timed out")
@@ -609,11 +600,11 @@ async fn stream_metrics_storage(stream: &S2Stream) -> Result<(), Box<dyn std::er
     } else {
         tokio::time::timeout(
             METRICS_TIMEOUT,
-            client.get_stream_metrics(GetStreamMetricsInput::new(
+            client.get_stream_metrics(
                 stream.basin_name().clone(),
                 stream.stream_name().clone(),
                 StreamMetricSet::Storage(time_range(1)),
-            )),
+            ),
         )
         .await
         .expect("stream metrics request timed out")?
@@ -644,9 +635,7 @@ async fn account_metrics_invalid_time_ranges(
     for (start, end) in invalid_time_ranges(now) {
         let result = tokio::time::timeout(
             METRICS_TIMEOUT,
-            client.get_account_metrics(GetAccountMetricsInput::new(
-                AccountMetricSet::ActiveBasins(TimeRange::new(start, end)?),
-            )),
+            client.get_account_metrics(AccountMetricSet::ActiveBasins(TimeRange::new(start, end)?)),
         )
         .await
         .expect("account metrics request timed out");
@@ -677,12 +666,9 @@ async fn account_metrics_all_sets(stream: &S2Stream) -> Result<(), Box<dyn std::
     ];
 
     for set in sets {
-        let _ = tokio::time::timeout(
-            METRICS_TIMEOUT,
-            client.get_account_metrics(GetAccountMetricsInput::new(set)),
-        )
-        .await
-        .expect("account metrics request timed out")?;
+        let _ = tokio::time::timeout(METRICS_TIMEOUT, client.get_account_metrics(set))
+            .await
+            .expect("account metrics request timed out")?;
     }
 
     Ok(())
@@ -698,10 +684,10 @@ async fn basin_metrics_empty_time_range(
     let client = s2();
     let metrics = tokio::time::timeout(
         METRICS_TIMEOUT,
-        client.get_basin_metrics(GetBasinMetricsInput::new(
+        client.get_basin_metrics(
             stream.basin_name().clone(),
             BasinMetricSet::Storage(TimeRange::new(ts(0), ts(3600))?),
-        )),
+        ),
     )
     .await
     .expect("basin metrics request timed out")?;
@@ -724,10 +710,10 @@ async fn basin_metrics_invalid_time_ranges(
     for (start, end) in invalid_time_ranges(now) {
         let result = tokio::time::timeout(
             METRICS_TIMEOUT,
-            client.get_basin_metrics(GetBasinMetricsInput::new(
+            client.get_basin_metrics(
                 stream.basin_name().clone(),
                 BasinMetricSet::Storage(TimeRange::new(start, end)?),
-            )),
+            ),
         )
         .await
         .expect("basin metrics request timed out");
@@ -764,7 +750,7 @@ async fn basin_metrics_all_sets(stream: &S2Stream) -> Result<(), Box<dyn std::er
     for set in sets {
         let _ = tokio::time::timeout(
             METRICS_TIMEOUT,
-            client.get_basin_metrics(GetBasinMetricsInput::new(stream.basin_name().clone(), set)),
+            client.get_basin_metrics(stream.basin_name().clone(), set),
         )
         .await
         .expect("basin metrics request timed out")?;
@@ -783,11 +769,11 @@ async fn stream_metrics_empty_time_range(
     let client = s2();
     let metrics = tokio::time::timeout(
         METRICS_TIMEOUT,
-        client.get_stream_metrics(GetStreamMetricsInput::new(
+        client.get_stream_metrics(
             stream.basin_name().clone(),
             stream.stream_name().clone(),
             StreamMetricSet::Storage(TimeRange::new(ts(0), ts(3600))?),
-        )),
+        ),
     )
     .await
     .expect("stream metrics request timed out")?;
@@ -810,11 +796,11 @@ async fn stream_metrics_invalid_time_ranges(
     for (start, end) in invalid_time_ranges(now) {
         let result = tokio::time::timeout(
             METRICS_TIMEOUT,
-            client.get_stream_metrics(GetStreamMetricsInput::new(
+            client.get_stream_metrics(
                 stream.basin_name().clone(),
                 stream.stream_name().clone(),
                 StreamMetricSet::Storage(TimeRange::new(start, end)?),
-            )),
+            ),
         )
         .await
         .expect("stream metrics request timed out");

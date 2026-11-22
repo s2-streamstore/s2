@@ -56,7 +56,28 @@ pub(crate) fn validate_max_batch_records(
     Ok(max_batch_records)
 }
 
+pub(crate) fn batch_is_full(
+    batch: &Metered<Vec<AppendRecord>>,
+    max_batch_records: usize,
+    max_batch_bytes: usize,
+) -> bool {
+    batch.len() >= max_batch_records || batch.metered_size() >= max_batch_bytes
+}
+
+pub(crate) fn batch_would_overflow(
+    batch: &Metered<Vec<AppendRecord>>,
+    record: &Metered<AppendRecord>,
+    max_batch_records: usize,
+    max_batch_bytes: usize,
+) -> bool {
+    batch.len() + 1 > max_batch_records
+        || batch.metered_size() + record.metered_size() > max_batch_bytes
+}
+
 /// Tracks automatic `match_seq_num` advancement across records and batches (`A5`).
+///
+/// Accepting a record at `seq_num = n` produces a batch whose `end` sequence number is at least
+/// `n + 1`, so `n` must be strictly less than `u64::MAX` (`A5`, `D5`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MatchSeqState {
     Unset,
@@ -67,6 +88,7 @@ pub(crate) enum MatchSeqState {
 impl MatchSeqState {
     pub(crate) fn from_option(seq: Option<u64>) -> Self {
         match seq {
+            Some(u64::MAX) => Self::Exhausted,
             Some(n) => Self::Next(n),
             None => Self::Unset,
         }
@@ -76,26 +98,28 @@ impl MatchSeqState {
         matches!(self, Self::Exhausted)
     }
 
-    /// Claim the sequence number for the next record and advance state.
+    /// Claim the sequence number for the next record and advance state (`A5`).
     pub(crate) fn claim_next(&mut self) -> Result<Option<u64>, ValidationError> {
         match *self {
             Self::Unset => Ok(None),
             Self::Next(n) => {
-                *self = match n.checked_add(1) {
-                    Some(next) => Self::Next(next),
-                    None => Self::Exhausted,
+                let end = n + 1;
+                *self = if end == u64::MAX {
+                    Self::Exhausted
+                } else {
+                    Self::Next(end)
                 };
                 Ok(Some(n))
             }
             Self::Exhausted => Err(ValidationError(
-                "match_seq_num overflow: sequence number exceeds u64::MAX".into(),
+                "match_seq_num overflow: batch end sequence number exceeds u64::MAX".into(),
             )),
         }
     }
 }
 
-/// Configuration for [`Batcher`] and [`TryBatcher`].
-#[derive(Debug, Clone)]
+/// Configuration for [`Batcher`], [`TryBatcher`], and [`batch_iter`].
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BatcherConfig {
     linger: Duration,
     max_batch_records: usize,
@@ -210,6 +234,50 @@ pub enum TryBatchError<E> {
     Input(E),
 }
 
+/// Eagerly batch an in-memory iterator of records into [`AppendInput`]s.
+///
+/// Respects `max_batch_records`, `max_batch_bytes`, `fencing_token`, and auto-incrementing
+/// `match_seq_num` from `config` (`linger` does not apply to an already-materialized iterator).
+///
+/// ```rust
+/// # use s2_sdk::batching::{BatcherConfig, batch_iter};
+/// # use s2_sdk::types::AppendRecord;
+/// let records = [AppendRecord::new("one")?, AppendRecord::new("two")?];
+/// let inputs = batch_iter(records, BatcherConfig::new())?;
+/// assert_eq!(inputs.len(), 1);
+/// # Ok::<(), s2_sdk::types::ValidationError>(())
+/// ```
+pub fn batch_iter(
+    records: impl IntoIterator<Item = impl Into<AppendRecord>>,
+    config: BatcherConfig,
+) -> Result<Vec<AppendInput>, ValidationError> {
+    let iter = records.into_iter();
+    let initial_cap = iter.size_hint().0.min(config.max_batch_records);
+    let mut inputs = Vec::new();
+    let mut acc = BatchAccumulator::with_capacity(config, initial_cap);
+
+    for item in iter {
+        let record = Metered::from(item.into());
+        validate_record_size(&record, acc.config.max_batch_bytes)?;
+
+        if !acc.is_empty() && acc.would_overflow(&record) {
+            inputs.push(acc.take_batch());
+        }
+
+        acc.push_record(record)?;
+
+        if acc.is_full() {
+            inputs.push(acc.take_batch());
+        }
+    }
+
+    if !acc.is_empty() {
+        inputs.push(acc.take_batch());
+    }
+
+    Ok(inputs)
+}
+
 pin_project! {
     /// A [`Stream`] that batches [`AppendRecord`]s from an infallible record stream into
     /// [`AppendInput`]s.
@@ -232,84 +300,6 @@ impl<S> Batcher<S> {
         R: Into<AppendRecord>,
     {
         Self {
-            records,
-            core: BatcherCore::new(config),
-        }
-    }
-}
-
-impl Batcher<futures_util::stream::Empty<AppendRecord>> {
-    /// Eagerly batch an in-memory iterator of records into [`AppendInput`]s.
-    ///
-    /// ```rust
-    /// # use s2_sdk::batching::{Batcher, BatcherConfig};
-    /// # use s2_sdk::types::AppendRecord;
-    /// let records = [AppendRecord::new("one")?, AppendRecord::new("two")?];
-    /// let inputs = Batcher::from_iter(records, BatcherConfig::new())?;
-    /// assert_eq!(inputs.len(), 1);
-    /// # Ok::<(), s2_sdk::types::ValidationError>(())
-    /// ```
-    pub fn from_iter(
-        records: impl IntoIterator<Item = impl Into<AppendRecord>>,
-        config: BatcherConfig,
-    ) -> Result<Vec<AppendInput>, ValidationError> {
-        let iter = records.into_iter();
-        let initial_cap = iter.size_hint().0.min(config.max_batch_records);
-        let mut inputs = Vec::new();
-        let mut batch = Metered::with_capacity(initial_cap);
-        let mut batch_match_seq: Option<u64> = None;
-        let mut match_seq = MatchSeqState::from_option(config.match_seq_num);
-
-        for item in iter {
-            let record = Metered::from(item.into());
-            validate_record_size(&record, config.max_batch_bytes)?;
-
-            if !batch.is_empty() && would_overflow(&config, &batch, &record) {
-                if match_seq.is_exhausted() {
-                    return Err(ValidationError(
-                        "match_seq_num overflow: sequence number exceeds u64::MAX".into(),
-                    ));
-                }
-                inputs.push(build_input(
-                    std::mem::replace(&mut batch, Metered::with_capacity(0)),
-                    batch_match_seq.take(),
-                    config.fencing_token.as_ref(),
-                ));
-            }
-
-            let seq = match_seq.claim_next()?;
-            if batch.is_empty() {
-                batch_match_seq = seq;
-            }
-            batch.push(record);
-
-            if is_full(&config, &batch) {
-                inputs.push(build_input(
-                    std::mem::replace(&mut batch, Metered::with_capacity(0)),
-                    batch_match_seq.take(),
-                    config.fencing_token.as_ref(),
-                ));
-            }
-        }
-
-        if !batch.is_empty() {
-            inputs.push(build_input(
-                batch,
-                batch_match_seq.take(),
-                config.fencing_token.as_ref(),
-            ));
-        }
-
-        Ok(inputs)
-    }
-
-    /// Create a [`TryBatcher`] over a fallible stream of `Result<R, E>` records.
-    pub fn try_new<S, R, E>(records: S, config: BatcherConfig) -> TryBatcher<S>
-    where
-        S: Stream<Item = Result<R, E>>,
-        R: Into<AppendRecord>,
-    {
-        TryBatcher {
             records,
             core: BatcherCore::new(config),
         }
@@ -390,8 +380,8 @@ where
 impl<S> fmt::Debug for Batcher<S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Batcher")
-            .field("config", &self.core.config)
-            .field("buffered_records", &self.core.batch.len())
+            .field("config", &self.core.acc.config)
+            .field("buffered_records", &self.core.acc.batch.len())
             .field("done", &self.core.done)
             .finish_non_exhaustive()
     }
@@ -400,79 +390,139 @@ impl<S> fmt::Debug for Batcher<S> {
 impl<S> fmt::Debug for TryBatcher<S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TryBatcher")
-            .field("config", &self.core.config)
-            .field("buffered_records", &self.core.batch.len())
+            .field("config", &self.core.acc.config)
+            .field("buffered_records", &self.core.acc.batch.len())
             .field("done", &self.core.done)
             .finish_non_exhaustive()
     }
 }
 
-struct BatcherCore {
+struct BatchAccumulator {
     config: BatcherConfig,
     batch: Metered<Vec<AppendRecord>>,
     batch_match_seq: Option<u64>,
     match_seq: MatchSeqState,
-    overflowed_record: Option<Metered<AppendRecord>>,
+}
+
+impl BatchAccumulator {
+    fn with_capacity(config: BatcherConfig, cap: usize) -> Self {
+        let match_seq = MatchSeqState::from_option(config.match_seq_num);
+        Self {
+            config,
+            batch: Metered::with_capacity(cap),
+            batch_match_seq: None,
+            match_seq,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.batch.is_empty()
+    }
+
+    fn is_full(&self) -> bool {
+        batch_is_full(
+            &self.batch,
+            self.config.max_batch_records,
+            self.config.max_batch_bytes,
+        )
+    }
+
+    fn would_overflow(&self, record: &Metered<AppendRecord>) -> bool {
+        batch_would_overflow(
+            &self.batch,
+            record,
+            self.config.max_batch_records,
+            self.config.max_batch_bytes,
+        )
+    }
+
+    fn push_record(&mut self, record: Metered<AppendRecord>) -> Result<(), ValidationError> {
+        let seq = self.match_seq.claim_next()?;
+        if self.batch.is_empty() {
+            self.batch_match_seq = seq;
+        }
+        self.batch.push(record);
+        Ok(())
+    }
+
+    fn take_batch(&mut self) -> AppendInput {
+        let records = std::mem::replace(&mut self.batch, Metered::with_capacity(0));
+        AppendInput {
+            records: AppendRecordBatch::from(records),
+            match_seq_num: self.batch_match_seq.take(),
+            fencing_token: self.config.fencing_token.clone(),
+        }
+    }
+
+    fn clear(&mut self) {
+        self.batch = Metered::with_capacity(0);
+        self.batch_match_seq = None;
+    }
+}
+
+struct BatcherCore {
+    acc: BatchAccumulator,
+    overflowed_record: Option<(Metered<AppendRecord>, Instant)>,
+    linger_deadline: Option<Instant>,
     linger_sleep: Option<Pin<Box<Sleep>>>,
-    linger_armed: bool,
     done: bool,
 }
 
 impl BatcherCore {
     fn new(config: BatcherConfig) -> Self {
-        let match_seq = MatchSeqState::from_option(config.match_seq_num);
         Self {
-            config,
-            batch: Metered::with_capacity(0),
-            batch_match_seq: None,
-            match_seq,
+            acc: BatchAccumulator::with_capacity(config, 0),
             overflowed_record: None,
+            linger_deadline: None,
             linger_sleep: None,
-            linger_armed: false,
             done: false,
         }
     }
 
-    fn arm_linger(&mut self) {
-        if self.config.linger.is_zero() {
+    fn set_linger_from(&mut self, started_at: Instant) {
+        if self.acc.config.linger.is_zero() {
             return;
         }
-        let Some(deadline) = Instant::now().checked_add(self.config.linger) else {
-            return;
-        };
-        match self.linger_sleep.as_mut() {
-            Some(sleep) => sleep.as_mut().reset(deadline),
-            None => self.linger_sleep = Some(Box::pin(tokio::time::sleep_until(deadline))),
-        }
-        self.linger_armed = true;
+        self.linger_deadline = started_at.checked_add(self.acc.config.linger);
     }
 
-    fn poll_linger_ready(&mut self, cx: &mut Context<'_>) -> bool {
-        self.linger_armed
-            && self
+    fn linger_elapsed(&self) -> bool {
+        self.linger_deadline.is_some_and(|d| Instant::now() >= d)
+    }
+
+    fn poll_linger_sleep(&mut self, cx: &mut Context<'_>) -> bool {
+        let Some(deadline) = self.linger_deadline else {
+            return false;
+        };
+        if Instant::now() >= deadline {
+            return true;
+        }
+        let sleep = match self.linger_sleep.as_mut() {
+            Some(sleep) => {
+                if sleep.deadline() != deadline {
+                    sleep.as_mut().reset(deadline);
+                }
+                sleep
+            }
+            None => self
                 .linger_sleep
-                .as_mut()
-                .is_some_and(|sleep| sleep.as_mut().poll(cx).is_ready())
+                .insert(Box::pin(tokio::time::sleep_until(deadline))),
+        };
+        sleep.as_mut().poll(cx).is_ready()
     }
 
     fn take_batch(&mut self) -> AppendInput {
-        self.linger_armed = false;
-        let records = std::mem::replace(&mut self.batch, Metered::with_capacity(0));
-        build_input(
-            records,
-            self.batch_match_seq.take(),
-            self.config.fencing_token.as_ref(),
-        )
+        self.linger_deadline = None;
+        self.acc.take_batch()
     }
 
     fn fail<E>(
         &mut self,
         err: TryBatchError<E>,
     ) -> Poll<Option<Result<AppendInput, TryBatchError<E>>>> {
-        self.batch = Metered::with_capacity(0);
-        self.batch_match_seq = None;
+        self.acc.clear();
         self.overflowed_record = None;
-        self.linger_armed = false;
+        self.linger_deadline = None;
         self.done = true;
         Poll::Ready(Some(Err(err)))
     }
@@ -487,70 +537,62 @@ impl BatcherCore {
         }
 
         // Seed from a previously overflowed record before polling the input again.
-        if self.batch.is_empty()
-            && let Some(record) = self.overflowed_record.take()
+        if self.acc.is_empty()
+            && let Some((record, arrived_at)) = self.overflowed_record.take()
         {
-            let seq = match self.match_seq.claim_next() {
-                Ok(seq) => seq,
-                Err(err) => return self.fail(TryBatchError::Validation(err)),
-            };
-            self.batch_match_seq = seq;
-            self.batch.push(record);
-            if is_full(&self.config, &self.batch) {
+            if let Err(err) = self.acc.push_record(record) {
+                return self.fail(TryBatchError::Validation(err));
+            }
+            if self.acc.is_full() {
                 return Poll::Ready(Some(Ok(self.take_batch())));
             }
-            self.arm_linger();
+            self.set_linger_from(arrived_at);
         }
 
         loop {
             // For positive linger, flush immediately if the linger deadline has already elapsed
-            // before pulling another input record. For zero linger, poll ready input records first
-            // so burst submissions coalesce into a single batch within the same tick.
-            if !self.batch.is_empty() && !self.config.linger.is_zero() && self.poll_linger_ready(cx)
-            {
+            // before pulling another input record (without touching the timer wheel per record).
+            // For zero linger, poll ready input records first so burst submissions coalesce into a
+            // single batch within the same tick.
+            if !self.acc.is_empty() && !self.acc.config.linger.is_zero() && self.linger_elapsed() {
                 return Poll::Ready(Some(Ok(self.take_batch())));
             }
 
             match poll_input(cx) {
                 Poll::Ready(Some(Ok(raw_record))) => {
                     let record = Metered::from(raw_record);
-                    if let Err(err) = validate_record_size(&record, self.config.max_batch_bytes) {
+                    if let Err(err) = validate_record_size(&record, self.acc.config.max_batch_bytes)
+                    {
                         return self.fail(TryBatchError::Validation(err));
                     }
 
-                    if !self.batch.is_empty() && would_overflow(&self.config, &self.batch, &record)
+                    // Flush any valid pending batch before either overflowing batch limits or
+                    // triggering a `match_seq_num` overflow error (`A5b`).
+                    if !self.acc.is_empty()
+                        && (self.acc.would_overflow(&record) || self.acc.match_seq.is_exhausted())
                     {
-                        if self.match_seq.is_exhausted() {
-                            return self.fail(TryBatchError::Validation(ValidationError(
-                                "match_seq_num overflow: sequence number exceeds u64::MAX".into(),
-                            )));
-                        }
-                        self.overflowed_record = Some(record);
+                        self.overflowed_record = Some((record, Instant::now()));
                         return Poll::Ready(Some(Ok(self.take_batch())));
                     }
 
-                    let seq = match self.match_seq.claim_next() {
-                        Ok(seq) => seq,
-                        Err(err) => return self.fail(TryBatchError::Validation(err)),
-                    };
-                    if self.batch.is_empty() {
-                        self.batch_match_seq = seq;
+                    let was_empty = self.acc.is_empty();
+                    if let Err(err) = self.acc.push_record(record) {
+                        return self.fail(TryBatchError::Validation(err));
                     }
-                    self.batch.push(record);
 
-                    if is_full(&self.config, &self.batch) {
+                    if self.acc.is_full() {
                         return Poll::Ready(Some(Ok(self.take_batch())));
                     }
 
-                    if !self.linger_armed {
-                        self.arm_linger();
+                    if was_empty {
+                        self.set_linger_from(Instant::now());
                     }
                 }
                 Poll::Ready(Some(Err(err))) => {
                     return self.fail(TryBatchError::Input(err));
                 }
                 Poll::Ready(None) => {
-                    if !self.batch.is_empty() {
+                    if !self.acc.is_empty() {
                         self.done = true;
                         return Poll::Ready(Some(Ok(self.take_batch())));
                     }
@@ -558,8 +600,8 @@ impl BatcherCore {
                     return Poll::Ready(None);
                 }
                 Poll::Pending => {
-                    if !self.batch.is_empty()
-                        && (self.config.linger.is_zero() || self.poll_linger_ready(cx))
+                    if !self.acc.is_empty()
+                        && (self.acc.config.linger.is_zero() || self.poll_linger_sleep(cx))
                     {
                         return Poll::Ready(Some(Ok(self.take_batch())));
                     }
@@ -581,32 +623,6 @@ fn validate_record_size(
         )));
     }
     Ok(())
-}
-
-fn is_full(config: &BatcherConfig, batch: &Metered<Vec<AppendRecord>>) -> bool {
-    batch.len() >= config.max_batch_records || batch.metered_size() >= config.max_batch_bytes
-}
-
-fn would_overflow(
-    config: &BatcherConfig,
-    batch: &Metered<Vec<AppendRecord>>,
-    record: &Metered<AppendRecord>,
-) -> bool {
-    batch.len() + 1 > config.max_batch_records
-        || batch.metered_size() + record.metered_size() > config.max_batch_bytes
-}
-
-fn build_input(
-    batch: Metered<Vec<AppendRecord>>,
-    match_seq_num: Option<u64>,
-    fencing_token: Option<&FencingToken>,
-) -> AppendInput {
-    AppendInput {
-        records: AppendRecordBatch::from(batch),
-        match_seq_num,
-        fencing_token: fencing_token.cloned(),
-        stream_config: None,
-    }
 }
 
 #[cfg(test)]
@@ -760,33 +776,52 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn match_seq_num_overflow_ends_batcher_with_validation_error()
+    async fn match_seq_num_overflow_preserves_valid_pending_batch_and_errors()
     -> Result<(), ValidationError> {
-        // Exactly reaching u64::MAX is valid.
         let r0 = AppendRecord::new("a")?;
         let r1 = AppendRecord::new("b")?;
+        let r2 = AppendRecord::new("c")?;
+
+        // Two records starting at `u64::MAX - 2` produce end = `u64::MAX`, which is valid.
         let config = BatcherConfig::new()
-            .with_max_batch_records(1)?
-            .with_match_seq_num(u64::MAX - 1);
+            .with_max_batch_records(10)?
+            .with_match_seq_num(u64::MAX - 2);
         let inputs: Vec<_> = Batcher::new(
             futures_util::stream::iter(vec![r0.clone(), r1.clone()]),
             config.clone(),
         )
         .try_collect()
         .await?;
-        assert_eq!(inputs.len(), 2);
-        assert_eq!(inputs[0].match_seq_num, Some(u64::MAX - 1));
-        assert_eq!(inputs[1].match_seq_num, Some(u64::MAX));
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].match_seq_num, Some(u64::MAX - 2));
+        assert_eq!(inputs[0].records.len(), 2);
 
-        // Adding a third record overflows u64::MAX.
-        let r2 = AppendRecord::new("c")?;
-        let results: Vec<_> = Batcher::new(futures_util::stream::iter(vec![r0, r1, r2]), config)
-            .collect()
-            .await;
-        assert_eq!(results.len(), 3);
-        assert!(results[0].is_ok());
-        assert!(results[1].is_ok());
-        assert!(results[2].is_err());
+        // Adding a third record would produce end = `u64::MAX + 1`, so the valid batch of 2 is
+        // emitted first and the third record yields a ValidationError (`A5`, `A5b`).
+        let results: Vec<_> = Batcher::new(
+            futures_util::stream::iter(vec![r0.clone(), r1.clone(), r2]),
+            config,
+        )
+        .collect()
+        .await;
+        assert_eq!(results.len(), 2);
+        let batch = results[0].as_ref().expect("valid batch preserved");
+        assert_eq!(batch.records.len(), 2);
+        assert_eq!(batch.match_seq_num, Some(u64::MAX - 2));
+        assert!(results[1].is_err());
+
+        // Starting directly at `u64::MAX` rejects the very first record (`end = u64::MAX + 1`).
+        let at_max = BatcherConfig::new().with_match_seq_num(u64::MAX);
+        assert!(batch_iter([r0], at_max).is_err());
+
+        // An empty iterator at `u64::MAX` accepts zero records and succeeds.
+        assert!(
+            batch_iter(
+                Vec::<AppendRecord>::new(),
+                BatcherConfig::new().with_match_seq_num(u64::MAX),
+            )?
+            .is_empty()
+        );
 
         Ok(())
     }
@@ -799,48 +834,30 @@ mod tests {
             Ok(AppendRecord::new("never-seen")?),
         ];
         let results: Vec<_> =
-            Batcher::try_new(futures_util::stream::iter(items), BatcherConfig::new())
+            TryBatcher::new(futures_util::stream::iter(items), BatcherConfig::new())
                 .collect()
                 .await;
         assert_eq!(results.len(), 1);
-        assert_matches!(results[0], Err(TryBatchError::Input("boom")));
+        assert_matches!(&results[0], Err(TryBatchError::Input("boom")));
         Ok(())
     }
 
     #[test]
-    fn from_iter_batches_and_validates() -> Result<(), ValidationError> {
-        assert!(
-            Batcher::from_iter(std::iter::empty::<AppendRecord>(), BatcherConfig::new())?
-                .is_empty()
-        );
-        let records: Vec<_> = (0..5)
-            .map(|i| AppendRecord::new(format!("r{i}")))
-            .collect::<Result<_, _>>()?;
+    fn batch_iter_batches_in_memory() -> Result<(), ValidationError> {
+        let records = [
+            AppendRecord::new("one")?,
+            AppendRecord::new("two")?,
+            AppendRecord::new("three")?,
+        ];
         let config = BatcherConfig::new()
             .with_max_batch_records(2)?
-            .with_match_seq_num(100);
-        let inputs = Batcher::from_iter(records, config)?;
-        assert_eq!(inputs.len(), 3);
-        assert_eq!(inputs[0].match_seq_num, Some(100));
-        assert_eq!(inputs[1].match_seq_num, Some(102));
-        assert_eq!(inputs[2].match_seq_num, Some(104));
-
-        let err = Batcher::from_iter(
-            [AppendRecord::new("hello-world")?],
-            BatcherConfig::new().with_max_batch_bytes(10)?,
-        )
-        .unwrap_err();
-        assert!(err.to_string().contains("exceeds max_batch_bytes"));
+            .with_match_seq_num(5);
+        let inputs = batch_iter(records, config)?;
+        assert_eq!(inputs.len(), 2);
+        assert_eq!(inputs[0].match_seq_num, Some(5));
+        assert_eq!(inputs[0].records.len(), 2);
+        assert_eq!(inputs[1].match_seq_num, Some(7));
+        assert_eq!(inputs[1].records.len(), 1);
         Ok(())
-    }
-
-    #[test]
-    fn batcher_constructible_outside_tokio_runtime() {
-        let batcher = Batcher::new(
-            futures_util::stream::empty::<AppendRecord>(),
-            BatcherConfig::new().with_linger(Duration::MAX),
-        );
-        let debug = format!("{batcher:?}");
-        assert!(debug.contains("Batcher"));
     }
 }

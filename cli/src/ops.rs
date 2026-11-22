@@ -8,21 +8,18 @@ use s2_api::v1::{
 use s2_sdk::{
     self as sdk, S2, S2Stream,
     producer::{ProducerConfig, RecordAck},
-    read_session::ReadBatchSession,
+    read_session::{ReadBatchSession, ReadSessionConfig},
     types::{
         AccessTokenId, AccessTokenInfo, AccessTokenScopeInput, AccountMetricSet, AppendAck,
         AppendInput, AppendRecord, AppendRecordBatch, AwsPrivateNetPolicy, BasinInfo,
         BasinMetricSet, BasinName, BasinReconfiguration, CommandRecord, CreateBasinInput,
-        CreateNetworkPolicyInput, CreateStreamInput, EncryptionKey, FencingToken,
-        GetAccountMetricsInput, GetBasinMetricsInput, GetStreamMetricsInput, IssueAccessTokenInput,
+        CreateStreamInput, EncryptionKey, FencingToken, IssueAccessTokenInput,
         ListAccessTokensInput, ListAllAccessTokensInput, ListAllBasinsInput,
         ListAllNetworkPoliciesInput, ListAllStreamsInput, ListBasinsInput,
         ListNetworkPoliciesInput, ListStreamsInput, LocationInfo, LocationName, MeteredBytes,
         Metric, NetworkPolicy, NetworkPolicyInfo, NetworkPolicySelector, PublicNetPolicy, ReadFrom,
-        ReadInput, ReadLimits, ReadSessionConfig, ReadStart, ReadStop, ReconfigureBasinInput,
-        ReconfigureStreamInput, SequencedRecord, StreamInfo, StreamMetricSet, StreamNamePrefix,
-        StreamPosition, StreamReconfiguration, TimeRange, TimeRangeAndInterval, TimeseriesInterval,
-        Timestamp,
+        ReadInput, SequencedRecord, StreamInfo, StreamMetricSet, StreamNamePrefix, StreamPosition,
+        StreamReconfiguration, TimeRange, TimeRangeAndInterval, TimeseriesInterval, Timestamp,
     },
 };
 
@@ -160,7 +157,7 @@ pub async fn reconfigure_basin_with(
     reconfig: BasinReconfiguration,
 ) -> Result<BasinConfig, CliError> {
     let config = s2
-        .reconfigure_basin(ReconfigureBasinInput::new(basin, reconfig))
+        .reconfigure_basin(basin, reconfig)
         .await
         .map_err(|e| CliError::op(OpKind::ReconfigureBasin, e))?;
 
@@ -386,7 +383,7 @@ pub async fn create_network_policy(
         policy = policy.with_private_net(AwsPrivateNetPolicy::new(aws_vpce));
     }
 
-    s2.create_network_policy(CreateNetworkPolicyInput::new(slug, policy))
+    s2.create_network_policy(slug, policy)
         .await
         .map_err(|e| CliError::op(OpKind::CreateNetworkPolicy, e))
 }
@@ -459,9 +456,8 @@ pub async fn get_account_metrics(
         }
     };
 
-    let input = GetAccountMetricsInput::new(set);
     let metrics = s2
-        .get_account_metrics(input)
+        .get_account_metrics(set)
         .await
         .map_err(|e| CliError::op(OpKind::GetAccountMetrics, e))?;
     Ok((range, metrics))
@@ -503,9 +499,8 @@ pub async fn get_basin_metrics(
         }
     };
 
-    let input = GetBasinMetricsInput::new(args.basin.into(), set);
     let metrics = s2
-        .get_basin_metrics(input)
+        .get_basin_metrics(args.basin.into(), set)
         .await
         .map_err(|e| CliError::op(OpKind::GetBasinMetrics, e))?;
     Ok((Some(range), metrics))
@@ -527,9 +522,8 @@ pub async fn get_stream_metrics(
         }
     };
 
-    let input = GetStreamMetricsInput::new(args.uri.basin, args.uri.stream, set);
     let metrics = s2
-        .get_stream_metrics(input)
+        .get_stream_metrics(args.uri.basin, args.uri.stream, set)
         .await
         .map_err(|e| CliError::op(OpKind::GetStreamMetrics, e))?;
     Ok((Some(range), metrics))
@@ -647,7 +641,7 @@ pub async fn reconfigure_stream_with(
 ) -> Result<StreamConfig, CliError> {
     let config = s2
         .basin(uri.basin)
-        .reconfigure_stream(ReconfigureStreamInput::new(uri.stream, reconfig))
+        .reconfigure_stream(uri.stream, reconfig)
         .await
         .map_err(|e| CliError::op(OpKind::ReconfigureStream, e))?;
 
@@ -711,24 +705,16 @@ pub fn read(
         _ => unreachable!("clap ensures only one start option"),
     };
 
-    let start = ReadStart::new()
-        .with_from(from)
-        .with_clamp_to_tail(args.clamp);
-
-    let mut limits = ReadLimits::new();
+    let mut input = ReadInput::new().with_from(from).with_clamp(args.clamp);
     if let Some(count) = args.count {
-        limits = limits.with_count(count);
+        input = input.with_count(count);
     }
     if let Some(bytes) = args.bytes {
-        limits = limits.with_bytes(bytes);
+        input = input.with_bytes(bytes);
     }
-
-    let mut stop = ReadStop::new().with_limits(limits);
     if let Some(until) = args.until {
-        stop = stop.with_until(..until);
+        input = input.with_until(until);
     }
-
-    let mut input = ReadInput::new().with_start(start).with_stop(stop);
     if !args.stream_config.is_empty() {
         input = input.with_stream_config(args.stream_config.clone().into());
     }
@@ -860,22 +846,17 @@ pub fn tail(
 ) -> Result<impl Stream<Item = Result<SequencedRecord, CliError>> + Send + Unpin, CliError> {
     let stream = stream_with_encryption(s2, args.uri.clone(), encryption_key);
 
-    // Use clamp_to_tail to handle empty streams gracefully - if we ask for
-    // TailOffset(10) but there are fewer records, clamp to the actual start
-    let start = ReadStart::new()
+    // Use clamp to handle empty streams gracefully - if we ask for
+    // TailOffset(10) but there are fewer records, clamp to the actual start.
+    let mut input = ReadInput::new()
         .with_from(ReadFrom::TailOffset(args.lines))
-        .with_clamp_to_tail(true);
-    let stop = if args.follow {
-        ReadStop::new()
-    } else {
-        ReadStop::new().with_limits(ReadLimits::new().with_count(args.lines))
-    };
+        .with_clamp(true);
+    if !args.follow {
+        input = input.with_count(args.lines);
+    }
 
     let mut records = stream
-        .read_session(
-            ReadInput::new().with_start(start).with_stop(stop),
-            ReadSessionConfig::default(),
-        )
+        .read_session(input, ReadSessionConfig::default())
         .map_err(|e| CliError::op(OpKind::Tail, e))?;
 
     let follow = args.follow;
@@ -887,11 +868,9 @@ pub fn tail(
                     seen_any = true;
                     yield Ok(record);
                 }
-                // Non-follow tail on an empty stream returns initial 416 with tail.seq_num == 0;
+                // Non-follow tail on an empty or fully-trimmed stream returns initial 416;
                 // treat that as clean 0-record EOF.
-                Err(sdk::error::ReadSessionError::ReadUnwritten(e))
-                    if !follow && !seen_any && e.tail.seq_num == 0 =>
-                {
+                Err(sdk::error::ReadSessionError::ReadUnwritten(_)) if !follow && !seen_any => {
                     break;
                 }
                 Err(e) => {
