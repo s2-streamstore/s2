@@ -27,3 +27,15 @@ crate = "ctutils"
 version = "0.4.4"
 advisory = "RUSTSEC-2026-0385"
 reason = "Fixes branching mask generation and 32-bit u128 comparisons in constant-time primitives"
+
+[[exception]]
+crate = "url"
+version = "2.5.9"
+advisory = "RUSTSEC-2026-0592"
+reason = "Fixes stack overflow in Url::origin() on nested blob: URLs"
+
+[[exception]]
+crate = "form_urlencoded"
+version = "1.2.3"
+advisory = "RUSTSEC-2026-0592"
+reason = "Required minimum companion release of url 2.5.9 from the same rust-url release commit"
