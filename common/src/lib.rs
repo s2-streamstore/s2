@@ -21,6 +21,23 @@ mod strings;
 #[error("{0}")]
 pub struct ValidationError(pub String);
 
+impl ValidationError {
+    /// Return the human-readable validation error message.
+    pub fn message(&self) -> &str {
+        &self.0
+    }
+
+    /// Whether retrying the operation with the same inputs may succeed (always `false`).
+    pub fn is_retryable(&self) -> bool {
+        false
+    }
+
+    /// Whether the failed attempt certainly had no side effects (always `true`).
+    pub fn has_no_side_effects(&self) -> bool {
+        true
+    }
+}
+
 impl From<String> for ValidationError {
     fn from(value: String) -> Self {
         ValidationError(value)

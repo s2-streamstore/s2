@@ -36,6 +36,7 @@ use tokio::{
     sync::{Notify, watch},
     time::{Instant, timeout, timeout_at},
 };
+pub(crate) use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 use tower_service::Service;
 
@@ -45,7 +46,7 @@ use crate::{
 };
 
 const APPLICATION_JSON: HeaderValue = HeaderValue::from_static("application/json");
-const MAX_CONCURRENT_REQUESTS_PER_CLIENT: usize = 50;
+const DEFAULT_MAX_CONCURRENT_REQUESTS_PER_CONNECTION: usize = 50;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(20);
 const KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -93,39 +94,6 @@ where
     type Fut = C::Future;
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct ShutdownSignal {
-    tx: Arc<watch::Sender<bool>>,
-}
-
-impl Default for ShutdownSignal {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl ShutdownSignal {
-    pub(crate) fn new() -> Self {
-        let (tx, _) = watch::channel(false);
-        Self { tx: Arc::new(tx) }
-    }
-
-    pub(crate) fn close(&self) {
-        self.tx.send_replace(true);
-    }
-
-    pub(crate) fn is_closed(&self) -> bool {
-        *self.tx.borrow()
-    }
-
-    pub(crate) fn cancelled(&self) -> impl Future<Output = ()> + Send + 'static {
-        let mut rx = self.tx.subscribe();
-        async move {
-            let _ = rx.wait_for(|closed| *closed).await;
-        }
-    }
-}
-
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum HttpError {
     #[error("connect error: {0}")]
@@ -139,9 +107,7 @@ pub(crate) enum HttpError {
     #[error("timeout")]
     Timeout,
     #[error("client closed")]
-    ClientClosed,
-    #[error("aborted")]
-    Aborted,
+    Closed,
     #[error("request compression error: {0}")]
     RequestCompression(String),
     #[error("response compression error: {0}")]
@@ -1040,7 +1006,7 @@ struct HostPool<C> {
     http2: Http2Config,
     state: StdRwLock<HostPoolState>,
     connector: C,
-    shutdown: ShutdownSignal,
+    shutdown: CancellationToken,
     reaper_notify: Arc<Notify>,
 }
 
@@ -1075,7 +1041,7 @@ where
         connector: C,
         connection_timeout: Duration,
         http2: Http2Config,
-        shutdown: ShutdownSignal,
+        shutdown: CancellationToken,
         reaper_notify: Arc<Notify>,
     ) -> Self {
         Self {
@@ -1096,7 +1062,7 @@ where
     fn max_concurrent_requests(&self) -> usize {
         self.http2
             .max_concurrent_requests
-            .unwrap_or(MAX_CONCURRENT_REQUESTS_PER_CLIENT)
+            .unwrap_or(DEFAULT_MAX_CONCURRENT_REQUESTS_PER_CONNECTION)
     }
 
     fn try_checkout_existing(connections: &[PooledConnection]) -> Option<Checkout> {
@@ -1310,7 +1276,7 @@ async fn dial_http2<C: Connect>(
     origin_uri: Uri,
     connection_timeout: Duration,
     http2_config: Http2Config,
-    shutdown: ShutdownSignal,
+    shutdown: CancellationToken,
 ) -> Result<
     (
         http2::SendRequest<BoxBody>,
@@ -1352,24 +1318,25 @@ async fn dial_http2<C: Connect>(
 
 async fn wait_for_dial(
     rx: &mut watch::Receiver<DialOutcome>,
-    shutdown: &ShutdownSignal,
+    shutdown: &CancellationToken,
 ) -> Result<http2::SendRequest<BoxBody>, HttpError> {
     loop {
         match &*rx.borrow_and_update() {
             DialOutcome::Pending => {}
             DialOutcome::Ready(sender) => return Ok(sender.clone()),
             DialOutcome::Failed(msg) => return Err(HttpError::Connect((**msg).clone())),
-            DialOutcome::Aborted => return Err(HttpError::Aborted),
+            DialOutcome::Aborted => return Err(HttpError::Closed),
         }
         tokio::select! {
             biased;
-            _ = shutdown.cancelled() => return Err(HttpError::Aborted),
+            _ = shutdown.cancelled() => return Err(HttpError::Closed),
             changed = rx.changed() => {
                 if changed.is_err() {
                     return match &*rx.borrow_and_update() {
                         DialOutcome::Ready(sender) => Ok(sender.clone()),
                         DialOutcome::Failed(msg) => Err(HttpError::Connect((**msg).clone())),
-                        DialOutcome::Pending | DialOutcome::Aborted => Err(HttpError::Aborted),
+                        DialOutcome::Aborted => Err(HttpError::Closed),
+                        DialOutcome::Pending => Err(HttpError::Connect("dial task ended".to_owned())),
                     };
                 }
             }
@@ -1387,7 +1354,7 @@ pub(crate) struct Pool<C> {
     http2: Http2Config,
     hosts: Arc<StdRwLock<PoolHosts<C>>>,
     connector: C,
-    shutdown: ShutdownSignal,
+    shutdown: CancellationToken,
     reaper_notify: Arc<Notify>,
     reaper: OnceLock<AbortOnDropHandle<()>>,
 }
@@ -1400,7 +1367,7 @@ where
         connector: C,
         connection_timeout: Duration,
         http2: Http2Config,
-        shutdown: ShutdownSignal,
+        shutdown: CancellationToken,
     ) -> Self {
         let hosts = Arc::new(StdRwLock::new(PoolHosts {
             closed: false,
@@ -1459,7 +1426,7 @@ where
         {
             let hosts = self.hosts.read().unwrap();
             if hosts.closed {
-                return Err(HttpError::ClientClosed);
+                return Err(HttpError::Closed);
             }
             if let Some(pool) = hosts.map.get(origin) {
                 return Ok(pool.clone());
@@ -1467,7 +1434,7 @@ where
         }
         let mut hosts = self.hosts.write().unwrap();
         if hosts.closed {
-            return Err(HttpError::ClientClosed);
+            return Err(HttpError::Closed);
         }
         Ok(hosts
             .map
@@ -1572,8 +1539,8 @@ where
         F: FnOnce(CheckedOutSender, Request) -> Fut,
         Fut: Future<Output = Result<T, HttpError>>,
     {
-        if self.shutdown.is_closed() {
-            return Err(HttpError::ClientClosed);
+        if self.shutdown.is_cancelled() {
+            return Err(HttpError::Closed);
         }
         self.ensure_reaper_started();
         let origin = request.origin();
@@ -1581,7 +1548,7 @@ where
         let shutdown = self.shutdown.clone();
         tokio::select! {
             biased;
-            _ = shutdown.cancelled() => Err(HttpError::Aborted),
+            _ = shutdown.cancelled() => Err(HttpError::Closed),
             res = async {
                 let checked_out = self
                     .checkout_ready(&origin, &request.uri, request_timeout)
@@ -1736,7 +1703,7 @@ where
     }
 
     fn close(&self) {
-        self.shutdown.close();
+        self.shutdown.cancel();
         let pools: Vec<_> = {
             let mut hosts = self.hosts.write().unwrap();
             hosts.closed = true;
@@ -1871,7 +1838,7 @@ mod tests {
             connector,
             Duration::from_secs(3),
             http2,
-            ShutdownSignal::new(),
+            CancellationToken::new(),
         )
     }
 
@@ -1999,10 +1966,10 @@ mod tests {
     // spec: r1 C13a
     #[tokio::test]
     async fn checkout_within_capacity() {
-        assert_eq!(MAX_CONCURRENT_REQUESTS_PER_CLIENT, 50);
+        assert_eq!(DEFAULT_MAX_CONCURRENT_REQUESTS_PER_CONNECTION, 50);
         let pool = test_pool();
         let mut permits = Vec::new();
-        for _ in 0..MAX_CONCURRENT_REQUESTS_PER_CLIENT {
+        for _ in 0..DEFAULT_MAX_CONCURRENT_REQUESTS_PER_CONNECTION {
             let (_, permit) = checkout_permit(&pool, TEST_ORIGIN).await;
             permits.push(permit);
         }
@@ -2014,7 +1981,7 @@ mod tests {
     async fn overflow_creates_new_connection() {
         let pool = test_pool();
         let mut permits = Vec::new();
-        for _ in 0..MAX_CONCURRENT_REQUESTS_PER_CLIENT {
+        for _ in 0..DEFAULT_MAX_CONCURRENT_REQUESTS_PER_CONNECTION {
             let (_, permit) = checkout_permit(&pool, TEST_ORIGIN).await;
             permits.push(permit);
         }
@@ -2076,7 +2043,7 @@ mod tests {
     async fn permit_drop_frees_capacity() {
         let pool = test_pool();
         let mut permits = Vec::new();
-        for _ in 0..MAX_CONCURRENT_REQUESTS_PER_CLIENT {
+        for _ in 0..DEFAULT_MAX_CONCURRENT_REQUESTS_PER_CONNECTION {
             let (_, permit) = checkout_permit(&pool, TEST_ORIGIN).await;
             permits.push(permit);
         }
@@ -2121,7 +2088,7 @@ mod tests {
         let host_b = "https://host-b";
 
         let mut permits_a = Vec::new();
-        for _ in 0..MAX_CONCURRENT_REQUESTS_PER_CLIENT {
+        for _ in 0..DEFAULT_MAX_CONCURRENT_REQUESTS_PER_CONNECTION {
             let (_, permit) = checkout_permit(&pool, host_a).await;
             permits_a.push(permit);
         }
@@ -2146,7 +2113,7 @@ mod tests {
             connector,
             Duration::from_secs(1),
             Http2Config::new(),
-            ShutdownSignal::new(),
+            CancellationToken::new(),
         );
         let req = RequestBuilder::get("http://localhost:8080/test".parse().unwrap())
             .timeout(Duration::from_millis(100))
@@ -2163,7 +2130,7 @@ mod tests {
             slow_connector,
             Duration::from_millis(100),
             Http2Config::new(),
-            ShutdownSignal::new(),
+            CancellationToken::new(),
         );
         let req = RequestBuilder::get("http://localhost:8080/test".parse().unwrap())
             .timeout(Duration::from_secs(10))
@@ -2206,20 +2173,12 @@ mod tests {
     }
 
     #[test]
-    fn shutdown_signal_close_updates_state_with_zero_receivers() {
-        let signal = ShutdownSignal::new();
-        assert!(!signal.is_closed());
-        signal.close();
-        assert!(signal.is_closed());
-    }
-
-    #[test]
     fn pool_construction_does_not_require_tokio_runtime() {
         let pool = Pool::new(
             HttpConnector::new(),
             Duration::from_secs(3),
             Http2Config::new(),
-            ShutdownSignal::new(),
+            CancellationToken::new(),
         );
         pool.close();
     }

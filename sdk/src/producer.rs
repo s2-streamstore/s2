@@ -6,7 +6,7 @@ use std::{
     collections::VecDeque,
     fmt,
     future::Future,
-    pin::{Pin, pin},
+    pin::Pin,
     sync::{
         Arc, Mutex as StdMutex,
         atomic::{AtomicU64, Ordering},
@@ -17,23 +17,21 @@ use std::{
 
 use futures_util::{StreamExt, stream::FuturesOrdered};
 use s2_common::{caps::RECORD_BATCH_MAX, record::Metered};
-use tokio::{
-    sync::{Notify, mpsc, oneshot},
-    time::{Instant, Sleep},
-};
+use tokio::sync::{Notify, mpsc, oneshot};
 use tracing::{Instrument, debug, debug_span};
 
 use crate::{
     api::BasinClient,
     batching::{
-        BatchAccumulator, MatchSeqState, validate_max_batch_bytes, validate_max_batch_records,
-        validate_record_size,
+        BatchAccumulator, Linger, MatchSeqState, validate_max_batch_bytes,
+        validate_max_batch_records, validate_record_size,
     },
-    client::ShutdownSignal,
+    client::CancellationToken,
     error::{AbortedError, AppendSessionError, ErrorContext, SessionClosedError},
     session::{
-        AppendPermit, AppendPermits, AppendSessionCore, BatchSubmitTicket, SessionLifecycle,
-        StreamHeaders, SubmitTicket, validate_max_unacked_bytes, validate_reserve_bytes,
+        AppendPermit, AppendPermits, AppendSessionCore, BatchSubmitTicket, FinishOnDrop,
+        SessionLifecycle, StreamHeaders, SubmitTicket, validate_max_unacked_bytes,
+        validate_reserve_bytes,
     },
     types::{
         AppendAck, AppendInput, AppendRecord, BasinName, FencingToken, MeteredBytes, ONE_MIB,
@@ -230,7 +228,6 @@ impl ProducerConfig {
 }
 
 struct ProducerGate {
-    closing: bool,
     match_seq: MatchSeqState,
     last_accepted_id: u64,
 }
@@ -245,15 +242,27 @@ struct ProducerShared {
     acked_through_id: AtomicU64,
     lifecycle: Arc<SessionLifecycle>,
     session_lifecycle: Arc<SessionLifecycle>,
-    client_shutdown: ShutdownSignal,
-    abort_signal: ShutdownSignal,
+    client_shutdown: CancellationToken,
+    /// Child token of `client_shutdown`; cancelled on either client close or producer drop.
+    abort: CancellationToken,
     flush_partial_notify: Notify,
     context: ErrorContext,
 }
 
 impl ProducerShared {
     fn is_closing_or_closed(&self) -> bool {
-        self.lifecycle.is_closing_or_closed() || self.session_lifecycle.is_closing_or_closed()
+        // Ignore a clean `session_lifecycle` close here: if `client.close()` aborts an idle owned
+        // session while the producer still holds a partial batch, `ProducerTask` drives
+        // `self.lifecycle` with `AbortedError` (`A8c`, `E6`).
+        self.lifecycle.is_closing_or_closed() || self.session_lifecycle.terminal_err().is_some()
+    }
+
+    fn abort_reason(&self) -> &'static str {
+        if self.client_shutdown.is_cancelled() {
+            "client closed"
+        } else {
+            DROPPED_ABORT_MSG
+        }
     }
 
     fn session_closed_err(&self, has_unacked_work: bool) -> AppendSessionError {
@@ -262,20 +271,12 @@ impl ProducerShared {
             .terminal_err()
             .or_else(|| self.session_lifecycle.terminal_err())
             .or_else(|| {
-                if !has_unacked_work {
-                    return None;
-                }
-                let reason = if self.client_shutdown.is_closed() {
-                    "client closed"
-                } else if self.abort_signal.is_closed() {
-                    DROPPED_ABORT_MSG
-                } else {
-                    return None;
-                };
-                Some(AppendSessionError::Aborted(AbortedError::new(
-                    reason,
-                    self.context.clone(),
-                )))
+                (has_unacked_work && self.abort.is_cancelled()).then(|| {
+                    AppendSessionError::Aborted(AbortedError::new(
+                        self.abort_reason(),
+                        self.context.clone(),
+                    ))
+                })
             });
         AppendSessionError::SessionClosed(SessionClosedError::new(failure, self.context.clone()))
     }
@@ -311,17 +312,16 @@ impl Producer {
     ) -> Self {
         let basin = client.name.clone();
         let context = ErrorContext::stream("producer", basin.as_ref(), stream.as_ref(), false);
-        let client_shutdown = client.shutdown_signal();
+        let client_shutdown = client.shutdown_token();
+        let abort = client_shutdown.child_token();
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let permits = AppendPermits::new(None, config.max_unacked_bytes);
         let max_batch_bytes = config.max_batch_bytes;
         let gate = StdMutex::new(ProducerGate {
-            closing: false,
             match_seq: MatchSeqState::from_option(config.match_seq_num),
             last_accepted_id: 0,
         });
         let lifecycle = Arc::new(SessionLifecycle::new());
-        let abort_signal = ShutdownSignal::new();
         let session = AppendSessionCore::new(
             client,
             stream.clone(),
@@ -342,7 +342,7 @@ impl Producer {
             lifecycle,
             session_lifecycle,
             client_shutdown,
-            abort_signal,
+            abort,
             flush_partial_notify: Notify::new(),
             context,
         });
@@ -357,7 +357,7 @@ impl Producer {
         if self.shared.is_closing_or_closed() {
             return Err(self.shared.session_closed_err(false));
         }
-        if self.shared.client_shutdown.is_closed() || self.shared.abort_signal.is_closed() {
+        if self.shared.abort.is_cancelled() {
             self.shared.lifecycle.wait_closing_or_closed().await;
             return Err(self.shared.session_closed_err(false));
         }
@@ -412,22 +412,15 @@ impl Producer {
 
         self.check_open_for_reserve().await?;
 
-        let append_permit = if let Some(permit) = self.shared.permits.try_acquire(bytes) {
-            permit
-        } else {
-            tokio::select! {
-                biased;
-                _ = self.shared.lifecycle.wait_closing_or_closed() => {
-                    return Err(self.shared.session_closed_err(false));
-                }
-                _ = self.shared.session_lifecycle.wait_closing_or_closed() => {
-                    return Err(self.shared.session_closed_err(false));
-                }
-                permit = self
-                    .shared
-                    .permits
-                    .acquire_notifying(bytes, &self.shared.flush_partial_notify) => permit,
+        let append_permit = tokio::select! {
+            biased;
+            _ = self.shared.lifecycle.wait_closing_or_closed() => {
+                return Err(self.shared.session_closed_err(false));
             }
+            permit = self
+                .shared
+                .permits
+                .acquire_notifying(bytes, &self.shared.flush_partial_notify) => permit,
         };
 
         self.check_open_for_reserve().await?;
@@ -495,10 +488,16 @@ impl Producer {
         }
         match close_res {
             Err(err) => Err(err),
-            Ok(()) => Err(AppendSessionError::Aborted(AbortedError::new(
-                "producer closed before flush completed",
-                self.shared.context.clone(),
-            ))),
+            Ok(()) => {
+                debug_assert!(
+                    false,
+                    "producer closed cleanly before accepted flush target was acked"
+                );
+                Err(AppendSessionError::Aborted(AbortedError::new(
+                    "producer closed before flush completed",
+                    self.shared.context.clone(),
+                )))
+            }
         }
     }
 
@@ -510,10 +509,8 @@ impl Producer {
     /// session.
     pub async fn close(&self) -> Result<(), AppendSessionError> {
         {
-            let mut gate = self.shared.gate.lock().unwrap();
-            if !gate.closing {
-                gate.closing = true;
-                self.shared.lifecycle.mark_closing();
+            let _gate = self.shared.gate.lock().unwrap();
+            if !self.shared.abort.is_cancelled() && self.shared.lifecycle.mark_closing() {
                 let _ = self.shared.cmd_tx.send(Command::Close);
             }
         }
@@ -524,7 +521,7 @@ impl Producer {
 impl Drop for Producer {
     fn drop(&mut self) {
         if !self.shared.lifecycle.is_closed() {
-            self.shared.abort_signal.close();
+            self.shared.abort.cancel();
         }
     }
 }
@@ -575,11 +572,7 @@ impl RecordSubmitPermit {
             gate.match_seq.check_available()?;
             let has_unacked_work =
                 gate.last_accepted_id > self.shared.acked_through_id.load(Ordering::Acquire);
-            if gate.closing
-                || self.shared.is_closing_or_closed()
-                || self.shared.client_shutdown.is_closed()
-                || self.shared.abort_signal.is_closed()
-            {
+            if self.shared.is_closing_or_closed() || self.shared.abort.is_cancelled() {
                 return Err(self.shared.session_closed_err(has_unacked_work));
             }
             let match_seq_num = gate.match_seq.claim_next()?;
@@ -618,11 +611,9 @@ struct UnsubmittedBatch {
 struct ProducerTask {
     shared: Arc<ProducerShared>,
     session: AppendSessionCore,
-    linger: Duration,
+    linger: Linger,
     cmd_rx: mpsc::UnboundedReceiver<Command>,
     partial_batch: PartialBatch,
-    linger_sleep: Option<Pin<Box<Sleep>>>,
-    linger_deadline: Option<Instant>,
     pending_batch_acks: FuturesOrdered<PendingBatchAck>,
     pending_flushes: VecDeque<PendingFlush>,
 }
@@ -642,47 +633,18 @@ impl ProducerTask {
         Self {
             shared,
             session,
-            linger: config.linger,
+            linger: Linger::new(config.linger),
             cmd_rx,
             partial_batch,
-            linger_sleep: None,
-            linger_deadline: None,
             pending_batch_acks: FuturesOrdered::new(),
             pending_flushes: VecDeque::new(),
         }
     }
 
-    fn set_linger_deadline(&mut self) {
-        if !self.linger.is_zero() {
-            self.linger_deadline = Instant::now().checked_add(self.linger);
-        }
-    }
-
-    /// Ensure `linger_sleep` matches `linger_deadline` without resetting when unchanged.
-    fn sync_linger_sleep(&mut self) -> bool {
-        let Some(deadline) = self.linger_deadline else {
-            return false;
-        };
-        if self.partial_batch.is_empty() {
-            return false;
-        }
-        match self.linger_sleep.as_mut() {
-            Some(sleep) => {
-                if sleep.deadline() != deadline {
-                    sleep.as_mut().reset(deadline);
-                }
-            }
-            None => {
-                self.linger_sleep = Some(Box::pin(tokio::time::sleep_until(deadline)));
-            }
-        }
-        true
-    }
-
     /// Take the current partial batch and submit it to the owned session.
     /// Returns `Err(UnsubmittedBatch)` if the owned session has already closed/failed.
     fn try_cut_and_submit(&mut self) -> Result<(), UnsubmittedBatch> {
-        self.linger_deadline = None;
+        self.linger.disarm();
         let Some((input, max_id, ack_txs, permit)) = self.partial_batch.take() else {
             return Ok(());
         };
@@ -714,13 +676,20 @@ impl ProducerTask {
             && self.shared.permits.has_waiters()
     }
 
-    fn publish_closing_from_session(&self) {
+    fn publish_closing_from_session(&self, has_unsubmitted: bool) {
+        let _gate = self.shared.gate.lock().unwrap();
         if let Some(err) = self.session.terminal_err() {
             self.shared.lifecycle.set_terminal_err(err);
+        } else if has_unsubmitted && self.shared.abort.is_cancelled() {
+            self.shared
+                .lifecycle
+                .set_terminal_err(AppendSessionError::Aborted(AbortedError::new(
+                    self.shared.abort_reason(),
+                    self.shared.context.clone(),
+                )));
+        } else if !self.shared.abort.is_cancelled() {
+            self.shared.lifecycle.mark_closing();
         }
-        let mut g = self.shared.gate.lock().unwrap();
-        g.closing = true;
-        self.shared.lifecycle.mark_closing();
     }
 
     fn record_batch_acked(&mut self, batch_max_id: u64) {
@@ -801,11 +770,13 @@ impl ProducerTask {
     }
 
     async fn run(mut self) {
+        let _finish_guard = FinishOnDrop::new(
+            self.shared.lifecycle.clone(),
+            self.shared.context.clone(),
+            DROPPED_ABORT_MSG,
+        );
         let mut closing = false;
-        let client_shutdown = self.shared.client_shutdown.clone();
-        let abort_signal = self.shared.abort_signal.clone();
-        let mut client_closed_fut = pin!(client_shutdown.cancelled());
-        let mut abort_fut = pin!(abort_signal.cancelled());
+        let abort = self.shared.abort.clone();
 
         loop {
             if closing && self.partial_batch.is_empty() && self.pending_batch_acks.is_empty() {
@@ -813,10 +784,7 @@ impl ProducerTask {
             }
 
             // For positive linger, flush before pulling more commands if deadline already elapsed.
-            if !self.partial_batch.is_empty()
-                && !self.linger.is_zero()
-                && self.linger_deadline.is_some_and(|d| Instant::now() >= d)
-            {
+            if !self.partial_batch.is_empty() && !self.linger.is_zero() && self.linger.elapsed() {
                 if let Err(unsubmitted) = self.try_cut_and_submit() {
                     self.terminate(Some(unsubmitted)).await;
                     return;
@@ -824,7 +792,7 @@ impl ProducerTask {
                 continue;
             }
 
-            let linger_active = self.sync_linger_sleep();
+            let linger_active = !self.partial_batch.is_empty() && self.linger.prepare_sleep();
 
             tokio::select! {
                 biased;
@@ -834,7 +802,7 @@ impl ProducerTask {
                     if batch_ack.is_err() {
                         // Publish terminal error and close acceptance gate BEFORE dropping
                         // `batch_permit` and unblocking waiting `reserve()` callers (`A4c`, `A9`).
-                        self.publish_closing_from_session();
+                        self.publish_closing_from_session(false);
                         dispatch_acks(batch_ack, ack_txs);
                         drop(batch_permit);
                         self.terminate(None).await;
@@ -852,19 +820,13 @@ impl ProducerTask {
                     }
                 }
 
-                _ = &mut client_closed_fut => {
-                    self.abort("client closed").await;
+                _ = abort.cancelled() => {
+                    let reason = self.shared.abort_reason();
+                    self.abort(reason).await;
                     return;
                 }
 
-                _ = &mut abort_fut => {
-                    self.abort(DROPPED_ABORT_MSG).await;
-                    return;
-                }
-
-                _ = async {
-                    self.linger_sleep.as_mut().expect("linger_sleep armed").as_mut().await
-                }, if linger_active => {
+                _ = self.linger.wait(), if linger_active => {
                     if let Err(unsubmitted) = self.try_cut_and_submit() {
                         self.terminate(Some(unsubmitted)).await;
                         return;
@@ -912,7 +874,7 @@ impl ProducerTask {
                                     return;
                                 }
                             } else if was_empty {
-                                self.set_linger_deadline();
+                                self.linger.arm_now();
                             }
                         }
                         Some(Command::Flush { target_id, done_tx }) => {
@@ -971,11 +933,11 @@ impl ProducerTask {
 
     async fn finish_clean(mut self) {
         let session_close_res = self.session.close().await;
-        {
-            let mut g = self.shared.gate.lock().unwrap();
-            g.closing = true;
-        }
-        let queued_cmds = drain_queued_commands(&mut self.cmd_rx);
+        let queued_cmds = {
+            let _gate = self.shared.gate.lock().unwrap();
+            self.shared.lifecycle.mark_closing();
+            drain_queued_commands(&mut self.cmd_rx)
+        };
         debug!(ok = session_close_res.is_ok(), "producer closed cleanly");
         self.settle_remaining(None, queued_cmds, session_close_res);
     }
@@ -984,23 +946,37 @@ impl ProducerTask {
     /// (`A6d`, `A9`), then fail any records still being batched or queued with
     /// `SessionClosedError` (`A6a`).
     async fn terminate(mut self, unsubmitted: Option<UnsubmittedBatch>) {
-        self.publish_closing_from_session();
+        self.publish_closing_from_session(unsubmitted.is_some());
 
         // Drain every remaining batch already submitted to the owned session so every record
         // receives the exact outcome reported by AppendSession strictly in submission order (A6d).
         self.drain_pending_batch_acks().await;
 
-        // Obtain the owned session's exact failure (A9).
+        // Obtain the owned session's exact failure (A9). If the owned session had nothing in
+        // flight when an abort closed it cleanly, this producer still had unsubmitted work, so the
+        // failure is `AbortedError` (`A8c`, `E6`).
         let session_failure = match self.session.close().await {
             Err(err) => err,
-            Ok(()) => AppendSessionError::SessionClosed(SessionClosedError::new(
-                None,
-                self.shared.context.clone(),
-            )),
+            Ok(()) => {
+                debug_assert!(
+                    self.shared.abort.is_cancelled(),
+                    "owned session closed cleanly without abort while terminating producer"
+                );
+                AppendSessionError::Aborted(AbortedError::new(
+                    self.shared.abort_reason(),
+                    self.shared.context.clone(),
+                ))
+            }
         };
 
         debug!(%session_failure, "terminating producer on session failure");
-        let queued_cmds = drain_queued_commands(&mut self.cmd_rx);
+        let queued_cmds = {
+            let _gate = self.shared.gate.lock().unwrap();
+            self.shared
+                .lifecycle
+                .set_terminal_err(session_failure.clone());
+            drain_queued_commands(&mut self.cmd_rx)
+        };
         self.settle_remaining(unsubmitted, queued_cmds, Err(session_failure));
     }
 
@@ -1008,8 +984,7 @@ impl ProducerTask {
         let aborted =
             AppendSessionError::Aborted(AbortedError::new(reason, self.shared.context.clone()));
         let queued_cmds = {
-            let mut g = self.shared.gate.lock().unwrap();
-            g.closing = true;
+            let _gate = self.shared.gate.lock().unwrap();
             let queued = drain_queued_commands(&mut self.cmd_rx);
             let has_unsubmitted = !self.partial_batch.is_empty()
                 || queued

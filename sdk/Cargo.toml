@@ -52,7 +52,7 @@ tokio-util = { workspace = true, features = ["rt", "codec"] }
 tower-service = "0.3.3"
 tracing = { workspace = true }
 urlencoding = "2"
-uuid = { version = "1", features = ["v4", "fast-rng"] }
+uuid = { workspace = true, features = ["v4", "fast-rng"] }
 zstd.workspace = true
 
 [dev-dependencies]

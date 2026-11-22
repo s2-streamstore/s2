@@ -865,7 +865,7 @@ async fn spec_vectors_s2s_frames() {
         }
 
         // 2. Replay the ending bytes through a real ReadSession so terminal/error parsing goes
-        //    through the SDK's real ApiError::from_terminal_message & stream decoder!
+        //    through the SDK's real ReadSessionError::from_terminal_message & stream decoder!
         *pending_wire.lock().unwrap() = Bytes::copy_from_slice(&wire[end_slice_offset..]);
         let mut sess = stream
             .read_session(ReadInput::new().with_count(1), ReadSessionConfig::default())
@@ -900,7 +900,7 @@ async fn spec_vectors_s2s_frames() {
 }
 
 // ---------------------------------------------------------------------------
-// D4: dates.json + additional PR 1 rule-tagged checks (M2, M3, R1, T5b)
+// D4: dates.json — wall-clock and metrics timestamps
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
@@ -955,6 +955,11 @@ fn spec_d4_wall_clock_and_metrics_timestamps() {
                             !expect_valid || secs > Timestamp::MAX.as_second(),
                             "{label}: unexpectedly unrepresentable in jiff::Timestamp"
                         );
+                        if expect_valid {
+                            eprintln!(
+                                "skipping {label}: epoch_secs={secs} exceeds jiff::Timestamp::MAX"
+                            );
+                        }
                     }
                 }
             }

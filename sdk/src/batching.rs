@@ -457,7 +457,8 @@ impl BatchAccumulator {
     }
 
     pub(crate) fn take(&mut self) -> AppendInput {
-        let records = std::mem::replace(&mut self.records, Metered::with_capacity(0));
+        let next_cap = self.records.len().min(self.max_batch_records);
+        let records = std::mem::replace(&mut self.records, Metered::with_capacity(next_cap));
         AppendInput {
             records: AppendRecordBatch::from_metered(records),
             match_seq_num: self.batch_match_seq.take(),
@@ -471,13 +472,88 @@ impl BatchAccumulator {
     }
 }
 
+/// Reusable linger timer shared by [`BatcherCore`] and [`Producer`](crate::producer::Producer).
+///
+/// Tracks the logical deadline separately from the Tokio timer wheel so records arriving before
+/// the deadline never reset a `Sleep` unnecessarily.
+pub(crate) struct Linger {
+    duration: Duration,
+    deadline: Option<Instant>,
+    sleep: Option<Pin<Box<Sleep>>>,
+}
+
+impl Linger {
+    pub(crate) fn new(duration: Duration) -> Self {
+        Self {
+            duration,
+            deadline: None,
+            sleep: None,
+        }
+    }
+
+    pub(crate) fn is_zero(&self) -> bool {
+        self.duration.is_zero()
+    }
+
+    pub(crate) fn arm_from(&mut self, started_at: Instant) {
+        if !self.duration.is_zero() {
+            self.deadline = started_at.checked_add(self.duration);
+        }
+    }
+
+    pub(crate) fn arm_now(&mut self) {
+        self.arm_from(Instant::now());
+    }
+
+    pub(crate) fn disarm(&mut self) {
+        self.deadline = None;
+    }
+
+    pub(crate) fn elapsed(&self) -> bool {
+        self.deadline.is_some_and(|d| Instant::now() >= d)
+    }
+
+    fn ensure_sleep(&mut self) -> Option<Pin<&mut Sleep>> {
+        let deadline = self.deadline?;
+        let sleep = self
+            .sleep
+            .get_or_insert_with(|| Box::pin(tokio::time::sleep_until(deadline)));
+        if sleep.deadline() != deadline {
+            sleep.as_mut().reset(deadline);
+        }
+        Some(sleep.as_mut())
+    }
+
+    pub(crate) fn poll_sleep(&mut self, cx: &mut Context<'_>) -> bool {
+        let Some(deadline) = self.deadline else {
+            return false;
+        };
+        if Instant::now() >= deadline {
+            return true;
+        }
+        self.ensure_sleep()
+            .is_some_and(|sleep| sleep.poll(cx).is_ready())
+    }
+
+    pub(crate) fn prepare_sleep(&mut self) -> bool {
+        self.ensure_sleep().is_some()
+    }
+
+    pub(crate) async fn wait(&mut self) {
+        self.sleep
+            .as_mut()
+            .expect("Linger::prepare_sleep must return true before wait")
+            .as_mut()
+            .await
+    }
+}
+
 struct BatcherCore {
     config: BatcherConfig,
     acc: BatchAccumulator,
     match_seq: MatchSeqState,
     overflowed_record: Option<(Metered<AppendRecord>, Instant)>,
-    linger_deadline: Option<Instant>,
-    linger_sleep: Option<Pin<Box<Sleep>>>,
+    linger: Linger,
     done: bool,
 }
 
@@ -490,13 +566,13 @@ impl BatcherCore {
             config.fencing_token.clone(),
             0,
         );
+        let linger = Linger::new(config.linger);
         Self {
             config,
             acc,
             match_seq,
             overflowed_record: None,
-            linger_deadline: None,
-            linger_sleep: None,
+            linger,
             done: false,
         }
     }
@@ -507,40 +583,8 @@ impl BatcherCore {
         Ok(())
     }
 
-    fn set_linger_from(&mut self, started_at: Instant) {
-        if self.config.linger.is_zero() {
-            return;
-        }
-        self.linger_deadline = started_at.checked_add(self.config.linger);
-    }
-
-    fn linger_elapsed(&self) -> bool {
-        self.linger_deadline.is_some_and(|d| Instant::now() >= d)
-    }
-
-    fn poll_linger_sleep(&mut self, cx: &mut Context<'_>) -> bool {
-        let Some(deadline) = self.linger_deadline else {
-            return false;
-        };
-        if Instant::now() >= deadline {
-            return true;
-        }
-        let sleep = match self.linger_sleep.as_mut() {
-            Some(sleep) => {
-                if sleep.deadline() != deadline {
-                    sleep.as_mut().reset(deadline);
-                }
-                sleep
-            }
-            None => self
-                .linger_sleep
-                .insert(Box::pin(tokio::time::sleep_until(deadline))),
-        };
-        sleep.as_mut().poll(cx).is_ready()
-    }
-
     fn take_batch(&mut self) -> AppendInput {
-        self.linger_deadline = None;
+        self.linger.disarm();
         self.acc.take()
     }
 
@@ -550,7 +594,7 @@ impl BatcherCore {
     ) -> Poll<Option<Result<AppendInput, TryBatchError<E>>>> {
         self.acc.clear();
         self.overflowed_record = None;
-        self.linger_deadline = None;
+        self.linger.disarm();
         self.done = true;
         Poll::Ready(Some(Err(err)))
     }
@@ -574,7 +618,7 @@ impl BatcherCore {
             if self.acc.is_full() {
                 return Poll::Ready(Some(Ok(self.take_batch())));
             }
-            self.set_linger_from(arrived_at);
+            self.linger.arm_from(arrived_at);
         }
 
         loop {
@@ -582,7 +626,7 @@ impl BatcherCore {
             // before pulling another input record (without touching the timer wheel per record).
             // For zero linger, poll ready input records first so burst submissions coalesce into a
             // single batch within the same tick.
-            if !self.acc.is_empty() && !self.config.linger.is_zero() && self.linger_elapsed() {
+            if !self.acc.is_empty() && !self.linger.is_zero() && self.linger.elapsed() {
                 return Poll::Ready(Some(Ok(self.take_batch())));
             }
 
@@ -614,7 +658,7 @@ impl BatcherCore {
                     }
 
                     if was_empty {
-                        self.set_linger_from(Instant::now());
+                        self.linger.arm_now();
                     }
                 }
                 Poll::Ready(Some(Err(err))) => {
@@ -629,8 +673,7 @@ impl BatcherCore {
                     return Poll::Ready(None);
                 }
                 Poll::Pending => {
-                    if !self.acc.is_empty()
-                        && (self.config.linger.is_zero() || self.poll_linger_sleep(cx))
+                    if !self.acc.is_empty() && (self.linger.is_zero() || self.linger.poll_sleep(cx))
                     {
                         return Poll::Ready(Some(Ok(self.take_batch())));
                     }

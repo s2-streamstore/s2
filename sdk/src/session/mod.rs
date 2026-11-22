@@ -9,17 +9,50 @@ use std::{
 };
 
 pub(crate) use append::{
-    AppendPermit, AppendPermits, AppendSessionCore, BatchSubmitTicket, SessionLifecycle,
-    validate_reserve_bytes,
+    AppendPermit, AppendPermits, AppendSession, AppendSessionConfig, AppendSessionCore,
+    BatchSubmitTicket, SessionLifecycle, validate_reserve_bytes,
 };
-pub use append::{AppendSession, AppendSessionConfig};
-pub use read::{ReadBatchSession, ReadSession, ReadSessionConfig};
+pub(crate) use read::{ReadBatchSession, ReadSession, ReadSessionConfig};
 use tokio::sync::oneshot;
 
 use crate::{
     error::{AbortedError, AppendSessionError, ErrorContext},
     types::{ONE_MIB, ValidationError},
 };
+
+/// Ensures a session's [`SessionLifecycle`] reaches `Closed` with an [`AbortedError`] if its
+/// background task panics or is externally cancelled before finishing normally.
+pub(crate) struct FinishOnDrop {
+    lifecycle: Arc<SessionLifecycle>,
+    context: ErrorContext,
+    msg: &'static str,
+}
+
+impl FinishOnDrop {
+    pub(crate) fn new(
+        lifecycle: Arc<SessionLifecycle>,
+        context: ErrorContext,
+        msg: &'static str,
+    ) -> Self {
+        Self {
+            lifecycle,
+            context,
+            msg,
+        }
+    }
+}
+
+impl Drop for FinishOnDrop {
+    fn drop(&mut self) {
+        if !self.lifecycle.is_closed() {
+            self.lifecycle
+                .finish(Err(AppendSessionError::Aborted(AbortedError::new(
+                    self.msg,
+                    self.context.clone(),
+                ))));
+        }
+    }
+}
 
 /// Pre-encoded per-stream options sent as request headers on every (re)connect of a session.
 #[derive(Debug, Clone, Default)]

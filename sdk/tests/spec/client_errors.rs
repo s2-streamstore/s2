@@ -605,28 +605,36 @@ async fn spec_c12_client_close_aborts_inflight_and_sessions_and_rejects_new_call
     let server = MockH2Server::start({
         let arrived = arrived.clone();
         let all_arrived = all_arrived.clone();
-        move |_conn_id, req, mut respond| {
+        move |_conn_id, req, respond| {
             let arrived = arrived.clone();
             let all_arrived = all_arrived.clone();
             async move {
                 let is_s2s = header_str(&req, "content-type") == Some("s2s/proto");
+                let is_post = req.method() == http::Method::POST;
+                let mut body = req.into_body();
                 let _hold_send = if is_s2s {
-                    let resp = Response::builder()
-                        .status(200)
-                        .header("content-type", "s2s/proto")
-                        .body(())
-                        .unwrap();
-                    match respond.send_response(resp, false) {
-                        Ok(send) => Some(send),
-                        Err(_) => return,
+                    let Some(s2s) = S2sResponder::open(respond) else {
+                        return;
+                    };
+                    if is_post {
+                        // Wait until the append session's batch frame actually arrives on the wire
+                        // so `append_ticket` is guaranteed `sent` (`A6a`, `C12`).
+                        let mut buf = BytesMut::new();
+                        let _ = read_one_s2s_frame(&mut body, &mut buf, true).await;
                     }
+                    Some(s2s)
                 } else {
-                    None
+                    let _keep_respond = respond;
+                    if arrived.fetch_add(1, Ordering::SeqCst) + 1 >= 4 {
+                        all_arrived.notify_waiters();
+                    }
+                    std::future::pending::<()>().await;
+                    unreachable!()
                 };
                 if arrived.fetch_add(1, Ordering::SeqCst) + 1 >= 4 {
                     all_arrived.notify_waiters();
                 }
-                let _keep = (respond, _hold_send);
+                let _keep = (body, _hold_send);
                 std::future::pending::<()>().await;
             }
         }
@@ -705,11 +713,16 @@ async fn spec_c12_client_close_aborts_inflight_and_sessions_and_rejects_new_call
         .expect("append session ticket must abort promptly")
         .expect_err("append session ticket must fail");
     assert!(
-        matches!(
-            ticket_err,
-            AppendSessionError::Aborted(_) | AppendSessionError::SessionClosed(_)
-        ),
-        "{ticket_err:?}"
+        matches!(ticket_err, AppendSessionError::Aborted(_)),
+        "sent append batch must resolve to AbortedError, got {ticket_err:?}"
+    );
+    let append_close_err = tokio::time::timeout(Duration::from_secs(1), append_session.close())
+        .await
+        .expect("append session close must resolve promptly")
+        .expect_err("append session close must report AbortedError");
+    assert!(
+        matches!(append_close_err, AppendSessionError::Aborted(_)),
+        "append session close must report AbortedError, got {append_close_err:?}"
     );
 
     let prod_err = tokio::time::timeout(Duration::from_secs(1), producer_ticket)
@@ -719,9 +732,18 @@ async fn spec_c12_client_close_aborts_inflight_and_sessions_and_rejects_new_call
     assert!(
         matches!(
             prod_err,
-            AppendSessionError::Aborted(_) | AppendSessionError::SessionClosed(_)
+            AppendSessionError::SessionClosed(ref e)
+                if matches!(e.failure(), Some(AppendSessionError::Aborted(_)))
         ),
-        "{prod_err:?}"
+        "unsent producer record must resolve to SessionClosedError(Some(Aborted)), got {prod_err:?}"
+    );
+    let prod_close_err = tokio::time::timeout(Duration::from_secs(1), producer.close())
+        .await
+        .expect("producer close must resolve promptly")
+        .expect_err("producer close must report AbortedError");
+    assert!(
+        matches!(prod_close_err, AppendSessionError::Aborted(_)),
+        "producer close must report AbortedError, got {prod_close_err:?}"
     );
 
     let read_item = tokio::time::timeout(Duration::from_secs(1), read_next)
@@ -2309,4 +2331,120 @@ async fn spec_t3_retry_backoff_delivers_bounded_exponential_delay() {
     // scheduling slack on upper bound).
     assert!(d1 >= Duration::from_millis(35), "delay 1 too short: {d1:?}");
     assert!(d2 >= Duration::from_millis(70), "delay 2 too short: {d2:?}");
+}
+
+// spec: r1 A4c, A8c, A9, C12, E6
+#[tokio::test]
+async fn producer_client_close_during_cut_or_reserve_wait_reports_aborted() {
+    let (basin_name, stream_name) = test_basin_and_stream();
+
+    let server = MockH2Server::start(|_conn_id, req, respond| async move {
+        let Some(s2s) = S2sResponder::open(respond) else {
+            return;
+        };
+        let _keep = (req, s2s);
+        std::future::pending::<()>().await;
+    })
+    .await;
+
+    // 1. Concurrent client.close() + producer.close() with linger = 0 (exercises the race where the
+    //    idle owned session closes cleanly on client close right as ProducerTask cuts a batch).
+    for _ in 0..8 {
+        let s2 = server.client(no_retry_config());
+        let stream = s2.basin(basin_name.clone()).stream(stream_name.clone());
+        let producer = stream
+            .producer(ProducerConfig::new().with_linger(Duration::ZERO))
+            .expect("open producer");
+        let ticket = producer
+            .submit(AppendRecord::new("r").unwrap())
+            .await
+            .expect("submit record");
+        s2.close();
+
+        let close_err = tokio::time::timeout(Duration::from_secs(1), producer.close())
+            .await
+            .expect("producer close must resolve promptly")
+            .expect_err("aborted producer with unacked record must fail close");
+        assert!(
+            matches!(close_err, AppendSessionError::Aborted(_)),
+            "producer.close() must report AbortedError (never SessionClosedError), got {close_err:?}"
+        );
+
+        let ticket_err = tokio::time::timeout(Duration::from_secs(1), ticket)
+            .await
+            .expect("ticket must resolve promptly")
+            .expect_err("ticket must fail");
+        assert!(
+            matches!(ticket_err, AppendSessionError::Aborted(_))
+                || matches!(
+                    ticket_err,
+                    AppendSessionError::SessionClosed(ref e)
+                        if matches!(e.failure(), Some(AppendSessionError::Aborted(_)))
+                ),
+            "ticket must report Aborted or SessionClosed(Some(Aborted)), got {ticket_err:?}"
+        );
+    }
+
+    // 2. Producer::reserve() blocked on capacity while owned session is idle (only a partial batch
+    //    is buffered) and client.close() fires -> reserve() MUST return
+    //    SessionClosed(Some(Aborted)), never SessionClosed(None)!
+    let s2 = server.client(no_retry_config());
+    let stream = s2.basin(basin_name).stream(stream_name);
+    let max_unacked = 1024 * 1024u32;
+    let producer = stream
+        .producer(
+            ProducerConfig::new()
+                .with_max_unacked_bytes(max_unacked)
+                .unwrap()
+                .with_linger(Duration::from_secs(60)),
+        )
+        .expect("open producer");
+
+    // Fill almost all capacity with a single partial batch (not full, so owned session stays idle)
+    // and reserve the remaining slack so the next reserve() blocks without flushing.
+    let fill = producer
+        .submit(AppendRecord::new(vec![b'a'; 500 * 1024]).unwrap())
+        .await
+        .expect("submit partial record");
+    let hold_permit = producer
+        .reserve(500 * 1024)
+        .await
+        .expect("reserve remaining capacity");
+
+    let mut blocked_reserve = Box::pin(producer.reserve(100 * 1024));
+    assert!(futures_util::poll!(blocked_reserve.as_mut()).is_pending());
+
+    s2.close();
+
+    let reserve_err = tokio::time::timeout(Duration::from_secs(1), blocked_reserve)
+        .await
+        .expect("blocked reserve must wake promptly")
+        .expect_err("blocked reserve must fail on client close");
+    assert!(
+        matches!(
+            reserve_err,
+            AppendSessionError::SessionClosed(ref e)
+                if matches!(e.failure(), Some(AppendSessionError::Aborted(_)))
+        ),
+        "reserve() woken by client close with partial batch must report SessionClosed(Some(Aborted)), got {reserve_err:?}"
+    );
+
+    drop(hold_permit);
+    let fill_err = tokio::time::timeout(Duration::from_secs(1), fill)
+        .await
+        .expect("fill ticket must resolve")
+        .expect_err("fill ticket must fail");
+    assert!(
+        matches!(fill_err, AppendSessionError::Aborted(_))
+            || matches!(
+                fill_err,
+                AppendSessionError::SessionClosed(ref e)
+                    if matches!(e.failure(), Some(AppendSessionError::Aborted(_)))
+            ),
+        "{fill_err:?}"
+    );
+    assert!(matches!(
+        producer.close().await,
+        Err(AppendSessionError::Aborted(_))
+    ));
 }

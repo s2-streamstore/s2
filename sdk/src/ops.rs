@@ -1,4 +1,4 @@
-use std::{future::Future, sync::Arc, time::Duration};
+use std::{fmt, future::Future, sync::Arc, time::Duration};
 
 use http::{
     HeaderValue, Uri,
@@ -9,7 +9,8 @@ use s2_common::encryption::S2_ENCRYPTION_KEY_HEADER;
 
 use crate::{
     api::{
-        ACCEPT_PROTO, BaseClient, BasinClient, CONTENT_TYPE_PROTO, S2_REQUEST_TOKEN, set_header_opt,
+        APPLICATION_PROTOBUF, BaseClient, BasinClient, S2_REQUEST_TOKEN, basin_path,
+        network_policy_path, set_header_opt, stream_path, stream_records_path, token_path,
     },
     client,
     error::{
@@ -29,13 +30,12 @@ use crate::{
         ListNetworkPoliciesInput, ListStream, ListStreamsInput, LocationInfo, LocationName, Metric,
         NetworkPolicy, NetworkPolicyInfo, NetworkPolicySelector, NetworkPolicySlug, Page,
         ReadBatch, ReadInput, S2Config, StreamConfig, StreamInfo, StreamMetricSet, StreamName,
-        StreamPosition, StreamReconfiguration, ValidationError, idempotency_token,
+        StreamPosition, StreamReconfiguration, ValidationError, request_token,
     },
 };
 
 fn init_error(err: ValidationError, op: &'static str) -> ValidationError {
-    let ctx = ErrorContext::account(op, true);
-    ValidationError(ctx.format_string(&err.0))
+    ValidationError(format!("{op}: {}", err.0))
 }
 
 fn encode_stream_config(config: &StreamConfig) -> HeaderValue {
@@ -79,12 +79,20 @@ where
     })
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 /// An S2 account.
 pub struct S2 {
     base: BaseClient,
     config: Arc<S2Config>,
     base_url: Uri,
+}
+
+impl fmt::Debug for S2 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("S2")
+            .field("base_url", &self.base_url)
+            .finish_non_exhaustive()
+    }
 }
 
 impl S2 {
@@ -173,14 +181,7 @@ impl S2 {
             )
             .send_json()
             .await?;
-        Ok(Page::new(
-            response
-                .basins
-                .into_iter()
-                .map(Into::into)
-                .collect::<Vec<_>>(),
-            response.has_more,
-        ))
+        Ok(Page::from_api(response.basins, response.has_more))
     }
 
     /// List all basins, paginating automatically.
@@ -210,7 +211,7 @@ impl S2 {
             .unary(
                 self.base
                     .post(self.uri("v1/basins"))
-                    .header(S2_REQUEST_TOKEN, idempotency_token())
+                    .header(S2_REQUEST_TOKEN, request_token())
                     .json(&req)
                     .build(),
                 OpScope::basin("create_basin", basin_name.as_ref(), false),
@@ -220,19 +221,23 @@ impl S2 {
         Ok(info.into())
     }
 
-    /// Ensure a basin.
+    /// Ensure a basin exists with the specified configuration.
     ///
-    /// If the basin doesn't exist, creates the basin with specified configuration.
+    /// If the basin does not exist, creates it with the specified configuration.
     ///
-    /// If the basin already exists:
-    /// - Its configuration is updated to the specified configuration, if different.
-    /// - Its configuration is unchanged, if the specified configuration is same.
+    /// If the basin already exists, replaces its configuration with the specified configuration
+    /// (**omitted fields are reset to defaults**; use
+    /// [`reconfigure_basin`](Self::reconfigure_basin) for partial updates) and reports
+    /// [`EnsureOutput::Updated`] or [`EnsureOutput::Noop`].
+    ///
+    /// Because this operation is retried idempotently, a retried creation whose first attempt
+    /// succeeded on the server may report [`EnsureOutput::Updated`] or [`EnsureOutput::Noop`].
     pub async fn ensure_basin(
         &self,
         input: EnsureBasinInput,
     ) -> Result<EnsureOutput<BasinInfo>, RequestError> {
-        let (name, body) = input.into();
-        let url = self.uri(format!("v1/basins/{name}"));
+        let (name, body) = input.into_parts();
+        let url = self.uri(basin_path(&name));
         let req = match body {
             Some(body) => self.base.put(url).json(&body).build(),
             None => self.base.put(url).build(),
@@ -242,14 +247,14 @@ impl S2 {
             .unary(req, OpScope::basin("ensure_basin", name.as_ref(), false))
             .send_ensure::<api::basin::BasinInfo>()
             .await?;
-        Ok(result.map(BasinInfo::from).into())
+        Ok(result.map(BasinInfo::from))
     }
 
     async fn get_basin_config_raw(
         &self,
         name: BasinName,
     ) -> Result<api::config::BasinConfig, RequestError> {
-        let url = self.uri(format!("v1/basins/{name}"));
+        let url = self.uri(basin_path(&name));
         self.base
             .unary(
                 self.base.get(url).build(),
@@ -277,7 +282,7 @@ impl S2 {
     ///
     /// Succeeds if the basin is already being deleted or does not exist.
     pub async fn delete_basin(&self, name: BasinName) -> Result<(), RequestError> {
-        let url = self.uri(format!("v1/basins/{name}"));
+        let url = self.uri(basin_path(&name));
         self.base
             .unary(
                 self.base.delete(url).build(),
@@ -294,7 +299,7 @@ impl S2 {
         config: BasinReconfiguration,
     ) -> Result<BasinConfig, RequestError> {
         let req: api::config::BasinReconfiguration = config.into();
-        let url = self.uri(format!("v1/basins/{name}"));
+        let url = self.uri(basin_path(&name));
         let config: api::config::BasinConfig = self
             .base
             .unary(
@@ -331,14 +336,7 @@ impl S2 {
         input: ListAccessTokensInput,
     ) -> Result<Page<AccessTokenInfo>, RequestError> {
         let response = self.list_access_tokens_raw(input).await?;
-        Ok(Page::new(
-            response
-                .access_tokens
-                .into_iter()
-                .map(Into::into)
-                .collect::<Vec<_>>(),
-            response.has_more,
-        ))
+        Ok(Page::from_api(response.access_tokens, response.has_more))
     }
 
     #[doc(hidden)]
@@ -395,7 +393,7 @@ impl S2 {
     ///
     /// Succeeds if the access token does not exist.
     pub async fn revoke_access_token(&self, id: AccessTokenId) -> Result<(), RequestError> {
-        let url = self.uri(format!("v1/access-tokens/{}", urlencoding::encode(&id)));
+        let url = self.uri(token_path(&id));
         self.base
             .unary(
                 self.base.delete(url).build(),
@@ -425,14 +423,7 @@ impl S2 {
             )
             .send_json()
             .await?;
-        Ok(Page::new(
-            response
-                .network_policies
-                .into_iter()
-                .map(Into::into)
-                .collect::<Vec<_>>(),
-            response.has_more,
-        ))
+        Ok(Page::from_api(response.network_policies, response.has_more))
     }
 
     /// List all network policies, paginating automatically.
@@ -485,10 +476,7 @@ impl S2 {
         &self,
         selector: NetworkPolicySelector,
     ) -> Result<NetworkPolicyInfo, RequestError> {
-        let url = self.uri(format!(
-            "v1/network-policies/{}",
-            urlencoding::encode(&selector.to_string())
-        ));
+        let url = self.uri(network_policy_path(&selector));
         let response: api::network_policy::NetworkPolicyInfo = self
             .base
             .unary(
@@ -508,10 +496,7 @@ impl S2 {
         &self,
         selector: NetworkPolicySelector,
     ) -> Result<(), RequestError> {
-        let url = self.uri(format!(
-            "v1/network-policies/{}",
-            urlencoding::encode(&selector.to_string())
-        ));
+        let url = self.uri(network_policy_path(&selector));
         self.base
             .unary(
                 self.base.delete(url).build(),
@@ -626,12 +611,20 @@ impl S2 {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 /// A basin in an S2 account.
 ///
 /// See [`S2::basin`].
 pub struct S2Basin {
     client: BasinClient,
+}
+
+impl fmt::Debug for S2Basin {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("S2Basin")
+            .field("name", &self.client.name)
+            .finish_non_exhaustive()
+    }
 }
 
 impl S2Basin {
@@ -660,23 +653,12 @@ impl S2Basin {
         let response: api::stream::ListStreamsResponse = self
             .client
             .unary(
-                self.client
-                    .base()
-                    .get(self.client.uri("v1/streams"))
-                    .query(&req)
-                    .build(),
-                OpScope::basin("list_streams", self.client.name.as_ref(), true),
+                self.client.get("v1/streams").query(&req).build(),
+                self.client.basin_scope("list_streams", true),
             )
             .send_json()
             .await?;
-        Ok(Page::new(
-            response
-                .streams
-                .into_iter()
-                .map(Into::into)
-                .collect::<Vec<_>>(),
-            response.has_more,
-        ))
+        Ok(Page::from_api(response.streams, response.has_more))
     }
 
     /// List all streams, paginating automatically.
@@ -708,74 +690,55 @@ impl S2Basin {
             .client
             .unary(
                 self.client
-                    .base()
-                    .post(self.client.uri("v1/streams"))
-                    .header(S2_REQUEST_TOKEN, idempotency_token())
+                    .post("v1/streams")
+                    .header(S2_REQUEST_TOKEN, request_token())
                     .json(&req)
                     .build(),
-                OpScope::stream(
-                    "create_stream",
-                    self.client.name.as_ref(),
-                    stream_name.as_ref(),
-                    false,
-                ),
+                self.client
+                    .stream_scope("create_stream", &stream_name, false),
             )
             .send_json()
             .await?;
         Ok(info.into())
     }
 
-    /// Ensure a stream.
+    /// Ensure a stream exists with the specified configuration.
     ///
-    /// If the stream doesn't exist, creates the stream with specified configuration.
+    /// If the stream does not exist, creates it with the specified configuration.
     ///
-    /// If the stream already exists:
-    /// - Its configuration is updated to the specified configuration, if different.
-    /// - Its configuration is unchanged, if the specified configuration is same.
+    /// If the stream already exists, replaces its configuration with the specified configuration
+    /// (**omitted fields are reset to defaults**; use
+    /// [`reconfigure_stream`](Self::reconfigure_stream) for partial updates) and reports
+    /// [`EnsureOutput::Updated`] or [`EnsureOutput::Noop`].
+    ///
+    /// Because this operation is retried idempotently, a retried creation whose first attempt
+    /// succeeded on the server may report [`EnsureOutput::Updated`] or [`EnsureOutput::Noop`].
     pub async fn ensure_stream(
         &self,
         input: EnsureStreamInput,
     ) -> Result<EnsureOutput<StreamInfo>, RequestError> {
-        let (name, config) = input.into();
-        let url = self
-            .client
-            .uri(format!("v1/streams/{}", urlencoding::encode(&name)));
+        let (name, config) = input.into_parts();
+        let path = stream_path(&name);
         let req = match config {
-            Some(body) => self.client.base().put(url).json(&body).build(),
-            None => self.client.base().put(url).build(),
+            Some(body) => self.client.put(path).json(&body).build(),
+            None => self.client.put(path).build(),
         };
         let result = self
             .client
-            .unary(
-                req,
-                OpScope::stream(
-                    "ensure_stream",
-                    self.client.name.as_ref(),
-                    name.as_ref(),
-                    false,
-                ),
-            )
+            .unary(req, self.client.stream_scope("ensure_stream", &name, false))
             .send_ensure::<api::stream::StreamInfo>()
             .await?;
-        Ok(result.map(StreamInfo::from).into())
+        Ok(result.map(StreamInfo::from))
     }
 
     async fn get_stream_config_raw(
         &self,
         name: StreamName,
     ) -> Result<api::config::StreamConfig, RequestError> {
-        let url = self
-            .client
-            .uri(format!("v1/streams/{}", urlencoding::encode(&name)));
         self.client
             .unary(
-                self.client.base().get(url).build(),
-                OpScope::stream(
-                    "get_stream_config",
-                    self.client.name.as_ref(),
-                    name.as_ref(),
-                    true,
-                ),
+                self.client.get(stream_path(&name)).build(),
+                self.client.stream_scope("get_stream_config", &name, true),
             )
             .send_json()
             .await
@@ -799,18 +762,10 @@ impl S2Basin {
     ///
     /// Succeeds if the stream is already being deleted or does not exist.
     pub async fn delete_stream(&self, name: StreamName) -> Result<(), RequestError> {
-        let url = self
-            .client
-            .uri(format!("v1/streams/{}", urlencoding::encode(&name)));
         self.client
             .unary(
-                self.client.base().delete(url).build(),
-                OpScope::stream(
-                    "delete_stream",
-                    self.client.name.as_ref(),
-                    name.as_ref(),
-                    false,
-                ),
+                self.client.delete(stream_path(&name)).build(),
+                self.client.stream_scope("delete_stream", &name, false),
             )
             .send_delete(ErrorCode::StreamNotFound)
             .await
@@ -823,19 +778,11 @@ impl S2Basin {
         config: StreamReconfiguration,
     ) -> Result<StreamConfig, RequestError> {
         let req: api::config::StreamReconfiguration = config.into();
-        let url = self
-            .client
-            .uri(format!("v1/streams/{}", urlencoding::encode(&name)));
         let config: api::config::StreamConfig = self
             .client
             .unary(
-                self.client.base().patch(url).json(&req).build(),
-                OpScope::stream(
-                    "reconfigure_stream",
-                    self.client.name.as_ref(),
-                    name.as_ref(),
-                    false,
-                ),
+                self.client.patch(stream_path(&name)).json(&req).build(),
+                self.client.stream_scope("reconfigure_stream", &name, false),
             )
             .send_json()
             .await?;
@@ -843,7 +790,7 @@ impl S2Basin {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 /// A stream in an S2 basin.
 ///
 /// See [`S2Basin::stream`].
@@ -851,6 +798,16 @@ pub struct S2Stream {
     client: BasinClient,
     name: StreamName,
     encryption: Option<HeaderValue>,
+}
+
+impl fmt::Debug for S2Stream {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("S2Stream")
+            .field("basin", &self.client.name)
+            .field("name", &self.name)
+            .field("encrypted", &self.encryption.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl S2Stream {
@@ -893,20 +850,13 @@ impl S2Stream {
 
     /// Check tail position.
     pub async fn check_tail(&self) -> Result<StreamPosition, ReadError> {
-        let url = self.client.uri(format!(
-            "v1/streams/{}/records/tail",
-            urlencoding::encode(&self.name)
-        ));
         let response: api::stream::TailResponse = self
             .client
             .unary(
-                self.client.base().get(url).build(),
-                OpScope::stream(
-                    "check_tail",
-                    self.client.name.as_ref(),
-                    self.name.as_ref(),
-                    true,
-                ),
+                self.client
+                    .get(format!("{}/tail", stream_records_path(&self.name)))
+                    .build(),
+                self.client.stream_scope("check_tail", &self.name, true),
             )
             .send_json_as::<_, ReadError>()
             .await?;
@@ -945,24 +895,14 @@ impl S2Stream {
     ) -> Result<AppendAck, AppendError> {
         use prost::Message as _;
 
-        let scope = OpScope::stream(
-            "append",
-            self.client.name.as_ref(),
-            self.name.as_ref(),
-            false,
-        );
+        let scope = self.client.stream_scope("append", &self.name, false);
         let expected_records = input.records.len() as u64;
         let proto_input: api::stream::proto::AppendInput = input.into();
-        let url = self.client.uri(format!(
-            "v1/streams/{}/records",
-            urlencoding::encode(&self.name)
-        ));
         let req = self
             .client
-            .base()
-            .post(url)
-            .header(CONTENT_TYPE, CONTENT_TYPE_PROTO)
-            .header(ACCEPT, ACCEPT_PROTO)
+            .post(stream_records_path(&self.name))
+            .header(CONTENT_TYPE, APPLICATION_PROTOBUF)
+            .header(ACCEPT, APPLICATION_PROTOBUF)
             .body(proto_input.encode_to_vec())
             .build()
             .map(|mut req| {
@@ -980,25 +920,22 @@ impl S2Stream {
             .append_retry_policy(self.client.config().retry.append_retry_policy)
             .send_proto::<_, AppendError>()
             .await?;
-        let ack = AppendAck::try_from_proto(ack, scope.context(attempts))?;
-        ack.validate_record_count(expected_records, &scope.context(attempts))?;
-        Ok(ack)
+        Ok(AppendAck::try_from_proto(
+            ack,
+            expected_records,
+            scope.context(attempts),
+        )?)
     }
 
     /// Read records.
     pub async fn read(&self, input: ReadInput) -> Result<ReadBatch, ReadError> {
         let (start, end, stream_config) = input.into_api_parts();
         let stream_config = stream_config.as_ref().map(encode_stream_config);
-        let scope = OpScope::stream("read", self.client.name.as_ref(), self.name.as_ref(), true);
-        let url = self.client.uri(format!(
-            "v1/streams/{}/records",
-            urlencoding::encode(&self.name)
-        ));
+        let scope = self.client.stream_scope("read", &self.name, true);
         let mut builder = self
             .client
-            .base()
-            .get(url)
-            .header(ACCEPT, ACCEPT_PROTO)
+            .get(stream_records_path(&self.name))
+            .header(ACCEPT, APPLICATION_PROTOBUF)
             .query(&start)
             .query(&end);
         if let Some(wait) = end.wait {

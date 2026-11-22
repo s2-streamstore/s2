@@ -10,6 +10,7 @@ use s2_common::{
 };
 
 use super::{StreamConfig, whole_seconds};
+use crate::error::{ErrorContext, ProtocolError};
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 /// Token for fencing appends to a stream.
@@ -590,54 +591,41 @@ impl AppendAck {
 
     pub(crate) fn try_from_proto(
         value: api::stream::proto::AppendAck,
-        context: crate::error::ErrorContext,
-    ) -> Result<Self, crate::error::ProtocolError> {
+        expected_records: u64,
+        context: ErrorContext,
+    ) -> Result<Self, ProtocolError> {
         let start: StreamPosition = value
             .start
             .ok_or_else(|| {
-                crate::error::ProtocolError::new(
-                    "append ack missing start position",
-                    context.clone(),
-                )
+                ProtocolError::new("append ack missing start position", context.clone())
             })?
             .into();
         let end: StreamPosition = value
             .end
-            .ok_or_else(|| {
-                crate::error::ProtocolError::new("append ack missing end position", context.clone())
-            })?
+            .ok_or_else(|| ProtocolError::new("append ack missing end position", context.clone()))?
             .into();
         let tail: StreamPosition = value
             .tail
-            .ok_or_else(|| {
-                crate::error::ProtocolError::new(
-                    "append ack missing tail position",
-                    context.clone(),
-                )
-            })?
+            .ok_or_else(|| ProtocolError::new("append ack missing tail position", context.clone()))?
             .into();
-        if end.seq_num < start.seq_num {
-            return Err(crate::error::ProtocolError::new(
-                "ack end seq_num should be greater than or equal to start seq_num",
-                context,
-            ));
-        }
-        Ok(Self { start, end, tail })
+        let ack = Self { start, end, tail };
+        ack.validate_record_count(expected_records, &context)?;
+        Ok(ack)
     }
 
     pub(crate) fn validate_record_count(
         &self,
         expected_records: u64,
-        context: &crate::error::ErrorContext,
-    ) -> Result<(), crate::error::ProtocolError> {
+        context: &ErrorContext,
+    ) -> Result<(), ProtocolError> {
         let Some(num_acked_records) = self.end.seq_num.checked_sub(self.start.seq_num) else {
-            return Err(crate::error::ProtocolError::new(
+            return Err(ProtocolError::new(
                 "ack end seq_num should be greater than or equal to start seq_num",
                 context.clone(),
             ));
         };
         if num_acked_records != expected_records {
-            return Err(crate::error::ProtocolError::new(
+            return Err(ProtocolError::new(
                 format!(
                     "acked record count {num_acked_records} does not match submitted batch size {expected_records}"
                 ),

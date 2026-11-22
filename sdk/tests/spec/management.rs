@@ -7,7 +7,6 @@ use bytes::Bytes;
 use futures_util::StreamExt as _;
 use http::Response;
 use s2_api::v1 as api;
-use s2_common::resources::ProvisionResult;
 use s2_sdk::{
     error::{AppendError, RequestError},
     types::{
@@ -25,19 +24,6 @@ use crate::support::*;
 // spec: r1 M2
 #[tokio::test]
 async fn spec_m2_ensure_output_variants() {
-    assert_eq!(
-        EnsureOutput::from(ProvisionResult::Created(1)),
-        EnsureOutput::Created(1)
-    );
-    assert_eq!(
-        EnsureOutput::from(ProvisionResult::Updated(2)),
-        EnsureOutput::Updated(2)
-    );
-    assert_eq!(
-        EnsureOutput::from(ProvisionResult::Noop(3)),
-        EnsureOutput::Noop(3)
-    );
-
     let (basin_name, stream_name) = test_basin_and_stream();
     let basin_json = r#"{"name":"test-basin","scope":"aws:us-east-1","state":"active","created_at":"2026-01-01T00:00:00Z"}"#;
     let stream_json = r#"{"name":"test-stream","created_at":"2026-01-01T00:00:00Z"}"#;
@@ -410,4 +396,58 @@ async fn spec_m5_m6_m7_m8_issue_token_and_list_pagination() {
         .collect()
         .await;
     assert!(sall.is_empty());
+}
+
+// spec: r1 M4
+#[tokio::test]
+async fn spec_m4_delete_idempotency_and_error_discrimination() {
+    let (basin_name, stream_name) = test_basin_and_stream();
+    let token_id: AccessTokenId = "m4-token".parse().unwrap();
+    let policy_sel = s2_sdk::types::NetworkPolicySelector::Slug("m4-policy".parse().unwrap());
+
+    // 1. Each delete succeeds on its own resource's not-found code.
+    let ok_server = MockH2Server::from_responses([
+        CannedResponse::new(404, r#"{"code":"basin_not_found","message":"gone"}"#),
+        CannedResponse::new(404, r#"{"code":"stream_not_found","message":"gone"}"#),
+        CannedResponse::new(404, r#"{"code":"access_token_not_found","message":"gone"}"#),
+        CannedResponse::new(
+            404,
+            r#"{"code":"network_policy_not_found","message":"gone"}"#,
+        ),
+    ])
+    .await;
+    let s2 = ok_server.client(no_retry_config());
+    s2.delete_basin(basin_name.clone()).await.unwrap();
+    s2.basin(basin_name.clone())
+        .delete_stream(stream_name.clone())
+        .await
+        .unwrap();
+    s2.revoke_access_token(token_id.clone()).await.unwrap();
+    s2.delete_network_policy(policy_sel.clone()).await.unwrap();
+
+    // 2. Other 404 codes, plain 404 without code, and 409 network_policy_in_use MUST fail.
+    let err_server = MockH2Server::from_responses([
+        CannedResponse::new(404, r#"{"code":"stream_not_found","message":"wrong code"}"#),
+        CannedResponse::new(404, r#"{"code":"basin_not_found","message":"wrong code"}"#),
+        CannedResponse::new(404, "plain not found"),
+        CannedResponse::new(409, r#"{"code":"network_policy_in_use","message":"bound"}"#),
+    ])
+    .await;
+    let s2 = err_server.client(no_retry_config());
+    assert!(matches!(
+        s2.delete_basin(basin_name.clone()).await,
+        Err(RequestError::Server(ref e)) if e.code.as_deref() == Some("stream_not_found")
+    ));
+    assert!(matches!(
+        s2.basin(basin_name).delete_stream(stream_name).await,
+        Err(RequestError::Server(ref e)) if e.code.as_deref() == Some("basin_not_found")
+    ));
+    assert!(matches!(
+        s2.revoke_access_token(token_id).await,
+        Err(RequestError::Server(ref e)) if e.status == http::StatusCode::NOT_FOUND && e.code.is_none()
+    ));
+    assert!(matches!(
+        s2.delete_network_policy(policy_sel).await,
+        Err(RequestError::Server(ref e)) if e.code.as_deref() == Some("network_policy_in_use")
+    ));
 }

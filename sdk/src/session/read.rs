@@ -2,7 +2,7 @@ use std::{
     collections::VecDeque,
     fmt,
     future::Future,
-    pin::{Pin, pin},
+    pin::Pin,
     sync::{Arc, Mutex as StdMutex},
     task::{Context, Poll},
     time::Duration,
@@ -24,18 +24,15 @@ use tracing::{Instrument, debug, debug_span};
 
 use crate::{
     api::{BasinClient, Streaming},
-    client::ShutdownSignal,
+    client::CancellationToken,
     error::{
         AbortedError, ConnectionLostError, ErrorContext, ProtocolError, ReadSessionError,
         SessionClosedError, TimeoutError, TransportError,
     },
-    reconnect::{AdvisedReconnects, ReconnectAdvice},
+    reconnect::AdvisedReconnects,
     retry::RetryBackoff,
     session::StreamHeaders,
-    types::{
-        AccessTokenMode, MeteredBytes, ReadBatch, ReadInput, SequencedRecord, StreamName,
-        StreamPosition,
-    },
+    types::{MeteredBytes, ReadBatch, ReadInput, SequencedRecord, StreamName, StreamPosition},
 };
 
 /// Retry policy for a continuous read session.
@@ -85,15 +82,9 @@ const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(20);
 
 type CaughtUpResult = Result<StreamPosition, ReadSessionError>;
 
-type SharedShutdown = Shared<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>;
-
 #[derive(Clone)]
 enum CaughtUpFuture {
-    Pending {
-        rx: Shared<oneshot::Receiver<CaughtUpResult>>,
-        shutdown: SharedShutdown,
-        context: ErrorContext,
-    },
+    Pending(Shared<oneshot::Receiver<CaughtUpResult>>),
     Ready(CaughtUpResult),
 }
 
@@ -102,27 +93,13 @@ impl Future for CaughtUpFuture {
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match &mut *self {
-            Self::Pending {
-                rx,
-                shutdown,
-                context,
-            } => {
-                // Poll `rx` first so a caught-up value resolved before client close is preserved
-                // (`R8a`), then fall back to client shutdown (`C12`) even if the driver already
-                // exited while records remained buffered.
-                match Pin::new(rx).poll(cx) {
-                    Poll::Ready(Ok(result)) => Poll::Ready(result),
-                    Poll::Ready(Err(_)) => Poll::Ready(Err(ReadSessionError::SessionClosed(
-                        SessionClosedError::new(None, context.clone()),
-                    ))),
-                    Poll::Pending => match Pin::new(shutdown).poll(cx) {
-                        Poll::Ready(()) => Poll::Ready(Err(ReadSessionError::Aborted(
-                            AbortedError::new("client closed", context.clone()),
-                        ))),
-                        Poll::Pending => Poll::Pending,
-                    },
+            Self::Pending(rx) => match Pin::new(rx).poll(cx) {
+                Poll::Ready(Ok(result)) => Poll::Ready(result),
+                Poll::Ready(Err(_)) => {
+                    unreachable!("ReadSessionCore::drop resolves every pending CaughtUp")
                 }
-            }
+                Poll::Pending => Poll::Pending,
+            },
             Self::Ready(result) => Poll::Ready(result.clone()),
         }
     }
@@ -170,15 +147,11 @@ enum CatchUpSlot {
 }
 
 impl CatchUpSlot {
-    fn pending(shutdown: SharedShutdown, context: ErrorContext) -> Self {
+    fn pending() -> Self {
         let (tx, rx) = oneshot::channel();
         Self::Pending {
             tx,
-            future: CaughtUpFuture::Pending {
-                rx: rx.shared(),
-                shutdown,
-                context,
-            },
+            future: CaughtUpFuture::Pending(rx.shared()),
         }
     }
 
@@ -199,23 +172,16 @@ struct ReadStateInner {
     last_observed_tail: Option<StreamPosition>,
     phase: RequestPhase,
     catch_up: CatchUpSlot,
-    shutdown_shared: SharedShutdown,
     context: ErrorContext,
 }
 
 impl ReadStateInner {
-    fn new(
-        initial_next_seq_num: Option<u64>,
-        shutdown_shared: SharedShutdown,
-        context: ErrorContext,
-    ) -> Self {
-        let catch_up = CatchUpSlot::pending(shutdown_shared.clone(), context.clone());
+    fn new(initial_next_seq_num: Option<u64>, context: ErrorContext) -> Self {
         Self {
             next_seq_num: initial_next_seq_num,
             last_observed_tail: None,
             phase: RequestPhase::Connecting,
-            catch_up,
-            shutdown_shared,
+            catch_up: CatchUpSlot::pending(),
             context,
         }
     }
@@ -252,8 +218,7 @@ impl ReadStateInner {
             }
             None => {
                 if self.catch_up.is_caught_up() {
-                    self.catch_up =
-                        CatchUpSlot::pending(self.shutdown_shared.clone(), self.context.clone());
+                    self.catch_up = CatchUpSlot::pending();
                 }
             }
         }
@@ -364,13 +329,13 @@ impl ReadStateInner {
 #[derive(Clone)]
 pub struct ReadSessionState {
     inner: Arc<StdMutex<ReadStateInner>>,
-    shutdown: ShutdownSignal,
+    shutdown: CancellationToken,
 }
 
 impl fmt::Debug for ReadSessionState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let inner = self.inner.lock().unwrap();
-        let caught_up = !self.shutdown.is_closed() && inner.catch_up.is_caught_up();
+        let caught_up = !self.shutdown.is_cancelled() && inner.catch_up.is_caught_up();
         f.debug_struct("ReadSessionState")
             .field("next_seq_num", &inner.next_seq_num)
             .field("last_observed_tail", &inner.last_observed_tail)
@@ -382,14 +347,12 @@ impl fmt::Debug for ReadSessionState {
 impl ReadSessionState {
     fn new(
         initial_next_seq_num: Option<u64>,
-        shutdown: ShutdownSignal,
-        shutdown_shared: SharedShutdown,
+        shutdown: CancellationToken,
         context: ErrorContext,
     ) -> Self {
         Self {
             inner: Arc::new(StdMutex::new(ReadStateInner::new(
                 initial_next_seq_num,
-                shutdown_shared,
                 context,
             ))),
             shutdown,
@@ -418,7 +381,7 @@ impl ReadSessionState {
     ///
     /// Returns `false` while reconnecting or once iteration has ended.
     pub fn is_caught_up(&self) -> bool {
-        !self.shutdown.is_closed() && self.inner.lock().unwrap().catch_up.is_caught_up()
+        !self.shutdown.is_cancelled() && self.inner.lock().unwrap().catch_up.is_caught_up()
     }
 
     /// Return a future that resolves to the tail position once the session is caught up.
@@ -430,7 +393,7 @@ impl ReadSessionState {
     /// up.
     pub fn caught_up(&self) -> CaughtUp {
         let mut inner = self.inner.lock().unwrap();
-        if self.shutdown.is_closed() && inner.phase != RequestPhase::Ended {
+        if self.shutdown.is_cancelled() && inner.phase != RequestPhase::Ended {
             let err = ReadSessionError::Aborted(AbortedError::new(
                 "client closed",
                 inner.context.clone(),
@@ -486,8 +449,7 @@ enum DriverEvent {
 struct ReadSessionCore {
     rx: mpsc::Receiver<DriverEvent>,
     state: ReadSessionState,
-    shutdown: ShutdownSignal,
-    shutdown_fut: SharedShutdown,
+    shutdown: CancellationToken,
     context: ErrorContext,
     terminated: bool,
     _driver: AbortOnDropHandle<()>,
@@ -504,21 +466,14 @@ impl ReadSessionCore {
     ) -> Self {
         let basin = client.name.clone();
         let context = ErrorContext::stream(op_name, basin.as_ref(), name.as_ref(), true);
-        let shutdown = client.shutdown_signal();
-        let shutdown_shared: SharedShutdown =
-            (Box::pin(shutdown.cancelled()) as Pin<Box<dyn Future<Output = ()> + Send>>).shared();
+        let shutdown = client.shutdown_token();
         let (start, end, _) = input.into_api_parts();
         let initial_next_seq_num = if start.clamp == Some(true) {
             None
         } else {
             start.seq_num
         };
-        let state = ReadSessionState::new(
-            initial_next_seq_num,
-            shutdown.clone(),
-            shutdown_shared.clone(),
-            context.clone(),
-        );
+        let state = ReadSessionState::new(initial_next_seq_num, shutdown.clone(), context.clone());
 
         // Bounded capacity 1 enforces `R6b` (at most 1 batch decoded ahead of the batch currently
         // being delivered) and lets `T7d` pause the heartbeat timer while the caller has not yet
@@ -544,7 +499,6 @@ impl ReadSessionCore {
             rx,
             state,
             shutdown,
-            shutdown_fut: shutdown_shared,
             context,
             terminated: false,
             _driver: AbortOnDropHandle::new(handle),
@@ -560,14 +514,6 @@ impl ReadSessionCore {
         err
     }
 
-    fn poll_abort(&mut self, cx: &mut Context<'_>) -> Option<ReadSessionError> {
-        if self.shutdown.is_closed() || Pin::new(&mut self.shutdown_fut).poll(cx).is_ready() {
-            Some(self.abort_now())
-        } else {
-            None
-        }
-    }
-
     fn poll_next_batch(
         &mut self,
         cx: &mut Context<'_>,
@@ -576,8 +522,10 @@ impl ReadSessionCore {
             return Poll::Ready(None);
         }
         loop {
-            if let Some(err) = self.poll_abort(cx) {
-                return Poll::Ready(Some(Err(err)));
+            // `ReadDriver` wakes `self.rx` by dropping `tx` upon `shutdown.cancelled()`, so
+            // checking `is_cancelled()` here handles both immediate and parked aborts (`C12`).
+            if self.shutdown.is_cancelled() {
+                return Poll::Ready(Some(Err(self.abort_now())));
             }
             match self.rx.poll_recv(cx) {
                 Poll::Pending => return Poll::Pending,
@@ -590,12 +538,17 @@ impl ReadSessionCore {
                     self.state.on_heartbeat_delivered(tail);
                 }
                 Poll::Ready(Some(DriverEvent::CleanEnd)) | Poll::Ready(None) => {
+                    if self.shutdown.is_cancelled() {
+                        return Poll::Ready(Some(Err(self.abort_now())));
+                    }
                     self.terminated = true;
+                    self.rx.close();
                     self.state.on_ended(None);
                     return Poll::Ready(None);
                 }
                 Poll::Ready(Some(DriverEvent::Error(err))) => {
                     self.terminated = true;
+                    self.rx.close();
                     self.state.on_ended(Some(err.clone()));
                     return Poll::Ready(Some(Err(err)));
                 }
@@ -606,7 +559,7 @@ impl ReadSessionCore {
 
 impl Drop for ReadSessionCore {
     fn drop(&mut self) {
-        if self.shutdown.is_closed() {
+        if self.shutdown.is_cancelled() {
             self.state
                 .on_aborted(AbortedError::new("client closed", self.context.clone()));
         } else {
@@ -691,7 +644,7 @@ impl Stream for ReadSession {
             return Poll::Ready(None);
         }
         // R9d / C12: client close aborts immediately, dropping fetched-but-undelivered records.
-        if this.core.shutdown.is_closed() {
+        if this.core.shutdown.is_cancelled() {
             this.current_batch.clear();
             return Poll::Ready(Some(Err(this.core.abort_now())));
         }
@@ -804,7 +757,6 @@ impl Stream for ReadBatchSession {
 
 struct ActiveAttempt {
     stream: Streaming<proto::ReadBatch, ReadSessionError>,
-    reconnect: ReconnectAdvice,
     made_progress: bool,
     fetched_record: bool,
 }
@@ -818,16 +770,15 @@ struct ReadDriver {
     baseline_wait: Option<u32>,
     has_stop_option: bool,
     retry_policy: ReadSessionRetryPolicy,
-    access_token_mode: AccessTokenMode,
+    refreshes_tokens: bool,
     op_name: &'static str,
     state: ReadSessionState,
     tx: mpsc::Sender<DriverEvent>,
-    shutdown: ShutdownSignal,
+    shutdown: CancellationToken,
     context: ErrorContext,
     retry_backoff: RetryBackoff,
     advised_reconnects: AdvisedReconnects,
     idle_since: Option<Instant>,
-    fetched_any_record: bool,
     has_received_response: bool,
     last_fetched_seq: Option<u64>,
     active: Option<ActiveAttempt>,
@@ -845,11 +796,11 @@ impl ReadDriver {
         op_name: &'static str,
         state: ReadSessionState,
         tx: mpsc::Sender<DriverEvent>,
-        shutdown: ShutdownSignal,
+        shutdown: CancellationToken,
         context: ErrorContext,
     ) -> Self {
         let retry_backoff = RetryBackoff::from_config(&client.base().retry_config());
-        let access_token_mode = client.config().access_token.mode();
+        let refreshes_tokens = client.base().refreshes_tokens();
         let baseline_wait = end.wait;
         let has_stop_option =
             end.count.is_some() || end.bytes.is_some() || end.until.is_some() || end.wait.is_some();
@@ -862,7 +813,7 @@ impl ReadDriver {
             baseline_wait,
             has_stop_option,
             retry_policy,
-            access_token_mode,
+            refreshes_tokens,
             op_name,
             state,
             tx,
@@ -871,7 +822,6 @@ impl ReadDriver {
             retry_backoff,
             advised_reconnects: AdvisedReconnects::default(),
             idle_since: None,
-            fetched_any_record: false,
             has_received_response: false,
             last_fetched_seq: None,
             active: None,
@@ -885,28 +835,35 @@ impl ReadDriver {
             .on_aborted(AbortedError::new("client closed", self.context.clone()));
     }
 
-    async fn send_terminal_event<F: Future<Output = ()>>(
-        &mut self,
-        mut shutdown_fut: Pin<&mut F>,
-        event: DriverEvent,
-    ) {
+    /// Enqueue a terminal event and stay parked until the consumer consumes it (closing `rx`) or
+    /// the client shuts down, so any pending `caught_up()` future still wakes immediately on
+    /// `S2::close()` while records or a terminal event sit buffered (`C12`, `R8d`).
+    async fn send_terminal_event(&mut self, event: DriverEvent) {
         tokio::select! {
             biased;
-            _ = &mut shutdown_fut => self.abort(),
-            _ = self.tx.send(event) => {}
+            _ = self.shutdown.cancelled() => {
+                self.abort();
+                return;
+            }
+            res = self.tx.send(event) => {
+                if res.is_err() {
+                    return;
+                }
+            }
+        }
+        tokio::select! {
+            biased;
+            _ = self.shutdown.cancelled() => self.abort(),
+            _ = self.tx.closed() => {}
         }
     }
 
     /// Sleep for retry backoff while racing client shutdown and consumer drop.
     /// Returns `true` if the driver should terminate.
-    async fn sleep_or_stop<F: Future<Output = ()>>(
-        &mut self,
-        mut shutdown_fut: Pin<&mut F>,
-        backoff: Duration,
-    ) -> bool {
+    async fn sleep_or_stop(&mut self, backoff: Duration) -> bool {
         tokio::select! {
             biased;
-            _ = &mut shutdown_fut => {
+            _ = self.shutdown.cancelled() => {
                 self.abort();
                 true
             }
@@ -915,74 +872,47 @@ impl ReadDriver {
         }
     }
 
-    async fn finish_resumed_unwritten_stop<F: Future<Output = ()>>(
-        &mut self,
-        mut shutdown_fut: Pin<&mut F>,
-        tail: Option<StreamPosition>,
-        permit: Option<mpsc::Permit<'_, DriverEvent>>,
-    ) {
+    async fn finish_resumed_unwritten_stop(&mut self, tail: Option<StreamPosition>) {
         debug!(?tail, "read session reached tail on resumed stop condition");
         self.state.on_clean_stop(tail);
-        let send_heartbeat = tail.filter(|_| !self.state.is_caught_up());
-        match (permit, send_heartbeat) {
-            (Some(permit), Some(tail)) => {
-                permit.send(DriverEvent::Heartbeat(tail));
-                self.send_terminal_event(shutdown_fut, DriverEvent::CleanEnd)
-                    .await;
-            }
-            (Some(permit), None) => {
-                permit.send(DriverEvent::CleanEnd);
-            }
-            (None, Some(tail)) => {
-                self.send_terminal_event(shutdown_fut.as_mut(), DriverEvent::Heartbeat(tail))
-                    .await;
-                if !self.shutdown.is_closed() {
-                    self.send_terminal_event(shutdown_fut, DriverEvent::CleanEnd)
-                        .await;
+        if let Some(tail) = tail.filter(|_| !self.state.is_caught_up()) {
+            tokio::select! {
+                biased;
+                _ = self.shutdown.cancelled() => {
+                    self.abort();
+                    return;
+                }
+                res = self.tx.send(DriverEvent::Heartbeat(tail)) => {
+                    if res.is_err() {
+                        return;
+                    }
                 }
             }
-            (None, None) => {
-                self.send_terminal_event(shutdown_fut, DriverEvent::CleanEnd)
-                    .await;
-            }
         }
+        self.send_terminal_event(DriverEvent::CleanEnd).await;
     }
 
     /// Retry `err` according to `retry_policy`, or deliver the terminal error to the consumer.
     /// Returns `true` if the driver should continue retrying, or `false` to exit.
-    async fn retry_or_fail<F: Future<Output = ()>>(
-        &mut self,
-        shutdown_fut: Pin<&mut F>,
-        err: ReadSessionError,
-        permit: Option<mpsc::Permit<'_, DriverEvent>>,
-    ) -> bool {
+    async fn retry_or_fail(&mut self, err: ReadSessionError) -> bool {
         let attempts = self.retry_backoff.attempt_number();
         if let Some(backoff) = retry_delay(
             &err,
             &mut self.retry_backoff,
             self.retry_policy,
-            self.access_token_mode,
+            self.refreshes_tokens,
         ) {
-            drop(permit);
-            return !self.sleep_or_stop(shutdown_fut, backoff).await;
+            return !self.sleep_or_stop(backoff).await;
         }
         let final_err = err.with_context(&self.context.clone().with_attempts(attempts));
-        match permit {
-            Some(permit) => permit.send(DriverEvent::Error(final_err)),
-            None => {
-                self.send_terminal_event(shutdown_fut, DriverEvent::Error(final_err))
-                    .await;
-            }
-        }
+        self.send_terminal_event(DriverEvent::Error(final_err))
+            .await;
         false
     }
 
     async fn run(mut self) {
-        let shutdown_signal = self.shutdown.clone();
-        let mut shutdown_fut = pin!(shutdown_signal.cancelled());
-
         loop {
-            if self.shutdown.is_closed() {
+            if self.shutdown.is_cancelled() {
                 self.abort();
                 return;
             }
@@ -993,11 +923,15 @@ impl ReadDriver {
             if self.active.is_none() {
                 self.end.wait = remaining_wait(self.baseline_wait, self.idle_since);
                 let attempt_num = self.retry_backoff.attempt_number();
-                let reconnect = ReconnectAdvice::default();
+                debug!(
+                    attempt = attempt_num,
+                    resume_seq_num = ?self.start.seq_num,
+                    "opening read session request"
+                );
 
                 let open_res = tokio::select! {
                     biased;
-                    _ = &mut shutdown_fut => {
+                    _ = self.shutdown.cancelled() => {
                         self.abort();
                         return;
                     }
@@ -1008,12 +942,11 @@ impl ReadDriver {
                         self.start.clone(),
                         self.end.clone(),
                         &self.headers,
-                        reconnect.clone(),
                         attempt_num,
                     ) => res,
                 };
 
-                if self.shutdown.is_closed() {
+                if self.shutdown.is_cancelled() {
                     self.abort();
                     return;
                 }
@@ -1022,7 +955,6 @@ impl ReadDriver {
                     Ok(stream) => {
                         self.active = Some(ActiveAttempt {
                             stream,
-                            reconnect,
                             made_progress: false,
                             fetched_record: false,
                         });
@@ -1037,11 +969,10 @@ impl ReadDriver {
                             &self.end,
                             &err,
                         ) {
-                            self.finish_resumed_unwritten_stop(shutdown_fut.as_mut(), tail, None)
-                                .await;
+                            self.finish_resumed_unwritten_stop(tail).await;
                             return;
                         }
-                        if self.retry_or_fail(shutdown_fut.as_mut(), err, None).await {
+                        if self.retry_or_fail(err).await {
                             continue;
                         }
                         return;
@@ -1055,7 +986,7 @@ impl ReadDriver {
             let tx = self.tx.clone();
             let permit = tokio::select! {
                 biased;
-                _ = &mut shutdown_fut => {
+                _ = self.shutdown.cancelled() => {
                     self.abort();
                     return;
                 }
@@ -1065,28 +996,30 @@ impl ReadDriver {
                 },
             };
 
-            let next_res = {
+            let Some(next_res) = ({
                 let attempt = self.active.as_mut().expect("active stream must be Some");
                 tokio::select! {
                     biased;
-                    _ = &mut shutdown_fut => {
-                        drop(permit);
-                        self.abort();
-                        return;
-                    }
+                    _ = self.shutdown.cancelled() => None,
                     _ = self.tx.closed() => return,
-                    res = timeout(HEARTBEAT_TIMEOUT, attempt.stream.next()) => res,
+                    res = timeout(HEARTBEAT_TIMEOUT, attempt.stream.next()) => Some(res),
                 }
+            }) else {
+                drop(permit);
+                self.abort();
+                return;
             };
 
-            if self.shutdown.is_closed() {
+            if self.shutdown.is_cancelled() {
                 drop(permit);
                 self.abort();
                 return;
             }
 
             let item = match next_res {
-                Ok(Some(Ok(raw_batch))) => Ok(Some(ReadBatch::from(raw_batch))),
+                Ok(Some(Ok(frame))) => {
+                    Ok(Some((ReadBatch::from(frame.msg), frame.reconnect_advised)))
+                }
                 Ok(Some(Err(err))) => Err(err),
                 Ok(None) => Ok(None),
                 Err(_) => Err(ReadSessionError::Timeout(TimeoutError::new(
@@ -1096,14 +1029,15 @@ impl ReadDriver {
             };
 
             match item {
-                Ok(Some(batch)) => {
+                Ok(Some((batch, reconnect_advised))) => {
                     // R6: verify records arrive in strictly increasing seq_num order.
                     match validate_read_batch_order(&batch, self.last_fetched_seq, &self.context) {
                         Ok(new_last) => self.last_fetched_seq = new_last,
                         Err(err) => {
+                            drop(permit);
                             self.active = None;
                             self.state.on_disconnected();
-                            permit.send(DriverEvent::Error(err));
+                            self.send_terminal_event(DriverEvent::Error(err)).await;
                             return;
                         }
                     }
@@ -1111,18 +1045,15 @@ impl ReadDriver {
                     let attempt = self.active.as_mut().expect("active stream must be Some");
                     attempt.made_progress = true;
                     self.has_received_response = true;
-                    if self.retry_backoff.used() > 0 {
-                        self.retry_backoff.reset();
-                    }
+                    self.retry_backoff.reset();
 
                     // R11c: restart idle clock only when a record is fetched; if no record has
                     // been fetched yet, start the clock the first time we learn we are at the tail.
                     // Heartbeats never restart this clock.
                     if !batch.records.is_empty() {
-                        self.fetched_any_record = true;
                         attempt.fetched_record = true;
                         self.idle_since = Some(Instant::now());
-                    } else if !self.fetched_any_record && batch.tail.is_some() {
+                    } else if self.last_fetched_seq.is_none() && batch.tail.is_some() {
                         self.idle_since.get_or_insert_with(Instant::now);
                     }
 
@@ -1156,13 +1087,12 @@ impl ReadDriver {
                     }
 
                     // T6a: act on reconnect advice immediately (at most once per cooldown window).
-                    if attempt.reconnect.take() && self.advised_reconnects.should_reconnect() {
+                    if reconnect_advised && self.advised_reconnects.should_reconnect() {
                         self.active = None;
                         if read_limits_exhausted(&self.end) {
                             debug!("read session limits exhausted on advised reconnect");
                             self.state.on_clean_stop(None);
-                            self.send_terminal_event(shutdown_fut.as_mut(), DriverEvent::CleanEnd)
-                                .await;
+                            self.send_terminal_event(DriverEvent::CleanEnd).await;
                             return;
                         }
                         self.advised_reconnects.record();
@@ -1175,6 +1105,7 @@ impl ReadDriver {
                     }
                 }
                 Ok(None) => {
+                    drop(permit);
                     // T9 / R9a: clean EOF ends iteration cleanly ONLY when a stop option was set;
                     // otherwise it is a ConnectionLostError and retried per retry_policy.
                     let fetched_record = self.active.take().is_some_and(|a| a.fetched_record);
@@ -1190,13 +1121,12 @@ impl ReadDriver {
                             && remaining_wait(self.baseline_wait, self.idle_since)
                                 .is_some_and(|w| w > 0)
                         {
-                            drop(permit);
                             self.state.on_disconnected();
                             continue;
                         }
                         debug!("read session ended cleanly on stop condition");
                         self.state.on_clean_stop(None);
-                        permit.send(DriverEvent::CleanEnd);
+                        self.send_terminal_event(DriverEvent::CleanEnd).await;
                         return;
                     }
                     let err = ReadSessionError::ConnectionLost(ConnectionLostError::new(
@@ -1205,15 +1135,13 @@ impl ReadDriver {
                         self.context.clone(),
                     ));
                     self.state.on_disconnected();
-                    if self
-                        .retry_or_fail(shutdown_fut.as_mut(), err, Some(permit))
-                        .await
-                    {
+                    if self.retry_or_fail(err).await {
                         continue;
                     }
                     return;
                 }
                 Err(err) => {
+                    drop(permit);
                     // T10: drop underlying attempt stream immediately.
                     let made_progress = self.active.take().is_some_and(|a| a.made_progress);
 
@@ -1225,12 +1153,7 @@ impl ReadDriver {
                         &self.end,
                         &err,
                     ) {
-                        self.finish_resumed_unwritten_stop(
-                            shutdown_fut.as_mut(),
-                            tail,
-                            Some(permit),
-                        )
-                        .await;
+                        self.finish_resumed_unwritten_stop(tail).await;
                         return;
                     }
 
@@ -1240,14 +1163,13 @@ impl ReadDriver {
                     if self.has_received_response && read_limits_exhausted(&self.end) {
                         debug!("read session limits exhausted after stream error");
                         self.state.on_clean_stop(None);
-                        permit.send(DriverEvent::CleanEnd);
+                        self.send_terminal_event(DriverEvent::CleanEnd).await;
                         return;
                     }
 
                     self.state.on_disconnected();
 
                     if err.is_server_draining() && made_progress {
-                        drop(permit);
                         debug!(
                             next_seq_num = ?self.start.seq_num,
                             "reconnecting read session while server drains"
@@ -1255,10 +1177,7 @@ impl ReadDriver {
                         continue;
                     }
 
-                    if self
-                        .retry_or_fail(shutdown_fut.as_mut(), err, Some(permit))
-                        .await
-                    {
+                    if self.retry_or_fail(err).await {
                         continue;
                     }
                     return;
@@ -1375,10 +1294,9 @@ fn retry_delay(
     err: &ReadSessionError,
     backoffs: &mut RetryBackoff,
     retry_policy: ReadSessionRetryPolicy,
-    access_token_mode: AccessTokenMode,
+    refreshes_tokens: bool,
 ) -> Option<Duration> {
-    let is_retryable =
-        err.is_retryable() || (access_token_mode.is_refreshable() && err.is_authentication_error());
+    let is_retryable = err.is_retryable() || (refreshes_tokens && err.is_authentication_error());
     if !is_retryable {
         debug!(
             %err,
@@ -1394,11 +1312,15 @@ fn retry_delay(
         ReadSessionRetryPolicy::Unbounded => Some(backoffs.next_unbounded()),
     };
     if let Some(backoff) = backoff {
+        let retries_remaining = match retry_policy {
+            ReadSessionRetryPolicy::Budgeted => Some(backoffs.remaining()),
+            ReadSessionRetryPolicy::Unbounded => None,
+        };
         debug!(
             %err,
             ?backoff,
             ?retry_policy,
-            num_retries_remaining = backoffs.remaining(),
+            ?retries_remaining,
             "retrying read session"
         );
         Some(backoff)
@@ -1536,25 +1458,23 @@ mod tests {
         ReadSession,
         mpsc::Sender<DriverEvent>,
         ReadSessionState,
-        ShutdownSignal,
+        CancellationToken,
     ) {
         let context = ErrorContext::default().into_read_only();
-        let shutdown = ShutdownSignal::new();
-        let shutdown_shared: SharedShutdown =
-            (Box::pin(shutdown.cancelled()) as Pin<Box<dyn Future<Output = ()> + Send>>).shared();
-        let state = ReadSessionState::new(
-            initial_next_seq_num,
-            shutdown.clone(),
-            shutdown_shared.clone(),
-            context.clone(),
-        );
+        let shutdown = CancellationToken::new();
+        let state = ReadSessionState::new(initial_next_seq_num, shutdown.clone(), context.clone());
         let (tx, rx) = mpsc::channel(4);
-        let driver = tokio::spawn(std::future::pending::<()>());
+        let driver_shutdown = shutdown.clone();
+        let driver_state = state.clone();
+        let driver_ctx = context.clone();
+        let driver = tokio::spawn(async move {
+            driver_shutdown.cancelled().await;
+            driver_state.on_aborted(AbortedError::new("client closed", driver_ctx));
+        });
         let session = ReadSession {
             core: ReadSessionCore {
                 rx,
                 state: state.clone(),
-                shutdown_fut: shutdown_shared,
                 shutdown: shutdown.clone(),
                 context,
                 terminated: false,
@@ -1764,7 +1684,7 @@ mod tests {
     async fn dropping_session_after_client_shutdown_reports_aborted() {
         let (session, _tx, state, shutdown) = test_session_parts(None);
         let cu = session.caught_up();
-        shutdown.close();
+        shutdown.cancel();
         drop(session);
 
         assert!(matches!(cu.await, Err(ReadSessionError::Aborted(_))));
@@ -1775,10 +1695,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn client_shutdown_wakes_caught_up_even_when_driver_exited() {
+    async fn client_shutdown_wakes_caught_up_while_terminal_event_is_buffered() {
         let (session, tx, state, shutdown) = test_session_parts(Some(0));
         let cu = session.caught_up();
-        // Simulate driver pushing a batch and CleanEnd, then exiting before consumer polls.
+        // Simulate driver pushing a batch and CleanEnd, then parking until rx closes.
         state.on_message_fetched(Some(0), Some(position(1)));
         tx.send(DriverEvent::Batch(batch(
             vec![record(0, false)],
@@ -1788,10 +1708,9 @@ mod tests {
         .unwrap();
         state.on_clean_stop(None);
         tx.send(DriverEvent::CleanEnd).await.unwrap();
-        drop(tx);
 
         // Client closes without polling `session`; pending `caught_up()` must wake immediately.
-        shutdown.close();
+        shutdown.cancel();
         assert!(!session.is_caught_up());
         assert!(matches!(cu.await, Err(ReadSessionError::Aborted(_))));
         assert!(matches!(

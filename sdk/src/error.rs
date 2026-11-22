@@ -91,10 +91,6 @@ struct ErrorContextInner {
 }
 
 impl ErrorContext {
-    pub(crate) fn account(operation: &'static str, read_only: bool) -> Self {
-        OpScope::account(operation, read_only).context(1)
-    }
-
     pub(crate) fn stream(
         operation: &'static str,
         basin: &str,
@@ -191,16 +187,6 @@ impl ErrorContext {
         } else {
             write!(f, "{detail}")
         }
-    }
-
-    pub(crate) fn format_string(&self, detail: &str) -> String {
-        struct Wrapper<'a>(&'a ErrorContext, &'a str);
-        impl fmt::Display for Wrapper<'_> {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                self.0.format_with(f, self.1)
-            }
-        }
-        Wrapper(self, detail).to_string()
     }
 }
 
@@ -621,11 +607,6 @@ impl ConnectionLostError {
         self
     }
 
-    pub(crate) fn with_no_side_effects(mut self, no_side_effects: bool) -> Self {
-        self.no_side_effects = self.no_side_effects || no_side_effects;
-        self
-    }
-
     pub(crate) fn into_read_only(mut self) -> Self {
         self.context.set_read_only();
         self
@@ -832,9 +813,7 @@ impl<E> SessionClosedError<E> {
 impl<E: fmt::Display> fmt::Display for SessionClosedError<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.failure {
-            Some(failure) => self
-                .context
-                .format_with(f, format_args!("session closed: {failure}")),
+            Some(failure) => write!(f, "session closed: {failure}"),
             None => self.context.format_with(f, "session closed"),
         }
     }
@@ -1615,7 +1594,16 @@ pub(crate) trait TransportError:
 
     fn server_error(&self) -> Option<&ServerError>;
 
-    fn mark_unsent_connection_lost(self, unsent: bool) -> Self;
+    fn connection_lost_mut(&mut self) -> Option<&mut ConnectionLostError> {
+        None
+    }
+
+    fn mark_unsent_connection_lost(mut self, unsent: bool) -> Self {
+        if unsent && let Some(conn_lost) = self.connection_lost_mut() {
+            conn_lost.no_side_effects = true;
+        }
+        self
+    }
 
     fn is_authentication_error(&self) -> bool {
         self.server_error()
@@ -1669,182 +1657,101 @@ where
     ServerError::from_response(status, body, context).into()
 }
 
-impl TransportError for RequestError {
-    fn from_http_response(status: StatusCode, body: &[u8], context: ErrorContext) -> Self {
-        Self::Server(ServerError::from_response(status, body, context))
-    }
+macro_rules! impl_transport_error {
+    (
+        $ty:ident,
+        from_http_response: $from_resp:expr
+        $(, read_only: $ro:tt)?
+        $(, unsent_conn_lost: $unsent:tt)?
+        $(, prior_uncertainty: $prior:tt)?
+        $(,)?
+    ) => {
+        impl TransportError for $ty {
+            $(
+                impl_transport_error!(@read_only $ro);
+            )?
 
-    #[cfg(feature = "_hidden")]
-    fn from_access_token_provider(err: crate::types::AccessTokenProviderError) -> Self {
-        Self::AccessTokenProvider(err)
-    }
+            fn from_http_response(status: StatusCode, body: &[u8], context: ErrorContext) -> Self {
+                ($from_resp)(status, body, context)
+            }
 
-    fn is_retryable(&self) -> bool {
-        Self::is_retryable(self)
-    }
+            #[cfg(feature = "_hidden")]
+            fn from_access_token_provider(err: crate::types::AccessTokenProviderError) -> Self {
+                Self::AccessTokenProvider(err)
+            }
 
-    fn has_no_side_effects(&self) -> bool {
-        Self::has_no_side_effects(self)
-    }
+            fn is_retryable(&self) -> bool {
+                Self::is_retryable(self)
+            }
 
-    fn server_error(&self) -> Option<&ServerError> {
-        Self::server_error(self)
-    }
+            fn has_no_side_effects(&self) -> bool {
+                Self::has_no_side_effects(self)
+            }
 
-    fn mark_unsent_connection_lost(self, unsent: bool) -> Self {
-        if !unsent {
-            return self;
+            fn server_error(&self) -> Option<&ServerError> {
+                Self::server_error(self)
+            }
+
+            $(
+                impl_transport_error!(@unsent $unsent);
+            )?
+
+            $(
+                impl_transport_error!(@prior $prior);
+            )?
         }
-        match self {
-            Self::ConnectionLost(e) => Self::ConnectionLost(e.with_no_side_effects(true)),
-            other => other,
+    };
+    (@read_only true) => {
+        fn from_http(err: client::HttpError, context: ErrorContext) -> Self {
+            classify_http_error(err, context.into_read_only())
         }
-    }
+    };
+    (@unsent true) => {
+        fn connection_lost_mut(&mut self) -> Option<&mut ConnectionLostError> {
+            match self {
+                Self::ConnectionLost(e) => Some(e),
+                _ => None,
+            }
+        }
+    };
+    (@prior true) => {
+        fn with_prior_uncertainty(self, prior_uncertainty: bool) -> Self {
+            if prior_uncertainty && self.has_no_side_effects() {
+                Self::IndefiniteAppend(IndefiniteAppendError::new(self))
+            } else {
+                self
+            }
+        }
+    };
 }
 
-impl TransportError for ReadError {
-    fn from_http(err: client::HttpError, context: ErrorContext) -> Self {
-        classify_http_error(err, context.into_read_only())
-    }
-
-    fn from_http_response(status: StatusCode, body: &[u8], context: ErrorContext) -> Self {
-        parse_read_response(status, body, context)
-    }
-
-    #[cfg(feature = "_hidden")]
-    fn from_access_token_provider(err: crate::types::AccessTokenProviderError) -> Self {
-        Self::AccessTokenProvider(err)
-    }
-
-    fn is_retryable(&self) -> bool {
-        Self::is_retryable(self)
-    }
-
-    fn has_no_side_effects(&self) -> bool {
-        Self::has_no_side_effects(self)
-    }
-
-    fn server_error(&self) -> Option<&ServerError> {
-        Self::server_error(self)
-    }
-
-    fn mark_unsent_connection_lost(self, _unsent: bool) -> Self {
-        self
-    }
-}
-
-impl TransportError for ReadSessionError {
-    fn from_http(err: client::HttpError, context: ErrorContext) -> Self {
-        classify_http_error(err, context.into_read_only())
-    }
-
-    fn from_http_response(status: StatusCode, body: &[u8], context: ErrorContext) -> Self {
-        parse_read_response(status, body, context)
-    }
-
-    #[cfg(feature = "_hidden")]
-    fn from_access_token_provider(err: crate::types::AccessTokenProviderError) -> Self {
-        Self::AccessTokenProvider(err)
-    }
-
-    fn is_retryable(&self) -> bool {
-        Self::is_retryable(self)
-    }
-
-    fn has_no_side_effects(&self) -> bool {
-        Self::has_no_side_effects(self)
-    }
-
-    fn server_error(&self) -> Option<&ServerError> {
-        Self::server_error(self)
-    }
-
-    fn mark_unsent_connection_lost(self, _unsent: bool) -> Self {
-        self
-    }
-}
-
-impl TransportError for AppendError {
-    fn from_http_response(status: StatusCode, body: &[u8], context: ErrorContext) -> Self {
-        parse_append_response(status, body, context)
-    }
-
-    #[cfg(feature = "_hidden")]
-    fn from_access_token_provider(err: crate::types::AccessTokenProviderError) -> Self {
-        Self::AccessTokenProvider(err)
-    }
-
-    fn is_retryable(&self) -> bool {
-        Self::is_retryable(self)
-    }
-
-    fn has_no_side_effects(&self) -> bool {
-        Self::has_no_side_effects(self)
-    }
-
-    fn server_error(&self) -> Option<&ServerError> {
-        Self::server_error(self)
-    }
-
-    fn mark_unsent_connection_lost(self, unsent: bool) -> Self {
-        if !unsent {
-            return self;
-        }
-        match self {
-            Self::ConnectionLost(e) => Self::ConnectionLost(e.with_no_side_effects(true)),
-            other => other,
-        }
-    }
-
-    fn with_prior_uncertainty(self, prior_uncertainty: bool) -> Self {
-        if prior_uncertainty && self.has_no_side_effects() {
-            Self::IndefiniteAppend(IndefiniteAppendError::new(self))
-        } else {
-            self
-        }
-    }
-}
-
-impl TransportError for AppendSessionError {
-    fn from_http_response(status: StatusCode, body: &[u8], context: ErrorContext) -> Self {
-        parse_append_response(status, body, context)
-    }
-
-    #[cfg(feature = "_hidden")]
-    fn from_access_token_provider(err: crate::types::AccessTokenProviderError) -> Self {
-        Self::AccessTokenProvider(err)
-    }
-
-    fn is_retryable(&self) -> bool {
-        Self::is_retryable(self)
-    }
-
-    fn has_no_side_effects(&self) -> bool {
-        Self::has_no_side_effects(self)
-    }
-
-    fn server_error(&self) -> Option<&ServerError> {
-        Self::server_error(self)
-    }
-
-    fn mark_unsent_connection_lost(self, unsent: bool) -> Self {
-        if !unsent {
-            return self;
-        }
-        match self {
-            Self::ConnectionLost(e) => Self::ConnectionLost(e.with_no_side_effects(true)),
-            other => other,
-        }
-    }
-
-    fn with_prior_uncertainty(self, prior_uncertainty: bool) -> Self {
-        if prior_uncertainty && self.has_no_side_effects() {
-            Self::IndefiniteAppend(IndefiniteAppendError::new(self))
-        } else {
-            self
-        }
-    }
-}
+impl_transport_error!(
+    RequestError,
+    from_http_response: |status, body, ctx| RequestError::Server(ServerError::from_response(status, body, ctx)),
+    unsent_conn_lost: true,
+);
+impl_transport_error!(
+    ReadError,
+    from_http_response: parse_read_response,
+    read_only: true,
+);
+impl_transport_error!(
+    ReadSessionError,
+    from_http_response: parse_read_response,
+    read_only: true,
+);
+impl_transport_error!(
+    AppendError,
+    from_http_response: parse_append_response,
+    unsent_conn_lost: true,
+    prior_uncertainty: true,
+);
+impl_transport_error!(
+    AppendSessionError,
+    from_http_response: parse_append_response,
+    unsent_conn_lost: true,
+    prior_uncertainty: true,
+);
 
 pub(crate) fn classify_http_error<E: TransportError>(
     err: client::HttpError,
@@ -1853,11 +1760,10 @@ pub(crate) fn classify_http_error<E: TransportError>(
     match err {
         client::HttpError::Connect(message) => ConnectError::new(message, context).into(),
         client::HttpError::Timeout => TimeoutError::new("request timed out", context).into(),
-        client::HttpError::ClientClosed => ClientClosedError::new(context).into(),
-        client::HttpError::Aborted => AbortedError::new("client closed", context).into(),
+        client::HttpError::Closed => AbortedError::new("client closed", context).into(),
         client::HttpError::Transport(hyper_err) => {
             let detail = client::format_error_chain(&hyper_err);
-            if hyper_err.is_parse() || hyper_err.is_user() {
+            if hyper_err.is_parse() {
                 return ProtocolError::new(detail, context).into();
             }
             let refused = source_err::<h2::Error>(&hyper_err)
@@ -2083,5 +1989,171 @@ mod tests {
         let s2_err: S2Error = timeout.into();
         assert!(s2_err.is_retryable());
         assert!(s2_err.has_no_side_effects());
+    }
+
+    // spec: r1 E4
+    #[test]
+    fn validation_error_exposes_e4_predicates() {
+        let err = ValidationError::from("invalid input");
+        assert_eq!(err.message(), "invalid input");
+        assert!(!err.is_retryable());
+        assert!(err.has_no_side_effects());
+    }
+
+    // spec: r1 E3, T9
+    #[tokio::test]
+    async fn hyper_dispatch_gone_maps_to_connection_lost_not_protocol() {
+        #[derive(Clone, Default)]
+        struct DropRequestTaskExecutor(Arc<std::sync::atomic::AtomicUsize>);
+        impl<F> hyper::rt::Executor<F> for DropRequestTaskExecutor
+        where
+            F: std::future::Future + Send + 'static,
+            F::Output: Send + 'static,
+        {
+            fn execute(&self, fut: F) {
+                // Allow hyper's initial h2 connection task to run, then drop the per-request
+                // task to simulate runtime teardown / dispatch drop (`User::DispatchGone`).
+                if self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    tokio::spawn(fut);
+                } else {
+                    drop(fut);
+                }
+            }
+        }
+
+        let (client_io, server_io) = tokio::io::duplex(4096);
+        let server_task = tokio::spawn(async move {
+            let _conn = h2::server::handshake(server_io).await;
+            std::future::pending::<()>().await;
+        });
+        let (mut sender, mut conn) = hyper::client::conn::http2::handshake(
+            DropRequestTaskExecutor::default(),
+            hyper_util::rt::TokioIo::new(client_io),
+        )
+        .await
+        .unwrap();
+        let req = http::Request::builder()
+            .uri("http://localhost/test")
+            .body(http_body_util::Empty::<bytes::Bytes>::new())
+            .unwrap();
+        let resp_fut = sender.send_request(req);
+        let hyper_err = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            tokio::select! {
+                res = resp_fut => res.unwrap_err(),
+                res = &mut conn => panic!("conn exited before request errored: {res:?}"),
+            }
+        })
+        .await
+        .expect("hyper_dispatch_gone test timed out");
+        assert!(
+            hyper_err.is_user(),
+            "expected hyper User::DispatchGone (`is_user() == true`), got {hyper_err:?}"
+        );
+        let classified = classify_http_error::<RequestError>(
+            client::HttpError::Transport(hyper_err),
+            ErrorContext::default(),
+        );
+        assert!(
+            matches!(classified, RequestError::ConnectionLost(_)),
+            "expected ConnectionLostError, got {classified:?}"
+        );
+        assert!(classified.is_retryable());
+        server_task.abort();
+    }
+
+    #[rstest::rstest]
+    #[case(StatusCode::FORBIDDEN, "permission_denied", false, false)]
+    #[case(StatusCode::FORBIDDEN, "permission_denied", true, true)]
+    #[case(StatusCode::SERVICE_UNAVAILABLE, "unavailable", false, false)]
+    #[case(StatusCode::SERVICE_UNAVAILABLE, "unavailable", true, false)]
+    #[case(StatusCode::TOO_MANY_REQUESTS, "rate_limited", true, true)]
+    #[test]
+    fn unary_append_failure_preserves_uncertainty_and_final_error(
+        #[case] status: StatusCode,
+        #[case] code: &str,
+        #[case] prior_uncertainty: bool,
+        #[case] wrapped: bool,
+    ) {
+        let error = AppendError::Server(response(status, Some(code)))
+            .with_prior_uncertainty(prior_uncertainty);
+        assert_eq!(matches!(error, AppendError::IndefiniteAppend(_)), wrapped);
+        if wrapped {
+            assert!(error.server_error().is_none());
+            assert!(!error.has_no_side_effects());
+            let latest = error
+                .source()
+                .unwrap()
+                .downcast_ref::<AppendError>()
+                .unwrap();
+            assert!(latest.has_no_side_effects());
+            let server = latest.server_error().unwrap();
+            assert_eq!(
+                (server.status, server.code.as_deref()),
+                (status, Some(code))
+            );
+            assert_eq!(server.message, "test");
+            assert_eq!(error.is_retryable(), server.is_retryable());
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "append may have taken effect in an earlier attempt; final attempt failed: {latest}"
+                )
+            );
+        } else {
+            let server = error.server_error().unwrap();
+            assert_eq!(
+                (server.status, server.code.as_deref()),
+                (status, Some(code))
+            );
+            assert_eq!(server.message, "test");
+            assert_eq!(error.is_retryable(), server.is_retryable());
+            assert_eq!(error.has_no_side_effects(), server.has_no_side_effects());
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::condition_failed(
+        AppendError::from_http_response(
+            StatusCode::PRECONDITION_FAILED,
+            br#"{"seq_num_mismatch":42}"#,
+            ErrorContext::default(),
+        ),
+        "assignable_seq_num=42"
+    )]
+    #[case::unrecognized_condition(
+        AppendError::from_terminal_message(
+            TerminalMessage {
+                status: 412,
+                body: bytes::Bytes::from_static(br#"{"some_future_mismatch":7}"#),
+            },
+            ErrorContext::default(),
+        ),
+        r#"{"some_future_mismatch":7}"#
+    )]
+    #[case::invalid_access_token(
+        AppendError::Validation(ValidationError("invalid access token: invalid header".to_owned())),
+        "invalid access token: invalid header"
+    )]
+    #[test]
+    fn unary_append_wraps_definite_terminal_errors(
+        #[case] error: AppendError,
+        #[case] expected_substr: &str,
+    ) {
+        assert!(error.has_no_side_effects());
+        let error = error.with_prior_uncertainty(true);
+        assert!(matches!(error, AppendError::IndefiniteAppend(_)));
+        assert!(!error.has_no_side_effects());
+        assert!(!error.is_retryable());
+        assert!(error.server_error().is_none());
+        let latest = error
+            .source()
+            .unwrap()
+            .downcast_ref::<AppendError>()
+            .unwrap();
+        assert!(latest.has_no_side_effects());
+        assert!(
+            latest.to_string().contains(expected_substr),
+            "got: {latest}"
+        );
     }
 }

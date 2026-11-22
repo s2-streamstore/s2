@@ -48,10 +48,6 @@ impl RetryBackoff {
         self.cur_retry = 0;
     }
 
-    pub(crate) fn used(&self) -> u32 {
-        self.cur_retry
-    }
-
     /// 1-based attempt number for the current try (1 on initial try, 2 on first retry, etc.).
     pub(crate) fn attempt_number(&self) -> u32 {
         self.cur_retry.saturating_add(1)
@@ -112,7 +108,7 @@ mod tests {
                 assert!(d >= expected && d <= expected * 2, "step {i}: {d:?}");
             }
             assert!(backoff.is_exhausted());
-            assert_eq!(backoff.used(), 8);
+            assert_eq!(backoff.attempt_number(), 9);
 
             backoff.reset();
             let after_reset = backoff.next_unbounded();
@@ -126,23 +122,20 @@ mod tests {
         let mut backoff = RetryBackoff::from_config(&config);
 
         assert_eq!(backoff.attempt_number(), 1);
-        assert_eq!(backoff.used(), 0);
         assert_eq!(backoff.remaining(), 3);
         assert!(!backoff.is_exhausted());
 
         assert!(backoff.next().is_some());
         assert_eq!(backoff.attempt_number(), 2);
-        assert_eq!(backoff.used(), 1);
         assert_eq!(backoff.remaining(), 2);
 
         backoff.reset();
         assert_eq!(backoff.attempt_number(), 1);
-        assert_eq!(backoff.used(), 0);
         assert_eq!(backoff.remaining(), 3);
 
-        for expected_used in 1..=3 {
+        for expected_attempt in 2..=4 {
             assert!(backoff.next().is_some());
-            assert_eq!(backoff.used(), expected_used);
+            assert_eq!(backoff.attempt_number(), expected_attempt);
         }
         assert!(backoff.is_exhausted());
         assert!(backoff.next().is_none());

@@ -70,7 +70,7 @@ pub use s2_common::stream::StreamNamePrefix;
 /// See [`ListStreamsInput::start_after`]. It must not contain NUL bytes.
 pub use s2_common::stream::StreamNameStartAfter;
 
-pub(crate) use self::config::{AccessToken, AccessTokenMode};
+pub(crate) use self::config::AccessToken;
 pub use self::{access::*, config::*, metrics::*, network_policy::*, records::*, resources::*};
 
 pub(crate) const ONE_MIB: u32 = 1024 * 1024;
@@ -114,6 +114,6 @@ pub(crate) fn validate_metrics_timestamp(
     u32::try_from(ts.as_second()).map_err(|_| err())
 }
 
-pub(crate) fn idempotency_token() -> String {
+pub(crate) fn request_token() -> String {
     uuid::Uuid::new_v4().simple().to_string()
 }

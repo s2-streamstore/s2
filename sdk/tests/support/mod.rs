@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::{
     collections::{BTreeMap, VecDeque},
     future::Future,
@@ -27,7 +25,7 @@ use s2_api::v1::stream::{
     s2s::{FrameDecoder, SessionMessage},
 };
 use s2_sdk::{
-    S2, S2Stream,
+    S2,
     types::{
         AppendInput, AppendRecord, AppendRecordBatch, BasinName, RetryConfig, S2Config,
         S2Endpoints, StreamName,
@@ -182,11 +180,6 @@ impl MockH2Server {
         let config = configure(S2Config::new("test-token").with_endpoints(endpoints));
         S2::new(config).expect("valid S2 client")
     }
-
-    pub fn stream(&self, retry: RetryConfig) -> S2Stream {
-        let (basin, stream) = test_basin_and_stream();
-        self.client(retry).basin(basin).stream(stream)
-    }
 }
 
 impl Drop for MockH2Server {
@@ -292,36 +285,6 @@ pub async fn drain_body(body: &mut h2::RecvStream) -> Bytes {
         let _ = body.flow_control().release_capacity(len);
     }
     out.freeze()
-}
-
-pub fn send_json(mut respond: SendResponse<Bytes>, status: u16, body: impl Into<Bytes>) {
-    let resp = Response::builder()
-        .status(status)
-        .header("content-type", "application/json")
-        .body(())
-        .expect("valid json response");
-    if let Ok(mut send) = respond.send_response(resp, false) {
-        let _ = send.send_data(body.into(), true);
-    }
-}
-
-pub fn send_proto(mut respond: SendResponse<Bytes>, body: impl Into<Bytes>) {
-    let resp = Response::builder()
-        .status(200)
-        .header("content-type", "application/protobuf")
-        .body(())
-        .expect("valid proto response");
-    if let Ok(mut send) = respond.send_response(resp, false) {
-        let _ = send.send_data(body.into(), true);
-    }
-}
-
-pub fn send_empty(mut respond: SendResponse<Bytes>, status: u16) {
-    let resp = Response::builder()
-        .status(status)
-        .body(())
-        .expect("valid empty response");
-    let _ = respond.send_response(resp, true);
 }
 
 pub fn header_str<'a>(req: &'a Request<h2::RecvStream>, name: &str) -> Option<&'a str> {
@@ -448,6 +411,17 @@ pub fn proto_read_batch_records(seq_nums: &[u64], tail_seq: Option<u64>) -> Vec<
 
 pub fn proto_heartbeat(tail_seq: u64) -> Vec<u8> {
     proto_read_batch_records(&[], Some(tail_seq))
+}
+
+pub fn proto_heartbeat_at(tail_seq: u64, timestamp: u64) -> Vec<u8> {
+    ProtoReadBatch {
+        records: vec![],
+        tail: Some(ProtoStreamPosition {
+            seq_num: tail_seq,
+            timestamp,
+        }),
+    }
+    .encode_to_vec()
 }
 
 pub async fn read_exact_h2_bytes(body: &mut h2::RecvStream, min_bytes: usize) -> usize {

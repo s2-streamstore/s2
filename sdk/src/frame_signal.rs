@@ -25,20 +25,9 @@ impl FrameSignal {
         self.0.load(Ordering::Acquire)
     }
 
-    /// Reset the signal to unsignalled.
-    pub(crate) fn reset(&self) {
-        self.0.store(false, Ordering::Release);
-    }
-
     /// Set the signal to signalled.
     pub(crate) fn signal(&self) {
         self.0.store(true, Ordering::Release);
-    }
-}
-
-impl Default for FrameSignal {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -117,21 +106,5 @@ mod tests {
         let collected = body.collect().await.unwrap();
         assert_eq!(collected.to_bytes().as_ref(), b"hello");
         assert!(signal.is_signalled());
-    }
-
-    #[tokio::test]
-    async fn reset_between_attempts() {
-        let signal = FrameSignal::new();
-
-        let body = RequestFrameMonitorBody::new(Full::new(Bytes::from("data")), signal.clone());
-        body.collect().await.unwrap();
-        assert!(signal.is_signalled());
-
-        signal.reset();
-        assert!(!signal.is_signalled());
-
-        let body = RequestFrameMonitorBody::new(Empty::<Bytes>::new(), signal.clone());
-        body.collect().await.unwrap();
-        assert!(!signal.is_signalled());
     }
 }

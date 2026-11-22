@@ -1,18 +1,12 @@
-use std::{
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-    time::Duration,
-};
+use std::time::Duration;
 
 use tokio::time::Instant;
 
-/// Minimum cooldown between advised reconnects (`C13` / `F1`).
+/// Minimum cooldown between advised reconnects (`T6a`).
 const ADVISED_RECONNECT_COOLDOWN: Duration = Duration::from_secs(60);
 
 /// Tracks advised reconnect cooldown so a session acts on server reconnect advice
-/// at most once per cooldown window and stays put if advised again sooner.
+/// at most once per cooldown window and stays put if advised again sooner (`T6a`).
 #[derive(Clone, Copy, Default)]
 pub(crate) struct AdvisedReconnects {
     last: Option<Instant>,
@@ -33,22 +27,5 @@ impl AdvisedReconnects {
 
     pub(crate) fn total(&self) -> u64 {
         self.total_reconnects
-    }
-}
-
-/// An atomic flag tracking whether the server has advised reconnecting on this
-/// connection. Set by the response decoder when a frame carries the
-/// reconnect-advised bit, consumed once by the session loop.
-#[derive(Clone, Default)]
-pub(crate) struct ReconnectAdvice(Arc<AtomicBool>);
-
-impl ReconnectAdvice {
-    /// Atomically take the reconnect advice flag (returns `true` at most once per `advise`).
-    pub(crate) fn take(&self) -> bool {
-        self.0.swap(false, Ordering::AcqRel)
-    }
-
-    pub(crate) fn advise(&self) {
-        self.0.store(true, Ordering::Release);
     }
 }

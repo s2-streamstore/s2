@@ -24,17 +24,17 @@ use tracing::{Instrument, debug, debug_span};
 use crate::{
     api::{BasinClient, Streaming},
     batching::RECORD_BATCH_MIN,
-    client::ShutdownSignal,
+    client::CancellationToken,
     error::{
         AbortedError, AppendSessionError, ConnectionLostError, ErrorContext, ProtocolError,
         SessionClosedError, TimeoutError, TransportError,
     },
-    reconnect::{AdvisedReconnects, ReconnectAdvice},
+    reconnect::AdvisedReconnects,
     retry::RetryBackoff,
-    session::{StreamHeaders, SubmitTicket, validate_max_unacked_bytes},
+    session::{FinishOnDrop, StreamHeaders, SubmitTicket, validate_max_unacked_bytes},
     types::{
-        AccessTokenMode, AppendAck, AppendInput, AppendRetryPolicy, BasinName, MeteredBytes,
-        ONE_MIB, StreamConfig, StreamName, StreamPosition, ValidationError,
+        AppendAck, AppendInput, AppendRetryPolicy, BasinName, MeteredBytes, ONE_MIB, StreamConfig,
+        StreamName, StreamPosition, ValidationError,
     },
 };
 
@@ -146,7 +146,7 @@ impl AppendSessionConfig {
 #[derive(Clone)]
 enum LifecycleState {
     Open,
-    Closing(Option<AppendSessionError>),
+    Closing { failure: Option<AppendSessionError> },
     Closed(Result<(), AppendSessionError>),
 }
 
@@ -175,21 +175,23 @@ impl SessionLifecycle {
         matches!(*self.state.borrow(), LifecycleState::Closed(_))
     }
 
-    pub(crate) fn mark_closing(&self) {
+    /// Transition `Open -> Closing { failure: None }`. Returns `true` if this call performed the
+    /// transition.
+    pub(crate) fn mark_closing(&self) -> bool {
         self.state.send_if_modified(|s| {
             if matches!(s, LifecycleState::Open) {
-                *s = LifecycleState::Closing(None);
+                *s = LifecycleState::Closing { failure: None };
                 true
             } else {
                 false
             }
-        });
+        })
     }
 
     pub(crate) fn set_terminal_err(&self, err: AppendSessionError) {
         self.state.send_if_modified(|s| match s {
-            LifecycleState::Open | LifecycleState::Closing(_) => {
-                *s = LifecycleState::Closing(Some(err));
+            LifecycleState::Open | LifecycleState::Closing { .. } => {
+                *s = LifecycleState::Closing { failure: Some(err) };
                 true
             }
             LifecycleState::Closed(_) => false,
@@ -199,7 +201,7 @@ impl SessionLifecycle {
     pub(crate) fn terminal_err(&self) -> Option<AppendSessionError> {
         match &*self.state.borrow() {
             LifecycleState::Open => None,
-            LifecycleState::Closing(err) => err.clone(),
+            LifecycleState::Closing { failure } => failure.clone(),
             LifecycleState::Closed(res) => res.as_ref().err().cloned(),
         }
     }
@@ -229,26 +231,15 @@ impl SessionLifecycle {
 
     pub(crate) async fn wait_closed(&self) -> Result<(), AppendSessionError> {
         let mut rx = self.state.subscribe();
-        match rx
+        let guard = rx
             .wait_for(|s| matches!(s, LifecycleState::Closed(_)))
             .await
-        {
-            Ok(guard) => match &*guard {
-                LifecycleState::Closed(res) => res.clone(),
-                _ => unreachable!("wait_for guarantees Closed"),
-            },
-            Err(_) => match &*self.state.borrow() {
-                LifecycleState::Closed(res) => res.clone(),
-                _ => Ok(()),
-            },
+            .expect("watch sender owned by self");
+        match &*guard {
+            LifecycleState::Closed(res) => res.clone(),
+            _ => unreachable!("wait_for guarantees Closed"),
         }
     }
-}
-
-/// Serializes command acceptance and `close()` initiation so every `submit()` returning `Ok` is
-/// ordered strictly before `Command::Close` in the unbounded channel (`A4c`, `A8a`).
-struct AcceptanceGate {
-    closing: bool,
 }
 
 /// Shared append-session core used by both [`AppendSession`] and
@@ -256,11 +247,15 @@ struct AcceptanceGate {
 pub(crate) struct AppendSessionCore {
     basin: BasinName,
     stream: StreamName,
-    gate: Arc<StdMutex<AcceptanceGate>>,
+    compression: s2s::CompressionAlgorithm,
+    /// Serializes command acceptance and `close()` initiation so every `submit()` returning `Ok`
+    /// is ordered strictly before `Command::Close` in the unbounded channel (`A4c`, `A8a`).
+    gate: Arc<StdMutex<()>>,
     cmd_tx: mpsc::UnboundedSender<Command>,
     lifecycle: Arc<SessionLifecycle>,
-    client_shutdown: ShutdownSignal,
-    abort_signal: ShutdownSignal,
+    client_shutdown: CancellationToken,
+    /// Child token of `client_shutdown`; cancelled on either client close or session drop/abort.
+    abort: CancellationToken,
     unacked_batches: Arc<AtomicUsize>,
     dropped_abort_msg: &'static str,
     context: ErrorContext,
@@ -275,16 +270,17 @@ impl AppendSessionCore {
         dropped_abort_msg: &'static str,
     ) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
-        let gate = Arc::new(StdMutex::new(AcceptanceGate { closing: false }));
+        let gate = Arc::new(StdMutex::new(()));
         let lifecycle = Arc::new(SessionLifecycle::new());
-        let client_shutdown = client.shutdown_signal();
-        let abort_signal = ShutdownSignal::new();
+        let client_shutdown = client.shutdown_token();
+        let abort = client_shutdown.child_token();
         let unacked_batches = Arc::new(AtomicUsize::new(0));
         let basin = client.name.clone();
+        let compression: s2s::CompressionAlgorithm = client.config().compression.into();
         let context = ErrorContext::stream(op, basin.as_ref(), stream.as_ref(), false);
 
         let span = debug_span!("append_session", op, basin = %basin, stream = %stream);
-        let task = SessionTask {
+        let task = AppendSessionTask {
             client,
             stream: stream.clone(),
             headers,
@@ -292,7 +288,7 @@ impl AppendSessionCore {
             gate: gate.clone(),
             lifecycle: lifecycle.clone(),
             client_shutdown: client_shutdown.clone(),
-            abort_signal: abort_signal.clone(),
+            abort: abort.clone(),
             dropped_abort_msg,
             context: context.clone(),
             state: SessionState {
@@ -308,11 +304,12 @@ impl AppendSessionCore {
         Self {
             basin,
             stream,
+            compression,
             gate,
             cmd_tx,
             lifecycle,
             client_shutdown,
-            abort_signal,
+            abort,
             unacked_batches,
             dropped_abort_msg,
             context,
@@ -329,18 +326,12 @@ impl AppendSessionCore {
 
     fn session_closed_err_on_submit(&self) -> AppendSessionError {
         let failure = self.lifecycle.terminal_err().or_else(|| {
-            if self.unacked_batches.load(Ordering::Acquire) > 0 {
-                check_abort(
-                    &self.client_shutdown,
-                    &self.abort_signal,
-                    self.dropped_abort_msg,
-                )
-                .map(|reason| {
-                    AppendSessionError::Aborted(AbortedError::new(
-                        reason.message(),
-                        self.context.clone(),
-                    ))
-                })
+            if self.unacked_batches.load(Ordering::Acquire) > 0 && self.abort.is_cancelled() {
+                let reason = abort_reason_msg(&self.client_shutdown, self.dropped_abort_msg);
+                Some(AppendSessionError::Aborted(AbortedError::new(
+                    reason,
+                    self.context.clone(),
+                )))
             } else {
                 None
             }
@@ -353,20 +344,34 @@ impl AppendSessionCore {
         input: AppendInput,
         permit: Option<AppendPermit>,
     ) -> Result<BatchSubmitTicket, AppendSessionError> {
+        if self.lifecycle.is_closing_or_closed() || self.abort.is_cancelled() {
+            return Err(self.session_closed_err_on_submit());
+        }
+
+        // Encode and compress on the caller task before taking the gate so the session task stays
+        // focused on network I/O and state transitions.
+        let record_count = input.records.len() as u64;
+        let api_input: proto::AppendInput = input.into();
+        let frame = s2s::SessionMessage::regular(self.compression, &api_input)
+            .map_err(|err| {
+                AppendSessionError::Protocol(ProtocolError::new(
+                    format!("failed to encode append frame: {err}"),
+                    self.context.clone(),
+                ))
+            })?
+            .encode();
+
         let (ack_tx, ack_rx) = oneshot::channel();
         {
-            let gate = self.gate.lock().unwrap();
-            if gate.closing
-                || self.lifecycle.is_closing_or_closed()
-                || self.client_shutdown.is_closed()
-                || self.abort_signal.is_closed()
-            {
+            let _gate = self.gate.lock().unwrap();
+            if self.lifecycle.is_closing_or_closed() || self.abort.is_cancelled() {
                 return Err(self.session_closed_err_on_submit());
             }
             if self
                 .cmd_tx
                 .send(Command::Submit {
-                    input,
+                    frame,
+                    record_count,
                     ack_tx,
                     permit,
                 })
@@ -386,10 +391,8 @@ impl AppendSessionCore {
 
     pub(crate) async fn close(&self) -> Result<(), AppendSessionError> {
         {
-            let mut gate = self.gate.lock().unwrap();
-            if !gate.closing {
-                gate.closing = true;
-                self.lifecycle.mark_closing();
+            let _gate = self.gate.lock().unwrap();
+            if !self.abort.is_cancelled() && self.lifecycle.mark_closing() {
                 let _ = self.cmd_tx.send(Command::Close);
             }
         }
@@ -398,7 +401,7 @@ impl AppendSessionCore {
 
     pub(crate) fn abort(&self) {
         if !self.lifecycle.is_closed() {
-            self.abort_signal.close();
+            self.abort.cancel();
         }
     }
 }
@@ -495,16 +498,12 @@ impl AppendSession {
 
         self.check_open_for_reserve().await?;
 
-        let append_permit = if let Some(permit) = self.permits.try_acquire(bytes) {
-            permit
-        } else {
-            tokio::select! {
-                biased;
-                _ = self.core.lifecycle.wait_closing_or_closed() => {
-                    return Err(self.core.lifecycle.session_closed_err(&self.core.context));
-                }
-                permit = self.permits.acquire(bytes) => permit,
+        let append_permit = tokio::select! {
+            biased;
+            _ = self.core.lifecycle.wait_closing_or_closed() => {
+                return Err(self.core.lifecycle.session_closed_err(&self.core.context));
             }
+            permit = self.permits.acquire(bytes) => permit,
         };
 
         self.check_open_for_reserve().await?;
@@ -520,7 +519,7 @@ impl AppendSession {
         if self.core.lifecycle.is_closing_or_closed() {
             return Err(self.core.lifecycle.session_closed_err(&self.core.context));
         }
-        if self.core.client_shutdown.is_closed() || self.core.abort_signal.is_closed() {
+        if self.core.abort.is_cancelled() {
             self.core.lifecycle.wait_closing_or_closed().await;
             return Err(self.core.lifecycle.session_closed_err(&self.core.context));
         }
@@ -726,7 +725,8 @@ impl AppendPermits {
         !self.inner.lock().unwrap().waiters.is_empty()
     }
 
-    pub(crate) fn try_acquire(&self, bytes: u32) -> Option<AppendPermit> {
+    #[cfg(test)]
+    fn try_acquire(&self, bytes: u32) -> Option<AppendPermit> {
         let mut state = self.inner.lock().unwrap();
         if state.waiters.is_empty() && state.can_satisfy(bytes) {
             let has_batch_slot = state.available_batches.is_some();
@@ -838,28 +838,12 @@ impl SessionState {
 
     fn push_submit(
         &mut self,
-        input: AppendInput,
+        frame: Bytes,
+        record_count: u64,
         ack_tx: oneshot::Sender<Result<AppendAck, AppendSessionError>>,
         permit: Option<AppendPermit>,
-        compression: s2s::CompressionAlgorithm,
-        context: &ErrorContext,
-    ) -> Result<(), AppendSessionError> {
-        debug_assert!(
-            !self.closing,
-            "AcceptanceGate orders all Submits before Close"
-        );
-        let record_count = input.records.len() as u64;
-        let api_input: proto::AppendInput = input.into();
-        let (frame, encode_err) = match s2s::SessionMessage::regular(compression, &api_input) {
-            Ok(msg) => (msg.encode(), None),
-            Err(err) => (
-                Bytes::new(),
-                Some(AppendSessionError::Protocol(ProtocolError::new(
-                    format!("failed to encode append frame: {err}"),
-                    context.clone(),
-                ))),
-            ),
-        };
+    ) {
+        debug_assert!(!self.closing, "gate orders all Submits before Close");
         self.inflight_appends.push_back(InflightAppend {
             frame,
             record_count,
@@ -869,10 +853,6 @@ impl SessionState {
             prior_uncertainty: false,
             attempt_last_byte_rx: None,
         });
-        match encode_err {
-            Some(err) => Err(err),
-            None => Ok(()),
-        }
     }
 
     fn drain_queued_commands(&mut self) -> Vec<Command> {
@@ -896,10 +876,10 @@ struct InflightAppend {
     attempt_last_byte_rx: Option<oneshot::Receiver<Instant>>,
 }
 
-#[allow(clippy::large_enum_variant)]
 enum Command {
     Submit {
-        input: AppendInput,
+        frame: Bytes,
+        record_count: u64,
         ack_tx: oneshot::Sender<Result<AppendAck, AppendSessionError>>,
         permit: Option<AppendPermit>,
     },
@@ -1018,19 +998,12 @@ impl Stream for AttemptBodyStream {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-enum AbortReason {
-    ClientClosed,
-    SessionDropped(&'static str),
-}
-
-impl AbortReason {
-    fn message(self) -> &'static str {
-        match self {
-            Self::ClientClosed => "client closed",
-            Self::SessionDropped(msg) => msg,
-        }
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TimerKind {
+    /// Waiting for the oldest sent batch to be acknowledged (`T7c`).
+    Ack,
+    /// Request body was dropped by hyper while waiting for a response error or EOF.
+    BodyClosed,
 }
 
 enum AttemptResult {
@@ -1039,9 +1012,9 @@ enum AttemptResult {
     /// Connection ended cleanly or broke while nothing was unacked (`A3`, `T9`).
     IdleEnded,
     /// Server advised reconnecting and all sent batches drained cleanly (`T6a`).
-    ReconnectAdvised,
+    ReconnectAdvised { made_progress: bool },
     /// Session was aborted (`C12`, `A8c`).
-    Aborted { reason: AbortReason },
+    Aborted(&'static str),
     /// Attempt failed with an error.
     Error {
         err: AppendSessionError,
@@ -1053,28 +1026,39 @@ enum AttemptResult {
 enum IdleWait {
     WorkReady,
     Closed,
-    Aborted(AbortReason),
-    EncodeError(AppendSessionError),
+    Aborted(&'static str),
 }
 
-struct SessionTask {
+struct AppendSessionTask {
     client: BasinClient,
     stream: StreamName,
     headers: StreamHeaders,
     op: &'static str,
-    gate: Arc<StdMutex<AcceptanceGate>>,
+    gate: Arc<StdMutex<()>>,
     lifecycle: Arc<SessionLifecycle>,
-    client_shutdown: ShutdownSignal,
-    abort_signal: ShutdownSignal,
+    client_shutdown: CancellationToken,
+    abort: CancellationToken,
     dropped_abort_msg: &'static str,
     context: ErrorContext,
     state: SessionState,
 }
 
-impl SessionTask {
+impl AppendSessionTask {
+    fn abort_reason_msg(&self) -> &'static str {
+        abort_reason_msg(&self.client_shutdown, self.dropped_abort_msg)
+    }
+
+    fn check_abort(&self) -> Option<&'static str> {
+        self.abort.is_cancelled().then(|| self.abort_reason_msg())
+    }
+
     async fn run(mut self) {
-        let access_token_mode = self.client.config().access_token.mode();
-        let compression: s2s::CompressionAlgorithm = self.client.config().compression.into();
+        let _finish_guard = FinishOnDrop::new(
+            self.lifecycle.clone(),
+            self.context.clone(),
+            self.dropped_abort_msg,
+        );
+        let refreshes_tokens = self.client.base().refreshes_tokens();
         let retry_config = self.client.base().retry_config();
         let mut retry_backoff = RetryBackoff::from_config(&retry_config);
         let mut advised_reconnects = AdvisedReconnects::default();
@@ -1091,7 +1075,7 @@ impl SessionTask {
                     self.finish_clean();
                     return;
                 }
-                match self.wait_for_work(compression).await {
+                match self.wait_for_work().await {
                     IdleWait::WorkReady => {}
                     IdleWait::Closed => {
                         self.finish_clean();
@@ -1101,17 +1085,16 @@ impl SessionTask {
                         self.abort_session(reason);
                         return;
                     }
-                    IdleWait::EncodeError(err) => {
-                        self.settle_terminal_error(err, 0);
-                        return;
-                    }
                 }
             }
 
             let attempt_num = retry_backoff.attempt_number();
-            let result = self
-                .run_attempt(advised_reconnects, compression, attempt_num)
-                .await;
+            debug!(
+                attempt = attempt_num,
+                inflight = self.state.inflight_appends.len(),
+                "opening append session request"
+            );
+            let result = self.run_attempt(advised_reconnects, attempt_num).await;
 
             match result {
                 AttemptResult::Closed => {
@@ -1124,18 +1107,18 @@ impl SessionTask {
                     // an idle gap.
                     retry_backoff.reset();
                 }
-                AttemptResult::ReconnectAdvised => {
-                    // Advice is only ever carried on a decoded server response frame, so progress
-                    // was made before draining (`T6a`).
+                AttemptResult::ReconnectAdvised { made_progress } => {
                     advised_reconnects.record();
-                    retry_backoff.reset();
+                    if made_progress {
+                        retry_backoff.reset();
+                    }
                     debug!(
                         inflight_appends_len = self.state.inflight_appends.len(),
                         advised_reconnects = advised_reconnects.total(),
                         "reconnecting append session on server advice"
                     );
                 }
-                AttemptResult::Aborted { reason } => {
+                AttemptResult::Aborted(reason) => {
                     self.abort_session(reason);
                     return;
                 }
@@ -1173,7 +1156,7 @@ impl SessionTask {
                         &err,
                         retry_config.append_retry_policy,
                         attempt_may_have_side_effects,
-                        access_token_mode,
+                        refreshes_tokens,
                     ) && let Some(backoff) = retry_backoff.next()
                     {
                         if attempt_may_have_side_effects {
@@ -1212,77 +1195,47 @@ impl SessionTask {
         }
     }
 
-    fn check_abort(&self) -> Option<AbortReason> {
-        check_abort(
-            &self.client_shutdown,
-            &self.abort_signal,
-            self.dropped_abort_msg,
-        )
-    }
-
-    async fn wait_for_work(&mut self, compression: s2s::CompressionAlgorithm) -> IdleWait {
-        let mut client_closed = pin!(self.client_shutdown.cancelled());
-        let mut dropped = pin!(self.abort_signal.cancelled());
-
-        loop {
-            tokio::select! {
-                biased;
-                _ = &mut client_closed => return IdleWait::Aborted(AbortReason::ClientClosed),
-                _ = &mut dropped => {
-                    return IdleWait::Aborted(AbortReason::SessionDropped(self.dropped_abort_msg));
+    async fn wait_for_work(&mut self) -> IdleWait {
+        tokio::select! {
+            biased;
+            _ = self.abort.cancelled() => IdleWait::Aborted(self.abort_reason_msg()),
+            cmd = self.state.cmd_rx.recv() => match cmd {
+                Some(Command::Submit {
+                    frame,
+                    record_count,
+                    ack_tx,
+                    permit,
+                }) => {
+                    self.state.push_submit(frame, record_count, ack_tx, permit);
+                    IdleWait::WorkReady
                 }
-                cmd = self.state.cmd_rx.recv() => {
-                    match cmd {
-                        Some(Command::Submit { input, ack_tx, permit }) => {
-                            if let Err(err) = self.state.push_submit(
-                                input,
-                                ack_tx,
-                                permit,
-                                compression,
-                                &self.context,
-                            ) {
-                                return IdleWait::EncodeError(err);
-                            }
-                            if !self.state.inflight_appends.is_empty() {
-                                return IdleWait::WorkReady;
-                            }
-                        }
-                        Some(Command::Close) => {
-                            self.state.closing = true;
-                            return IdleWait::Closed;
-                        }
-                        None => {
-                            return IdleWait::Aborted(AbortReason::SessionDropped(
-                                self.dropped_abort_msg,
-                            ));
-                        }
-                    }
+                Some(Command::Close) => {
+                    self.state.closing = true;
+                    IdleWait::Closed
                 }
-            }
+                None => IdleWait::Aborted(self.dropped_abort_msg),
+            },
         }
     }
 
-    async fn sleep_or_abort(&self, duration: Duration) -> Option<AbortReason> {
+    async fn sleep_or_abort(&self, duration: Duration) -> Option<&'static str> {
         tokio::select! {
             biased;
-            _ = self.client_shutdown.cancelled() => Some(AbortReason::ClientClosed),
-            _ = self.abort_signal.cancelled() => {
-                Some(AbortReason::SessionDropped(self.dropped_abort_msg))
-            }
+            _ = self.abort.cancelled() => Some(self.abort_reason_msg()),
             _ = tokio::time::sleep(duration) => None,
         }
     }
 
     fn finish_clean(&mut self) {
         debug!("append session closed cleanly");
-        {
-            let mut g = self.gate.lock().unwrap();
-            g.closing = true;
-        }
-        self.lifecycle.mark_closing();
+        let queued = {
+            let _gate = self.gate.lock().unwrap();
+            self.lifecycle.mark_closing();
+            self.state.drain_queued_commands()
+        };
         let closed_err =
             AppendSessionError::SessionClosed(SessionClosedError::new(None, self.context.clone()));
-        for cmd in self.state.drain_queued_commands() {
+        for cmd in queued {
             if let Command::Submit { ack_tx, .. } = cmd {
                 let _ = ack_tx.send(Err(closed_err.clone()));
             }
@@ -1290,15 +1243,13 @@ impl SessionTask {
         self.lifecycle.finish(Ok(()));
     }
 
-    fn abort_session(&mut self, reason: AbortReason) {
-        let aborted =
-            AppendSessionError::Aborted(AbortedError::new(reason.message(), self.context.clone()));
+    fn abort_session(&mut self, reason: &'static str) {
+        let aborted = AppendSessionError::Aborted(AbortedError::new(reason, self.context.clone()));
         let (queued, has_pending_work) = {
             // Hold gate across checking pending work AND publishing terminal_err / closing so
             // concurrent reserve()/submit() callers never observe
             // `SessionClosedError { failure: None }` on an aborted session with pending work.
-            let mut g = self.gate.lock().unwrap();
-            g.closing = true;
+            let _gate = self.gate.lock().unwrap();
             let queued = self.state.drain_queued_commands();
             let has_pending_work = !self.state.inflight_appends.is_empty()
                 || queued
@@ -1313,7 +1264,7 @@ impl SessionTask {
         };
 
         debug!(
-            reason = reason.message(),
+            reason,
             has_pending_work,
             inflight_appends_len = self.state.inflight_appends.len(),
             "aborting append session"
@@ -1385,13 +1336,11 @@ impl SessionTask {
         // definite and any batch's outcome was wrapped.
         let session_failure = final_err.clone().with_prior_uncertainty(any_batch_wrapped);
 
-        // Publish terminal error before setting gate.closing so concurrent reserve/submit callers
-        // always observe the session failure on SessionClosedError.
-        self.lifecycle.set_terminal_err(session_failure.clone());
-        {
-            let mut g = self.gate.lock().unwrap();
-            g.closing = true;
-        }
+        let queued = {
+            let _gate = self.gate.lock().unwrap();
+            self.lifecycle.set_terminal_err(session_failure.clone());
+            self.state.drain_queued_commands()
+        };
         let closed_err = AppendSessionError::SessionClosed(SessionClosedError::new(
             Some(session_failure.clone()),
             self.context.clone(),
@@ -1408,7 +1357,7 @@ impl SessionTask {
                 .send(Err(base.with_prior_uncertainty(append.prior_uncertainty)));
         }
 
-        for cmd in self.state.drain_queued_commands() {
+        for cmd in queued {
             if let Command::Submit { ack_tx, .. } = cmd {
                 let _ = ack_tx.send(Err(closed_err.clone()));
             }
@@ -1420,7 +1369,6 @@ impl SessionTask {
     async fn run_attempt(
         &mut self,
         advised_reconnects: AdvisedReconnects,
-        compression: s2s::CompressionAlgorithm,
         attempt: u32,
     ) -> AttemptResult {
         for append in &mut self.state.inflight_appends {
@@ -1428,40 +1376,25 @@ impl SessionTask {
         }
 
         let send_gate = AttemptSendGate::new();
-        let reconnect = ReconnectAdvice::default();
         let (input_tx, input_rx) = mpsc::channel::<OutboundBatch>(1);
         let body_stream = AttemptBodyStream::new(input_rx, send_gate.clone());
 
-        let connect_fut = self.client.append_session(
-            self.op,
-            &self.stream,
-            body_stream,
-            &self.headers,
-            reconnect.clone(),
-            attempt,
-        );
-
-        let mut client_closed_fut = pin!(self.client_shutdown.cancelled());
-        let mut abort_fut = pin!(self.abort_signal.cancelled());
+        let connect_fut =
+            self.client
+                .append_session(self.op, &self.stream, body_stream, &self.headers, attempt);
 
         let mut acks = tokio::select! {
             biased;
-            _ = &mut client_closed_fut => {
+            _ = self.abort.cancelled() => {
                 AttemptSendGate::stop(&send_gate);
-                return AttemptResult::Aborted { reason: AbortReason::ClientClosed };
-            }
-            _ = &mut abort_fut => {
-                AttemptSendGate::stop(&send_gate);
-                return AttemptResult::Aborted {
-                    reason: AbortReason::SessionDropped(self.dropped_abort_msg),
-                };
+                return AttemptResult::Aborted(self.abort_reason_msg());
             }
             res = connect_fut => match res {
                 Ok(s) => s,
                 Err(err) => {
                     AttemptSendGate::stop(&send_gate);
                     if let Some(reason) = self.check_abort() {
-                        return AttemptResult::Aborted { reason };
+                        return AttemptResult::Aborted(reason);
                     }
                     return AttemptResult::Error {
                         err,
@@ -1481,7 +1414,7 @@ impl SessionTask {
         let mut became_oldest_at: Option<Instant> =
             (!self.state.inflight_appends.is_empty()).then(Instant::now);
         let mut ack_timer = pin!(tokio::time::sleep(Duration::ZERO));
-        let mut ack_timer_armed = false;
+        let mut timer_kind: Option<TimerKind> = None;
 
         loop {
             if self.state.is_close_complete() {
@@ -1490,18 +1423,12 @@ impl SessionTask {
                 return AttemptResult::Closed;
             }
 
-            // T6a: Act on reconnect advice at most once per cooldown window by half-closing and
-            // draining all batches already sent on this request.
-            if !draining_for_reconnect && reconnect.take() && advised_reconnects.should_reconnect()
+            if input_tx.is_none()
+                && !draining_for_reconnect
+                && self.state.inflight_appends.is_empty()
             {
-                draining_for_reconnect = true;
-                // Stop sending new batches on this request; half-close so the server acks
-                // everything already pushed into `input_tx`.
-                drop(input_tx.take());
-                if send_cursor == 0 {
-                    drop(acks);
-                    return AttemptResult::ReconnectAdvised;
-                }
+                drop(acks);
+                return AttemptResult::IdleEnded;
             }
 
             // Check if the oldest unacked batch already finished sending its last byte (e.g. while
@@ -1511,15 +1438,20 @@ impl SessionTask {
                 became_oldest_at,
                 ack_timeout,
                 ack_timer.as_mut(),
-                &mut ack_timer_armed,
+                &mut timer_kind,
             );
 
-            // If the request body was dropped by hyper (not an advised drain), bound waiting for
-            // the server's response error or EOF.
-            if input_tx.is_none() && !draining_for_reconnect && !ack_timer_armed {
-                arm_ack_timer(
+            // If the request body was dropped by hyper while batches remain unacked (not an
+            // advised drain), bound waiting for the server's response error or EOF.
+            if input_tx.is_none()
+                && !draining_for_reconnect
+                && !self.state.inflight_appends.is_empty()
+                && timer_kind.is_none()
+            {
+                arm_timer(
                     ack_timer.as_mut(),
-                    &mut ack_timer_armed,
+                    &mut timer_kind,
+                    TimerKind::BodyClosed,
                     Instant::now(),
                     ack_timeout,
                 );
@@ -1528,7 +1460,7 @@ impl SessionTask {
             let can_send_more = input_tx.is_some()
                 && !draining_for_reconnect
                 && send_cursor < self.state.inflight_appends.len();
-            let wait_oldest_last_byte = !ack_timer_armed
+            let wait_oldest_last_byte = timer_kind.is_none()
                 && self
                     .state
                     .inflight_appends
@@ -1543,9 +1475,9 @@ impl SessionTask {
                 // T10: process already-received acks first, in order.
                 ack = acks.next() => {
                     match ack {
-                        Some(Ok(proto_ack)) => {
+                        Some(Ok(frame)) => {
                             match process_proto_ack(
-                                proto_ack,
+                                frame.msg,
                                 &mut self.state,
                                 send_cursor,
                                 &self.context,
@@ -1553,15 +1485,24 @@ impl SessionTask {
                                 Ok(()) => {
                                     acked_in_attempt += 1;
                                     send_cursor = send_cursor.saturating_sub(1);
-                                    ack_timer_armed = false;
+                                    timer_kind = None;
                                     became_oldest_at =
                                         (!self.state.inflight_appends.is_empty()).then(Instant::now);
+                                    // T6a: Act on reconnect advice at most once per cooldown window
+                                    // by half-closing and draining batches already sent on this
+                                    // request.
+                                    if frame.reconnect_advised
+                                        && !draining_for_reconnect
+                                        && advised_reconnects.should_reconnect()
+                                    {
+                                        draining_for_reconnect = true;
+                                        drop_input_tx = true;
+                                    }
                                     if draining_for_reconnect && send_cursor == 0 {
-                                        // All batches sent on the advised request are acked;
-                                        // reconnect immediately rather than waiting indefinitely
-                                        // for server EOF.
                                         drop(acks);
-                                        return AttemptResult::ReconnectAdvised;
+                                        return AttemptResult::ReconnectAdvised {
+                                            made_progress: acked_in_attempt > 0,
+                                        };
                                     }
                                 }
                                 Err(err) => {
@@ -1583,7 +1524,7 @@ impl SessionTask {
                                 finish_attempt_gate(&send_gate, acked_in_attempt, &mut self.state);
 
                             if let Some(reason) = self.check_abort() {
-                                return AttemptResult::Aborted { reason };
+                                return AttemptResult::Aborted(reason);
                             }
 
                             // T9 / A3: Connection break or retryable error while nothing is unacked
@@ -1593,7 +1534,9 @@ impl SessionTask {
                             }
 
                             if draining_for_reconnect && err.is_server_draining() && unacked_sent == 0 {
-                                return AttemptResult::ReconnectAdvised;
+                                return AttemptResult::ReconnectAdvised {
+                                    made_progress: acked_in_attempt > 0,
+                                };
                             }
 
                             return AttemptResult::Error {
@@ -1607,12 +1550,14 @@ impl SessionTask {
                                 finish_attempt_gate(&send_gate, acked_in_attempt, &mut self.state);
 
                             if let Some(reason) = self.check_abort() {
-                                return AttemptResult::Aborted { reason };
+                                return AttemptResult::Aborted(reason);
                             }
 
                             if draining_for_reconnect {
                                 if unacked_sent == 0 {
-                                    return AttemptResult::ReconnectAdvised;
+                                    return AttemptResult::ReconnectAdvised {
+                                        made_progress: acked_in_attempt > 0,
+                                    };
                                 }
                                 return AttemptResult::Error {
                                     err: AppendSessionError::ConnectionLost(ConnectionLostError::new(
@@ -1648,7 +1593,7 @@ impl SessionTask {
                     }
                 }
 
-                _ = &mut client_closed_fut => {
+                _ = self.abort.cancelled() => {
                     drain_ready_acks(
                         &mut acks,
                         &mut self.state,
@@ -1657,31 +1602,30 @@ impl SessionTask {
                         &self.context,
                     );
                     finish_attempt_gate(&send_gate, acked_in_attempt, &mut self.state);
-                    return AttemptResult::Aborted { reason: AbortReason::ClientClosed };
+                    return AttemptResult::Aborted(self.abort_reason_msg());
                 }
 
-                _ = &mut abort_fut => {
-                    drain_ready_acks(
-                        &mut acks,
-                        &mut self.state,
-                        &mut acked_in_attempt,
-                        &mut send_cursor,
-                        &self.context,
-                    );
-                    finish_attempt_gate(&send_gate, acked_in_attempt, &mut self.state);
-                    return AttemptResult::Aborted {
-                        reason: AbortReason::SessionDropped(self.dropped_abort_msg),
-                    };
-                }
-
-                _ = &mut ack_timer, if ack_timer_armed => {
+                _ = &mut ack_timer, if timer_kind.is_some() => {
                     let unacked_sent =
                         finish_attempt_gate(&send_gate, acked_in_attempt, &mut self.state);
-                    return AttemptResult::Error {
-                        err: AppendSessionError::Timeout(TimeoutError::new(
+                    if self.state.inflight_appends.is_empty() {
+                        return AttemptResult::IdleEnded;
+                    }
+                    let err = match timer_kind.expect("timer_kind is Some") {
+                        TimerKind::Ack => AppendSessionError::Timeout(TimeoutError::new(
                             "append acknowledgement timed out",
                             self.context.clone(),
                         )),
+                        TimerKind::BodyClosed => {
+                            AppendSessionError::ConnectionLost(ConnectionLostError::new(
+                                "request body closed before response ended",
+                                unacked_sent == 0,
+                                self.context.clone(),
+                            ))
+                        }
+                    };
+                    return AttemptResult::Error {
+                        err,
                         made_progress: acked_in_attempt > 0,
                         unacked_sent_in_attempt: unacked_sent,
                     };
@@ -1703,7 +1647,13 @@ impl SessionTask {
                             Ok(sent_at) => became_oldest_at.map_or(sent_at, |b| b.max(sent_at)),
                             Err(_) => Instant::now(),
                         };
-                        arm_ack_timer(ack_timer.as_mut(), &mut ack_timer_armed, start, ack_timeout);
+                        arm_timer(
+                            ack_timer.as_mut(),
+                            &mut timer_kind,
+                            TimerKind::Ack,
+                            start,
+                            ack_timeout,
+                        );
                     }
                 }
 
@@ -1730,7 +1680,7 @@ impl SessionTask {
                             // terminal error or reset the stream). Stop sending and stay in the
                             // loop so `acks.next()` drains all buffered acks and surfaces the real
                             // terminal server error or EOF (`T10`, `A6a`). The next iteration arms
-                            // `ack_timer` while waiting for `acks`.
+                            // `TimerKind::BodyClosed` if batches remain unacked.
                             drop_input_tx = true;
                         }
                     }
@@ -1738,27 +1688,15 @@ impl SessionTask {
 
                 cmd = self.state.cmd_rx.recv() => {
                     match cmd {
-                        Some(Command::Submit { input, ack_tx, permit }) => {
+                        Some(Command::Submit {
+                            frame,
+                            record_count,
+                            ack_tx,
+                            permit,
+                        }) => {
                             let was_empty = self.state.inflight_appends.is_empty();
-                            if let Err(err) = self.state.push_submit(
-                                input,
-                                ack_tx,
-                                permit,
-                                compression,
-                                &self.context,
-                            ) {
-                                let unacked_sent = finish_attempt_gate(
-                                    &send_gate,
-                                    acked_in_attempt,
-                                    &mut self.state,
-                                );
-                                return AttemptResult::Error {
-                                    err,
-                                    made_progress: acked_in_attempt > 0,
-                                    unacked_sent_in_attempt: unacked_sent,
-                                };
-                            }
-                            if was_empty && !self.state.inflight_appends.is_empty() {
+                            self.state.push_submit(frame, record_count, ack_tx, permit);
+                            if was_empty {
                                 became_oldest_at = Some(Instant::now());
                             }
                         }
@@ -1774,9 +1712,7 @@ impl SessionTask {
                                 &self.context,
                             );
                             finish_attempt_gate(&send_gate, acked_in_attempt, &mut self.state);
-                            return AttemptResult::Aborted {
-                                reason: AbortReason::SessionDropped(self.dropped_abort_msg),
-                            };
+                            return AttemptResult::Aborted(self.dropped_abort_msg);
                         }
                     }
                 }
@@ -1789,28 +1725,26 @@ impl SessionTask {
     }
 }
 
-fn check_abort(
-    client_shutdown: &ShutdownSignal,
-    abort_signal: &ShutdownSignal,
+fn abort_reason_msg(
+    client_shutdown: &CancellationToken,
     dropped_abort_msg: &'static str,
-) -> Option<AbortReason> {
-    if client_shutdown.is_closed() {
-        Some(AbortReason::ClientClosed)
-    } else if abort_signal.is_closed() {
-        Some(AbortReason::SessionDropped(dropped_abort_msg))
+) -> &'static str {
+    if client_shutdown.is_cancelled() {
+        "client closed"
     } else {
-        None
+        dropped_abort_msg
     }
 }
 
-fn arm_ack_timer(
+fn arm_timer(
     ack_timer: Pin<&mut Sleep>,
-    ack_timer_armed: &mut bool,
+    timer_kind: &mut Option<TimerKind>,
+    kind: TimerKind,
     start: Instant,
     ack_timeout: Duration,
 ) {
     ack_timer.reset(start + ack_timeout);
-    *ack_timer_armed = true;
+    *timer_kind = Some(kind);
 }
 
 fn refresh_oldest_timer(
@@ -1818,9 +1752,9 @@ fn refresh_oldest_timer(
     became_oldest_at: Option<Instant>,
     ack_timeout: Duration,
     ack_timer: Pin<&mut Sleep>,
-    ack_timer_armed: &mut bool,
+    timer_kind: &mut Option<TimerKind>,
 ) {
-    if *ack_timer_armed {
+    if timer_kind.is_some() {
         return;
     }
     let Some(front) = state.inflight_appends.front_mut() else {
@@ -1833,12 +1767,18 @@ fn refresh_oldest_timer(
         Ok(sent_at) => {
             front.attempt_last_byte_rx = None;
             let start = became_oldest_at.map_or(sent_at, |b| b.max(sent_at));
-            arm_ack_timer(ack_timer, ack_timer_armed, start, ack_timeout);
+            arm_timer(ack_timer, timer_kind, TimerKind::Ack, start, ack_timeout);
         }
         Err(oneshot::error::TryRecvError::Empty) => {}
         Err(oneshot::error::TryRecvError::Closed) => {
             front.attempt_last_byte_rx = None;
-            arm_ack_timer(ack_timer, ack_timer_armed, Instant::now(), ack_timeout);
+            arm_timer(
+                ack_timer,
+                timer_kind,
+                TimerKind::Ack,
+                Instant::now(),
+                ack_timeout,
+            );
         }
     }
 }
@@ -1868,10 +1808,8 @@ fn drain_ready_acks(
 ) {
     // Use `coop::unconstrained` so Tokio cooperative preemption cannot spuriously return
     // `Pending` and drop an already-buffered ack during abort (`T10`).
-    while let Some(Some(Ok(proto_ack))) =
-        tokio::task::coop::unconstrained(acks.next()).now_or_never()
-    {
-        if process_proto_ack(proto_ack, state, *send_cursor, context).is_err() {
+    while let Some(Some(Ok(frame))) = tokio::task::coop::unconstrained(acks.next()).now_or_never() {
+        if process_proto_ack(frame.msg, state, *send_cursor, context).is_err() {
             break;
         }
         *acked_in_attempt += 1;
@@ -1881,16 +1819,6 @@ fn drain_ready_acks(
 
 fn process_proto_ack(
     proto_ack: proto::AppendAck,
-    state: &mut SessionState,
-    send_cursor: usize,
-    context: &ErrorContext,
-) -> Result<(), AppendSessionError> {
-    let ack = AppendAck::try_from_proto(proto_ack, context.clone())?;
-    process_ack(ack, state, send_cursor, context)
-}
-
-fn process_ack(
-    ack: AppendAck,
     state: &mut SessionState,
     send_cursor: usize,
     context: &ErrorContext,
@@ -1909,6 +1837,12 @@ fn process_ack(
         )));
     };
 
+    let ack = AppendAck::try_from_proto(
+        proto_ack,
+        corresponding_append.record_count,
+        context.clone(),
+    )?;
+
     if state
         .prev_ack_end
         .is_some_and(|end| ack.start.seq_num < end.seq_num || ack.end.seq_num <= end.seq_num)
@@ -1918,9 +1852,6 @@ fn process_ack(
             context.clone(),
         )));
     }
-
-    ack.validate_record_count(corresponding_append.record_count, context)
-        .map_err(AppendSessionError::Protocol)?;
 
     let corresponding_append = state
         .inflight_appends
@@ -1938,15 +1869,13 @@ fn is_safe_to_retry(
     err: &AppendSessionError,
     policy: AppendRetryPolicy,
     attempt_may_have_side_effects: bool,
-    access_token_mode: AccessTokenMode,
+    refreshes_tokens: bool,
 ) -> bool {
     let policy_compliant = match policy {
         AppendRetryPolicy::All => true,
         AppendRetryPolicy::NoSideEffects => !attempt_may_have_side_effects,
     };
-    policy_compliant
-        && (err.is_retryable()
-            || (access_token_mode.is_refreshable() && err.is_authentication_error()))
+    policy_compliant && (err.is_retryable() || (refreshes_tokens && err.is_authentication_error()))
 }
 
 #[cfg(test)]
@@ -1959,11 +1888,12 @@ mod tests {
     use bytes::Bytes;
     use futures_util::poll;
     use http::StatusCode;
+    use s2_api::v1::stream::proto;
 
     use super::{AppendSessionError, is_safe_to_retry};
     use crate::{
         error::{ErrorContext, ServerError, TimeoutError, TransportError},
-        types::{AccessTokenMode, AppendRetryPolicy},
+        types::AppendRetryPolicy,
     };
 
     fn server_error(status: StatusCode, code: &str) -> AppendSessionError {
@@ -2014,29 +1944,20 @@ mod tests {
         let retryable = server_error(StatusCode::INTERNAL_SERVER_ERROR, "internal");
         let non_retryable = server_error(StatusCode::BAD_REQUEST, "bad_request");
         let policy = AppendRetryPolicy::All;
-        let static_mode = AccessTokenMode::Static;
 
-        assert!(is_safe_to_retry(&retryable, policy, true, static_mode));
-        assert!(!is_safe_to_retry(&non_retryable, policy, true, static_mode));
+        assert!(is_safe_to_retry(&retryable, policy, true, false));
+        assert!(!is_safe_to_retry(&non_retryable, policy, true, false));
 
         let unauthorized = server_error(StatusCode::UNAUTHORIZED, "authn");
-        #[cfg(feature = "_hidden")]
-        assert!(is_safe_to_retry(
-            &unauthorized,
-            policy,
-            true,
-            AccessTokenMode::Refreshable,
-        ));
-        assert!(!is_safe_to_retry(&unauthorized, policy, true, static_mode));
+        assert!(is_safe_to_retry(&unauthorized, policy, true, true));
+        assert!(!is_safe_to_retry(&unauthorized, policy, true, false));
 
-        #[cfg(feature = "_hidden")]
         let unrelated_unauthorized = server_error(StatusCode::UNAUTHORIZED, "other");
-        #[cfg(feature = "_hidden")]
         assert!(!is_safe_to_retry(
             &unrelated_unauthorized,
             policy,
             true,
-            AccessTokenMode::Refreshable,
+            true
         ));
     }
 
@@ -2045,14 +1966,13 @@ mod tests {
         let retryable = server_error(StatusCode::INTERNAL_SERVER_ERROR, "internal");
         let no_side_effect = server_error(StatusCode::TOO_MANY_REQUESTS, "rate_limited");
         let policy = AppendRetryPolicy::NoSideEffects;
-        let mode = AccessTokenMode::Static;
 
         // No possible side effects (e.g. nothing unacked sent, or definite error) -> safe.
-        assert!(is_safe_to_retry(&retryable, policy, false, mode));
-        assert!(is_safe_to_retry(&no_side_effect, policy, false, mode));
+        assert!(is_safe_to_retry(&retryable, policy, false, false));
+        assert!(is_safe_to_retry(&no_side_effect, policy, false, false));
 
         // Possible side effects -> not safe under NoSideEffects.
-        assert!(!is_safe_to_retry(&retryable, policy, true, mode));
+        assert!(!is_safe_to_retry(&retryable, policy, true, false));
         assert!(!is_safe_to_retry(
             &AppendSessionError::Timeout(TimeoutError::new(
                 "append acknowledgement timed out",
@@ -2060,7 +1980,7 @@ mod tests {
             )),
             policy,
             true,
-            mode,
+            false,
         ));
     }
 
@@ -2070,7 +1990,8 @@ mod tests {
 
         let lifecycle = SessionLifecycle::new();
         // Calling mark_closing() with zero subscribers must still observe closed=true later.
-        lifecycle.mark_closing();
+        assert!(lifecycle.mark_closing());
+        assert!(!lifecycle.mark_closing());
         assert!(lifecycle.is_closing_or_closed());
         lifecycle.wait_closing_or_closed().await;
 
@@ -2164,8 +2085,7 @@ mod tests {
     fn process_ack_preserves_inflight_batch_on_protocol_error() {
         use std::collections::VecDeque;
 
-        use super::{InflightAppend, SessionState, process_ack};
-        use crate::types::{AppendAck, StreamPosition};
+        use super::{InflightAppend, SessionState, process_proto_ack};
 
         let (_cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
         let (ack_tx, mut ack_rx) = tokio::sync::oneshot::channel();
@@ -2186,14 +2106,20 @@ mod tests {
             unacked_batches: unacked_batches.clone(),
         };
         let ctx = ErrorContext::default();
+        let pos = |seq_num| {
+            Some(proto::StreamPosition {
+                seq_num,
+                timestamp: 1,
+            })
+        };
 
         // send_cursor == 0 rejects unsolicited ack without popping inflight_appends.
-        let ok_ack = AppendAck::new(
-            StreamPosition::new(0, 1),
-            StreamPosition::new(1, 1),
-            StreamPosition::new(1, 1),
-        );
-        let err = process_ack(ok_ack.clone(), &mut state, 0, &ctx).unwrap_err();
+        let ok_ack = proto::AppendAck {
+            start: pos(0),
+            end: pos(1),
+            tail: pos(1),
+        };
+        let err = process_proto_ack(ok_ack, &mut state, 0, &ctx).unwrap_err();
         assert!(matches!(err, AppendSessionError::Protocol(_)));
         assert_eq!(state.inflight_appends.len(), 1);
         assert_eq!(
@@ -2202,18 +2128,18 @@ mod tests {
         );
 
         // Wrong record count (2 instead of 1) rejects without popping inflight_appends.
-        let bad_ack = AppendAck::new(
-            StreamPosition::new(0, 1),
-            StreamPosition::new(2, 1),
-            StreamPosition::new(2, 1),
-        );
-        let err = process_ack(bad_ack, &mut state, 1, &ctx).unwrap_err();
+        let bad_ack = proto::AppendAck {
+            start: pos(0),
+            end: pos(2),
+            tail: pos(2),
+        };
+        let err = process_proto_ack(bad_ack, &mut state, 1, &ctx).unwrap_err();
         assert!(matches!(err, AppendSessionError::Protocol(_)));
         assert_eq!(state.inflight_appends.len(), 1);
         assert!(ack_rx.try_recv().is_err());
 
         // Valid ack succeeds and delivers through ack_tx.
-        process_ack(ok_ack, &mut state, 1, &ctx).unwrap();
+        process_proto_ack(ok_ack, &mut state, 1, &ctx).unwrap();
         assert!(state.inflight_appends.is_empty());
         assert_eq!(
             unacked_batches.load(std::sync::atomic::Ordering::Relaxed),

@@ -15,7 +15,7 @@ use s2_api::v1::stream::proto::{
 };
 use s2_sdk::{
     error::{ReadError, ReadSessionError},
-    read_session::{ReadSessionConfig, ReadSessionRetryPolicy},
+    read_session::{ReadSession, ReadSessionConfig, ReadSessionRetryPolicy},
     types::{EncryptionKey, ReadFrom, ReadInput, RetryConfig},
 };
 
@@ -173,7 +173,7 @@ async fn spec_r5_r6_r7_r8_read_session_records_batches_readahead_state_and_caugh
         let break_conn = break_conn.clone();
         let allow_reconnect_hb = allow_reconnect_hb.clone();
         let attempt_num = attempt_num.clone();
-        move |_conn_id, _req, mut respond| {
+        move |_conn_id, _req, respond| {
             let opened_notify = opened_notify.clone();
             let send_step4_hb = send_step4_hb.clone();
             let send_step5_rec5 = send_step5_rec5.clone();
@@ -182,39 +182,28 @@ async fn spec_r5_r6_r7_r8_read_session_records_batches_readahead_state_and_caugh
             let attempt_num = attempt_num.clone();
             async move {
                 let idx = attempt_num.fetch_add(1, Ordering::SeqCst) + 1;
-                let resp = Response::builder()
-                    .status(200)
-                    .header("content-type", "s2s/proto")
-                    .body(())
-                    .unwrap();
-                let Ok(mut send) = respond.send_response(resp, false) else {
+                let Some(mut s2s) = S2sResponder::open(respond) else {
                     return;
                 };
                 if idx == 1 {
                     opened_notify.notify_one();
                     // Records 0-4 with tail 5
-                    let _ = send.send_data(
-                        encode_s2s_regular_frame(
-                            &proto_read_batch_records(&[0, 1, 2, 3, 4], Some(5)),
-                            false,
-                        ),
+                    s2s.send_regular(
+                        &proto_read_batch_records(&[0, 1, 2, 3, 4], Some(5)),
+                        false,
                         false,
                     );
                     send_step4_hb.notified().await;
-                    let _ =
-                        send.send_data(encode_s2s_regular_frame(&proto_heartbeat(5), false), false);
+                    // Distinct timestamp lets the test verify step 4's heartbeat was received.
+                    s2s.send_regular(&proto_heartbeat_at(5, 2000), false, false);
                     send_step5_rec5.notified().await;
-                    let _ = send.send_data(
-                        encode_s2s_regular_frame(&proto_read_batch_records(&[5], Some(6)), false),
-                        false,
-                    );
+                    s2s.send_regular(&proto_read_batch_records(&[5], Some(6)), false, false);
                     break_conn.notified().await;
                     // Break active request with RST_STREAM
-                    send.send_reset(h2::Reason::INTERNAL_ERROR);
+                    s2s.reset(h2::Reason::INTERNAL_ERROR);
                 } else {
                     allow_reconnect_hb.notified().await;
-                    let _ =
-                        send.send_data(encode_s2s_regular_frame(&proto_heartbeat(6), false), false);
+                    s2s.send_regular(&proto_heartbeat(6), false, false);
                     std::future::pending::<()>().await;
                 }
             }
@@ -275,9 +264,21 @@ async fn spec_r5_r6_r7_r8_read_session_records_batches_readahead_state_and_caugh
     let pinned_cu = state.caught_up();
     assert_eq!(pinned_cu.clone().await.unwrap().seq_num, 5);
 
-    // Heartbeat tail=5 -> still caught up
+    // Heartbeat tail=5 (ts=2000) -> observed and still caught up
     send_step4_hb.notify_one();
-    tokio::time::sleep(Duration::from_millis(30)).await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if state
+                .last_observed_tail()
+                .is_some_and(|t| t.seq_num == 5 && t.timestamp == 2000)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("driver should observe step 4 heartbeat");
     assert!(state.is_caught_up());
 
     // Record 5 fetched with tail=6 BEFORE delivery -> next_seq_num=5, last_observed_tail=6,
@@ -338,21 +339,13 @@ async fn spec_r5_r6_r7_r8_read_session_records_batches_readahead_state_and_caugh
     ));
 
     // 2. R6a: ReadBatchSession delivers whole non-empty batches and skips empty heartbeats.
-    let batch_server = MockH2Server::start(|_conn_id, _req, mut respond| async move {
-        let resp = Response::builder()
-            .status(200)
-            .header("content-type", "s2s/proto")
-            .body(())
-            .unwrap();
-        let Ok(mut send) = respond.send_response(resp, false) else {
+    let batch_server = MockH2Server::start(|_conn_id, _req, respond| async move {
+        let Some(mut s2s) = S2sResponder::open(respond) else {
             return;
         };
-        let _ = send.send_data(encode_s2s_regular_frame(&proto_heartbeat(0), false), false);
-        let _ = send.send_data(
-            encode_s2s_regular_frame(&proto_read_batch_records(&[0, 1], Some(2)), false),
-            false,
-        );
-        let _ = send.send_data(encode_s2s_regular_frame(&proto_heartbeat(2), false), true);
+        s2s.send_regular(&proto_heartbeat(0), false, false);
+        s2s.send_regular(&proto_read_batch_records(&[0, 1], Some(2)), false, false);
+        s2s.send_regular(&proto_heartbeat(2), false, true);
     })
     .await;
 
@@ -375,20 +368,16 @@ async fn spec_r5_r6_r7_r8_read_session_records_batches_readahead_state_and_caugh
     assert!(!batch_session.is_caught_up());
 
     // 3. R6b: At most 1 batch decoded ahead of the batch currently being delivered!
-    let readahead_server = MockH2Server::start(|_conn_id, _req, mut respond| async move {
-        let resp = Response::builder()
-            .status(200)
-            .header("content-type", "s2s/proto")
-            .body(())
-            .unwrap();
-        let Ok(mut send) = respond.send_response(resp, false) else {
+    let readahead_server = MockH2Server::start(|_conn_id, _req, respond| async move {
+        let Some(mut s2s) = S2sResponder::open(respond) else {
             return;
         };
         for b_idx in 0u64..4 {
             let s0 = b_idx * 2;
             let s1 = s0 + 1;
-            let _ = send.send_data(
-                encode_s2s_regular_frame(&proto_read_batch_records(&[s0, s1], Some(s1 + 1)), false),
+            s2s.send_regular(
+                &proto_read_batch_records(&[s0, s1], Some(s1 + 1)),
+                false,
                 false,
             );
         }
@@ -406,44 +395,62 @@ async fn spec_r5_r6_r7_r8_read_session_records_batches_readahead_state_and_caugh
         )
         .unwrap();
 
+    async fn wait_and_assert_tail(session: &ReadSession, expected: u64, msg: &str) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while session.last_observed_tail().map(|t| t.seq_num) != Some(expected) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "{msg}: timed out waiting for tail {expected}, got {:?}",
+                session.last_observed_tail()
+            )
+        });
+        // Settle briefly to verify the driver does not decode past the 1-batch-ahead cap.
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        assert_eq!(
+            session.last_observed_tail().map(|t| t.seq_num),
+            Some(expected),
+            "{msg}"
+        );
+    }
+
     // Before consuming anything, at most B0 (tail=2) is decoded into the 1-slot buffer.
-    tokio::time::sleep(Duration::from_millis(80)).await;
-    assert_eq!(
-        ra_session.last_observed_tail().map(|t| t.seq_num),
-        Some(2),
-        "R6b: before consumer pulls B0, driver must decode at most 1 batch (B0)"
-    );
+    wait_and_assert_tail(
+        &ra_session,
+        2,
+        "R6b: before consumer pulls B0, driver must decode at most 1 batch (B0)",
+    )
+    .await;
 
     // Pull record 0 of B0 -> now B0 is being delivered, so driver may decode at most B1 (tail=4),
     // NEVER B2 (tail=6) or B3 (tail=8)!
     assert_eq!(ra_session.next().await.unwrap().unwrap().seq_num, 0);
-    tokio::time::sleep(Duration::from_millis(80)).await;
-    assert_eq!(
-        ra_session.last_observed_tail().map(|t| t.seq_num),
-        Some(4),
-        "R6b: while delivering B0, driver must decode at most 1 batch ahead (B1)"
-    );
+    wait_and_assert_tail(
+        &ra_session,
+        4,
+        "R6b: while delivering B0, driver must decode at most 1 batch ahead (B1)",
+    )
+    .await;
 
     // Finish B0 (record 1) and pull record 2 of B1 -> driver decodes B2 (tail=6), NOT B3 (tail=8)!
     assert_eq!(ra_session.next().await.unwrap().unwrap().seq_num, 1);
     assert_eq!(ra_session.next().await.unwrap().unwrap().seq_num, 2);
-    tokio::time::sleep(Duration::from_millis(80)).await;
-    assert_eq!(
-        ra_session.last_observed_tail().map(|t| t.seq_num),
-        Some(6),
-        "R6b: while delivering B1, driver must decode at most 1 batch ahead (B2)"
-    );
+    wait_and_assert_tail(
+        &ra_session,
+        6,
+        "R6b: while delivering B1, driver must decode at most 1 batch ahead (B2)",
+    )
+    .await;
 }
 
 // spec: r1 R9, R9a, R9b, R9c, R9d, R10
 #[tokio::test]
 async fn spec_r9_r10_read_session_closing_buffered_delivery_and_abort() {
     let (basin_name, stream_name) = test_basin_and_stream();
-    let fast_retry_2 = RetryConfig::new()
-        .with_max_attempts(2)
-        .unwrap()
-        .with_min_base_delay(Duration::ZERO)
-        .with_max_base_delay(Duration::ZERO);
+    let fast_retry_2 = fast_retry_config(2);
 
     // 1. R9a + T9: Clean EOF WITHOUT any stop option is ConnectionLostError (retried!), whereas
     //    clean EOF WITH a stop option finishes cleanly.
@@ -600,49 +607,27 @@ async fn spec_r9_r10_read_session_closing_buffered_delivery_and_abort() {
 #[tokio::test]
 async fn spec_t7d_read_session_heartbeat_timeout_and_backpressure_pause() {
     let (basin_name, stream_name) = test_basin_and_stream();
-    let fast_retry_2 = RetryConfig::new()
-        .with_max_attempts(2)
-        .unwrap()
-        .with_min_base_delay(Duration::ZERO)
-        .with_max_base_delay(Duration::ZERO);
+    let fast_retry_2 = fast_retry_config(2);
 
     let attempts = Arc::new(AtomicUsize::new(0));
-    let initial_sent = Arc::new(tokio::sync::Notify::new());
     let server = MockH2Server::start({
         let attempts = attempts.clone();
-        let initial_sent = initial_sent.clone();
-        move |_conn_id, _req, mut respond| {
+        move |_conn_id, _req, respond| {
             let attempts = attempts.clone();
-            let initial_sent = initial_sent.clone();
             async move {
                 let idx = attempts.fetch_add(1, Ordering::SeqCst) + 1;
-                let resp = Response::builder()
-                    .status(200)
-                    .header("content-type", "s2s/proto")
-                    .body(())
-                    .unwrap();
-                let Ok(mut send) = respond.send_response(resp, false) else {
+                let Some(mut s2s) = S2sResponder::open(respond) else {
                     return;
                 };
                 if idx == 1 {
-                    // Send two batches immediately so B0 is delivered and B1 fills the 1-slot
-                    // read-ahead channel; then go silent!
-                    let _ = send.send_data(
-                        encode_s2s_regular_frame(&proto_read_batch_records(&[0, 1], None), false),
-                        false,
-                    );
-                    let _ = send.send_data(
-                        encode_s2s_regular_frame(&proto_read_batch_records(&[2], None), false),
-                        false,
-                    );
-                    initial_sent.notify_one();
+                    // Send two batches immediately so B0 is delivered and B1 (with tail=3) fills
+                    // the 1-slot read-ahead channel; then go silent!
+                    s2s.send_regular(&proto_read_batch_records(&[0, 1], None), false, false);
+                    s2s.send_regular(&proto_read_batch_records(&[2], Some(3)), false, false);
                     std::future::pending::<()>().await;
                 } else {
                     // On retry after heartbeat timeout, deliver record 3 and end cleanly.
-                    let _ = send.send_data(
-                        encode_s2s_regular_frame(&proto_read_batch_records(&[3], Some(4)), false),
-                        false,
-                    );
+                    s2s.send_regular(&proto_read_batch_records(&[3], Some(4)), false, false);
                     std::future::pending::<()>().await;
                 }
             }
@@ -662,11 +647,16 @@ async fn spec_t7d_read_session_heartbeat_timeout_and_backpressure_pause() {
 
     // Pull record 0 (record 1 stays in current_batch, record 2 fills the 1-slot channel).
     assert_eq!(session.next().await.unwrap().unwrap().seq_num, 0);
-    tokio::time::timeout(Duration::from_secs(2), initial_sent.notified())
-        .await
-        .expect("server must send both initial batches");
-    // Give the driver one turn to read B1 into the bounded 1-slot channel and park on reserve().
-    tokio::time::sleep(Duration::from_millis(20)).await;
+    // Deterministically wait until the driver has decoded B1 into the bounded 1-slot channel and
+    // is parked on `tx.reserve()` before pausing the Tokio clock.
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while session.last_observed_tail().map(|t| t.seq_num) != Some(3) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("driver must decode B1 into the bounded channel");
+    tokio::task::yield_now().await;
 
     // Advance 60s (> 20s heartbeat timeout!) while caller has NOT consumed buffered records.
     // T7d: backpressure time MUST NOT count toward the 20s heartbeat timeout!

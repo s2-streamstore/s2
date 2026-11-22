@@ -70,33 +70,6 @@ pub(crate) enum AccessToken {
     Provider(Arc<dyn AccessTokenProvider>),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AccessTokenMode {
-    Static,
-    #[cfg(feature = "_hidden")]
-    Refreshable,
-}
-
-impl AccessTokenMode {
-    pub(crate) fn is_refreshable(self) -> bool {
-        match self {
-            Self::Static => false,
-            #[cfg(feature = "_hidden")]
-            Self::Refreshable => true,
-        }
-    }
-}
-
-impl AccessToken {
-    pub(crate) fn mode(&self) -> AccessTokenMode {
-        match self {
-            Self::Static(_) => AccessTokenMode::Static,
-            #[cfg(feature = "_hidden")]
-            Self::Provider(_) => AccessTokenMode::Refreshable,
-        }
-    }
-}
-
 impl fmt::Debug for AccessToken {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -142,12 +115,9 @@ impl FromStr for EncryptionKey {
         if trimmed.is_empty() {
             return Err(ValidationError("encryption key must not be empty".into()));
         }
-        let decoded = SecretBox::from(Base64::decode_vec(trimmed).map_err(|_| {
+        let _decoded = SecretBox::from(Base64::decode_vec(trimmed).map_err(|_| {
             ValidationError("encryption key must be valid standard padded base64".into())
         })?);
-        if decoded.expose_secret().is_empty() {
-            return Err(ValidationError("encryption key must not be empty".into()));
-        }
         Ok(Self(SecretString::from(trimmed.to_owned())))
     }
 }
@@ -496,15 +466,11 @@ impl From<Compression> for CompressionAlgorithm {
 pub enum AppendRetryPolicy {
     /// Retry all appends. Use when duplicate records on the stream are acceptable.
     All,
-    /// Retry when it can be determined that the request had no side effects.
+    /// Retry only when the failed attempt certainly had no side effects.
     ///
-    /// Uses a frame-level signal to detect whether any body frames were consumed
-    /// by the HTTP transport. If no frames were sent, the server never saw the
-    /// request, so retry is safe and will not cause duplicate records.
-    ///
-    /// Certain server errors (`rate_limited`, `hot_server`) are also safe to
-    /// retry regardless of frame signal state, since they guarantee no mutation
-    /// occurred.
+    /// Retries only after a definite error (where
+    /// [`has_no_side_effects()`](crate::error::AppendError::has_no_side_effects) is `true`) or
+    /// when no unacked request/batch bytes were sent on the failed attempt.
     NoSideEffects,
 }
 
@@ -719,7 +685,7 @@ impl Http2Config {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 /// Configuration for [`S2`](crate::S2).
 pub struct S2Config {
     pub(crate) access_token: AccessToken,
@@ -733,6 +699,29 @@ pub struct S2Config {
     pub(crate) default_headers: HeaderMap,
     pub(crate) insecure_skip_cert_verification: bool,
     pub(crate) rustls_crypto_provider: Option<Arc<rustls::crypto::CryptoProvider>>,
+}
+
+impl fmt::Debug for S2Config {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("S2Config")
+            .field("access_token", &self.access_token)
+            .field("endpoints", &self.endpoints)
+            .field("http2", &self.http2)
+            .field("connection_timeout", &self.connection_timeout)
+            .field("request_timeout", &self.request_timeout)
+            .field("retry", &self.retry)
+            .field("compression", &self.compression)
+            .field("user_agent", &self.user_agent)
+            .field(
+                "insecure_skip_cert_verification",
+                &self.insecure_skip_cert_verification,
+            )
+            .field(
+                "rustls_crypto_provider",
+                &self.rustls_crypto_provider.as_ref().map(|_| ".."),
+            )
+            .finish_non_exhaustive()
+    }
 }
 
 impl S2Config {

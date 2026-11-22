@@ -751,6 +751,7 @@ async fn spec_a6_a9_outcome_table_all_five_scenarios_and_producer_passthrough() 
     // Helper: runs the exact 3-batch scenario (A=40 KiB, B=40 KiB, C=1 KiB) where A and B fill
     // the 65535-byte HTTP/2 initial stream flow-control window so A and B are guaranteed sent while
     // C is guaranteed accepted but NEVER sent!
+    #[derive(Clone, Copy)]
     enum Scenario {
         Reject412,
         FailStorage,
@@ -773,28 +774,16 @@ async fn spec_a6_a9_outcome_table_all_five_scenarios_and_producer_passthrough() 
         let attempt_num = Arc::new(AtomicUsize::new(0));
         let is_retry = matches!(scenario, Scenario::RetryThen412);
         let is_close = matches!(scenario, Scenario::ClientClose);
-        let scenario_code = match scenario {
-            Scenario::Reject412 => 1,
-            Scenario::FailStorage => 2,
-            Scenario::ConnectionLost => 3,
-            Scenario::RetryThen412 => 4,
-            Scenario::ClientClose => 5,
-        };
 
         let server = MockH2Server::start({
             let ab_sent = ab_sent.clone();
             let attempt_num = attempt_num.clone();
-            move |_conn_id, req, mut respond| {
+            move |_conn_id, req, respond| {
                 let ab_sent = ab_sent.clone();
                 let attempt_num = attempt_num.clone();
                 async move {
                     let n = attempt_num.fetch_add(1, Ordering::SeqCst);
-                    let resp = Response::builder()
-                        .status(200)
-                        .header("content-type", "s2s/proto")
-                        .body(())
-                        .unwrap();
-                    let Ok(mut send) = respond.send_response(resp, false) else {
+                    let Some(mut s2s) = S2sResponder::open(respond) else {
                         return;
                     };
                     let mut body = req.into_body();
@@ -802,43 +791,30 @@ async fn spec_a6_a9_outcome_table_all_five_scenarios_and_producer_passthrough() 
                     // least the first chunk of B (40 KiB) are guaranteed sent while the 65535-byte
                     // H2 window blocks C from ever leaving the SDK!
                     let _ = read_exact_h2_bytes(&mut body, 50 * 1024).await;
-                    match scenario_code {
-                        1 => {
-                            let _ = send.send_data(
-                                encode_s2s_terminal_frame(412, br#"{"seq_num_mismatch":99}"#),
-                                true,
-                            );
+                    match scenario {
+                        Scenario::Reject412 => {
+                            s2s.send_terminal(412, br#"{"seq_num_mismatch":99}"#);
                         }
-                        2 => {
-                            let _ = send.send_data(
-                                encode_s2s_terminal_frame(
-                                    500,
-                                    br#"{"code":"storage","message":"disk err"}"#,
-                                ),
-                                true,
-                            );
+                        Scenario::FailStorage => {
+                            s2s.send_terminal(500, br#"{"code":"storage","message":"disk err"}"#);
                         }
-                        3 => {
-                            let _ = send.send_data(Bytes::new(), true);
+                        Scenario::ConnectionLost => {
+                            s2s.send_eof();
                         }
-                        4 => {
+                        Scenario::RetryThen412 => {
                             if n == 0 {
                                 // Attempt 1: connection lost (indefinite) -> sets prior_uncertainty
                                 // on A and B (not C!).
-                                let _ = send.send_data(Bytes::new(), true);
+                                s2s.send_eof();
                             } else {
                                 // Attempt 2: server rejects A with definite 412.
-                                let _ = send.send_data(
-                                    encode_s2s_terminal_frame(412, br#"{"seq_num_mismatch":99}"#),
-                                    true,
-                                );
+                                s2s.send_terminal(412, br#"{"seq_num_mismatch":99}"#);
                             }
                         }
-                        5 => {
+                        Scenario::ClientClose => {
                             ab_sent.notify_one();
                             std::future::pending::<()>().await;
                         }
-                        _ => unreachable!(),
                     }
                 }
             }
@@ -846,12 +822,7 @@ async fn spec_a6_a9_outcome_table_all_five_scenarios_and_producer_passthrough() 
         .await;
 
         let retry = if is_retry {
-            RetryConfig::new()
-                .with_max_attempts(2)
-                .unwrap()
-                .with_min_base_delay(Duration::ZERO)
-                .with_max_base_delay(Duration::ZERO)
-                .with_append_retry_policy(AppendRetryPolicy::All)
+            fast_retry_config(2).with_append_retry_policy(AppendRetryPolicy::All)
         } else {
             no_retry_config()
         };

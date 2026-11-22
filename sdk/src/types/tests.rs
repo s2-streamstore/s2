@@ -726,8 +726,13 @@ proptest! {
         end in proptest::option::of(proto_stream_position_strategy()),
         tail in proptest::option::of(proto_stream_position_strategy()),
     ) {
+        let expected = match (start, end) {
+            (Some(s), Some(e)) if e.seq_num >= s.seq_num => e.seq_num - s.seq_num,
+            _ => 1,
+        };
         let res = AppendAck::try_from_proto(
             api::stream::proto::AppendAck { start, end, tail },
+            expected,
             crate::error::ErrorContext::default(),
         );
         match (start, end, tail) {
@@ -739,6 +744,12 @@ proptest! {
                 prop_assert_eq!(ack.end.timestamp, e.timestamp);
                 prop_assert_eq!(ack.tail.seq_num, t.seq_num);
                 prop_assert_eq!(ack.tail.timestamp, t.timestamp);
+                let wrong_count = AppendAck::try_from_proto(
+                    api::stream::proto::AppendAck { start, end, tail },
+                    expected.wrapping_add(1),
+                    crate::error::ErrorContext::default(),
+                );
+                prop_assert!(wrong_count.is_err());
             }
             _ => {
                 prop_assert!(res.is_err());
@@ -875,4 +886,35 @@ fn basin_reconfiguration_reset_booleans() {
         json,
         r#"{"create_stream_on_append":null,"create_stream_on_read":null}"#
     );
+}
+
+#[test]
+fn account_metrics_query_repeats_token_id() {
+    let request = api::metrics::AccountMetricSetRequest {
+        set: api::metrics::AccountMetricSet::TokenActivity,
+        start: None,
+        end: None,
+        interval: None,
+        token_ids: vec!["a,b".parse().unwrap(), "c&d".parse().unwrap()],
+    };
+
+    let query = serde_urlencoded::to_string(&request).unwrap();
+    assert_eq!(query, "set=token-activity&token_id=a%2Cb&token_id=c%26d");
+
+    let parsed: api::metrics::AccountMetricSetRequest = serde_urlencoded::from_str(&query).unwrap();
+    assert_eq!(parsed.token_ids, request.token_ids);
+    assert!(
+        serde_urlencoded::from_str::<api::metrics::AccountMetricSetRequest>(
+            "set=token-activity&set=account-ops"
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn config_debug_does_not_dump_rustls_crypto_provider_details() {
+    let config = S2Config::new("super-secret-token");
+    let debug = format!("{config:?}");
+    assert!(!debug.contains("super-secret-token"));
+    assert!(!debug.contains("cipher_suites"));
 }

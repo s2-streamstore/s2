@@ -13,7 +13,6 @@ use s2_common::{
     basin::{BasinName, BasinNamePrefix, BasinNameStartAfter},
     location::LocationName,
     maybe::Maybe,
-    resources::ProvisionResult,
     stream::{StreamName, StreamNamePrefix, StreamNameStartAfter},
 };
 
@@ -31,9 +30,9 @@ pub struct Page<T> {
 }
 
 impl<T> Page<T> {
-    pub(crate) fn new(values: impl Into<Vec<T>>, has_more: bool) -> Self {
+    pub(crate) fn from_api<U: Into<T>>(values: Vec<U>, has_more: bool) -> Self {
         Self {
-            values: values.into(),
+            values: values.into_iter().map(Into::into).collect(),
             has_more,
         }
     }
@@ -562,9 +561,10 @@ impl From<CreateBasinInput> for api::basin::CreateBasinRequest {
 pub struct EnsureBasinInput {
     /// Basin name.
     pub name: BasinName,
-    /// Configuration for the basin.
+    /// Desired full configuration for the basin.
     ///
-    /// See [`BasinConfig`] for defaults.
+    /// Unlike [`reconfigure_basin`](crate::S2::reconfigure_basin), omitted fields are reset to
+    /// their server defaults when ensuring an existing basin.
     pub config: Option<BasinConfig>,
     /// Location of the basin.
     ///
@@ -583,7 +583,7 @@ impl EnsureBasinInput {
         }
     }
 
-    /// Set the configuration for the basin.
+    /// Set the full desired configuration for the basin (omitted fields reset to defaults).
     pub fn with_config(self, config: BasinConfig) -> Self {
         Self {
             config: Some(config),
@@ -598,20 +598,17 @@ impl EnsureBasinInput {
             ..self
         }
     }
-}
 
-impl From<EnsureBasinInput> for (BasinName, Option<api::basin::EnsureBasinRequest>) {
-    fn from(value: EnsureBasinInput) -> Self {
-        let config = value.config;
-        let request = if config.is_some() || value.location.is_some() {
+    pub(crate) fn into_parts(self) -> (BasinName, Option<api::basin::EnsureBasinRequest>) {
+        let request = if self.config.is_some() || self.location.is_some() {
             Some(api::basin::EnsureBasinRequest {
-                config: config.map(Into::into),
-                location: value.location,
+                config: self.config.map(Into::into),
+                location: self.location,
             })
         } else {
             None
         };
-        (value.name, request)
+        (self.name, request)
     }
 }
 
@@ -642,14 +639,12 @@ impl<T> EnsureOutput<T> {
             Self::Created(info) | Self::Updated(info) | Self::Noop(info) => info,
         }
     }
-}
 
-impl<T> From<ProvisionResult<T>> for EnsureOutput<T> {
-    fn from(result: ProvisionResult<T>) -> Self {
-        match result {
-            ProvisionResult::Created(info) => EnsureOutput::Created(info),
-            ProvisionResult::Updated(info) => EnsureOutput::Updated(info),
-            ProvisionResult::Noop(info) => EnsureOutput::Noop(info),
+    pub(crate) fn map<U>(self, f: impl FnOnce(T) -> U) -> EnsureOutput<U> {
+        match self {
+            Self::Created(info) => EnsureOutput::Created(f(info)),
+            Self::Updated(info) => EnsureOutput::Updated(f(info)),
+            Self::Noop(info) => EnsureOutput::Noop(f(info)),
         }
     }
 }
@@ -1360,9 +1355,11 @@ impl From<CreateStreamInput> for api::stream::CreateStreamRequest {
 pub struct EnsureStreamInput {
     /// Stream name.
     pub name: StreamName,
-    /// Configuration for the stream.
+    /// Desired full configuration for the stream.
     ///
-    /// See [`StreamConfig`] for defaults.
+    /// Unlike [`reconfigure_stream`](crate::S2Basin::reconfigure_stream), omitted fields are reset
+    /// to their defaults (inheriting the basin's default stream configuration) when ensuring an
+    /// existing stream.
     pub config: Option<StreamConfig>,
 }
 
@@ -1372,17 +1369,15 @@ impl EnsureStreamInput {
         Self { name, config: None }
     }
 
-    /// Set the configuration for the stream.
+    /// Set the full desired configuration for the stream (omitted fields reset to defaults).
     pub fn with_config(self, config: StreamConfig) -> Self {
         Self {
             config: Some(config),
             ..self
         }
     }
-}
 
-impl From<EnsureStreamInput> for (StreamName, Option<api::config::StreamConfig>) {
-    fn from(value: EnsureStreamInput) -> Self {
-        (value.name, value.config.map(Into::into))
+    pub(crate) fn into_parts(self) -> (StreamName, Option<api::config::StreamConfig>) {
+        (self.name, self.config.map(Into::into))
     }
 }
