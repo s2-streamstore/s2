@@ -1,12 +1,23 @@
-use http::HeaderValue;
-use s2_api::v1 as api;
+use std::{future::Future, sync::Arc, time::Duration};
+
+use http::{
+    HeaderValue, Uri,
+    header::{ACCEPT, CONTENT_TYPE},
+};
+use s2_api::v1::{self as api, config::STREAM_CONFIG_HEADER};
+use s2_common::encryption::S2_ENCRYPTION_KEY_HEADER;
 
 use crate::{
-    api::{AccountClient, BaseClient, BasinClient},
-    error::{AppendError, ClientClosedError, ErrorContext, ReadError, RequestError},
+    api::{
+        ACCEPT_PROTO, BaseClient, BasinClient, CONTENT_TYPE_PROTO, S2_REQUEST_TOKEN, set_header_opt,
+    },
+    client,
+    error::{
+        AppendError, ClientClosedError, ErrorCode, ErrorContext, OpScope, ReadError, RequestError,
+    },
     producer::{Producer, ProducerConfig},
     session::{
-        self, AppendSession, AppendSessionConfig, ReadBatchSession, ReadSession, ReadSessionConfig,
+        AppendSession, AppendSessionConfig, ReadBatchSession, ReadSession, ReadSessionConfig,
         StreamHeaders,
     },
     types::{
@@ -31,10 +42,49 @@ fn encode_stream_config(config: &StreamConfig) -> HeaderValue {
     api::config::StreamConfig::from(config.clone()).to_header_value()
 }
 
+fn paginate_list<Item, Cursor, Fetch, Fut, Advance, Keep>(
+    mut cursor: Cursor,
+    fetch: Fetch,
+    advance: Advance,
+    keep: Keep,
+) -> ListStream<Item>
+where
+    Item: Send + 'static,
+    Cursor: Clone + Send + 'static,
+    Fetch: Fn(Cursor) -> Fut + Send + 'static,
+    Fut: Future<Output = Result<Page<Item>, RequestError>> + Send + 'static,
+    Advance: Fn(&mut Cursor, &Item) + Send + 'static,
+    Keep: Fn(&Item) -> bool + Send + 'static,
+{
+    ListStream::new(async_stream::try_stream! {
+        loop {
+            let page = fetch(cursor.clone()).await?;
+            let has_last = if let Some(last) = page.values.last() {
+                advance(&mut cursor, last);
+                true
+            } else {
+                false
+            };
+
+            for item in page.values {
+                if keep(&item) {
+                    yield item;
+                }
+            }
+
+            if !page.has_more || !has_last {
+                break;
+            }
+        }
+    })
+}
+
 #[derive(Debug, Clone)]
 /// An S2 account.
 pub struct S2 {
-    client: AccountClient,
+    base: BaseClient,
+    config: Arc<S2Config>,
+    base_url: Uri,
 }
 
 impl S2 {
@@ -53,10 +103,21 @@ impl S2 {
     }
 
     fn init_with_op(config: S2Config, op: &'static str) -> Result<Self, ValidationError> {
-        let base_client = BaseClient::init(&config).map_err(|e| init_error(e, op))?;
-        Ok(Self {
-            client: AccountClient::init(config, base_client),
-        })
+        let base = BaseClient::init(&config).map_err(|e| init_error(e, op))?;
+        Ok(Self::from_parts(config, base))
+    }
+
+    fn from_parts(config: S2Config, base: BaseClient) -> Self {
+        let base_url = config
+            .endpoints
+            .account_origin()
+            .parse()
+            .expect("valid account URI");
+        Self {
+            base,
+            config: Arc::new(config),
+            base_url,
+        }
     }
 
     #[doc(hidden)]
@@ -68,11 +129,13 @@ impl S2 {
         C::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
         C::Future: Send + 'static,
     {
-        let base_client = BaseClient::init_with_connector(&config, connector)
-            .map_err(|e| init_error(e, "S2::new"))?;
-        Ok(Self {
-            client: AccountClient::init(config, base_client),
-        })
+        let base = BaseClient::init_with_connector(&config, connector)
+            .map_err(|e| init_error(e, "S2::new_with_connector"))?;
+        Ok(Self::from_parts(config, base))
+    }
+
+    fn uri(&self, path: impl AsRef<str>) -> Uri {
+        client::uri_with_path(&self.base_url, path)
     }
 
     /// Close the client, aborting all active sessions and in-flight requests and terminating all
@@ -84,13 +147,13 @@ impl S2 {
     /// Dropping an [`S2`] without calling `close()` keeps it alive while any handle or session
     /// opened from it remains open.
     pub fn close(&self) {
-        self.client.close();
+        self.base.close();
     }
 
     /// Get an [`S2Basin`].
     pub fn basin(&self, name: BasinName) -> S2Basin {
         S2Basin {
-            client: self.client.basin_client(name),
+            client: BasinClient::init(name, self.config.clone(), self.base.clone()),
         }
     }
 
@@ -101,7 +164,15 @@ impl S2 {
         &self,
         input: ListBasinsInput,
     ) -> Result<Page<BasinInfo>, RequestError> {
-        let response = self.client.list_basins(input.into()).await?;
+        let req: api::basin::ListBasinsRequest = input.into();
+        let response: api::basin::ListBasinsResponse = self
+            .base
+            .unary(
+                self.base.get(self.uri("v1/basins")).query(&req).build(),
+                OpScope::account("list_basins", true),
+            )
+            .send_json()
+            .await?;
         Ok(Page::new(
             response
                 .basins
@@ -115,38 +186,36 @@ impl S2 {
     /// List all basins, paginating automatically.
     pub fn list_all_basins(&self, input: ListAllBasinsInput) -> ListStream<BasinInfo> {
         let s2 = self.clone();
-        let prefix = input.prefix;
-        let start_after = input.start_after;
         let include_deleted = input.include_deleted;
-        let mut input = ListBasinsInput::new()
-            .with_prefix(prefix)
-            .with_start_after(start_after);
-        ListStream::new(async_stream::try_stream! {
-            loop {
-                let page = s2.list_basins(input.clone()).await?;
-                let start_after = page.values.last().map(|info| info.name.clone().into());
-
-                for info in page.values {
-                    if !include_deleted && info.deleted_at.is_some() {
-                        continue;
-                    }
-                    yield info;
-                }
-
-                if page.has_more && let Some(start_after) = start_after {
-                    input = input.with_start_after(start_after);
-                } else {
-                    break;
-                }
-            }
-        })
+        let initial = ListBasinsInput::new()
+            .with_prefix(input.prefix)
+            .with_start_after(input.start_after);
+        paginate_list(
+            initial,
+            move |req| {
+                let s2 = s2.clone();
+                async move { s2.list_basins(req).await }
+            },
+            |req, last| req.start_after = last.name.clone().into(),
+            move |info| include_deleted || info.deleted_at.is_none(),
+        )
     }
 
     /// Create a basin.
     pub async fn create_basin(&self, input: CreateBasinInput) -> Result<BasinInfo, RequestError> {
-        let info = self
-            .client
-            .create_basin(input.into(), idempotency_token())
+        let req: api::basin::CreateBasinRequest = input.into();
+        let basin_name = req.basin.clone();
+        let info: api::basin::BasinInfo = self
+            .base
+            .unary(
+                self.base
+                    .post(self.uri("v1/basins"))
+                    .header(S2_REQUEST_TOKEN, idempotency_token())
+                    .json(&req)
+                    .build(),
+                OpScope::basin("create_basin", basin_name.as_ref(), false),
+            )
+            .send_json()
             .await?;
         Ok(info.into())
     }
@@ -162,19 +231,37 @@ impl S2 {
         &self,
         input: EnsureBasinInput,
     ) -> Result<EnsureOutput<BasinInfo>, RequestError> {
-        let (name, request) = input.into();
-        Ok(self
-            .client
-            .ensure_basin(name, request)
-            .await?
-            .map(BasinInfo::from)
-            .into())
+        let (name, body) = input.into();
+        let url = self.uri(format!("v1/basins/{name}"));
+        let req = match body {
+            Some(body) => self.base.put(url).json(&body).build(),
+            None => self.base.put(url).build(),
+        };
+        let result = self
+            .base
+            .unary(req, OpScope::basin("ensure_basin", name.as_ref(), false))
+            .send_ensure::<api::basin::BasinInfo>()
+            .await?;
+        Ok(result.map(BasinInfo::from).into())
+    }
+
+    async fn get_basin_config_raw(
+        &self,
+        name: BasinName,
+    ) -> Result<api::config::BasinConfig, RequestError> {
+        let url = self.uri(format!("v1/basins/{name}"));
+        self.base
+            .unary(
+                self.base.get(url).build(),
+                OpScope::basin("get_basin_config", name.as_ref(), true),
+            )
+            .send_json()
+            .await
     }
 
     /// Get basin configuration.
     pub async fn get_basin_config(&self, name: BasinName) -> Result<BasinConfig, RequestError> {
-        let config = self.client.get_basin_config(name).await?;
-        Ok(config.into())
+        Ok(self.get_basin_config_raw(name).await?.into())
     }
 
     #[doc(hidden)]
@@ -183,14 +270,21 @@ impl S2 {
         &self,
         name: BasinName,
     ) -> Result<api::config::BasinConfig, RequestError> {
-        Ok(self.client.get_basin_config(name).await?)
+        self.get_basin_config_raw(name).await
     }
 
     /// Delete a basin.
     ///
     /// Succeeds if the basin is already being deleted or does not exist.
     pub async fn delete_basin(&self, name: BasinName) -> Result<(), RequestError> {
-        Ok(self.client.delete_basin(name).await?)
+        let url = self.uri(format!("v1/basins/{name}"));
+        self.base
+            .unary(
+                self.base.delete(url).build(),
+                OpScope::basin("delete_basin", name.as_ref(), false),
+            )
+            .send_delete(ErrorCode::BasinNotFound)
+            .await
     }
 
     /// Reconfigure a basin.
@@ -199,8 +293,34 @@ impl S2 {
         name: BasinName,
         config: BasinReconfiguration,
     ) -> Result<BasinConfig, RequestError> {
-        let config = self.client.reconfigure_basin(name, config.into()).await?;
+        let req: api::config::BasinReconfiguration = config.into();
+        let url = self.uri(format!("v1/basins/{name}"));
+        let config: api::config::BasinConfig = self
+            .base
+            .unary(
+                self.base.patch(url).json(&req).build(),
+                OpScope::basin("reconfigure_basin", name.as_ref(), false),
+            )
+            .send_json()
+            .await?;
         Ok(config.into())
+    }
+
+    async fn list_access_tokens_raw(
+        &self,
+        input: ListAccessTokensInput,
+    ) -> Result<api::access::ListAccessTokensResponse, RequestError> {
+        let req: api::access::ListAccessTokensRequest = input.into();
+        self.base
+            .unary(
+                self.base
+                    .get(self.uri("v1/access-tokens"))
+                    .query(&req)
+                    .build(),
+                OpScope::account("list_access_tokens", true),
+            )
+            .send_json()
+            .await
     }
 
     /// List a page of access tokens.
@@ -210,7 +330,7 @@ impl S2 {
         &self,
         input: ListAccessTokensInput,
     ) -> Result<Page<AccessTokenInfo>, RequestError> {
-        let response = self.client.list_access_tokens(input.into()).await?;
+        let response = self.list_access_tokens_raw(input).await?;
         Ok(Page::new(
             response
                 .access_tokens
@@ -227,7 +347,7 @@ impl S2 {
         &self,
         input: ListAccessTokensInput,
     ) -> Result<api::access::ListAccessTokensResponse, RequestError> {
-        Ok(self.client.list_access_tokens(input.into()).await?)
+        self.list_access_tokens_raw(input).await
     }
 
     /// List all access tokens, paginating automatically.
@@ -236,27 +356,18 @@ impl S2 {
         input: ListAllAccessTokensInput,
     ) -> ListStream<AccessTokenInfo> {
         let s2 = self.clone();
-        let prefix = input.prefix;
-        let start_after = input.start_after;
-        let mut input = ListAccessTokensInput::new()
-            .with_prefix(prefix)
-            .with_start_after(start_after);
-        ListStream::new(async_stream::try_stream! {
-            loop {
-                let page = s2.list_access_tokens(input.clone()).await?;
-
-                let start_after = page.values.last().map(|info| info.id.clone().into());
-                for info in page.values {
-                    yield info;
-                }
-
-                if page.has_more && let Some(start_after) = start_after {
-                    input = input.with_start_after(start_after);
-                } else {
-                    break;
-                }
-            }
-        })
+        let initial = ListAccessTokensInput::new()
+            .with_prefix(input.prefix)
+            .with_start_after(input.start_after);
+        paginate_list(
+            initial,
+            move |req| {
+                let s2 = s2.clone();
+                async move { s2.list_access_tokens(req).await }
+            },
+            |req, last| req.start_after = last.id.clone().into(),
+            |_| true,
+        )
     }
 
     /// Issue an access token.
@@ -264,7 +375,19 @@ impl S2 {
         &self,
         input: IssueAccessTokenInput,
     ) -> Result<String, RequestError> {
-        let response = self.client.issue_access_token(input.into()).await?;
+        let req: api::access::IssueAccessTokenRequest = input.into();
+        let response: api::access::IssueAccessTokenResponse = self
+            .base
+            .unary(
+                self.base
+                    .post(self.uri("v1/access-tokens"))
+                    .json(&req)
+                    .build(),
+                OpScope::account("issue_access_token", false),
+            )
+            .definite_retries_only()
+            .send_json()
+            .await?;
         Ok(response.access_token)
     }
 
@@ -272,7 +395,14 @@ impl S2 {
     ///
     /// Succeeds if the access token does not exist.
     pub async fn revoke_access_token(&self, id: AccessTokenId) -> Result<(), RequestError> {
-        Ok(self.client.revoke_access_token(id).await?)
+        let url = self.uri(format!("v1/access-tokens/{}", urlencoding::encode(&id)));
+        self.base
+            .unary(
+                self.base.delete(url).build(),
+                OpScope::account("revoke_access_token", false),
+            )
+            .send_delete(ErrorCode::AccessTokenNotFound)
+            .await
     }
 
     /// List a page of network policies.
@@ -283,7 +413,18 @@ impl S2 {
         &self,
         input: ListNetworkPoliciesInput,
     ) -> Result<Page<NetworkPolicyInfo>, RequestError> {
-        let response = self.client.list_network_policies(input.into()).await?;
+        let req: api::network_policy::ListNetworkPoliciesRequest = input.into();
+        let response: api::network_policy::ListNetworkPoliciesResponse = self
+            .base
+            .unary(
+                self.base
+                    .get(self.uri("v1/network-policies"))
+                    .query(&req)
+                    .build(),
+                OpScope::account("list_network_policies", true),
+            )
+            .send_json()
+            .await?;
         Ok(Page::new(
             response
                 .network_policies
@@ -300,27 +441,18 @@ impl S2 {
         input: ListAllNetworkPoliciesInput,
     ) -> ListStream<NetworkPolicyInfo> {
         let s2 = self.clone();
-        let prefix = input.prefix;
-        let start_after = input.start_after;
-        let mut input = ListNetworkPoliciesInput::new()
-            .with_prefix(prefix)
-            .with_start_after(start_after);
-        ListStream::new(async_stream::try_stream! {
-            loop {
-                let page = s2.list_network_policies(input.clone()).await?;
-
-                let start_after = page.values.last().map(|info| info.id.slug().clone().into());
-                for info in page.values {
-                    yield info;
-                }
-
-                if page.has_more && let Some(start_after) = start_after {
-                    input = input.with_start_after(start_after);
-                } else {
-                    break;
-                }
-            }
-        })
+        let initial = ListNetworkPoliciesInput::new()
+            .with_prefix(input.prefix)
+            .with_start_after(input.start_after);
+        paginate_list(
+            initial,
+            move |req| {
+                let s2 = s2.clone();
+                async move { s2.list_network_policies(req).await }
+            },
+            |req, last| req.start_after = last.id.slug().clone().into(),
+            |_| true,
+        )
     }
 
     /// Create a network policy.
@@ -329,12 +461,21 @@ impl S2 {
         slug: NetworkPolicySlug,
         policy: NetworkPolicy,
     ) -> Result<NetworkPolicyInfo, RequestError> {
-        let response = self
-            .client
-            .create_network_policy(api::network_policy::CreateNetworkPolicyRequest {
-                slug,
-                policy: policy.into(),
-            })
+        let req = api::network_policy::CreateNetworkPolicyRequest {
+            slug,
+            policy: policy.into(),
+        };
+        let response: api::network_policy::NetworkPolicyInfo = self
+            .base
+            .unary(
+                self.base
+                    .post(self.uri("v1/network-policies"))
+                    .json(&req)
+                    .build(),
+                OpScope::account("create_network_policy", false),
+            )
+            .definite_retries_only()
+            .send_json()
             .await?;
         Ok(response.into())
     }
@@ -344,7 +485,18 @@ impl S2 {
         &self,
         selector: NetworkPolicySelector,
     ) -> Result<NetworkPolicyInfo, RequestError> {
-        let response = self.client.get_network_policy(selector).await?;
+        let url = self.uri(format!(
+            "v1/network-policies/{}",
+            urlencoding::encode(&selector.to_string())
+        ));
+        let response: api::network_policy::NetworkPolicyInfo = self
+            .base
+            .unary(
+                self.base.get(url).build(),
+                OpScope::account("get_network_policy", true),
+            )
+            .send_json()
+            .await?;
         Ok(response.into())
     }
 
@@ -356,18 +508,43 @@ impl S2 {
         &self,
         selector: NetworkPolicySelector,
     ) -> Result<(), RequestError> {
-        Ok(self.client.delete_network_policy(selector).await?)
+        let url = self.uri(format!(
+            "v1/network-policies/{}",
+            urlencoding::encode(&selector.to_string())
+        ));
+        self.base
+            .unary(
+                self.base.delete(url).build(),
+                OpScope::account("delete_network_policy", false),
+            )
+            .send_delete(ErrorCode::NetworkPolicyNotFound)
+            .await
     }
 
     /// List locations.
     pub async fn list_locations(&self) -> Result<Vec<LocationInfo>, RequestError> {
-        let response = self.client.list_locations().await?;
+        let response: Vec<api::location::LocationInfo> = self
+            .base
+            .unary(
+                self.base.get(self.uri("v1/locations")).build(),
+                OpScope::account("list_locations", true),
+            )
+            .send_json()
+            .await?;
         Ok(response.into_iter().map(Into::into).collect())
     }
 
     /// Get the default location.
     pub async fn get_default_location(&self) -> Result<LocationInfo, RequestError> {
-        Ok(self.client.get_default_location().await?.into())
+        let response: api::location::LocationInfo = self
+            .base
+            .unary(
+                self.base.get(self.uri("v1/locations/default")).build(),
+                OpScope::account("get_default_location", true),
+            )
+            .send_json()
+            .await?;
+        Ok(response.into())
     }
 
     /// Set the default location.
@@ -375,7 +552,18 @@ impl S2 {
         &self,
         location: LocationName,
     ) -> Result<LocationInfo, RequestError> {
-        Ok(self.client.set_default_location(location).await?.into())
+        let response: api::location::LocationInfo = self
+            .base
+            .unary(
+                self.base
+                    .put(self.uri("v1/locations/default"))
+                    .json(&location)
+                    .build(),
+                OpScope::account("set_default_location", false),
+            )
+            .send_json()
+            .await?;
+        Ok(response.into())
     }
 
     /// Get account metrics.
@@ -383,7 +571,15 @@ impl S2 {
         &self,
         set: AccountMetricSet,
     ) -> Result<Vec<Metric>, RequestError> {
-        let response = self.client.get_account_metrics(set.into()).await?;
+        let req: api::metrics::AccountMetricSetRequest = set.into();
+        let response: api::metrics::MetricSetResponse = self
+            .base
+            .unary(
+                self.base.get(self.uri("v1/metrics")).query(&req).build(),
+                OpScope::account("get_account_metrics", true),
+            )
+            .send_json()
+            .await?;
         Ok(response.values.into_iter().map(Into::into).collect())
     }
 
@@ -393,7 +589,16 @@ impl S2 {
         basin: BasinName,
         set: BasinMetricSet,
     ) -> Result<Vec<Metric>, RequestError> {
-        let response = self.client.get_basin_metrics(basin, set.into()).await?;
+        let req: api::metrics::BasinMetricSetRequest = set.into();
+        let url = self.uri(format!("v1/metrics/{basin}"));
+        let response: api::metrics::MetricSetResponse = self
+            .base
+            .unary(
+                self.base.get(url).query(&req).build(),
+                OpScope::basin("get_basin_metrics", basin.as_ref(), true),
+            )
+            .send_json()
+            .await?;
         Ok(response.values.into_iter().map(Into::into).collect())
     }
 
@@ -404,9 +609,18 @@ impl S2 {
         stream: StreamName,
         set: StreamMetricSet,
     ) -> Result<Vec<Metric>, RequestError> {
-        let response = self
-            .client
-            .get_stream_metrics(basin, stream, set.into())
+        let req: api::metrics::StreamMetricSetRequest = set.into();
+        let url = self.uri(format!(
+            "v1/metrics/{basin}/{}",
+            urlencoding::encode(&stream)
+        ));
+        let response: api::metrics::MetricSetResponse = self
+            .base
+            .unary(
+                self.base.get(url).query(&req).build(),
+                OpScope::stream("get_stream_metrics", basin.as_ref(), stream.as_ref(), true),
+            )
+            .send_json()
             .await?;
         Ok(response.values.into_iter().map(Into::into).collect())
     }
@@ -442,7 +656,19 @@ impl S2Basin {
         &self,
         input: ListStreamsInput,
     ) -> Result<Page<StreamInfo>, RequestError> {
-        let response = self.client.list_streams(input.into()).await?;
+        let req: api::stream::ListStreamsRequest = input.into();
+        let response: api::stream::ListStreamsResponse = self
+            .client
+            .unary(
+                self.client
+                    .base()
+                    .get(self.client.uri("v1/streams"))
+                    .query(&req)
+                    .build(),
+                OpScope::basin("list_streams", self.client.name.as_ref(), true),
+            )
+            .send_json()
+            .await?;
         Ok(Page::new(
             response
                 .streams
@@ -456,31 +682,19 @@ impl S2Basin {
     /// List all streams, paginating automatically.
     pub fn list_all_streams(&self, input: ListAllStreamsInput) -> ListStream<StreamInfo> {
         let basin = self.clone();
-        let prefix = input.prefix;
-        let start_after = input.start_after;
         let include_deleted = input.include_deleted;
-        let mut input = ListStreamsInput::new()
-            .with_prefix(prefix)
-            .with_start_after(start_after);
-        ListStream::new(async_stream::try_stream! {
-            loop {
-                let page = basin.list_streams(input.clone()).await?;
-                let start_after = page.values.last().map(|info| info.name.clone().into());
-
-                for info in page.values {
-                    if !include_deleted && info.deleted_at.is_some() {
-                        continue;
-                    }
-                    yield info;
-                }
-
-                if page.has_more && let Some(start_after) = start_after {
-                    input = input.with_start_after(start_after);
-                } else {
-                    break;
-                }
-            }
-        })
+        let initial = ListStreamsInput::new()
+            .with_prefix(input.prefix)
+            .with_start_after(input.start_after);
+        paginate_list(
+            initial,
+            move |req| {
+                let basin = basin.clone();
+                async move { basin.list_streams(req).await }
+            },
+            |req, last| req.start_after = last.name.clone().into(),
+            move |info| include_deleted || info.deleted_at.is_none(),
+        )
     }
 
     /// Create a stream.
@@ -488,9 +702,25 @@ impl S2Basin {
         &self,
         input: CreateStreamInput,
     ) -> Result<StreamInfo, RequestError> {
-        let info = self
+        let req: api::stream::CreateStreamRequest = input.into();
+        let stream_name = req.stream.clone();
+        let info: api::stream::StreamInfo = self
             .client
-            .create_stream(input.into(), idempotency_token())
+            .unary(
+                self.client
+                    .base()
+                    .post(self.client.uri("v1/streams"))
+                    .header(S2_REQUEST_TOKEN, idempotency_token())
+                    .json(&req)
+                    .build(),
+                OpScope::stream(
+                    "create_stream",
+                    self.client.name.as_ref(),
+                    stream_name.as_ref(),
+                    false,
+                ),
+            )
+            .send_json()
             .await?;
         Ok(info.into())
     }
@@ -507,18 +737,53 @@ impl S2Basin {
         input: EnsureStreamInput,
     ) -> Result<EnsureOutput<StreamInfo>, RequestError> {
         let (name, config) = input.into();
-        Ok(self
+        let url = self
             .client
-            .ensure_stream(name, config)
-            .await?
-            .map(StreamInfo::from)
-            .into())
+            .uri(format!("v1/streams/{}", urlencoding::encode(&name)));
+        let req = match config {
+            Some(body) => self.client.base().put(url).json(&body).build(),
+            None => self.client.base().put(url).build(),
+        };
+        let result = self
+            .client
+            .unary(
+                req,
+                OpScope::stream(
+                    "ensure_stream",
+                    self.client.name.as_ref(),
+                    name.as_ref(),
+                    false,
+                ),
+            )
+            .send_ensure::<api::stream::StreamInfo>()
+            .await?;
+        Ok(result.map(StreamInfo::from).into())
+    }
+
+    async fn get_stream_config_raw(
+        &self,
+        name: StreamName,
+    ) -> Result<api::config::StreamConfig, RequestError> {
+        let url = self
+            .client
+            .uri(format!("v1/streams/{}", urlencoding::encode(&name)));
+        self.client
+            .unary(
+                self.client.base().get(url).build(),
+                OpScope::stream(
+                    "get_stream_config",
+                    self.client.name.as_ref(),
+                    name.as_ref(),
+                    true,
+                ),
+            )
+            .send_json()
+            .await
     }
 
     /// Get stream configuration.
     pub async fn get_stream_config(&self, name: StreamName) -> Result<StreamConfig, RequestError> {
-        let config = self.client.get_stream_config(name).await?;
-        Ok(config.into())
+        Ok(self.get_stream_config_raw(name).await?.into())
     }
 
     #[doc(hidden)]
@@ -527,14 +792,28 @@ impl S2Basin {
         &self,
         name: StreamName,
     ) -> Result<api::config::StreamConfig, RequestError> {
-        Ok(self.client.get_stream_config(name).await?)
+        self.get_stream_config_raw(name).await
     }
 
     /// Delete a stream.
     ///
     /// Succeeds if the stream is already being deleted or does not exist.
     pub async fn delete_stream(&self, name: StreamName) -> Result<(), RequestError> {
-        Ok(self.client.delete_stream(name).await?)
+        let url = self
+            .client
+            .uri(format!("v1/streams/{}", urlencoding::encode(&name)));
+        self.client
+            .unary(
+                self.client.base().delete(url).build(),
+                OpScope::stream(
+                    "delete_stream",
+                    self.client.name.as_ref(),
+                    name.as_ref(),
+                    false,
+                ),
+            )
+            .send_delete(ErrorCode::StreamNotFound)
+            .await
     }
 
     /// Reconfigure a stream.
@@ -543,7 +822,23 @@ impl S2Basin {
         name: StreamName,
         config: StreamReconfiguration,
     ) -> Result<StreamConfig, RequestError> {
-        let config = self.client.reconfigure_stream(name, config.into()).await?;
+        let req: api::config::StreamReconfiguration = config.into();
+        let url = self
+            .client
+            .uri(format!("v1/streams/{}", urlencoding::encode(&name)));
+        let config: api::config::StreamConfig = self
+            .client
+            .unary(
+                self.client.base().patch(url).json(&req).build(),
+                OpScope::stream(
+                    "reconfigure_stream",
+                    self.client.name.as_ref(),
+                    name.as_ref(),
+                    false,
+                ),
+            )
+            .send_json()
+            .await?;
         Ok(config.into())
     }
 }
@@ -584,9 +879,37 @@ impl S2Stream {
         }
     }
 
+    fn ensure_open(&self, op: &'static str, read_only: bool) -> Result<(), ClientClosedError> {
+        if self.client.is_closed() {
+            return Err(ClientClosedError::new(ErrorContext::stream(
+                op,
+                self.client.name.as_ref(),
+                self.name.as_ref(),
+                read_only,
+            )));
+        }
+        Ok(())
+    }
+
     /// Check tail position.
     pub async fn check_tail(&self) -> Result<StreamPosition, ReadError> {
-        let response = self.client.check_tail(&self.name).await?;
+        let url = self.client.uri(format!(
+            "v1/streams/{}/records/tail",
+            urlencoding::encode(&self.name)
+        ));
+        let response: api::stream::TailResponse = self
+            .client
+            .unary(
+                self.client.base().get(url).build(),
+                OpScope::stream(
+                    "check_tail",
+                    self.client.name.as_ref(),
+                    self.name.as_ref(),
+                    true,
+                ),
+            )
+            .send_json_as::<_, ReadError>()
+            .await?;
         Ok(response.tail.into())
     }
 
@@ -620,25 +943,45 @@ impl S2Stream {
         input: AppendInput,
         stream_config: Option<&HeaderValue>,
     ) -> Result<AppendAck, AppendError> {
-        let ctx = ErrorContext::stream(
+        use prost::Message as _;
+
+        let scope = OpScope::stream(
             "append",
             self.client.name.as_ref(),
             self.name.as_ref(),
             false,
         );
         let expected_records = input.records.len() as u64;
-        let ack = self
+        let proto_input: api::stream::proto::AppendInput = input.into();
+        let url = self.client.uri(format!(
+            "v1/streams/{}/records",
+            urlencoding::encode(&self.name)
+        ));
+        let req = self
             .client
-            .append(
-                &self.name,
-                input.into(),
-                self.encryption.as_ref(),
-                stream_config,
-                self.client.config.retry.append_retry_policy,
-            )
+            .base()
+            .post(url)
+            .header(CONTENT_TYPE, CONTENT_TYPE_PROTO)
+            .header(ACCEPT, ACCEPT_PROTO)
+            .body(proto_input.encode_to_vec())
+            .build()
+            .map(|mut req| {
+                set_header_opt(
+                    &mut req,
+                    &S2_ENCRYPTION_KEY_HEADER,
+                    self.encryption.as_ref(),
+                );
+                set_header_opt(&mut req, &STREAM_CONFIG_HEADER, stream_config);
+                req
+            });
+        let (ack, attempts): (api::stream::proto::AppendAck, u32) = self
+            .client
+            .unary(req, scope)
+            .append_retry_policy(self.client.config().retry.append_retry_policy)
+            .send_proto::<_, AppendError>()
             .await?;
-        let ack = AppendAck::try_from_proto(ack, ctx.clone())?;
-        ack.validate_record_count(expected_records, &ctx)?;
+        let ack = AppendAck::try_from_proto(ack, scope.context(attempts))?;
+        ack.validate_record_count(expected_records, &scope.context(attempts))?;
         Ok(ack)
     }
 
@@ -646,17 +989,41 @@ impl S2Stream {
     pub async fn read(&self, input: ReadInput) -> Result<ReadBatch, ReadError> {
         let (start, end, stream_config) = input.into_api_parts();
         let stream_config = stream_config.as_ref().map(encode_stream_config);
-        let batch = self
+        let scope = OpScope::stream("read", self.client.name.as_ref(), self.name.as_ref(), true);
+        let url = self.client.uri(format!(
+            "v1/streams/{}/records",
+            urlencoding::encode(&self.name)
+        ));
+        let mut builder = self
             .client
-            .read(
-                &self.name,
-                start,
-                end,
+            .base()
+            .get(url)
+            .header(ACCEPT, ACCEPT_PROTO)
+            .query(&start)
+            .query(&end);
+        if let Some(wait) = end.wait {
+            builder = builder.timeout(
+                self.client
+                    .base()
+                    .request_timeout()
+                    .saturating_add(Duration::from_secs(wait.into())),
+            );
+        }
+        let req = builder.build().map(|mut req| {
+            set_header_opt(
+                &mut req,
+                &S2_ENCRYPTION_KEY_HEADER,
                 self.encryption.as_ref(),
-                stream_config.as_ref(),
-            )
+            );
+            set_header_opt(&mut req, &STREAM_CONFIG_HEADER, stream_config.as_ref());
+            req
+        });
+        let (batch, _): (api::stream::proto::ReadBatch, u32) = self
+            .client
+            .unary(req, scope)
+            .send_proto::<_, ReadError>()
             .await?;
-        Ok(ReadBatch::from_api(batch))
+        Ok(batch.into())
     }
 
     /// Create an append session for submitting [`AppendInput`]s.
@@ -664,14 +1031,7 @@ impl S2Stream {
         &self,
         config: AppendSessionConfig,
     ) -> Result<AppendSession, ClientClosedError> {
-        if self.client.is_closed() {
-            return Err(ClientClosedError::new(ErrorContext::stream(
-                "append_session",
-                self.client.name.as_ref(),
-                self.name.as_ref(),
-                false,
-            )));
-        }
+        self.ensure_open("append_session", false)?;
         Ok(AppendSession::new(
             self.client.clone(),
             self.name.clone(),
@@ -682,14 +1042,7 @@ impl S2Stream {
 
     /// Create a producer for submitting individual [`AppendRecord`](crate::types::AppendRecord)s.
     pub fn producer(&self, config: ProducerConfig) -> Result<Producer, ClientClosedError> {
-        if self.client.is_closed() {
-            return Err(ClientClosedError::new(ErrorContext::stream(
-                "producer",
-                self.client.name.as_ref(),
-                self.name.as_ref(),
-                false,
-            )));
-        }
+        self.ensure_open("producer", false)?;
         Ok(Producer::new(
             self.client.clone(),
             self.name.clone(),
@@ -699,7 +1052,7 @@ impl S2Stream {
     }
 
     /// Create a continuous read session yielding individual
-    /// [`SequencedRecord`](crate::types::SequencedRecord)s (`R5`, `R6`).
+    /// [`SequencedRecord`](crate::types::SequencedRecord)s.
     ///
     /// Initiates the first request immediately without waiting for a response; request errors
     /// surface through iteration.
@@ -708,16 +1061,9 @@ impl S2Stream {
         input: ReadInput,
         config: ReadSessionConfig,
     ) -> Result<ReadSession, ClientClosedError> {
-        if self.client.is_closed() {
-            return Err(ClientClosedError::new(ErrorContext::stream(
-                "read_session",
-                self.client.name.as_ref(),
-                self.name.as_ref(),
-                true,
-            )));
-        }
+        self.ensure_open("read_session", true)?;
         let headers = self.headers(input.stream_config());
-        Ok(session::open_read_session(
+        Ok(ReadSession::open(
             self.client.clone(),
             self.name.clone(),
             headers,
@@ -726,7 +1072,7 @@ impl S2Stream {
         ))
     }
 
-    /// Create a continuous read session yielding whole non-empty [`ReadBatch`]es (`R6a`).
+    /// Create a continuous read session yielding whole non-empty [`ReadBatch`]es.
     ///
     /// Initiates the first request immediately without waiting for a response; request errors
     /// surface through iteration.
@@ -735,16 +1081,9 @@ impl S2Stream {
         input: ReadInput,
         config: ReadSessionConfig,
     ) -> Result<ReadBatchSession, ClientClosedError> {
-        if self.client.is_closed() {
-            return Err(ClientClosedError::new(ErrorContext::stream(
-                "read_batch_session",
-                self.client.name.as_ref(),
-                self.name.as_ref(),
-                true,
-            )));
-        }
+        self.ensure_open("read_batch_session", true)?;
         let headers = self.headers(input.stream_config());
-        Ok(session::open_read_batch_session(
+        Ok(ReadBatchSession::open(
             self.client.clone(),
             self.name.clone(),
             headers,

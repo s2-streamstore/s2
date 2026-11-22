@@ -1162,13 +1162,9 @@ async fn write_record(
     Ok(())
 }
 
-fn format_timestamp(ts: Timestamp) -> String {
-    ts.to_string()
-}
-
 /// ` (2h 5m ago)` for a time in the past, and nothing for one that is not.
 fn format_ago(ts: Timestamp) -> String {
-    metrics::format_age(ts, std::time::SystemTime::now())
+    metrics::format_age(ts, Timestamp::now())
         .map(|age| format!(" ({age} ago)"))
         .unwrap_or_default()
 }
@@ -1195,7 +1191,7 @@ fn print_token_activity(metrics: &[Metric]) {
         .map(|(terminal_size::Width(width), _)| width as usize);
     print!(
         "{}",
-        metrics::render_token_activity(&records, std::time::SystemTime::now(), width)
+        metrics::render_token_activity(&records, Timestamp::now(), width)
     );
     let rest: Vec<Metric> = rest.into_iter().cloned().collect();
     print_metrics(&rest, cli::MetricsOutput::Pretty, None);
@@ -1266,7 +1262,7 @@ fn print_metrics(
                     .values
                     .iter()
                     .map(|(ts, value)| AccumulationRow {
-                        interval_start: format_timestamp(*ts),
+                        interval_start: ts.to_string(),
                         count: value.to_string(),
                     })
                     .collect();
@@ -1307,12 +1303,7 @@ fn print_metrics(
                 }
             }
             Metric::Record(m) => {
-                println!(
-                    "{} @ {}{}:",
-                    m.name,
-                    format_timestamp(m.timestamp),
-                    format_ago(m.timestamp)
-                );
+                println!("{} @ {}{}:", m.name, m.timestamp, format_ago(m.timestamp));
                 for (field, value) in &m.fields {
                     println!("  {field}: {value}");
                 }

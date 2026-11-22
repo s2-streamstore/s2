@@ -1,25 +1,41 @@
 #![allow(dead_code)]
 
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     future::Future,
+    io::Write as _,
     net::SocketAddr,
+    path::{Path, PathBuf},
     pin::Pin,
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
+    time::Duration,
 };
 
-use async_compression::tokio::write::{GzipEncoder, ZstdEncoder};
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
+use flate2::{Compression as GzCompression, write::GzEncoder};
 use h2::server::SendResponse;
 use http::{HeaderName, HeaderValue, Request, Response, StatusCode};
-use s2_sdk::{
-    S2,
-    types::{AccountEndpoint, BasinEndpoint, RetryConfig, S2Config, S2Endpoints},
+use prost::Message as _;
+use s2_api::v1::stream::{
+    proto::{
+        AppendAck as ProtoAppendAck, ReadBatch as ProtoReadBatch,
+        SequencedRecord as ProtoSequencedRecord, StreamPosition as ProtoStreamPosition,
+    },
+    s2s::{FrameDecoder, SessionMessage},
 };
-use tokio::{io::AsyncWriteExt, net::TcpListener, task::JoinHandle};
+use s2_sdk::{
+    S2, S2Stream,
+    types::{
+        AppendInput, AppendRecord, AppendRecordBatch, BasinName, RetryConfig, S2Config,
+        S2Endpoints, StreamName,
+    },
+};
+use serde::Deserialize;
+use tokio::{net::TcpListener, sync::Notify, task::JoinHandle};
+use tokio_util::codec::Decoder;
 
 pub type BoxFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 pub type RequestHandler =
@@ -118,10 +134,7 @@ impl MockH2Server {
         Self::start(move |_conn_id, req, mut respond| {
             let queue = queue.clone();
             async move {
-                let mut body = req.into_body();
-                while let Some(Ok(chunk)) = body.data().await {
-                    let _ = body.flow_control().release_capacity(chunk.len());
-                }
+                let _ = drain_body(&mut req.into_body()).await;
                 let canned = {
                     let mut guard = queue.lock().expect("lock queue");
                     if guard.len() > 1 {
@@ -148,10 +161,6 @@ impl MockH2Server {
         .await
     }
 
-    pub fn addr(&self) -> SocketAddr {
-        self.addr
-    }
-
     pub fn endpoint_url(&self) -> String {
         format!("http://{}", self.addr)
     }
@@ -165,18 +174,18 @@ impl MockH2Server {
     }
 
     pub fn client(&self, retry: RetryConfig) -> S2 {
-        let ep = self.endpoint_url();
-        let endpoints = S2Endpoints::new(
-            AccountEndpoint::new(&ep).expect("valid account endpoint"),
-            BasinEndpoint::new(&ep).expect("valid basin endpoint"),
-        )
-        .expect("valid endpoints");
-        S2::new(
-            S2Config::new("test-token")
-                .with_endpoints(endpoints)
-                .with_retry(retry),
-        )
-        .expect("valid S2 client")
+        self.client_with(|cfg| cfg.with_retry(retry))
+    }
+
+    pub fn client_with(&self, configure: impl FnOnce(S2Config) -> S2Config) -> S2 {
+        let endpoints = S2Endpoints::for_endpoint(&self.endpoint_url()).expect("valid endpoints");
+        let config = configure(S2Config::new("test-token").with_endpoints(endpoints));
+        S2::new(config).expect("valid S2 client")
+    }
+
+    pub fn stream(&self, retry: RetryConfig) -> S2Stream {
+        let (basin, stream) = test_basin_and_stream();
+        self.client(retry).basin(basin).stream(stream)
     }
 }
 
@@ -186,16 +195,332 @@ impl Drop for MockH2Server {
     }
 }
 
-pub async fn gzip_bytes(input: &[u8]) -> Bytes {
-    let mut enc = GzipEncoder::new(Vec::new());
-    enc.write_all(input).await.expect("gzip write");
-    enc.shutdown().await.expect("gzip shutdown");
-    Bytes::from(enc.into_inner())
+/// Raw TCP listener that accepts connections and never sends a TLS ServerHello.
+pub struct StallingTlsServer {
+    addr: SocketAddr,
+    accepted: Arc<Notify>,
+    task: JoinHandle<()>,
 }
 
-pub async fn zstd_bytes(input: &[u8]) -> Bytes {
-    let mut enc = ZstdEncoder::new(Vec::new());
-    enc.write_all(input).await.expect("zstd write");
-    enc.shutdown().await.expect("zstd shutdown");
-    Bytes::from(enc.into_inner())
+impl StallingTlsServer {
+    pub async fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind stalling listener");
+        let addr = listener.local_addr().expect("stalling local_addr");
+        let accepted = Arc::new(Notify::new());
+        let accepted_tx = accepted.clone();
+        let task = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((sock, _)) = listener.accept().await {
+                held.push(sock);
+                accepted_tx.notify_waiters();
+            }
+        });
+        Self {
+            addr,
+            accepted,
+            task,
+        }
+    }
+
+    pub fn endpoint_url(&self) -> String {
+        format!("https://{}", self.addr)
+    }
+
+    pub async fn wait_accepted(&self) {
+        self.accepted.notified().await;
+    }
+
+    pub fn client_with(&self, configure: impl FnOnce(S2Config) -> S2Config) -> S2 {
+        let endpoints = S2Endpoints::for_endpoint(&self.endpoint_url()).expect("valid endpoints");
+        let config = configure(
+            S2Config::new("test-token")
+                .with_endpoints(endpoints)
+                .with_insecure_skip_cert_verification(true),
+        );
+        S2::new(config).expect("valid S2 client")
+    }
+}
+
+impl Drop for StallingTlsServer {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+/// Ergonomic wrapper around an open `s2s/proto` HTTP/2 response stream.
+pub struct S2sResponder(h2::SendStream<Bytes>);
+
+impl S2sResponder {
+    pub fn open(mut respond: SendResponse<Bytes>) -> Option<Self> {
+        let resp = Response::builder()
+            .status(200)
+            .header("content-type", "s2s/proto")
+            .body(())
+            .expect("valid s2s response");
+        respond.send_response(resp, false).ok().map(Self)
+    }
+
+    pub fn send_regular(&mut self, payload: &[u8], reconnect_advised: bool, end_stream: bool) {
+        let _ = self.0.send_data(
+            encode_s2s_regular_frame(payload, reconnect_advised),
+            end_stream,
+        );
+    }
+
+    pub fn send_terminal(&mut self, status: u16, body: &[u8]) {
+        let _ = self
+            .0
+            .send_data(encode_s2s_terminal_frame(status, body), true);
+    }
+
+    pub fn send_eof(&mut self) {
+        let _ = self.0.send_data(Bytes::new(), true);
+    }
+
+    pub fn reset(&mut self, reason: h2::Reason) {
+        self.0.send_reset(reason);
+    }
+}
+
+pub async fn drain_body(body: &mut h2::RecvStream) -> Bytes {
+    let mut out = BytesMut::new();
+    while let Some(Ok(chunk)) = body.data().await {
+        let len = chunk.len();
+        out.extend_from_slice(&chunk);
+        let _ = body.flow_control().release_capacity(len);
+    }
+    out.freeze()
+}
+
+pub fn send_json(mut respond: SendResponse<Bytes>, status: u16, body: impl Into<Bytes>) {
+    let resp = Response::builder()
+        .status(status)
+        .header("content-type", "application/json")
+        .body(())
+        .expect("valid json response");
+    if let Ok(mut send) = respond.send_response(resp, false) {
+        let _ = send.send_data(body.into(), true);
+    }
+}
+
+pub fn send_proto(mut respond: SendResponse<Bytes>, body: impl Into<Bytes>) {
+    let resp = Response::builder()
+        .status(200)
+        .header("content-type", "application/protobuf")
+        .body(())
+        .expect("valid proto response");
+    if let Ok(mut send) = respond.send_response(resp, false) {
+        let _ = send.send_data(body.into(), true);
+    }
+}
+
+pub fn send_empty(mut respond: SendResponse<Bytes>, status: u16) {
+    let resp = Response::builder()
+        .status(status)
+        .body(())
+        .expect("valid empty response");
+    let _ = respond.send_response(resp, true);
+}
+
+pub fn header_str<'a>(req: &'a Request<h2::RecvStream>, name: &str) -> Option<&'a str> {
+    req.headers().get(name).and_then(|v| v.to_str().ok())
+}
+
+pub fn query_pairs(uri: &http::Uri) -> BTreeMap<String, String> {
+    uri.query()
+        .and_then(|q| serde_urlencoded::from_str::<Vec<(String, String)>>(q).ok())
+        .map(|pairs| pairs.into_iter().collect())
+        .unwrap_or_default()
+}
+
+pub fn no_retry_config() -> RetryConfig {
+    RetryConfig::new()
+        .with_max_attempts(1)
+        .expect("max_attempts = 1")
+}
+
+pub fn fast_retry_config(max_attempts: u32) -> RetryConfig {
+    RetryConfig::new()
+        .with_max_attempts(max_attempts)
+        .expect("valid max_attempts")
+        .with_min_base_delay(Duration::ZERO)
+        .with_max_base_delay(Duration::ZERO)
+}
+
+pub fn test_basin_and_stream() -> (BasinName, StreamName) {
+    (
+        "test-basin".parse().expect("valid basin"),
+        "test-stream".parse().expect("valid stream"),
+    )
+}
+
+pub fn sample_append_input() -> AppendInput {
+    AppendInput::new(
+        AppendRecordBatch::try_from_iter([AppendRecord::new("payload").expect("valid record")])
+            .expect("valid batch"),
+    )
+}
+
+pub fn sized_append_input(body_len: usize) -> AppendInput {
+    AppendInput::new(
+        AppendRecordBatch::try_from_iter([AppendRecord::new(vec![b'x'; body_len]).unwrap()])
+            .unwrap(),
+    )
+}
+
+pub fn encode_s2s_terminal_frame(status: u16, body: &[u8]) -> Bytes {
+    let frame_len = 1 + 2 + body.len();
+    let mut out = Vec::with_capacity(3 + frame_len);
+    out.push(((frame_len >> 16) & 0xff) as u8);
+    out.push(((frame_len >> 8) & 0xff) as u8);
+    out.push((frame_len & 0xff) as u8);
+    out.push(0x80); // terminal, uncompressed
+    out.extend_from_slice(&status.to_be_bytes());
+    out.extend_from_slice(body);
+    Bytes::from(out)
+}
+
+pub fn encode_s2s_regular_frame(payload: &[u8], reconnect_advised: bool) -> Bytes {
+    let frame_len = 1 + payload.len();
+    let mut out = Vec::with_capacity(3 + frame_len);
+    out.push(((frame_len >> 16) & 0xff) as u8);
+    out.push(((frame_len >> 8) & 0xff) as u8);
+    out.push((frame_len & 0xff) as u8);
+    out.push(if reconnect_advised { 0x10 } else { 0x00 });
+    out.extend_from_slice(payload);
+    Bytes::from(out)
+}
+
+pub fn proto_append_ack(start: u64, end: u64) -> Vec<u8> {
+    ProtoAppendAck {
+        start: Some(ProtoStreamPosition {
+            seq_num: start,
+            timestamp: 1000,
+        }),
+        end: Some(ProtoStreamPosition {
+            seq_num: end,
+            timestamp: 1000,
+        }),
+        tail: Some(ProtoStreamPosition {
+            seq_num: end,
+            timestamp: 1000,
+        }),
+    }
+    .encode_to_vec()
+}
+
+pub fn proto_read_batch(seq_num: u64, tail_seq: u64) -> Vec<u8> {
+    ProtoReadBatch {
+        records: vec![ProtoSequencedRecord {
+            seq_num,
+            timestamp: 1000,
+            headers: vec![],
+            body: Bytes::from_static(b"rec"),
+        }],
+        tail: Some(ProtoStreamPosition {
+            seq_num: tail_seq,
+            timestamp: 1000,
+        }),
+    }
+    .encode_to_vec()
+}
+
+pub fn proto_read_batch_records(seq_nums: &[u64], tail_seq: Option<u64>) -> Vec<u8> {
+    ProtoReadBatch {
+        records: seq_nums
+            .iter()
+            .map(|&seq_num| ProtoSequencedRecord {
+                seq_num,
+                timestamp: 1000 + seq_num,
+                headers: vec![],
+                body: Bytes::from(format!("rec-{seq_num}")),
+            })
+            .collect(),
+        tail: tail_seq.map(|seq_num| ProtoStreamPosition {
+            seq_num,
+            timestamp: 1000 + seq_num,
+        }),
+    }
+    .encode_to_vec()
+}
+
+pub fn proto_heartbeat(tail_seq: u64) -> Vec<u8> {
+    proto_read_batch_records(&[], Some(tail_seq))
+}
+
+pub async fn read_exact_h2_bytes(body: &mut h2::RecvStream, min_bytes: usize) -> usize {
+    let mut total = 0;
+    while total < min_bytes {
+        match body.data().await {
+            Some(Ok(chunk)) => total += chunk.len(),
+            _ => break,
+        }
+    }
+    total
+}
+
+pub async fn read_one_s2s_frame(
+    body: &mut h2::RecvStream,
+    buf: &mut BytesMut,
+    release_flow_control: bool,
+) -> Option<SessionMessage> {
+    let mut decoder = FrameDecoder;
+    loop {
+        if let Ok(Some(msg)) = decoder.decode(buf) {
+            return Some(msg);
+        }
+        match body.data().await {
+            Some(Ok(chunk)) => {
+                let len = chunk.len();
+                buf.extend_from_slice(&chunk);
+                if release_flow_control {
+                    let _ = body.flow_control().release_capacity(len);
+                }
+            }
+            _ => return None,
+        }
+    }
+}
+
+pub fn gzip_bytes(input: &[u8]) -> Bytes {
+    let mut enc = GzEncoder::new(Vec::new(), GzCompression::default());
+    enc.write_all(input).expect("gzip write");
+    Bytes::from(enc.finish().expect("gzip finish"))
+}
+
+pub fn zstd_bytes(input: &[u8]) -> Bytes {
+    Bytes::from(zstd::bulk::compress(input, 0).expect("zstd compress"))
+}
+
+pub fn specs_path(rel: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../api/specs")
+        .join(rel)
+}
+
+pub fn read_json<T: for<'de> Deserialize<'de>>(rel: &str) -> T {
+    let path = specs_path(rel);
+    let data = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
+    serde_json::from_str(&data)
+        .unwrap_or_else(|e| panic!("failed to parse {}: {e}", path.display()))
+}
+
+pub fn decode_hex(hex: &str) -> Vec<u8> {
+    assert!(hex.len().is_multiple_of(2), "odd hex length: {hex}");
+    (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("valid hex byte"))
+        .collect()
+}
+
+pub fn encode_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        write!(out, "{b:02x}").unwrap();
+    }
+    out
 }

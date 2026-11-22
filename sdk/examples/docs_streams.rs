@@ -10,27 +10,21 @@ use s2_sdk::{
     producer::ProducerConfig,
     read_session::ReadSessionConfig,
     types::{
-        AppendInput, AppendRecord, AppendRecordBatch, BasinName, ReadFrom, ReadInput, S2Config,
-        StreamName,
+        AppendInput, AppendRecord, AppendRecordBatch, BasinName, ReadFrom, ReadInput, StreamName,
+        Timestamp,
     },
 };
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let access_token = std::env::var("S2_ACCESS_TOKEN")?;
     let basin_name: BasinName = std::env::var("S2_BASIN")?.parse()?;
 
-    let client = S2::new(S2Config::new(access_token))?;
+    let client = S2::from_env()?;
     let basin = client.basin(basin_name);
 
     // Create a temporary stream for examples
-    let stream_name: StreamName = format!(
-        "docs-streams-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_millis()
-    )
-    .parse()?;
+    let stream_name: StreamName =
+        format!("docs-streams-{}", Timestamp::now().as_millisecond()).parse()?;
     basin
         .create_stream(s2_sdk::types::CreateStreamInput::new(stream_name.clone()))
         .await?;
@@ -79,7 +73,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Wait for durability
     let ack = ticket.await?;
-    println!("Durable at seqNum {}", ack.start.seq_num);
+    println!("Durable at seq_num {}", ack.start.seq_num);
 
     session.close().await?;
     // ANCHOR_END: append-session
@@ -95,7 +89,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Get the exact sequence number
     let ack = ticket.await?;
-    println!("Record durable at seqNum {}", ack.seq_num);
+    println!("Record durable at seq_num {}", ack.seq_num);
 
     producer.close().await?;
     // ANCHOR_END: producer
@@ -119,7 +113,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ANCHOR: read-session
     let mut session = stream.read_session(
         ReadInput::new().with_from(ReadFrom::SeqNum(0)),
-        ReadSessionConfig::default(),
+        ReadSessionConfig::new(),
     )?;
 
     while let Some(record) = session.next().await {
@@ -132,7 +126,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Start reading from 10 records before the current tail
     let mut session = stream.read_session(
         ReadInput::new().with_from(ReadFrom::TailOffset(10)),
-        ReadSessionConfig::default(),
+        ReadSessionConfig::new(),
     )?;
 
     while let Some(record) = session.next().await {
@@ -143,13 +137,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ANCHOR: read-session-timestamp
     // Start reading from a specific timestamp
-    let one_hour_ago = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_millis() as u64
-        - 3600 * 1000;
+    let one_hour_ago = (Timestamp::now() - Duration::from_secs(3600))
+        .as_millisecond()
+        .max(0) as u64;
     let mut session = stream.read_session(
         ReadInput::new().with_from(ReadFrom::Timestamp(one_hour_ago)),
-        ReadSessionConfig::default(),
+        ReadSessionConfig::new(),
     )?;
 
     while let Some(record) = session.next().await {
@@ -160,15 +153,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ANCHOR: read-session-until
     // Read records until a specific timestamp
-    let one_hour_ago = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_millis() as u64
-        - 3600 * 1000;
+    let one_hour_ago = (Timestamp::now() - Duration::from_secs(3600))
+        .as_millisecond()
+        .max(0) as u64;
     let mut session = stream.read_session(
         ReadInput::new()
             .with_from(ReadFrom::SeqNum(0))
             .with_until(one_hour_ago),
-        ReadSessionConfig::default(),
+        ReadSessionConfig::new(),
     )?;
 
     while let Some(record) = session.next().await {
@@ -184,7 +176,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ReadInput::new()
             .with_from(ReadFrom::SeqNum(0))
             .with_wait(Duration::from_secs(30))?,
-        ReadSessionConfig::default(),
+        ReadSessionConfig::new(),
     )?;
 
     while let Some(record) = session.next().await {

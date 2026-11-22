@@ -1,8 +1,6 @@
-use std::{ops::Deref, str::FromStr};
+use compact_str::CompactString;
 
-use compact_str::{CompactString, ToCompactString};
-
-use super::ValidationError;
+use super::{ValidationError, strings::impl_validated_str};
 use crate::caps;
 
 fn validate_location_str(field_name: &str, location: &str) -> Result<(), ValidationError> {
@@ -42,12 +40,9 @@ impl LocationName {
 
         validate_location_str("name", location)
     }
-
-    fn try_from_compact(location: CompactString) -> Result<Self, ValidationError> {
-        Self::validate_str(&location)?;
-        Ok(Self(location))
-    }
 }
+
+impl_validated_str!(LocationName);
 
 #[cfg(feature = "utoipa")]
 impl utoipa::PartialSchema for LocationName {
@@ -62,83 +57,6 @@ impl utoipa::PartialSchema for LocationName {
 
 #[cfg(feature = "utoipa")]
 impl utoipa::ToSchema for LocationName {}
-
-impl serde::Serialize for LocationName {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_str(&self.0)
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for LocationName {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let s = CompactString::deserialize(deserializer)?;
-        Self::try_from_compact(s).map_err(serde::de::Error::custom)
-    }
-}
-
-impl AsRef<str> for LocationName {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
-impl Deref for LocationName {
-    type Target = str;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl TryFrom<String> for LocationName {
-    type Error = ValidationError;
-
-    fn try_from(location: String) -> Result<Self, Self::Error> {
-        Self::validate_str(&location)?;
-        Ok(Self(CompactString::from(location)))
-    }
-}
-
-impl TryFrom<&str> for LocationName {
-    type Error = ValidationError;
-
-    fn try_from(location: &str) -> Result<Self, Self::Error> {
-        location.parse()
-    }
-}
-
-impl FromStr for LocationName {
-    type Err = ValidationError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Self::validate_str(s)?;
-        Ok(Self(s.to_compact_string()))
-    }
-}
-
-impl std::fmt::Debug for LocationName {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl std::fmt::Display for LocationName {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl From<LocationName> for String {
-    fn from(value: LocationName) -> Self {
-        value.0.into_string()
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AwsPrivateNet {

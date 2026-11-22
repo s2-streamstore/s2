@@ -1,16 +1,9 @@
 use futures_util::{StreamExt, TryStreamExt};
-use s2_sdk::{
-    S2,
-    types::{ListAllBasinsInput, S2Config},
-};
+use s2_sdk::{S2, types::ListAllBasinsInput};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let access_token =
-        std::env::var("S2_ACCESS_TOKEN").map_err(|_| "S2_ACCESS_TOKEN env var not set")?;
-
-    let config = S2Config::new(access_token);
-    let s2 = S2::new(config)?;
+    let s2 = S2::from_env()?;
 
     let input = ListAllBasinsInput::new();
 

@@ -160,7 +160,7 @@ impl From<TimestampingConfig> for OptionalTimestampingConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct OptionalDeleteOnEmptyConfig {
     pub min_age: Option<Duration>,
 }

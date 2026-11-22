@@ -70,7 +70,7 @@ pub use s2_common::stream::StreamNamePrefix;
 /// See [`ListStreamsInput::start_after`]. It must not contain NUL bytes.
 pub use s2_common::stream::StreamNameStartAfter;
 
-pub(crate) use self::config::{AccessToken, AccessTokenMode, BasinAuthority};
+pub(crate) use self::config::{AccessToken, AccessTokenMode};
 pub use self::{access::*, config::*, metrics::*, network_policy::*, records::*, resources::*};
 
 pub(crate) const ONE_MIB: u32 = 1024 * 1024;
@@ -102,18 +102,16 @@ pub(crate) fn validate_metrics_timestamp(
     ts: Timestamp,
     field: &str,
 ) -> Result<u32, ValidationError> {
-    if ts < Timestamp::UNIX_EPOCH {
-        return Err(ValidationError(format!(
-            "{field} ({ts}) must be between 0 and {} Unix epoch seconds",
-            u32::MAX
-        )));
-    }
-    u32::try_from(ts.as_second()).map_err(|_| {
+    let err = || {
         ValidationError(format!(
             "{field} ({ts}) must be between 0 and {} Unix epoch seconds",
             u32::MAX
         ))
-    })
+    };
+    if ts < Timestamp::UNIX_EPOCH {
+        return Err(err());
+    }
+    u32::try_from(ts.as_second()).map_err(|_| err())
 }
 
 pub(crate) fn idempotency_token() -> String {

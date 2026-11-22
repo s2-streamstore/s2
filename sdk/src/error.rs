@@ -12,12 +12,11 @@ use std::{fmt, sync::Arc};
 
 pub use http::StatusCode;
 pub use s2_api::v1::error::ErrorCode;
+use s2_api::v1::stream::{TailResponse, s2s::TerminalMessage};
 pub use s2_common::ValidationError;
 
 use crate::{
-    api::{ApiError, ServerErrorBody},
     client,
-    retry::AppendRetryError,
     types::{FencingToken, StreamPosition},
 };
 
@@ -123,7 +122,13 @@ impl ErrorContext {
     }
 
     pub(crate) fn with_attempts(mut self, attempts: u32) -> Self {
-        self.inner_mut().attempts = attempts;
+        if self
+            .0
+            .as_ref()
+            .is_none_or(|inner| inner.attempts != attempts)
+        {
+            self.inner_mut().attempts = attempts;
+        }
         self
     }
 
@@ -136,8 +141,16 @@ impl ErrorContext {
         let Some(other_inner) = other.0.as_deref() else {
             return;
         };
-        if self.0.is_none() {
+        let Some(self_inner) = self.0.as_deref() else {
             self.0 = other.0.clone();
+            return;
+        };
+        let needs_update = (self_inner.operation.is_none() && other_inner.operation.is_some())
+            || (self_inner.basin.is_none() && other_inner.basin.is_some())
+            || (self_inner.stream.is_none() && other_inner.stream.is_some())
+            || (self_inner.attempts <= 1 && other_inner.attempts > 1)
+            || (!self_inner.read_only && other_inner.read_only);
+        if !needs_update {
             return;
         }
         let inner = self.inner_mut();
@@ -191,6 +204,18 @@ impl ErrorContext {
     }
 }
 
+#[derive(serde::Deserialize)]
+struct ServerErrorBody {
+    code: String,
+    message: String,
+}
+
+#[derive(serde::Deserialize)]
+struct AppendConditionFailedBody {
+    seq_num_mismatch: Option<u64>,
+    fencing_token_mismatch: Option<String>,
+}
+
 /// An error returned by an S2 server (or any non-2xx HTTP response).
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -217,7 +242,7 @@ impl ServerError {
         }
         let message = match std::str::from_utf8(body) {
             Ok(text) if !text.is_empty() => text.to_owned(),
-            _ => status.as_u16().to_string(),
+            _ => status.as_str().to_owned(),
         };
         Self {
             status,
@@ -252,7 +277,7 @@ impl ServerError {
     }
 
     /// Return the server error code when it is recognized by this SDK version **and** paired with
-    /// the HTTP status defined for it (`E4b`).
+    /// the HTTP status defined for it.
     ///
     /// The raw [`code`](Self::code) remains available so callers can preserve and report codes
     /// introduced by newer servers or returned with unexpected statuses.
@@ -265,26 +290,42 @@ impl ServerError {
 
     /// Whether retrying the request may succeed.
     pub fn is_retryable(&self) -> bool {
-        server_error_is_retryable(self.status, self.code.as_deref())
+        if self.status == StatusCode::PRECONDITION_FAILED {
+            return false;
+        }
+        if let Some(known) = self.known_code() {
+            return known.is_retryable();
+        }
+        matches!(
+            self.status,
+            StatusCode::REQUEST_TIMEOUT
+                | StatusCode::TOO_MANY_REQUESTS
+                | StatusCode::INTERNAL_SERVER_ERROR
+                | StatusCode::BAD_GATEWAY
+                | StatusCode::SERVICE_UNAVAILABLE
+                | StatusCode::GATEWAY_TIMEOUT
+        )
     }
 
     /// Whether the failed attempt certainly had no side effects.
     pub fn has_no_side_effects(&self) -> bool {
         self.context.is_read_only()
-            || server_error_has_no_side_effects(self.status, self.code.as_deref())
+            || self.status == StatusCode::PRECONDITION_FAILED
+            || self
+                .known_code()
+                .is_some_and(ErrorCode::has_no_side_effects)
     }
 
     pub(crate) fn is_authentication_error(&self) -> bool {
-        self.status == StatusCode::UNAUTHORIZED && self.code.as_deref() == Some("authn")
+        self.known_code() == Some(ErrorCode::Authn)
     }
 
     pub(crate) fn is_server_draining(&self) -> bool {
-        self.status == StatusCode::SERVICE_UNAVAILABLE
-            && self.code.as_deref() == Some("server_draining")
+        self.known_code() == Some(ErrorCode::ServerDraining)
     }
 
     pub(crate) fn is_hot_server(&self) -> bool {
-        self.status == StatusCode::BAD_GATEWAY && self.code.as_deref() == Some("hot_server")
+        self.known_code() == Some(ErrorCode::HotServer)
     }
 
     pub(crate) fn should_retire_connection(&self) -> bool {
@@ -304,7 +345,7 @@ impl fmt::Display for ServerError {
                         self.0.status.as_u16(),
                         self.0.message
                     ),
-                    None if self.0.message == self.0.status.as_u16().to_string() => {
+                    None if self.0.message == self.0.status.as_str() => {
                         write!(f, "HTTP {}", self.0.status.as_u16())
                     }
                     None => write!(f, "HTTP {}: {}", self.0.status.as_u16(), self.0.message),
@@ -475,52 +516,82 @@ impl fmt::Display for ReadUnwrittenError {
 
 impl std::error::Error for ReadUnwrittenError {}
 
-/// Failed to establish a connection, or `connection_timeout` elapsed.
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub struct ConnectError {
-    /// Diagnostic detail describing the connection failure.
-    pub message: String,
-    pub(crate) context: ErrorContext,
-}
-
-impl ConnectError {
-    pub(crate) fn new(message: impl Into<String>, context: ErrorContext) -> Self {
-        Self {
-            message: message.into(),
-            context,
+macro_rules! define_message_error {
+    (
+        $(#[$meta:meta])*
+        pub struct $name:ident {
+            field_doc: $field_doc:literal,
+            prefix: $prefix:literal,
+            retryable: $retryable:expr,
+            retryable_doc: $retryable_doc:literal,
+            no_side_effects: |$self_ident:ident| $no_side_effects:expr,
+            no_side_effects_doc: $no_side_effects_doc:literal,
+            $(into_read_only: $into_ro:ident,)?
         }
-    }
+    ) => {
+        $(#[$meta])*
+        #[derive(Debug, Clone)]
+        #[non_exhaustive]
+        pub struct $name {
+            #[doc = $field_doc]
+            pub message: String,
+            pub(crate) context: ErrorContext,
+        }
 
-    pub(crate) fn with_context(mut self, context: &ErrorContext) -> Self {
-        self.context.merge_missing(context);
-        self
-    }
+        impl $name {
+            pub(crate) fn new(message: impl Into<String>, context: ErrorContext) -> Self {
+                Self {
+                    message: message.into(),
+                    context,
+                }
+            }
 
-    pub(crate) fn into_read_only(mut self) -> Self {
-        self.context.set_read_only();
-        self
-    }
+            pub(crate) fn with_context(mut self, context: &ErrorContext) -> Self {
+                self.context.merge_missing(context);
+                self
+            }
 
-    /// Whether retrying the request may succeed (always `true`).
-    pub fn is_retryable(&self) -> bool {
-        true
-    }
+            $(
+                pub(crate) fn $into_ro(mut self) -> Self {
+                    self.context.set_read_only();
+                    self
+                }
+            )?
 
-    /// Whether the failed attempt certainly had no side effects (always `true`).
-    pub fn has_no_side_effects(&self) -> bool {
-        true
-    }
+            #[doc = $retryable_doc]
+            pub fn is_retryable(&self) -> bool {
+                $retryable
+            }
+
+            #[doc = $no_side_effects_doc]
+            pub fn has_no_side_effects(&self) -> bool {
+                let $self_ident = self;
+                $no_side_effects
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                self.context
+                    .format_with(f, format_args!("{}: {}", $prefix, self.message))
+            }
+        }
+
+        impl std::error::Error for $name {}
+    };
 }
 
-impl fmt::Display for ConnectError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.context
-            .format_with(f, format_args!("connect: {}", self.message))
+define_message_error! {
+    /// Failed to establish a connection, or `connection_timeout` elapsed.
+    pub struct ConnectError {
+        field_doc: "Diagnostic detail describing the connection failure.",
+        prefix: "connect",
+        retryable: true,
+        retryable_doc: "Whether retrying the request may succeed (always `true`).",
+        no_side_effects: |_this| true,
+        no_side_effects_doc: "Whether the failed attempt certainly had no side effects (always `true`).",
     }
 }
-
-impl std::error::Error for ConnectError {}
 
 /// A request or connection broke, or a response ended prematurely.
 #[derive(Debug, Clone)]
@@ -583,99 +654,31 @@ impl fmt::Display for ConnectionLostError {
 
 impl std::error::Error for ConnectionLostError {}
 
-/// A request, acknowledgement, or read-session heartbeat timed out.
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub struct TimeoutError {
-    /// Diagnostic detail identifying which timer expired.
-    pub message: String,
-    pub(crate) context: ErrorContext,
-}
-
-impl TimeoutError {
-    pub(crate) fn new(message: impl Into<String>, context: ErrorContext) -> Self {
-        Self {
-            message: message.into(),
-            context,
-        }
-    }
-
-    pub(crate) fn with_context(mut self, context: &ErrorContext) -> Self {
-        self.context.merge_missing(context);
-        self
-    }
-
-    pub(crate) fn into_read_only(mut self) -> Self {
-        self.context.set_read_only();
-        self
-    }
-
-    /// Whether retrying the request may succeed (always `true`).
-    pub fn is_retryable(&self) -> bool {
-        true
-    }
-
-    /// Whether the failed attempt certainly had no side effects.
-    pub fn has_no_side_effects(&self) -> bool {
-        self.context.is_read_only()
+define_message_error! {
+    /// A request, acknowledgement, or read-session heartbeat timed out.
+    pub struct TimeoutError {
+        field_doc: "Diagnostic detail identifying which timer expired.",
+        prefix: "timeout",
+        retryable: true,
+        retryable_doc: "Whether retrying the request may succeed (always `true`).",
+        no_side_effects: |this| this.context.is_read_only(),
+        no_side_effects_doc: "Whether the failed attempt certainly had no side effects.",
+        into_read_only: into_read_only,
     }
 }
 
-impl fmt::Display for TimeoutError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.context
-            .format_with(f, format_args!("timeout: {}", self.message))
+define_message_error! {
+    /// A successful response or session message could not be decoded or violated an SDK check.
+    pub struct ProtocolError {
+        field_doc: "Diagnostic detail describing the protocol failure.",
+        prefix: "protocol",
+        retryable: false,
+        retryable_doc: "Whether retrying the request may succeed (always `false`).",
+        no_side_effects: |this| this.context.is_read_only(),
+        no_side_effects_doc: "Whether the failed attempt certainly had no side effects.",
+        into_read_only: into_read_only,
     }
 }
-
-impl std::error::Error for TimeoutError {}
-
-/// A successful response or session message could not be decoded or violated an SDK check.
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub struct ProtocolError {
-    /// Diagnostic detail describing the protocol failure.
-    pub message: String,
-    pub(crate) context: ErrorContext,
-}
-
-impl ProtocolError {
-    pub(crate) fn new(message: impl Into<String>, context: ErrorContext) -> Self {
-        Self {
-            message: message.into(),
-            context,
-        }
-    }
-
-    pub(crate) fn with_context(mut self, context: &ErrorContext) -> Self {
-        self.context.merge_missing(context);
-        self
-    }
-
-    pub(crate) fn into_read_only(mut self) -> Self {
-        self.context.set_read_only();
-        self
-    }
-
-    /// Whether retrying the request may succeed (always `false`).
-    pub fn is_retryable(&self) -> bool {
-        false
-    }
-
-    /// Whether the failed attempt certainly had no side effects.
-    pub fn has_no_side_effects(&self) -> bool {
-        self.context.is_read_only()
-    }
-}
-
-impl fmt::Display for ProtocolError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.context
-            .format_with(f, format_args!("protocol: {}", self.message))
-    }
-}
-
-impl std::error::Error for ProtocolError {}
 
 /// A call was made on a client after `close()`.
 #[derive(Debug, Clone)]
@@ -712,53 +715,19 @@ impl fmt::Display for ClientClosedError {
 
 impl std::error::Error for ClientClosedError {}
 
-/// A session was aborted, a call was canceled, or a unary call was in flight when the client
-/// closed.
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub struct AbortedError {
-    /// Diagnostic detail describing why the operation was aborted.
-    pub message: String,
-    pub(crate) context: ErrorContext,
-}
-
-impl AbortedError {
-    pub(crate) fn new(message: impl Into<String>, context: ErrorContext) -> Self {
-        Self {
-            message: message.into(),
-            context,
-        }
-    }
-
-    pub(crate) fn with_context(mut self, context: &ErrorContext) -> Self {
-        self.context.merge_missing(context);
-        self
-    }
-
-    pub(crate) fn into_read_only(mut self) -> Self {
-        self.context.set_read_only();
-        self
-    }
-
-    /// Whether retrying the request may succeed (always `false`).
-    pub fn is_retryable(&self) -> bool {
-        false
-    }
-
-    /// Whether the failed attempt certainly had no side effects.
-    pub fn has_no_side_effects(&self) -> bool {
-        self.context.is_read_only()
+define_message_error! {
+    /// A session was aborted, a call was canceled, or a unary call was in flight when the client
+    /// closed.
+    pub struct AbortedError {
+        field_doc: "Diagnostic detail describing why the operation was aborted.",
+        prefix: "aborted",
+        retryable: false,
+        retryable_doc: "Whether retrying the request may succeed (always `false`).",
+        no_side_effects: |this| this.context.is_read_only(),
+        no_side_effects_doc: "Whether the failed attempt certainly had no side effects.",
+        into_read_only: into_read_only,
     }
 }
-
-impl fmt::Display for AbortedError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.context
-            .format_with(f, format_args!("aborted: {}", self.message))
-    }
-}
-
-impl std::error::Error for AbortedError {}
 
 /// A definite final error on an append followed an earlier attempt that may have taken effect,
 /// making the overall append indeterminate.
@@ -897,6 +866,28 @@ macro_rules! delegate_has_no_side_effects {
             Self::Validation(_) => true,
             #[cfg(feature = "_hidden")]
             Self::AccessTokenProvider(_) => true,
+        }
+    };
+}
+
+macro_rules! impl_error_upcast {
+    (
+        $src:ident => $dst:ident {
+            direct: [$($direct:ident),* $(,)?],
+            read_only: [$($ro:ident),* $(,)?],
+            mapped: [$($mapped:ident),* $(,)?],
+        }
+    ) => {
+        impl From<$src> for $dst {
+            fn from(error: $src) -> Self {
+                match error {
+                    $($src::$direct(e) => Self::$direct(e),)*
+                    $($src::$ro(e) => Self::$ro(e.into_read_only()),)*
+                    $($src::$mapped(e) => Self::$mapped(e.map($dst::from)),)*
+                    #[cfg(feature = "_hidden")]
+                    $src::AccessTokenProvider(e) => Self::AccessTokenProvider(e),
+                }
+            }
         }
     };
 }
@@ -1102,45 +1093,11 @@ impl RequestError {
     }
 }
 
-impl From<RequestError> for S2Error {
-    fn from(error: RequestError) -> Self {
-        match error {
-            RequestError::Server(e) => Self::Server(e),
-            RequestError::Validation(e) => Self::Validation(e),
-            RequestError::Connect(e) => Self::Connect(e),
-            RequestError::ConnectionLost(e) => Self::ConnectionLost(e),
-            RequestError::Timeout(e) => Self::Timeout(e),
-            RequestError::Protocol(e) => Self::Protocol(e),
-            RequestError::ClientClosed(e) => Self::ClientClosed(e),
-            RequestError::Aborted(e) => Self::Aborted(e),
-            #[cfg(feature = "_hidden")]
-            RequestError::AccessTokenProvider(e) => Self::AccessTokenProvider(e),
-        }
-    }
-}
-
-impl From<ApiError> for RequestError {
-    fn from(error: ApiError) -> Self {
-        match error {
-            ApiError::Server(e) => Self::Server(e),
-            ApiError::SeqNumMismatch(e) => Self::Server(e.server),
-            ApiError::FencingTokenMismatch(e) => Self::Server(e.server),
-            ApiError::ReadUnwritten(e) => Self::Server(e.server),
-            ApiError::Validation(e) => Self::Validation(e),
-            ApiError::Connect(e) => Self::Connect(e),
-            ApiError::ConnectionLost(e) => Self::ConnectionLost(e),
-            ApiError::Timeout(e) => Self::Timeout(e),
-            ApiError::Protocol(e) => Self::Protocol(e),
-            ApiError::ClientClosed(e) => Self::ClientClosed(e),
-            ApiError::Aborted(e) => Self::Aborted(e),
-            ApiError::IndefiniteAppend { .. } => {
-                unreachable!("IndefiniteAppend is only produced on append operations")
-            }
-            #[cfg(feature = "_hidden")]
-            ApiError::AccessTokenProvider(e) => Self::AccessTokenProvider(e),
-        }
-    }
-}
+impl_error_upcast!(RequestError => S2Error {
+    direct: [Server, Validation, Connect, ConnectionLost, Timeout, Protocol, ClientClosed, Aborted],
+    read_only: [],
+    mapped: [],
+});
 
 /// Errors returned by unary read and tail-check operations.
 #[derive(Debug, Clone, thiserror::Error)]
@@ -1212,47 +1169,11 @@ impl ReadError {
     }
 }
 
-impl From<ReadError> for S2Error {
-    fn from(error: ReadError) -> Self {
-        match error {
-            ReadError::Server(e) => Self::Server(e.into_read_only()),
-            ReadError::ReadUnwritten(e) => Self::ReadUnwritten(e),
-            ReadError::Validation(e) => Self::Validation(e),
-            ReadError::Connect(e) => Self::Connect(e.into_read_only()),
-            ReadError::ConnectionLost(e) => Self::ConnectionLost(e.into_read_only()),
-            ReadError::Timeout(e) => Self::Timeout(e.into_read_only()),
-            ReadError::Protocol(e) => Self::Protocol(e.into_read_only()),
-            ReadError::ClientClosed(e) => Self::ClientClosed(e),
-            ReadError::Aborted(e) => Self::Aborted(e.into_read_only()),
-            #[cfg(feature = "_hidden")]
-            ReadError::AccessTokenProvider(e) => Self::AccessTokenProvider(e),
-        }
-    }
-}
-
-impl From<ApiError> for ReadError {
-    fn from(error: ApiError) -> Self {
-        let error = error.into_read_only();
-        match error {
-            ApiError::Server(e) => Self::Server(e),
-            ApiError::ReadUnwritten(e) => Self::ReadUnwritten(e),
-            ApiError::SeqNumMismatch(e) => Self::Server(e.server),
-            ApiError::FencingTokenMismatch(e) => Self::Server(e.server),
-            ApiError::Validation(e) => Self::Validation(e),
-            ApiError::Connect(e) => Self::Connect(e),
-            ApiError::ConnectionLost(e) => Self::ConnectionLost(e),
-            ApiError::Timeout(e) => Self::Timeout(e),
-            ApiError::Protocol(e) => Self::Protocol(e),
-            ApiError::ClientClosed(e) => Self::ClientClosed(e),
-            ApiError::Aborted(e) => Self::Aborted(e),
-            ApiError::IndefiniteAppend { .. } => {
-                unreachable!("IndefiniteAppend is only produced on append operations")
-            }
-            #[cfg(feature = "_hidden")]
-            ApiError::AccessTokenProvider(e) => Self::AccessTokenProvider(e),
-        }
-    }
-}
+impl_error_upcast!(ReadError => S2Error {
+    direct: [ReadUnwritten, Validation, Connect, ClientClosed],
+    read_only: [Server, ConnectionLost, Timeout, Protocol, Aborted],
+    mapped: [],
+});
 
 /// Errors returned by unary append operations.
 #[derive(Debug, Clone, thiserror::Error)]
@@ -1358,48 +1279,11 @@ impl AppendError {
     }
 }
 
-impl From<AppendError> for S2Error {
-    fn from(error: AppendError) -> Self {
-        match error {
-            AppendError::Server(e) => Self::Server(e),
-            AppendError::SeqNumMismatch(e) => Self::SeqNumMismatch(e),
-            AppendError::FencingTokenMismatch(e) => Self::FencingTokenMismatch(e),
-            AppendError::IndefiniteAppend(e) => Self::IndefiniteAppend(e.map(S2Error::from)),
-            AppendError::Validation(e) => Self::Validation(e),
-            AppendError::Connect(e) => Self::Connect(e),
-            AppendError::ConnectionLost(e) => Self::ConnectionLost(e),
-            AppendError::Timeout(e) => Self::Timeout(e),
-            AppendError::Protocol(e) => Self::Protocol(e),
-            AppendError::ClientClosed(e) => Self::ClientClosed(e),
-            AppendError::Aborted(e) => Self::Aborted(e),
-            #[cfg(feature = "_hidden")]
-            AppendError::AccessTokenProvider(e) => Self::AccessTokenProvider(e),
-        }
-    }
-}
-
-impl From<ApiError> for AppendError {
-    fn from(error: ApiError) -> Self {
-        match error {
-            ApiError::Server(e) => Self::Server(e),
-            ApiError::SeqNumMismatch(e) => Self::SeqNumMismatch(e),
-            ApiError::FencingTokenMismatch(e) => Self::FencingTokenMismatch(e),
-            ApiError::ReadUnwritten(e) => Self::Server(e.server),
-            ApiError::IndefiniteAppend {
-                final_attempt_error,
-            } => Self::IndefiniteAppend(IndefiniteAppendError::new((*final_attempt_error).into())),
-            ApiError::Validation(e) => Self::Validation(e),
-            ApiError::Connect(e) => Self::Connect(e),
-            ApiError::ConnectionLost(e) => Self::ConnectionLost(e),
-            ApiError::Timeout(e) => Self::Timeout(e),
-            ApiError::Protocol(e) => Self::Protocol(e),
-            ApiError::ClientClosed(e) => Self::ClientClosed(e),
-            ApiError::Aborted(e) => Self::Aborted(e),
-            #[cfg(feature = "_hidden")]
-            ApiError::AccessTokenProvider(e) => Self::AccessTokenProvider(e),
-        }
-    }
-}
+impl_error_upcast!(AppendError => S2Error {
+    direct: [Server, SeqNumMismatch, FencingTokenMismatch, Validation, Connect, ConnectionLost, Timeout, Protocol, ClientClosed, Aborted],
+    read_only: [],
+    mapped: [IndefiniteAppend],
+});
 
 /// Errors returned by [`AppendSession`](crate::append_session::AppendSession) and
 /// [`Producer`](crate::producer::Producer).
@@ -1518,10 +1402,6 @@ impl AppendSessionError {
         }
     }
 
-    pub(crate) fn is_authentication_error(&self) -> bool {
-        matches!(self, Self::Server(e) if e.is_authentication_error())
-    }
-
     pub(crate) fn is_server_draining(&self) -> bool {
         matches!(self, Self::Server(e) if e.is_server_draining())
     }
@@ -1549,64 +1429,17 @@ impl AppendSessionError {
     }
 }
 
-impl AppendRetryError for AppendSessionError {
-    fn has_no_side_effects(&self) -> bool {
-        Self::has_no_side_effects(self)
-    }
+impl_error_upcast!(AppendError => AppendSessionError {
+    direct: [Server, SeqNumMismatch, FencingTokenMismatch, Validation, Connect, ConnectionLost, Timeout, Protocol, ClientClosed, Aborted],
+    read_only: [],
+    mapped: [IndefiniteAppend],
+});
 
-    fn into_indefinite_failure(self) -> Self {
-        Self::IndefiniteAppend(IndefiniteAppendError::new(self))
-    }
-}
-
-impl From<AppendError> for AppendSessionError {
-    fn from(error: AppendError) -> Self {
-        match error {
-            AppendError::Server(e) => Self::Server(e),
-            AppendError::SeqNumMismatch(e) => Self::SeqNumMismatch(e),
-            AppendError::FencingTokenMismatch(e) => Self::FencingTokenMismatch(e),
-            AppendError::IndefiniteAppend(e) => {
-                Self::IndefiniteAppend(e.map(AppendSessionError::from))
-            }
-            AppendError::Validation(e) => Self::Validation(e),
-            AppendError::Connect(e) => Self::Connect(e),
-            AppendError::ConnectionLost(e) => Self::ConnectionLost(e),
-            AppendError::Timeout(e) => Self::Timeout(e),
-            AppendError::Protocol(e) => Self::Protocol(e),
-            AppendError::ClientClosed(e) => Self::ClientClosed(e),
-            AppendError::Aborted(e) => Self::Aborted(e),
-            #[cfg(feature = "_hidden")]
-            AppendError::AccessTokenProvider(e) => Self::AccessTokenProvider(e),
-        }
-    }
-}
-
-impl From<AppendSessionError> for S2Error {
-    fn from(error: AppendSessionError) -> Self {
-        match error {
-            AppendSessionError::Server(e) => Self::Server(e),
-            AppendSessionError::SeqNumMismatch(e) => Self::SeqNumMismatch(e),
-            AppendSessionError::FencingTokenMismatch(e) => Self::FencingTokenMismatch(e),
-            AppendSessionError::IndefiniteAppend(e) => Self::IndefiniteAppend(e.map(S2Error::from)),
-            AppendSessionError::SessionClosed(e) => Self::SessionClosed(e.map(S2Error::from)),
-            AppendSessionError::Validation(e) => Self::Validation(e),
-            AppendSessionError::Connect(e) => Self::Connect(e),
-            AppendSessionError::ConnectionLost(e) => Self::ConnectionLost(e),
-            AppendSessionError::Timeout(e) => Self::Timeout(e),
-            AppendSessionError::Protocol(e) => Self::Protocol(e),
-            AppendSessionError::ClientClosed(e) => Self::ClientClosed(e),
-            AppendSessionError::Aborted(e) => Self::Aborted(e),
-            #[cfg(feature = "_hidden")]
-            AppendSessionError::AccessTokenProvider(e) => Self::AccessTokenProvider(e),
-        }
-    }
-}
-
-impl From<ApiError> for AppendSessionError {
-    fn from(error: ApiError) -> Self {
-        AppendError::from(error).into()
-    }
-}
+impl_error_upcast!(AppendSessionError => S2Error {
+    direct: [Server, SeqNumMismatch, FencingTokenMismatch, Validation, Connect, ConnectionLost, Timeout, Protocol, ClientClosed, Aborted],
+    read_only: [],
+    mapped: [IndefiniteAppend, SessionClosed],
+});
 
 /// Errors returned by [`ReadSession`](crate::read_session::ReadSession) and its
 /// [`caught_up`](crate::read_session::ReadSession::caught_up) future.
@@ -1693,6 +1526,10 @@ impl ReadSessionError {
         }
     }
 
+    pub(crate) fn is_server_draining(&self) -> bool {
+        matches!(self, Self::Server(e) if e.is_server_draining())
+    }
+
     pub(crate) fn with_context(self, context: &ErrorContext) -> Self {
         let context = context.clone().into_read_only();
         match self {
@@ -1715,114 +1552,330 @@ impl ReadSessionError {
     }
 }
 
-impl From<ReadError> for ReadSessionError {
-    fn from(error: ReadError) -> Self {
-        match error {
-            ReadError::Server(e) => Self::Server(e.into_read_only()),
-            ReadError::ReadUnwritten(e) => Self::ReadUnwritten(e),
-            ReadError::Validation(e) => Self::Validation(e),
-            ReadError::Connect(e) => Self::Connect(e.into_read_only()),
-            ReadError::ConnectionLost(e) => Self::ConnectionLost(e.into_read_only()),
-            ReadError::Timeout(e) => Self::Timeout(e.into_read_only()),
-            ReadError::Protocol(e) => Self::Protocol(e.into_read_only()),
-            ReadError::ClientClosed(e) => Self::ClientClosed(e),
-            ReadError::Aborted(e) => Self::Aborted(e.into_read_only()),
-            #[cfg(feature = "_hidden")]
-            ReadError::AccessTokenProvider(e) => Self::AccessTokenProvider(e),
-        }
+impl_error_upcast!(ReadError => ReadSessionError {
+    direct: [ReadUnwritten, Validation, Connect, ClientClosed],
+    read_only: [Server, ConnectionLost, Timeout, Protocol, Aborted],
+    mapped: [],
+});
+
+impl_error_upcast!(ReadSessionError => S2Error {
+    direct: [ReadUnwritten, Validation, Connect, ClientClosed],
+    read_only: [Server, ConnectionLost, Timeout, Protocol, Aborted],
+    mapped: [SessionClosed],
+});
+
+/// Internal transport-layer error abstraction implemented directly by the five public operation
+/// error enums, allowing `api.rs` unary and streaming paths to construct the exact return type
+/// without an intermediate `ApiError` wrapper.
+pub(crate) trait TransportError:
+    Sized
+    + fmt::Display
+    + From<ServerError>
+    + From<ValidationError>
+    + From<ConnectError>
+    + From<ConnectionLostError>
+    + From<TimeoutError>
+    + From<ProtocolError>
+    + From<ClientClosedError>
+    + From<AbortedError>
+{
+    fn from_http(err: client::HttpError, context: ErrorContext) -> Self {
+        classify_http_error(err, context)
+    }
+
+    fn from_http_response(status: StatusCode, body: &[u8], context: ErrorContext) -> Self;
+
+    fn from_terminal_message(msg: TerminalMessage, context: ErrorContext) -> Self {
+        let status = match StatusCode::from_u16(msg.status) {
+            Ok(status) if (300..600).contains(&status.as_u16()) => status,
+            Ok(status) => {
+                return ProtocolError::new(
+                    format!("unexpected non-error status code in terminal frame: {status}"),
+                    context,
+                )
+                .into();
+            }
+            Err(err) => {
+                return ProtocolError::new(
+                    format!("invalid status code in terminal frame: {err}"),
+                    context,
+                )
+                .into();
+            }
+        };
+        Self::from_http_response(status, &msg.body, context)
+    }
+
+    #[cfg(feature = "_hidden")]
+    fn from_access_token_provider(err: crate::types::AccessTokenProviderError) -> Self;
+
+    fn is_retryable(&self) -> bool;
+
+    fn has_no_side_effects(&self) -> bool;
+
+    fn server_error(&self) -> Option<&ServerError>;
+
+    fn mark_unsent_connection_lost(self, unsent: bool) -> Self;
+
+    fn is_authentication_error(&self) -> bool {
+        self.server_error()
+            .is_some_and(ServerError::is_authentication_error)
+    }
+
+    fn should_retire_connection(&self) -> bool {
+        self.server_error()
+            .is_some_and(ServerError::should_retire_connection)
+    }
+
+    fn with_prior_uncertainty(self, _prior_uncertainty: bool) -> Self {
+        self
     }
 }
 
-impl From<ReadSessionError> for S2Error {
-    fn from(error: ReadSessionError) -> Self {
-        match error {
-            ReadSessionError::Server(e) => Self::Server(e.into_read_only()),
-            ReadSessionError::ReadUnwritten(e) => Self::ReadUnwritten(e),
-            ReadSessionError::SessionClosed(e) => Self::SessionClosed(e.map(S2Error::from)),
-            ReadSessionError::Validation(e) => Self::Validation(e),
-            ReadSessionError::Connect(e) => Self::Connect(e.into_read_only()),
-            ReadSessionError::ConnectionLost(e) => Self::ConnectionLost(e.into_read_only()),
-            ReadSessionError::Timeout(e) => Self::Timeout(e.into_read_only()),
-            ReadSessionError::Protocol(e) => Self::Protocol(e.into_read_only()),
-            ReadSessionError::ClientClosed(e) => Self::ClientClosed(e),
-            ReadSessionError::Aborted(e) => Self::Aborted(e.into_read_only()),
-            #[cfg(feature = "_hidden")]
-            ReadSessionError::AccessTokenProvider(e) => Self::AccessTokenProvider(e),
-        }
-    }
-}
-
-impl From<ApiError> for ReadSessionError {
-    fn from(error: ApiError) -> Self {
-        ReadError::from(error).into()
-    }
-}
-
-pub(crate) fn server_error_is_retryable(status: StatusCode, code: Option<&str>) -> bool {
-    if status == StatusCode::PRECONDITION_FAILED {
-        return false;
-    }
-    if let Some(known) = code.and_then(|c| c.parse::<ErrorCode>().ok())
-        && known.status() == status
+fn parse_append_response<E>(status: StatusCode, body: &[u8], context: ErrorContext) -> E
+where
+    E: From<ServerError> + From<SeqNumMismatchError> + From<FencingTokenMismatchError>,
+{
+    if status == StatusCode::PRECONDITION_FAILED
+        && let Ok(parsed) = serde_json::from_slice::<AppendConditionFailedBody>(body)
     {
-        return known.is_retryable();
+        match (parsed.seq_num_mismatch, parsed.fencing_token_mismatch) {
+            (Some(assignable_seq_num), None) => {
+                let server = ServerError::from_response(status, body, context);
+                return SeqNumMismatchError::new(assignable_seq_num, server).into();
+            }
+            (None, Some(token)) => {
+                let server = ServerError::from_response(status, body, context);
+                return FencingTokenMismatchError::new(FencingToken::from_server(token), server)
+                    .into();
+            }
+            _ => {}
+        }
     }
-    matches!(
-        status,
-        StatusCode::REQUEST_TIMEOUT
-            | StatusCode::TOO_MANY_REQUESTS
-            | StatusCode::INTERNAL_SERVER_ERROR
-            | StatusCode::BAD_GATEWAY
-            | StatusCode::SERVICE_UNAVAILABLE
-            | StatusCode::GATEWAY_TIMEOUT
-    )
+    ServerError::from_response(status, body, context).into()
 }
 
-pub(crate) fn server_error_has_no_side_effects(status: StatusCode, code: Option<&str>) -> bool {
-    if status == StatusCode::PRECONDITION_FAILED {
-        return true;
+fn parse_read_response<E>(status: StatusCode, body: &[u8], context: ErrorContext) -> E
+where
+    E: From<ServerError> + From<ReadUnwrittenError>,
+{
+    let context = context.into_read_only();
+    if status == StatusCode::RANGE_NOT_SATISFIABLE
+        && let Ok(tail) = serde_json::from_slice::<TailResponse>(body)
+    {
+        let server = ServerError::from_response(status, body, context);
+        return ReadUnwrittenError::new(tail.tail.into(), server).into();
     }
-    code.and_then(|c| c.parse::<ErrorCode>().ok())
-        .is_some_and(|known| known.status() == status && known.has_no_side_effects())
+    ServerError::from_response(status, body, context).into()
 }
 
-pub(crate) fn classify_http_error(err: client::HttpError, context: ErrorContext) -> ApiError {
+impl TransportError for RequestError {
+    fn from_http_response(status: StatusCode, body: &[u8], context: ErrorContext) -> Self {
+        Self::Server(ServerError::from_response(status, body, context))
+    }
+
+    #[cfg(feature = "_hidden")]
+    fn from_access_token_provider(err: crate::types::AccessTokenProviderError) -> Self {
+        Self::AccessTokenProvider(err)
+    }
+
+    fn is_retryable(&self) -> bool {
+        Self::is_retryable(self)
+    }
+
+    fn has_no_side_effects(&self) -> bool {
+        Self::has_no_side_effects(self)
+    }
+
+    fn server_error(&self) -> Option<&ServerError> {
+        Self::server_error(self)
+    }
+
+    fn mark_unsent_connection_lost(self, unsent: bool) -> Self {
+        if !unsent {
+            return self;
+        }
+        match self {
+            Self::ConnectionLost(e) => Self::ConnectionLost(e.with_no_side_effects(true)),
+            other => other,
+        }
+    }
+}
+
+impl TransportError for ReadError {
+    fn from_http(err: client::HttpError, context: ErrorContext) -> Self {
+        classify_http_error(err, context.into_read_only())
+    }
+
+    fn from_http_response(status: StatusCode, body: &[u8], context: ErrorContext) -> Self {
+        parse_read_response(status, body, context)
+    }
+
+    #[cfg(feature = "_hidden")]
+    fn from_access_token_provider(err: crate::types::AccessTokenProviderError) -> Self {
+        Self::AccessTokenProvider(err)
+    }
+
+    fn is_retryable(&self) -> bool {
+        Self::is_retryable(self)
+    }
+
+    fn has_no_side_effects(&self) -> bool {
+        Self::has_no_side_effects(self)
+    }
+
+    fn server_error(&self) -> Option<&ServerError> {
+        Self::server_error(self)
+    }
+
+    fn mark_unsent_connection_lost(self, _unsent: bool) -> Self {
+        self
+    }
+}
+
+impl TransportError for ReadSessionError {
+    fn from_http(err: client::HttpError, context: ErrorContext) -> Self {
+        classify_http_error(err, context.into_read_only())
+    }
+
+    fn from_http_response(status: StatusCode, body: &[u8], context: ErrorContext) -> Self {
+        parse_read_response(status, body, context)
+    }
+
+    #[cfg(feature = "_hidden")]
+    fn from_access_token_provider(err: crate::types::AccessTokenProviderError) -> Self {
+        Self::AccessTokenProvider(err)
+    }
+
+    fn is_retryable(&self) -> bool {
+        Self::is_retryable(self)
+    }
+
+    fn has_no_side_effects(&self) -> bool {
+        Self::has_no_side_effects(self)
+    }
+
+    fn server_error(&self) -> Option<&ServerError> {
+        Self::server_error(self)
+    }
+
+    fn mark_unsent_connection_lost(self, _unsent: bool) -> Self {
+        self
+    }
+}
+
+impl TransportError for AppendError {
+    fn from_http_response(status: StatusCode, body: &[u8], context: ErrorContext) -> Self {
+        parse_append_response(status, body, context)
+    }
+
+    #[cfg(feature = "_hidden")]
+    fn from_access_token_provider(err: crate::types::AccessTokenProviderError) -> Self {
+        Self::AccessTokenProvider(err)
+    }
+
+    fn is_retryable(&self) -> bool {
+        Self::is_retryable(self)
+    }
+
+    fn has_no_side_effects(&self) -> bool {
+        Self::has_no_side_effects(self)
+    }
+
+    fn server_error(&self) -> Option<&ServerError> {
+        Self::server_error(self)
+    }
+
+    fn mark_unsent_connection_lost(self, unsent: bool) -> Self {
+        if !unsent {
+            return self;
+        }
+        match self {
+            Self::ConnectionLost(e) => Self::ConnectionLost(e.with_no_side_effects(true)),
+            other => other,
+        }
+    }
+
+    fn with_prior_uncertainty(self, prior_uncertainty: bool) -> Self {
+        if prior_uncertainty && self.has_no_side_effects() {
+            Self::IndefiniteAppend(IndefiniteAppendError::new(self))
+        } else {
+            self
+        }
+    }
+}
+
+impl TransportError for AppendSessionError {
+    fn from_http_response(status: StatusCode, body: &[u8], context: ErrorContext) -> Self {
+        parse_append_response(status, body, context)
+    }
+
+    #[cfg(feature = "_hidden")]
+    fn from_access_token_provider(err: crate::types::AccessTokenProviderError) -> Self {
+        Self::AccessTokenProvider(err)
+    }
+
+    fn is_retryable(&self) -> bool {
+        Self::is_retryable(self)
+    }
+
+    fn has_no_side_effects(&self) -> bool {
+        Self::has_no_side_effects(self)
+    }
+
+    fn server_error(&self) -> Option<&ServerError> {
+        Self::server_error(self)
+    }
+
+    fn mark_unsent_connection_lost(self, unsent: bool) -> Self {
+        if !unsent {
+            return self;
+        }
+        match self {
+            Self::ConnectionLost(e) => Self::ConnectionLost(e.with_no_side_effects(true)),
+            other => other,
+        }
+    }
+
+    fn with_prior_uncertainty(self, prior_uncertainty: bool) -> Self {
+        if prior_uncertainty && self.has_no_side_effects() {
+            Self::IndefiniteAppend(IndefiniteAppendError::new(self))
+        } else {
+            self
+        }
+    }
+}
+
+pub(crate) fn classify_http_error<E: TransportError>(
+    err: client::HttpError,
+    context: ErrorContext,
+) -> E {
     match err {
-        client::HttpError::Connect(message) => {
-            ApiError::Connect(ConnectError::new(message, context))
-        }
-        client::HttpError::Timeout => {
-            ApiError::Timeout(TimeoutError::new("request timed out", context))
-        }
-        client::HttpError::ClientClosed => ApiError::ClientClosed(ClientClosedError::new(context)),
-        client::HttpError::Aborted => {
-            ApiError::Aborted(AbortedError::new("client closed", context))
-        }
+        client::HttpError::Connect(message) => ConnectError::new(message, context).into(),
+        client::HttpError::Timeout => TimeoutError::new("request timed out", context).into(),
+        client::HttpError::ClientClosed => ClientClosedError::new(context).into(),
+        client::HttpError::Aborted => AbortedError::new("client closed", context).into(),
         client::HttpError::Transport(hyper_err) => {
             let detail = client::format_error_chain(&hyper_err);
             if hyper_err.is_parse() || hyper_err.is_user() {
-                return ApiError::Protocol(ProtocolError::new(detail, context));
+                return ProtocolError::new(detail, context).into();
             }
             let refused = source_err::<h2::Error>(&hyper_err)
                 .is_some_and(|e| e.reason() == Some(h2::Reason::REFUSED_STREAM));
-            ApiError::ConnectionLost(ConnectionLostError::new(detail, refused, context))
+            ConnectionLostError::new(detail, refused, context).into()
         }
-        client::HttpError::RequestBuild(message) => ApiError::Protocol(ProtocolError::new(
-            format!("request build: {message}"),
-            context,
-        )),
-        client::HttpError::RequestCompression(message) => ApiError::Protocol(ProtocolError::new(
-            format!("request compression: {message}"),
-            context,
-        )),
-        client::HttpError::ResponseCompression(message) => ApiError::Protocol(ProtocolError::new(
-            format!("response compression: {message}"),
-            context,
-        )),
-        client::HttpError::ResponseDecode(error) => ApiError::Protocol(ProtocolError::new(
-            format!("response decode: {error}"),
-            context,
-        )),
+        client::HttpError::RequestBuild(message) => {
+            ProtocolError::new(format!("request build: {message}"), context).into()
+        }
+        client::HttpError::RequestCompression(message) => {
+            ProtocolError::new(format!("request compression: {message}"), context).into()
+        }
+        client::HttpError::ResponseCompression(message) => {
+            ProtocolError::new(format!("response compression: {message}"), context).into()
+        }
+        client::HttpError::ResponseDecode(error) => {
+            ProtocolError::new(format!("response decode: {error}"), context).into()
+        }
     }
 }
 
@@ -1903,38 +1956,41 @@ mod tests {
     #[test]
     fn http_error_classification_matches_e3() {
         assert!(matches!(
-            classify_http_error(
+            classify_http_error::<RequestError>(
                 client::HttpError::Connect("dns failed".to_owned()),
                 ErrorContext::default()
             ),
-            ApiError::Connect(ConnectError { message, .. }) if message.contains("dns failed")
+            RequestError::Connect(ConnectError { message, .. }) if message.contains("dns failed")
         ));
         assert!(matches!(
-            classify_http_error(
+            classify_http_error::<RequestError>(
                 client::HttpError::RequestBuild("bad request".to_owned()),
                 ErrorContext::default()
             ),
-            ApiError::Protocol(ProtocolError { message, .. }) if message.contains("bad request")
+            RequestError::Protocol(ProtocolError { message, .. }) if message.contains("bad request")
         ));
         assert!(matches!(
-            classify_http_error(
+            classify_http_error::<RequestError>(
                 client::HttpError::ResponseCompression("corrupt".to_owned()),
                 ErrorContext::default()
             ),
-            ApiError::Protocol(ProtocolError { message, .. }) if message.contains("corrupt")
+            RequestError::Protocol(ProtocolError { message, .. }) if message.contains("corrupt")
         ));
         let json_error = serde_json::from_slice::<serde_json::Value>(b"{")
             .expect_err("invalid JSON should fail");
         assert!(matches!(
-            classify_http_error(
+            classify_http_error::<RequestError>(
                 client::HttpError::ResponseDecode(json_error),
                 ErrorContext::default()
             ),
-            ApiError::Protocol(_)
+            RequestError::Protocol(_)
         ));
         assert!(matches!(
-            classify_http_error(client::HttpError::Timeout, ErrorContext::default()),
-            ApiError::Timeout(_)
+            classify_http_error::<RequestError>(
+                client::HttpError::Timeout,
+                ErrorContext::default()
+            ),
+            RequestError::Timeout(_)
         ));
     }
 

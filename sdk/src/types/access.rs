@@ -408,80 +408,59 @@ pub enum Operation {
     Unknown(String),
 }
 
-impl From<Operation> for MaybeKnown<api::access::Operation> {
-    fn from(value: Operation) -> Self {
-        let known = match value {
-            Operation::ListBasins => api::access::Operation::ListBasins,
-            Operation::CreateBasin => api::access::Operation::CreateBasin,
-            Operation::DeleteBasin => api::access::Operation::DeleteBasin,
-            Operation::ReconfigureBasin => api::access::Operation::ReconfigureBasin,
-            Operation::GetBasinConfig => api::access::Operation::GetBasinConfig,
-            Operation::IssueAccessToken => api::access::Operation::IssueAccessToken,
-            Operation::RevokeAccessToken => api::access::Operation::RevokeAccessToken,
-            Operation::ListAccessTokens => api::access::Operation::ListAccessTokens,
-            Operation::ListStreams => api::access::Operation::ListStreams,
-            Operation::CreateStream => api::access::Operation::CreateStream,
-            Operation::DeleteStream => api::access::Operation::DeleteStream,
-            Operation::GetStreamConfig => api::access::Operation::GetStreamConfig,
-            Operation::ReconfigureStream => api::access::Operation::ReconfigureStream,
-            Operation::CheckTail => api::access::Operation::CheckTail,
-            Operation::Append => api::access::Operation::Append,
-            Operation::Read => api::access::Operation::Read,
-            Operation::Trim => api::access::Operation::Trim,
-            Operation::Fence => api::access::Operation::Fence,
-            Operation::GetAccountMetrics => api::access::Operation::AccountMetrics,
-            Operation::GetBasinMetrics => api::access::Operation::BasinMetrics,
-            Operation::GetStreamMetrics => api::access::Operation::StreamMetrics,
-            Operation::ListLocations => api::access::Operation::ListLocations,
-            Operation::GetDefaultLocation => api::access::Operation::GetDefaultLocation,
-            Operation::SetDefaultLocation => api::access::Operation::SetDefaultLocation,
-            Operation::ListNetworkPolicies => api::access::Operation::ListNetworkPolicies,
-            Operation::CreateNetworkPolicy => api::access::Operation::CreateNetworkPolicy,
-            Operation::GetNetworkPolicy => api::access::Operation::GetNetworkPolicy,
-            Operation::DeleteNetworkPolicy => api::access::Operation::DeleteNetworkPolicy,
-            Operation::Unknown(name) => return Self::Unknown(name),
-        };
-        Self::Known(known)
-    }
+macro_rules! map_operations {
+    ($($sdk:ident => $api:ident),* $(,)?) => {
+        impl From<Operation> for MaybeKnown<api::access::Operation> {
+            fn from(value: Operation) -> Self {
+                match value {
+                    $(Operation::$sdk => Self::Known(api::access::Operation::$api),)*
+                    Operation::Unknown(name) => Self::Unknown(name),
+                }
+            }
+        }
+
+        impl From<MaybeKnown<api::access::Operation>> for Operation {
+            fn from(value: MaybeKnown<api::access::Operation>) -> Self {
+                match value {
+                    MaybeKnown::Known(op) => match op {
+                        $(api::access::Operation::$api => Operation::$sdk,)*
+                    },
+                    MaybeKnown::Unknown(name) => Operation::Unknown(name),
+                }
+            }
+        }
+    };
 }
 
-impl From<MaybeKnown<api::access::Operation>> for Operation {
-    fn from(value: MaybeKnown<api::access::Operation>) -> Self {
-        let value = match value {
-            MaybeKnown::Known(value) => value,
-            MaybeKnown::Unknown(name) => return Self::Unknown(name),
-        };
-        match value {
-            api::access::Operation::ListBasins => Operation::ListBasins,
-            api::access::Operation::CreateBasin => Operation::CreateBasin,
-            api::access::Operation::DeleteBasin => Operation::DeleteBasin,
-            api::access::Operation::ReconfigureBasin => Operation::ReconfigureBasin,
-            api::access::Operation::GetBasinConfig => Operation::GetBasinConfig,
-            api::access::Operation::IssueAccessToken => Operation::IssueAccessToken,
-            api::access::Operation::RevokeAccessToken => Operation::RevokeAccessToken,
-            api::access::Operation::ListAccessTokens => Operation::ListAccessTokens,
-            api::access::Operation::ListStreams => Operation::ListStreams,
-            api::access::Operation::CreateStream => Operation::CreateStream,
-            api::access::Operation::DeleteStream => Operation::DeleteStream,
-            api::access::Operation::GetStreamConfig => Operation::GetStreamConfig,
-            api::access::Operation::ReconfigureStream => Operation::ReconfigureStream,
-            api::access::Operation::CheckTail => Operation::CheckTail,
-            api::access::Operation::Append => Operation::Append,
-            api::access::Operation::Read => Operation::Read,
-            api::access::Operation::Trim => Operation::Trim,
-            api::access::Operation::Fence => Operation::Fence,
-            api::access::Operation::AccountMetrics => Operation::GetAccountMetrics,
-            api::access::Operation::BasinMetrics => Operation::GetBasinMetrics,
-            api::access::Operation::StreamMetrics => Operation::GetStreamMetrics,
-            api::access::Operation::ListLocations => Operation::ListLocations,
-            api::access::Operation::GetDefaultLocation => Operation::GetDefaultLocation,
-            api::access::Operation::SetDefaultLocation => Operation::SetDefaultLocation,
-            api::access::Operation::ListNetworkPolicies => Operation::ListNetworkPolicies,
-            api::access::Operation::CreateNetworkPolicy => Operation::CreateNetworkPolicy,
-            api::access::Operation::GetNetworkPolicy => Operation::GetNetworkPolicy,
-            api::access::Operation::DeleteNetworkPolicy => Operation::DeleteNetworkPolicy,
-        }
-    }
+map_operations! {
+    ListBasins => ListBasins,
+    CreateBasin => CreateBasin,
+    DeleteBasin => DeleteBasin,
+    ReconfigureBasin => ReconfigureBasin,
+    GetBasinConfig => GetBasinConfig,
+    IssueAccessToken => IssueAccessToken,
+    RevokeAccessToken => RevokeAccessToken,
+    ListAccessTokens => ListAccessTokens,
+    ListStreams => ListStreams,
+    CreateStream => CreateStream,
+    DeleteStream => DeleteStream,
+    GetStreamConfig => GetStreamConfig,
+    ReconfigureStream => ReconfigureStream,
+    CheckTail => CheckTail,
+    Append => Append,
+    Read => Read,
+    Trim => Trim,
+    Fence => Fence,
+    GetAccountMetrics => AccountMetrics,
+    GetBasinMetrics => BasinMetrics,
+    GetStreamMetrics => StreamMetrics,
+    ListLocations => ListLocations,
+    GetDefaultLocation => GetDefaultLocation,
+    SetDefaultLocation => SetDefaultLocation,
+    ListNetworkPolicies => ListNetworkPolicies,
+    CreateNetworkPolicy => CreateNetworkPolicy,
+    GetNetworkPolicy => GetNetworkPolicy,
+    DeleteNetworkPolicy => DeleteNetworkPolicy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -611,36 +590,58 @@ pub struct AccessTokenScope {
     pub ops: HashSet<Operation>,
 }
 
+macro_rules! impl_resource_matcher_conversions {
+    ($($matcher:ident($exact:ty, $prefix:ty)),* $(,)?) => {
+        $(
+            impl From<MaybeKnown<api::access::ResourceSet<api::access::MaybeEmpty<$exact>, $prefix>>>
+                for $matcher
+            {
+                fn from(
+                    value: MaybeKnown<
+                        api::access::ResourceSet<api::access::MaybeEmpty<$exact>, $prefix>,
+                    >,
+                ) -> Self {
+                    use api::access::{MaybeEmpty, ResourceSet};
+                    match value {
+                        MaybeKnown::Known(ResourceSet::Exact(MaybeEmpty::NonEmpty(e))) => {
+                            Self::Exact(e)
+                        }
+                        MaybeKnown::Known(ResourceSet::Exact(MaybeEmpty::Empty)) => Self::None,
+                        MaybeKnown::Known(ResourceSet::Prefix(p)) => Self::Prefix(p),
+                        MaybeKnown::Unknown(name) => Self::Unknown(name),
+                    }
+                }
+            }
+
+            impl From<$matcher>
+                for MaybeKnown<api::access::ResourceSet<api::access::MaybeEmpty<$exact>, $prefix>>
+            {
+                fn from(value: $matcher) -> Self {
+                    use api::access::{MaybeEmpty, ResourceSet};
+                    match value {
+                        $matcher::None => ResourceSet::Exact(MaybeEmpty::Empty).into(),
+                        $matcher::Exact(e) => ResourceSet::Exact(MaybeEmpty::NonEmpty(e)).into(),
+                        $matcher::Prefix(p) => ResourceSet::Prefix(p).into(),
+                        $matcher::Unknown(name) => MaybeKnown::Unknown(name),
+                    }
+                }
+            }
+        )*
+    };
+}
+
+impl_resource_matcher_conversions! {
+    BasinMatcher(BasinName, BasinNamePrefix),
+    StreamMatcher(StreamName, StreamNamePrefix),
+    AccessTokenMatcher(AccessTokenId, AccessTokenIdPrefix),
+}
+
 impl From<api::access::AccessTokenScope> for AccessTokenScope {
     fn from(value: api::access::AccessTokenScope) -> Self {
-        use api::access::{MaybeEmpty, ResourceSet};
         Self {
-            basins: value.basins.map(|rs| match rs {
-                MaybeKnown::Known(ResourceSet::Exact(MaybeEmpty::NonEmpty(e))) => {
-                    BasinMatcher::Exact(e)
-                }
-                MaybeKnown::Known(ResourceSet::Exact(MaybeEmpty::Empty)) => BasinMatcher::None,
-                MaybeKnown::Known(ResourceSet::Prefix(p)) => BasinMatcher::Prefix(p),
-                MaybeKnown::Unknown(name) => BasinMatcher::Unknown(name),
-            }),
-            streams: value.streams.map(|rs| match rs {
-                MaybeKnown::Known(ResourceSet::Exact(MaybeEmpty::NonEmpty(e))) => {
-                    StreamMatcher::Exact(e)
-                }
-                MaybeKnown::Known(ResourceSet::Exact(MaybeEmpty::Empty)) => StreamMatcher::None,
-                MaybeKnown::Known(ResourceSet::Prefix(p)) => StreamMatcher::Prefix(p),
-                MaybeKnown::Unknown(name) => StreamMatcher::Unknown(name),
-            }),
-            access_tokens: value.access_tokens.map(|rs| match rs {
-                MaybeKnown::Known(ResourceSet::Exact(MaybeEmpty::NonEmpty(e))) => {
-                    AccessTokenMatcher::Exact(e)
-                }
-                MaybeKnown::Known(ResourceSet::Exact(MaybeEmpty::Empty)) => {
-                    AccessTokenMatcher::None
-                }
-                MaybeKnown::Known(ResourceSet::Prefix(p)) => AccessTokenMatcher::Prefix(p),
-                MaybeKnown::Unknown(name) => AccessTokenMatcher::Unknown(name),
-            }),
+            basins: value.basins.map(Into::into),
+            streams: value.streams.map(Into::into),
+            access_tokens: value.access_tokens.map(Into::into),
             op_group_perms: value.op_groups.map(Into::into),
             ops: value
                 .ops
@@ -652,26 +653,10 @@ impl From<api::access::AccessTokenScope> for AccessTokenScope {
 
 impl From<AccessTokenScopeInput> for api::access::AccessTokenScope {
     fn from(value: AccessTokenScopeInput) -> Self {
-        use api::access::{MaybeEmpty, ResourceSet};
         Self {
-            basins: value.basins.map(|rs| match rs {
-                BasinMatcher::None => ResourceSet::Exact(MaybeEmpty::Empty).into(),
-                BasinMatcher::Exact(e) => ResourceSet::Exact(MaybeEmpty::NonEmpty(e)).into(),
-                BasinMatcher::Prefix(p) => ResourceSet::Prefix(p).into(),
-                BasinMatcher::Unknown(name) => MaybeKnown::Unknown(name),
-            }),
-            streams: value.streams.map(|rs| match rs {
-                StreamMatcher::None => ResourceSet::Exact(MaybeEmpty::Empty).into(),
-                StreamMatcher::Exact(e) => ResourceSet::Exact(MaybeEmpty::NonEmpty(e)).into(),
-                StreamMatcher::Prefix(p) => ResourceSet::Prefix(p).into(),
-                StreamMatcher::Unknown(name) => MaybeKnown::Unknown(name),
-            }),
-            access_tokens: value.access_tokens.map(|rs| match rs {
-                AccessTokenMatcher::None => ResourceSet::Exact(MaybeEmpty::Empty).into(),
-                AccessTokenMatcher::Exact(e) => ResourceSet::Exact(MaybeEmpty::NonEmpty(e)).into(),
-                AccessTokenMatcher::Prefix(p) => ResourceSet::Prefix(p).into(),
-                AccessTokenMatcher::Unknown(name) => MaybeKnown::Unknown(name),
-            }),
+            basins: value.basins.map(Into::into),
+            streams: value.streams.map(Into::into),
+            access_tokens: value.access_tokens.map(Into::into),
             op_groups: value.op_group_perms.map(Into::into),
             ops: if value.ops.is_empty() {
                 None

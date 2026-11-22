@@ -326,6 +326,13 @@ fn validate_stream_config(config: &StreamConfig, context: &str, errors: &mut Vec
     {
         errors.push(format!("{context}: {err}"));
     }
+    if let Some(min_age) = config.delete_on_empty.as_ref().and_then(|d| d.min_age)
+        && min_age.0.subsec_nanos() != 0
+    {
+        errors.push(format!(
+            "{context}: delete_on_empty.min_age must be a whole number of seconds"
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -607,5 +614,20 @@ mod tests {
             config.delete_on_empty,
             s2_common::config::OptionalDeleteOnEmptyConfig::default()
         );
+    }
+
+    #[test]
+    fn validate_rejects_sub_second_delete_on_empty_min_age() {
+        let spec = parse_spec(
+            r#"{"basins":[{"name":"my-basin","config":{"default_stream_config":{"delete_on_empty":{"min_age":"1500ms"}}}}]}"#,
+        );
+        let err = validate(&spec).unwrap_err();
+        assert!(err.contains("delete_on_empty.min_age must be a whole number of seconds"));
+
+        let stream_spec = parse_spec(
+            r#"{"basins":[{"name":"my-basin","streams":[{"name":"events","config":{"delete_on_empty":{"min_age":"500ms"}}}]}]}"#,
+        );
+        let err = validate(&stream_spec).unwrap_err();
+        assert!(err.contains("delete_on_empty.min_age must be a whole number of seconds"));
     }
 }

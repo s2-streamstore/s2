@@ -21,20 +21,20 @@ rustls-aws-lc-rs = ["hyper-rustls/aws-lc-rs", "rustls/aws-lc-rs"]
 rustls-ring = ["hyper-rustls/ring", "rustls/ring"]
 
 [dependencies]
-async-compression = { version = "0.4", features = ["tokio", "gzip", "zstd"] }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
 base64ct = { workspace = true, features = ["alloc"] }
 bytes = { workspace = true }
+flate2.workspace = true
 futures-core = { workspace = true }
 futures-util = { workspace = true }
 h2 = "0.4"
 http = { workspace = true }
 http-body = "1"
 http-body-util = "0.1"
-hyper = "1"
+hyper = { version = "1", features = ["client", "http2"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http2", "native-tokio", "tls12"] }
-hyper-util = { version = "0.1", features = ["client-legacy", "tokio", "http1", "http2"] }
+hyper-util = { version = "0.1.21", features = ["client-legacy", "tokio"] }
 jiff = { workspace = true }
 pin-project-lite = "0.2"
 prost = { workspace = true }
@@ -47,12 +47,13 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 serde_urlencoded = "0.7"
 thiserror = { workspace = true }
-tokio = { version = "1.53", features = ["time", "macros", "io-util", "sync"] }
+tokio = { workspace = true, features = ["time", "macros", "sync"] }
 tokio-util = { workspace = true, features = ["rt", "codec"] }
 tower-service = "0.3.3"
 tracing = { workspace = true }
 urlencoding = "2"
 uuid = { version = "1", features = ["v4", "fast-rng"] }
+zstd.workspace = true
 
 [dev-dependencies]
 assert_matches = "1.5"

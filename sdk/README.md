@@ -32,10 +32,9 @@ the [S2 SDK Specification](https://github.com/s2-streamstore/s2-specs/blob/main/
 
 ## Getting started
 
-1. Ensure you have added [tokio](https://crates.io/crates/tokio) and [futures](https://crates.io/crates/futures) as dependencies.
+1. Ensure you have added [tokio](https://crates.io/crates/tokio) as a dependency:
    ```bash
    cargo add tokio --features full
-   cargo add futures
    ```
 
 1. Add the `s2-sdk` dependency to your project:
@@ -44,22 +43,19 @@ the [S2 SDK Specification](https://github.com/s2-streamstore/s2-specs/blob/main/
    ```
 
 1. Generate an access token by logging into the web console at
-   [s2.dev](https://s2.dev/dashboard).
+   [s2.dev](https://s2.dev/dashboard), then export `S2_ACCESS_TOKEN`.
 
-1. Perform an operation.
+1. Perform an operation:
    ```rust
-    use s2_sdk::{
-        S2,
-        types::{ListBasinsInput, S2Config},
-    };
+   use s2_sdk::{S2, types::ListBasinsInput};
 
-    #[tokio::main]
-    async fn main() -> Result<(), Box<dyn std::error::Error>> {
-        let s2 = S2::new(S2Config::new("<YOUR_ACCESS_TOKEN>"))?;
-        let page = s2.list_basins(ListBasinsInput::new()).await?;
-        println!("My basins: {:?}", page.values);
-        Ok(())
-    }
+   #[tokio::main]
+   async fn main() -> Result<(), Box<dyn std::error::Error>> {
+       let s2 = S2::from_env()?;
+       let page = s2.list_basins(ListBasinsInput::new()).await?;
+       println!("My basins: {:?}", page.values);
+       Ok(())
+   }
    ```
 
 ## Examples
@@ -67,14 +63,17 @@ the [S2 SDK Specification](https://github.com/s2-streamstore/s2-specs/blob/main/
 The [`examples`](./examples) directory in this repository contains a variety of
 example use cases demonstrating how to use the SDK effectively.
 
-You might have to set one or more of these env vars based on the example you run.
+You might have to set one or more of these env vars based on the example you run:
 
 ```bash
 export S2_ACCESS_TOKEN="<YOUR_ACCESS_TOKEN>"
 export S2_BASIN="<YOUR_BASIN_NAME>"
 export S2_STREAM="<YOUR_STREAM_NAME>"
 export S2_ENCRYPTION_KEY="<YOUR_ENCRYPTION_KEY>"
-cargo run --example <example_name>
+# Optional custom endpoints (for example, local s2-lite):
+# export S2_ACCOUNT_ENDPOINT="http://localhost:8080"
+# export S2_BASIN_ENDPOINT="http://localhost:8080"
+cargo run -p s2-sdk --example <example_name>
 ```
 
 ## SDK Docs and Reference

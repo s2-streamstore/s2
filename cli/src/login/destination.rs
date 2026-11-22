@@ -13,7 +13,7 @@ fn is_production_issuer(issuer: &str) -> bool {
 pub(crate) fn effective_endpoints(config: &CliConfig) -> (String, String) {
     match (&config.account_endpoint, &config.basin_endpoint) {
         (Some(account), Some(basin)) => (normalize_endpoint(account), normalize_endpoint(basin)),
-        // The SDK ignores an incomplete custom-endpoint pair and uses its defaults.
+        // Display labels fall back to defaults until both custom endpoints are configured.
         _ => (
             DEFAULT_ACCOUNT_ENDPOINT.to_owned(),
             DEFAULT_BASIN_ENDPOINT.to_owned(),

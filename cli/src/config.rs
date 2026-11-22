@@ -411,16 +411,18 @@ pub fn sdk_config(
             sdk_config = sdk_config.with_endpoints(endpoints);
         }
         (Some(_), None) => {
-            eprintln!(
-                "Warning: account endpoint is set but basin endpoint is not. \
-                 Both must be set to use custom endpoints. Using default endpoints"
-            );
+            return Err(CliError::EndpointsInvalid(
+                "account endpoint is set without basin endpoint; both must be set to use custom \
+                 endpoints"
+                    .into(),
+            ));
         }
         (None, Some(_)) => {
-            eprintln!(
-                "Warning: basin endpoint is set but account endpoint is not. \
-                 Both must be set to use custom endpoints. Using default endpoints"
-            );
+            return Err(CliError::EndpointsInvalid(
+                "basin endpoint is set without account endpoint; both must be set to use custom \
+                 endpoints"
+                    .into(),
+            ));
         }
         (None, None) => {}
     }

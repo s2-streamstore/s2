@@ -6,7 +6,7 @@ use std::time::Duration;
 use s2_sdk::{
     S2,
     error::RequestError,
-    types::{AccountEndpoint, BasinEndpoint, S2Config, S2Endpoints, ValidationError},
+    types::{S2Config, S2Endpoints, ValidationError},
 };
 use testcontainers::{
     ContainerAsync, ContainerRequest, GenericImage, ImageExt, TestcontainersError,
@@ -130,12 +130,7 @@ pub fn s2_config_for_endpoint(
     endpoint: impl AsRef<str>,
     access_token: impl Into<String>,
 ) -> Result<S2Config> {
-    let endpoint = endpoint.as_ref();
-    let endpoints = S2Endpoints::new(
-        AccountEndpoint::new(endpoint)?,
-        BasinEndpoint::new(endpoint)?,
-    )?;
-
+    let endpoints = S2Endpoints::for_endpoint(endpoint.as_ref())?;
     Ok(S2Config::new(access_token).with_endpoints(endpoints))
 }
 

@@ -148,9 +148,11 @@ async fn ensure_basin_created() -> Result<(), Box<dyn std::error::Error>> {
         assert_eq!(basin_name, info.name);
     });
 
-    let config = s2.get_basin_config(basin_name).await?;
+    let config = s2.get_basin_config(basin_name.clone()).await?;
 
     assert!(config.create_stream_on_read);
+
+    s2.delete_basin(basin_name).await?;
 
     Ok(())
 }
@@ -180,9 +182,11 @@ async fn ensure_basin_config_updated() -> Result<(), Box<dyn std::error::Error>>
 
     assert_matches!(output, EnsureOutput::Updated(_));
 
-    let updated_config = s2.get_basin_config(basin_name).await?;
+    let updated_config = s2.get_basin_config(basin_name.clone()).await?;
 
     assert!(!updated_config.create_stream_on_append);
+
+    s2.delete_basin(basin_name).await?;
 
     Ok(())
 }
@@ -208,9 +212,11 @@ async fn ensure_basin_config_unchanged() -> Result<(), Box<dyn std::error::Error
 
     assert_matches!(output, EnsureOutput::Noop(_));
 
-    let updated_config = s2.get_basin_config(basin_name).await?;
+    let updated_config = s2.get_basin_config(basin_name.clone()).await?;
 
     assert_eq!(config, updated_config);
+
+    s2.delete_basin(basin_name).await?;
 
     Ok(())
 }
@@ -302,32 +308,6 @@ async fn delete_nonexistent_basin_succeeds() -> Result<(), Box<dyn std::error::E
     let result = s2.delete_basin(unique_basin_name()).await;
 
     assert_matches!(result, Ok(()));
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn get_basin_config() -> Result<(), Box<dyn std::error::Error>> {
-    let s2 = s2();
-    let basin_name = unique_basin_name();
-
-    let config = BasinConfig::new()
-        .with_default_stream_config(StreamConfig::new().with_storage_class("express"));
-
-    s2.create_basin(CreateBasinInput::new(basin_name.clone()).with_config(config))
-        .await?;
-
-    let retrieved_config = s2.get_basin_config(basin_name.clone()).await?;
-
-    assert_matches!(
-        retrieved_config.default_stream_config,
-        Some(StreamConfig {
-            storage_class: Some(ref storage_class),
-            ..
-        }) if storage_class == "express"
-    );
-
-    s2.delete_basin(basin_name).await?;
 
     Ok(())
 }

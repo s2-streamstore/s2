@@ -213,7 +213,7 @@ pub struct ResolvedStreamConfig {
 }
 
 /// Resolve a stream configuration against basin defaults and server defaults while preserving
-/// unrecognized future enum values (`MaybeKnown::Unknown`) verbatim.
+/// unrecognized future enum values (`Unknown`) verbatim.
 pub fn resolve_stream_config(
     config: sdk::types::StreamConfig,
     basin_defaults: sdk::types::StreamConfig,
@@ -375,7 +375,7 @@ pub struct DeleteOnEmptyConfig {
 impl From<DeleteOnEmptyConfig> for sdk::types::DeleteOnEmptyConfig {
     fn from(value: DeleteOnEmptyConfig) -> Self {
         sdk::types::DeleteOnEmptyConfig::new()
-            .with_min_age(Duration::from_secs(value.delete_on_empty_min_age.as_secs()))
+            .with_min_age(value.delete_on_empty_min_age)
             .expect("whole-second duration")
     }
 }
@@ -383,7 +383,7 @@ impl From<DeleteOnEmptyConfig> for sdk::types::DeleteOnEmptyConfig {
 impl From<DeleteOnEmptyConfig> for sdk::types::DeleteOnEmptyReconfiguration {
     fn from(value: DeleteOnEmptyConfig) -> Self {
         sdk::types::DeleteOnEmptyReconfiguration::new()
-            .with_min_age(Duration::from_secs(value.delete_on_empty_min_age.as_secs()))
+            .with_min_age(value.delete_on_empty_min_age)
             .expect("whole-second duration")
     }
 }

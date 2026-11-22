@@ -422,7 +422,7 @@ mod tests {
         headers: Vec<Header>,
         body: Bytes,
     ) -> SequencedRecord {
-        SequencedRecord::from_parts(seq_num, timestamp, headers, body)
+        SequencedRecord::new(seq_num, body, headers, timestamp)
     }
 
     async fn parse_text_line(line: String) -> AppendRecord {

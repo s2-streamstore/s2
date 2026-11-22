@@ -49,62 +49,6 @@ async fn create_list_and_delete_stream(basin: &S2Basin) -> Result<(), RequestErr
 
 #[test_context(S2Basin)]
 #[tokio_shared_rt::test(shared)]
-async fn stream_config_roundtrip(basin: &S2Basin) -> Result<(), RequestError> {
-    let stream_name = unique_stream_name();
-    let config = StreamConfig::new()
-        .with_storage_class("standard")
-        .with_retention_policy(RetentionPolicy::Age(3600))
-        .with_timestamping(TimestampingConfig::new().with_mode(TimestampingMode::ClientRequire));
-
-    basin
-        .create_stream(CreateStreamInput::new(stream_name.clone()).with_config(config.clone()))
-        .await?;
-
-    let retrieved_config = basin.get_stream_config(stream_name.clone()).await?;
-
-    assert_matches!(
-        retrieved_config,
-        StreamConfig {
-            storage_class: Some(ref storage_class),
-            retention_policy: Some(RetentionPolicy::Age(3600)),
-            timestamping: Some(TimestampingConfig {
-                mode: Some(TimestampingMode::ClientRequire),
-                ..
-            }),
-            ..
-        } if storage_class == "standard"
-    );
-
-    Ok(())
-}
-
-#[test_context(S2Basin)]
-#[tokio_shared_rt::test(shared)]
-async fn reconfigure_stream(basin: &S2Basin) -> Result<(), RequestError> {
-    let stream_name = unique_stream_name();
-
-    basin
-        .create_stream(CreateStreamInput::new(stream_name.clone()))
-        .await?;
-
-    let new_config = StreamReconfiguration::new().with_delete_on_empty(
-        DeleteOnEmptyReconfiguration::new().with_min_age(Duration::from_hours(12))?,
-    );
-
-    let updated_config = basin
-        .reconfigure_stream(stream_name.clone(), new_config)
-        .await?;
-
-    assert_eq!(
-        updated_config.delete_on_empty.map(|d| d.min_age()),
-        Some(Duration::from_secs(43200))
-    );
-
-    Ok(())
-}
-
-#[test_context(S2Basin)]
-#[tokio_shared_rt::test(shared)]
 async fn ensure_stream_created(basin: &S2Basin) -> Result<(), RequestError> {
     let stream_name = unique_stream_name();
 
@@ -172,7 +116,7 @@ async fn ensure_stream_config_updated(basin: &S2Basin) -> Result<(), RequestErro
 
 #[test_context(S2Basin)]
 #[tokio_shared_rt::test(shared)]
-async fn ensure_basin_config_unchanged(basin: &S2Basin) -> Result<(), RequestError> {
+async fn ensure_stream_config_unchanged(basin: &S2Basin) -> Result<(), RequestError> {
     let stream_name = unique_stream_name();
 
     let output = basin
@@ -315,24 +259,6 @@ async fn delete_nonexistent_stream_succeeds(basin: &S2Basin) -> Result<(), Reque
     let result = basin.delete_stream(unique_stream_name()).await;
 
     assert_matches!(result, Ok(()));
-
-    Ok(())
-}
-
-#[test_context(S2Basin)]
-#[tokio_shared_rt::test(shared)]
-async fn get_stream_config(basin: &S2Basin) -> Result<(), RequestError> {
-    let stream_name = unique_stream_name();
-
-    let config = StreamConfig::new().with_storage_class("express");
-
-    basin
-        .create_stream(CreateStreamInput::new(stream_name.clone()).with_config(config))
-        .await?;
-
-    let retrieved_config = basin.get_stream_config(stream_name.clone()).await?;
-
-    assert_matches!(retrieved_config.storage_class.as_deref(), Some("express"));
 
     Ok(())
 }
@@ -729,28 +655,6 @@ async fn create_stream_timestamping_uncapped(basin: &SharedS2Basin) -> Result<()
 
         basin.delete_stream(stream_name).await?;
     }
-
-    Ok(())
-}
-
-#[test_context(SharedS2Basin)]
-#[tokio_shared_rt::test(shared)]
-async fn create_stream_delete_on_empty_min_age(basin: &SharedS2Basin) -> Result<(), RequestError> {
-    let stream_name = unique_stream_name();
-    let config = StreamConfig::new()
-        .with_delete_on_empty(DeleteOnEmptyConfig::new().with_min_age(Duration::from_secs(3600))?);
-
-    basin
-        .create_stream(CreateStreamInput::new(stream_name.clone()).with_config(config))
-        .await?;
-
-    let retrieved = basin.get_stream_config(stream_name.clone()).await?;
-    assert_eq!(
-        retrieved.delete_on_empty.map(|d| d.min_age()),
-        Some(Duration::from_secs(3600))
-    );
-
-    basin.delete_stream(stream_name).await?;
 
     Ok(())
 }

@@ -306,6 +306,12 @@ impl FromStr for AccountEndpoint {
     }
 }
 
+impl fmt::Display for AccountEndpoint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}://{}", self.scheme, self.authority)
+    }
+}
+
 /// Basin endpoint.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BasinEndpoint {
@@ -347,12 +353,27 @@ impl FromStr for BasinEndpoint {
     }
 }
 
+impl fmt::Display for BasinEndpoint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.authority {
+            BasinAuthority::ParentZone(zone) => write!(f, "{}://{{basin}}.{zone}", self.scheme),
+            BasinAuthority::Direct(authority) => write!(f, "{}://{authority}", self.scheme),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Endpoints for the S2 environment.
 pub struct S2Endpoints {
     pub(crate) scheme: Scheme,
     pub(crate) account_authority: Authority,
     pub(crate) basin_authority: BasinAuthority,
+}
+
+impl Default for S2Endpoints {
+    fn default() -> Self {
+        Self::for_cloud()
+    }
 }
 
 impl S2Endpoints {
@@ -375,10 +396,12 @@ impl S2Endpoints {
     ///
     /// This is useful for S2-compatible services that expose both APIs at one endpoint.
     pub fn for_endpoint(endpoint: &str) -> Result<Self, ValidationError> {
-        Self::new(
-            AccountEndpoint::new(endpoint)?,
-            BasinEndpoint::new(endpoint)?,
-        )
+        let account = AccountEndpoint::new(endpoint)?;
+        Ok(Self {
+            scheme: account.scheme,
+            account_authority: account.authority.clone(),
+            basin_authority: BasinAuthority::Direct(account.authority),
+        })
     }
 
     /// Create a new [`S2Endpoints`] from environment variables.
@@ -779,8 +802,8 @@ impl S2Config {
     }
 
     /// Return the retry configuration.
-    pub fn retry(&self) -> &RetryConfig {
-        &self.retry
+    pub fn retry(&self) -> RetryConfig {
+        self.retry
     }
 
     /// Return the compression algorithm for requests and responses.
@@ -794,12 +817,6 @@ impl S2Config {
     }
 
     pub(crate) fn validate(&self) -> Result<(), ValidationError> {
-        if self.connection_timeout.is_zero() {
-            return Err("connection_timeout must be greater than zero".into());
-        }
-        if self.request_timeout.is_zero() {
-            return Err("request_timeout must be greater than zero".into());
-        }
         if self.retry.min_base_delay > self.retry.max_base_delay {
             return Err("min_base_delay must not exceed max_base_delay".into());
         }

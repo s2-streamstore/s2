@@ -5115,11 +5115,11 @@ name = "s2-sdk"
 version = "0.49.0"
 dependencies = [
  "assert_matches",
- "async-compression",
  "async-stream",
  "async-trait",
  "base64ct",
  "bytes",
+ "flate2",
  "futures-core",
  "futures-util",
  "h2",
@@ -5152,6 +5152,7 @@ dependencies = [
  "tracing",
  "urlencoding",
  "uuid",
+ "zstd 0.14.4",
 ]
 
 [[package]]

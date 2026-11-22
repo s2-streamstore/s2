@@ -6,13 +6,12 @@ use std::time::Duration;
 
 use s2_sdk::{
     S2,
-    types::{AccountMetricSet, BasinMetricSet, S2Config, StreamMetricSet, TimeRange, Timestamp},
+    types::{AccountMetricSet, BasinMetricSet, StreamMetricSet, TimeRange, Timestamp},
 };
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let access_token = std::env::var("S2_ACCESS_TOKEN")?;
-    let client = S2::new(S2Config::new(access_token))?;
+    let client = S2::from_env()?;
 
     // ANCHOR: metrics
     let now = Timestamp::now();

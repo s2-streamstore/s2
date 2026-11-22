@@ -1,3 +1,4 @@
+use jiff::Timestamp;
 use s2_common::{
     self,
     access::{AccessTokenId, AccessTokenIdPrefix, AccessTokenIdStartAfter},
@@ -44,8 +45,6 @@ where
         }
     }
 }
-
-use jiff::Timestamp;
 
 #[rustfmt::skip]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]

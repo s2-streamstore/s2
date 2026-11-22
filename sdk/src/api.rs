@@ -1,40 +1,20 @@
-use std::{ops::Deref, pin::Pin, sync::Arc, time::Duration};
+use std::{pin::Pin, sync::Arc, time::Duration};
 
 use async_stream::try_stream;
-use async_trait::async_trait;
 use bytes::BytesMut;
 use futures_core::Stream;
 use futures_util::StreamExt;
 use http::{
     HeaderMap, HeaderName, HeaderValue, StatusCode, Uri,
-    header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE},
+    header::{AUTHORIZATION, CONTENT_TYPE},
 };
-use prost::{self, Message};
+use prost::Message;
 use s2_api::v1::{
-    access::{
-        IssueAccessTokenRequest, IssueAccessTokenResponse, ListAccessTokensRequest,
-        ListAccessTokensResponse,
-    },
-    basin::{
-        BasinInfo, CreateBasinRequest, EnsureBasinRequest, ListBasinsRequest, ListBasinsResponse,
-    },
-    config::{
-        BasinConfig, BasinReconfiguration, STREAM_CONFIG_HEADER, StreamConfig,
-        StreamReconfiguration,
-    },
-    location::LocationInfo,
-    metrics::{
-        AccountMetricSetRequest, BasinMetricSetRequest, MetricSetResponse, StreamMetricSetRequest,
-    },
-    network_policy::{
-        CreateNetworkPolicyRequest, ListNetworkPoliciesRequest, ListNetworkPoliciesResponse,
-        NetworkPolicyInfo,
-    },
+    config::STREAM_CONFIG_HEADER,
     stream::{
-        CreateStreamRequest, ListStreamsRequest, ListStreamsResponse, ReadEnd, ReadStart,
-        StreamInfo, TailResponse,
-        proto::{AppendAck, AppendInput, ReadBatch},
-        s2s::{FrameDecoder, SessionMessage, TerminalMessage},
+        ReadEnd, ReadStart,
+        proto::{AppendAck, ReadBatch},
+        s2s::{FrameDecoder, SessionMessage},
     },
 };
 use s2_common::{
@@ -42,1082 +22,35 @@ use s2_common::{
     resources::{PROVISION_RESULT_HEADER, ProvisionResult},
 };
 use secrecy::ExposeSecret;
+use serde::de::DeserializeOwned;
 use tokio_util::codec::Decoder;
 use tracing::debug;
 
 use crate::{
     client::{self, ShutdownSignal, StreamingResponse, UnaryResponse},
     error::{
-        AbortedError, ClientClosedError, ConnectError, ConnectionLostError, ErrorContext,
-        FencingTokenMismatchError, OpScope, ProtocolError, ReadUnwrittenError, SeqNumMismatchError,
-        ServerError, TimeoutError, classify_http_error,
+        AbortedError, AppendSessionError, ClientClosedError, ConnectionLostError, ErrorCode,
+        ErrorContext, OpScope, ProtocolError, ReadSessionError, TransportError,
     },
     frame_signal::FrameSignal,
     reconnect::ReconnectAdvice,
-    retry::{AppendRetryError, RetryBackoff, RetryBackoffBuilder},
+    retry::RetryBackoff,
+    session::StreamHeaders,
     types::{
-        AccessToken, AccessTokenId, AccessTokenMode, AppendRetryPolicy, BasinAuthority, BasinName,
-        Compression, FencingToken, LocationName, NetworkPolicySelector, RetryConfig, S2Config,
-        S2Endpoints, StreamName, ValidationError,
+        AccessToken, AccessTokenMode, AppendRetryPolicy, BasinName, Compression, RetryConfig,
+        S2Config, StreamName, ValidationError,
     },
 };
 
 const CONTENT_TYPE_S2S: &str = "s2s/proto";
-const CONTENT_TYPE_PROTO: &str = "application/protobuf";
-const ACCEPT_PROTO: &str = "application/protobuf";
-const S2_REQUEST_TOKEN: &str = "s2-request-token";
+pub(crate) const CONTENT_TYPE_PROTO: &str = "application/protobuf";
+pub(crate) const ACCEPT_PROTO: &str = "application/protobuf";
+pub(crate) const S2_REQUEST_TOKEN: &str = "s2-request-token";
 const S2_ATTEMPT: HeaderName = HeaderName::from_static("s2-attempt");
 const S2_BASIN: HeaderName = HeaderName::from_static("s2-basin");
 const RETRY_AFTER_MS_HEADER: &str = "retry-after-ms";
 
-#[derive(Debug, Clone)]
-pub struct AccountClient {
-    pub client: BaseClient,
-    pub config: Arc<S2Config>,
-    pub base_url: Uri,
-}
-
-impl AccountClient {
-    pub fn init(config: S2Config, client: BaseClient) -> Self {
-        let base_url = base_url(&config.endpoints, ClientKind::Account);
-        Self {
-            client,
-            config: Arc::new(config),
-            base_url,
-        }
-    }
-
-    pub fn basin_client(&self, name: BasinName) -> BasinClient {
-        BasinClient::init(name, self.config.clone(), self.client.clone())
-    }
-
-    fn uri(&self, path: impl AsRef<str>) -> Uri {
-        client::uri_with_path(&self.base_url, path)
-    }
-
-    pub async fn list_access_tokens(
-        &self,
-        request: ListAccessTokensRequest,
-    ) -> Result<ListAccessTokensResponse, ApiError> {
-        let scope = OpScope::account("list_access_tokens", true);
-        let url = self.uri("v1/access-tokens");
-        let request = self
-            .get(url)
-            .query(&request)
-            .build()
-            .map_err(|e| ApiError::from_http(e, scope.context(1)))?;
-        let response = self.request(request, scope).send().await?;
-        response
-            .json::<ListAccessTokensResponse>()
-            .map_err(|e| ApiError::from_http(e, scope.context(1)))
-    }
-
-    pub async fn issue_access_token(
-        &self,
-        request: IssueAccessTokenRequest,
-    ) -> Result<IssueAccessTokenResponse, ApiError> {
-        let scope = OpScope::account("issue_access_token", false);
-        let url = self.uri("v1/access-tokens");
-        let request = self
-            .post(url)
-            .json(&request)
-            .build()
-            .map_err(|e| ApiError::from_http(e, scope.context(1)))?;
-        let response = self
-            .request(request, scope)
-            .with_definite_retries_only()
-            .send()
-            .await?;
-        response
-            .json::<IssueAccessTokenResponse>()
-            .map_err(|e| ApiError::from_http(e, scope.context(1)))
-    }
-
-    pub async fn revoke_access_token(&self, id: AccessTokenId) -> Result<(), ApiError> {
-        let scope = OpScope::account("revoke_access_token", false);
-        let url = self.uri(format!("v1/access-tokens/{}", urlencoding::encode(&id)));
-        let request = self
-            .delete(url)
-            .build()
-            .map_err(|e| ApiError::from_http(e, scope.context(1)))?;
-        self.request(request, scope)
-            .send()
-            .await
-            .ignore_not_found_code("access_token_not_found")?;
-        Ok(())
-    }
-
-    pub async fn list_network_policies(
-        &self,
-        request: ListNetworkPoliciesRequest,
-    ) -> Result<ListNetworkPoliciesResponse, ApiError> {
-        let scope = OpScope::account("list_network_policies", true);
-        let url = self.uri("v1/network-policies");
-        let request = self
-            .get(url)
-            .query(&request)
-            .build()
-            .map_err(|e| ApiError::from_http(e, scope.context(1)))?;
-        let response = self.request(request, scope).send().await?;
-        response
-            .json::<ListNetworkPoliciesResponse>()
-            .map_err(|e| ApiError::from_http(e, scope.context(1)))
-    }
-
-    pub async fn create_network_policy(
-        &self,
-        request: CreateNetworkPolicyRequest,
-    ) -> Result<NetworkPolicyInfo, ApiError> {
-        let scope = OpScope::account("create_network_policy", false);
-        let url = self.uri("v1/network-policies");
-        let request = self
-            .post(url)
-            .json(&request)
-            .build()
-            .map_err(|e| ApiError::from_http(e, scope.context(1)))?;
-        let response = self
-            .request(request, scope)
-            .with_definite_retries_only()
-            .send()
-            .await?;
-        response
-            .json::<NetworkPolicyInfo>()
-            .map_err(|e| ApiError::from_http(e, scope.context(1)))
-    }
-
-    pub async fn get_network_policy(
-        &self,
-        selector: NetworkPolicySelector,
-    ) -> Result<NetworkPolicyInfo, ApiError> {
-        let scope = OpScope::account("get_network_policy", true);
-        let url = self.uri(format!(
-            "v1/network-policies/{}",
-            urlencoding::encode(&selector.to_string())
-        ));
-        let request = self
-            .get(url)
-            .build()
-            .map_err(|e| ApiError::from_http(e, scope.context(1)))?;
-        let response = self.request(request, scope).send().await?;
-        response
-            .json::<NetworkPolicyInfo>()
-            .map_err(|e| ApiError::from_http(e, scope.context(1)))
-    }
-
-    pub async fn delete_network_policy(
-        &self,
-        selector: NetworkPolicySelector,
-    ) -> Result<(), ApiError> {
-        let scope = OpScope::account("delete_network_policy", false);
-        let url = self.uri(format!(
-            "v1/network-policies/{}",
-            urlencoding::encode(&selector.to_string())
-        ));
-        let request = self
-            .delete(url)
-            .build()
-            .map_err(|e| ApiError::from_http(e, scope.context(1)))?;
-        self.request(request, scope)
-            .send()
-            .await
-            .ignore_not_found_code("network_policy_not_found")?;
-        Ok(())
-    }
-
-    pub async fn list_locations(&self) -> Result<Vec<LocationInfo>, ApiError> {
-        let scope = OpScope::account("list_locations", true);
-        let url = self.uri("v1/locations");
-        let request = self
-            .get(url)
-            .build()
-            .map_err(|e| ApiError::from_http(e, scope.context(1)))?;
-        let response = self.request(request, scope).send().await?;
-        response
-            .json::<Vec<LocationInfo>>()
-            .map_err(|e| ApiError::from_http(e, scope.context(1)))
-    }
-
-    pub async fn get_default_location(&self) -> Result<LocationInfo, ApiError> {
-        let scope = OpScope::account("get_default_location", true);
-        let url = self.uri("v1/locations/default");
-        let request = self
-            .get(url)
-            .build()
-            .map_err(|e| ApiError::from_http(e, scope.context(1)))?;
-        let response = self.request(request, scope).send().await?;
-        response
-            .json::<LocationInfo>()
-            .map_err(|e| ApiError::from_http(e, scope.context(1)))
-    }
-
-    pub async fn set_default_location(
-        &self,
-        location: LocationName,
-    ) -> Result<LocationInfo, ApiError> {
-        let scope = OpScope::account("set_default_location", false);
-        let url = self.uri("v1/locations/default");
-        let request = self
-            .put(url)
-            .json(&location)
-            .build()
-            .map_err(|e| ApiError::from_http(e, scope.context(1)))?;
-        let response = self.request(request, scope).send().await?;
-        response
-            .json::<LocationInfo>()
-            .map_err(|e| ApiError::from_http(e, scope.context(1)))
-    }
-
-    pub async fn list_basins(
-        &self,
-        request: ListBasinsRequest,
-    ) -> Result<ListBasinsResponse, ApiError> {
-        let scope = OpScope::account("list_basins", true);
-        let url = self.uri("v1/basins");
-        let request = self
-            .get(url)
-            .query(&request)
-            .build()
-            .map_err(|e| ApiError::from_http(e, scope.context(1)))?;
-        let response = self.request(request, scope).send().await?;
-        response
-            .json::<ListBasinsResponse>()
-            .map_err(|e| ApiError::from_http(e, scope.context(1)))
-    }
-
-    pub async fn create_basin(
-        &self,
-        request: CreateBasinRequest,
-        idempotency_token: String,
-    ) -> Result<BasinInfo, ApiError> {
-        let basin_name = request.basin.clone();
-        let scope = OpScope::basin("create_basin", basin_name.as_ref(), false);
-        let url = self.uri("v1/basins");
-        let request = self
-            .post(url)
-            .header(S2_REQUEST_TOKEN, idempotency_token)
-            .json(&request)
-            .build()
-            .map_err(|e| ApiError::from_http(e, scope.context(1)))?;
-        let response = self.request(request, scope).send().await?;
-        response
-            .json::<BasinInfo>()
-            .map_err(|e| ApiError::from_http(e, scope.context(1)))
-    }
-
-    pub async fn get_basin_config(&self, name: BasinName) -> Result<BasinConfig, ApiError> {
-        let scope = OpScope::basin("get_basin_config", name.as_ref(), true);
-        let url = self.uri(format!("v1/basins/{name}"));
-        let request = self
-            .get(url)
-            .build()
-            .map_err(|e| ApiError::from_http(e, scope.context(1)))?;
-        let response = self.request(request, scope).send().await?;
-        response
-            .json::<BasinConfig>()
-            .map_err(|e| ApiError::from_http(e, scope.context(1)))
-    }
-
-    pub async fn reconfigure_basin(
-        &self,
-        name: BasinName,
-        config: BasinReconfiguration,
-    ) -> Result<BasinConfig, ApiError> {
-        let scope = OpScope::basin("reconfigure_basin", name.as_ref(), false);
-        let url = self.uri(format!("v1/basins/{name}"));
-        let request = self
-            .patch(url)
-            .json(&config)
-            .build()
-            .map_err(|e| ApiError::from_http(e, scope.context(1)))?;
-        let response = self.request(request, scope).send().await?;
-        response
-            .json::<BasinConfig>()
-            .map_err(|e| ApiError::from_http(e, scope.context(1)))
-    }
-
-    pub async fn ensure_basin(
-        &self,
-        name: BasinName,
-        request: Option<EnsureBasinRequest>,
-    ) -> Result<ProvisionResult<BasinInfo>, ApiError> {
-        let scope = OpScope::basin("ensure_basin", name.as_ref(), false);
-        let url = self.uri(format!("v1/basins/{name}"));
-        let request = match request {
-            Some(body) => self.put(url).json(&body).build(),
-            None => self.put(url).build(),
-        }
-        .map_err(|e| ApiError::from_http(e, scope.context(1)))?;
-        let response = self.request(request, scope).send().await?;
-        let status = response.status();
-        let provision_result_header_value = provision_result_header_value(&response);
-        let info = response
-            .json::<BasinInfo>()
-            .map_err(|e| ApiError::from_http(e, scope.context(1)))?;
-        Ok(provision_result_from_parts(
-            status,
-            provision_result_header_value.as_deref(),
-            info,
-        ))
-    }
-
-    pub async fn delete_basin(&self, name: BasinName) -> Result<(), ApiError> {
-        let scope = OpScope::basin("delete_basin", name.as_ref(), false);
-        let url = self.uri(format!("v1/basins/{name}"));
-        let request = self
-            .delete(url)
-            .build()
-            .map_err(|e| ApiError::from_http(e, scope.context(1)))?;
-        self.request(request, scope)
-            .send()
-            .await
-            .ignore_not_found_code("basin_not_found")?;
-        Ok(())
-    }
-
-    pub async fn get_account_metrics(
-        &self,
-        request: AccountMetricSetRequest,
-    ) -> Result<MetricSetResponse, ApiError> {
-        let scope = OpScope::account("get_account_metrics", true);
-        let url = self.uri("v1/metrics");
-        let request = self
-            .get(url)
-            .query(&request)
-            .build()
-            .map_err(|e| ApiError::from_http(e, scope.context(1)))?;
-        let response = self.request(request, scope).send().await?;
-        response
-            .json::<MetricSetResponse>()
-            .map_err(|e| ApiError::from_http(e, scope.context(1)))
-    }
-
-    pub async fn get_basin_metrics(
-        &self,
-        name: BasinName,
-        request: BasinMetricSetRequest,
-    ) -> Result<MetricSetResponse, ApiError> {
-        let scope = OpScope::basin("get_basin_metrics", name.as_ref(), true);
-        let url = self.uri(format!("v1/metrics/{name}"));
-        let request = self
-            .get(url)
-            .query(&request)
-            .build()
-            .map_err(|e| ApiError::from_http(e, scope.context(1)))?;
-        let response = self.request(request, scope).send().await?;
-        response
-            .json::<MetricSetResponse>()
-            .map_err(|e| ApiError::from_http(e, scope.context(1)))
-    }
-
-    pub async fn get_stream_metrics(
-        &self,
-        basin_name: BasinName,
-        stream_name: StreamName,
-        request: StreamMetricSetRequest,
-    ) -> Result<MetricSetResponse, ApiError> {
-        let scope = OpScope::stream(
-            "get_stream_metrics",
-            basin_name.as_ref(),
-            stream_name.as_ref(),
-            true,
-        );
-        let url = self.uri(format!(
-            "v1/metrics/{basin_name}/{}",
-            urlencoding::encode(&stream_name)
-        ));
-        let request = self
-            .get(url)
-            .query(&request)
-            .build()
-            .map_err(|e| ApiError::from_http(e, scope.context(1)))?;
-        let response = self.request(request, scope).send().await?;
-        response
-            .json::<MetricSetResponse>()
-            .map_err(|e| ApiError::from_http(e, scope.context(1)))
-    }
-}
-
-impl Deref for AccountClient {
-    type Target = BaseClient;
-
-    fn deref(&self) -> &Self::Target {
-        &self.client
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct BasinClient {
-    pub name: BasinName,
-    pub client: BaseClient,
-    pub config: Arc<S2Config>,
-    pub base_url: Uri,
-    basin_header: Option<HeaderValue>,
-}
-
-impl BasinClient {
-    pub fn init(name: BasinName, config: Arc<S2Config>, client: BaseClient) -> Self {
-        let base_url = base_url(&config.endpoints, ClientKind::Basin(name.clone()));
-        let basin_header = matches!(config.endpoints.basin_authority, BasinAuthority::Direct(_))
-            .then(|| HeaderValue::from_str(&name).expect("valid header value"));
-        Self {
-            name,
-            client,
-            config,
-            base_url,
-            basin_header,
-        }
-    }
-
-    fn uri(&self, path: impl AsRef<str>) -> Uri {
-        client::uri_with_path(&self.base_url, path)
-    }
-
-    fn apply_basin_header(&self, request: &mut client::Request) {
-        if let Some(ref header) = self.basin_header {
-            request.headers_mut().insert(S2_BASIN, header.clone());
-        }
-    }
-
-    fn request<'a>(&'a self, mut request: client::Request, scope: OpScope<'a>) -> RequestBuilder<'a> {
-        self.apply_basin_header(&mut request);
-        self.client.request(request, scope)
-    }
-
-    pub async fn list_streams(
-        &self,
-        request: ListStreamsRequest,
-    ) -> Result<ListStreamsResponse, ApiError> {
-        let scope = OpScope::basin("list_streams", self.name.as_ref(), true);
-        let url = self.uri("v1/streams");
-        let request = self
-            .get(url)
-            .query(&request)
-            .build()
-            .map_err(|e| ApiError::from_http(e, scope.context(1)))?;
-        let response = self.request(request, scope).send().await?;
-        response
-            .json::<ListStreamsResponse>()
-            .map_err(|e| ApiError::from_http(e, scope.context(1)))
-    }
-
-    pub async fn create_stream(
-        &self,
-        request: CreateStreamRequest,
-        idempotency_token: String,
-    ) -> Result<StreamInfo, ApiError> {
-        let stream_name = request.stream.clone();
-        let scope = OpScope::stream(
-            "create_stream",
-            self.name.as_ref(),
-            stream_name.as_ref(),
-            false,
-        );
-        let url = self.uri("v1/streams");
-        let request = self
-            .post(url)
-            .header(S2_REQUEST_TOKEN, idempotency_token)
-            .json(&request)
-            .build()
-            .map_err(|e| ApiError::from_http(e, scope.context(1)))?;
-        let response = self.request(request, scope).send().await?;
-        response
-            .json::<StreamInfo>()
-            .map_err(|e| ApiError::from_http(e, scope.context(1)))
-    }
-
-    pub async fn get_stream_config(&self, name: StreamName) -> Result<StreamConfig, ApiError> {
-        let scope = OpScope::stream("get_stream_config", self.name.as_ref(), name.as_ref(), true);
-        let url = self.uri(format!("v1/streams/{}", urlencoding::encode(&name)));
-        let request = self
-            .get(url)
-            .build()
-            .map_err(|e| ApiError::from_http(e, scope.context(1)))?;
-        let response = self.request(request, scope).send().await?;
-        response
-            .json::<StreamConfig>()
-            .map_err(|e| ApiError::from_http(e, scope.context(1)))
-    }
-
-    pub async fn reconfigure_stream(
-        &self,
-        name: StreamName,
-        config: StreamReconfiguration,
-    ) -> Result<StreamConfig, ApiError> {
-        let scope = OpScope::stream(
-            "reconfigure_stream",
-            self.name.as_ref(),
-            name.as_ref(),
-            false,
-        );
-        let url = self.uri(format!("v1/streams/{}", urlencoding::encode(&name)));
-        let request = self
-            .patch(url)
-            .json(&config)
-            .build()
-            .map_err(|e| ApiError::from_http(e, scope.context(1)))?;
-        let response = self.request(request, scope).send().await?;
-        response
-            .json::<StreamConfig>()
-            .map_err(|e| ApiError::from_http(e, scope.context(1)))
-    }
-
-    pub async fn ensure_stream(
-        &self,
-        name: StreamName,
-        config: Option<StreamConfig>,
-    ) -> Result<ProvisionResult<StreamInfo>, ApiError> {
-        let scope = OpScope::stream("ensure_stream", self.name.as_ref(), name.as_ref(), false);
-        let url = self.uri(format!("v1/streams/{}", urlencoding::encode(&name)));
-        let request = match config {
-            Some(body) => self.put(url).json(&body).build(),
-            None => self.put(url).build(),
-        }
-        .map_err(|e| ApiError::from_http(e, scope.context(1)))?;
-        let response = self.request(request, scope).send().await?;
-        let status = response.status();
-        let provision_result_header_value = provision_result_header_value(&response);
-        let info = response
-            .json::<StreamInfo>()
-            .map_err(|e| ApiError::from_http(e, scope.context(1)))?;
-        Ok(provision_result_from_parts(
-            status,
-            provision_result_header_value.as_deref(),
-            info,
-        ))
-    }
-
-    pub async fn delete_stream(&self, name: StreamName) -> Result<(), ApiError> {
-        let scope = OpScope::stream("delete_stream", self.name.as_ref(), name.as_ref(), false);
-        let url = self.uri(format!("v1/streams/{}", urlencoding::encode(&name)));
-        let request = self
-            .delete(url)
-            .build()
-            .map_err(|e| ApiError::from_http(e, scope.context(1)))?;
-        self.request(request, scope)
-            .send()
-            .await
-            .ignore_not_found_code("stream_not_found")?;
-        Ok(())
-    }
-
-    pub async fn check_tail(&self, name: &StreamName) -> Result<TailResponse, ApiError> {
-        let scope = OpScope::stream("check_tail", self.name.as_ref(), name.as_ref(), true);
-        let url = self.uri(format!(
-            "v1/streams/{}/records/tail",
-            urlencoding::encode(name)
-        ));
-        let request = self
-            .get(url)
-            .build()
-            .map_err(|e| ApiError::from_http(e, scope.context(1)))?;
-        let response = self.request(request, scope).send().await?;
-        response
-            .json::<TailResponse>()
-            .map_err(|e| ApiError::from_http(e, scope.context(1)))
-    }
-
-    pub async fn append(
-        &self,
-        name: &StreamName,
-        input: AppendInput,
-        encryption: Option<&HeaderValue>,
-        stream_config: Option<&HeaderValue>,
-        append_retry_policy: AppendRetryPolicy,
-    ) -> Result<AppendAck, ApiError> {
-        let scope = OpScope::stream("append", self.name.as_ref(), name.as_ref(), false);
-        let url = self.uri(format!("v1/streams/{}/records", urlencoding::encode(name)));
-        let mut request = self
-            .post(url)
-            .header(CONTENT_TYPE, CONTENT_TYPE_PROTO)
-            .header(ACCEPT, ACCEPT_PROTO)
-            .body(input.encode_to_vec())
-            .build()
-            .map_err(|e| ApiError::from_http(e, scope.context(1)))?;
-        set_header_opt(&mut request, &S2_ENCRYPTION_KEY_HEADER, encryption);
-        set_header_opt(&mut request, &STREAM_CONFIG_HEADER, stream_config);
-        let response = self
-            .request(request, scope)
-            .with_append_retry_policy(append_retry_policy)
-            .error_handler(|status, response, ctx| {
-                Err(parse_append_error_response(
-                    status,
-                    &response.into_bytes(),
-                    ctx,
-                ))
-            })
-            .send()
-            .await?;
-        AppendAck::decode(response.into_bytes()).map_err(|e| {
-            ApiError::Protocol(ProtocolError::new(
-                format!("protobuf decode: {e}"),
-                scope.context(1),
-            ))
-        })
-    }
-
-    pub async fn read(
-        &self,
-        name: &StreamName,
-        start: ReadStart,
-        end: ReadEnd,
-        encryption: Option<&HeaderValue>,
-        stream_config: Option<&HeaderValue>,
-    ) -> Result<ReadBatch, ApiError> {
-        let scope = OpScope::stream("read", self.name.as_ref(), name.as_ref(), true);
-        let url = self.uri(format!("v1/streams/{}/records", urlencoding::encode(name)));
-        let mut builder = self
-            .get(url)
-            .header(ACCEPT, ACCEPT_PROTO)
-            .query(&start)
-            .query(&end);
-        if let Some(wait) = end.wait {
-            builder = builder.timeout(
-                self.client
-                    .request_timeout
-                    .saturating_add(Duration::from_secs(wait.into())),
-            );
-        }
-        let mut request = builder
-            .build()
-            .map_err(|e| ApiError::from_http(e, scope.context(1)))?;
-        set_header_opt(&mut request, &S2_ENCRYPTION_KEY_HEADER, encryption);
-        set_header_opt(&mut request, &STREAM_CONFIG_HEADER, stream_config);
-        let response = self
-            .request(request, scope)
-            .error_handler(|status, response, ctx| {
-                Err(parse_read_error_response(
-                    status,
-                    &response.into_bytes(),
-                    ctx,
-                ))
-            })
-            .send()
-            .await?;
-        ReadBatch::decode(response.into_bytes()).map_err(|e| {
-            ApiError::Protocol(ProtocolError::new(
-                format!("protobuf decode: {e}"),
-                scope.context(1),
-            ))
-        })
-    }
-
-    async fn open_s2s<T: Message + Default + 'static>(
-        &self,
-        mut request: client::Request,
-        encryption: Option<&HeaderValue>,
-        stream_config: Option<&HeaderValue>,
-        reconnect: ReconnectAdvice,
-        kind: TerminalKind,
-        ctx: ErrorContext,
-    ) -> Result<Streaming<T>, ApiError> {
-        self.apply_basin_header(&mut request);
-        set_header_opt(&mut request, &S2_ENCRYPTION_KEY_HEADER, encryption);
-        set_header_opt(&mut request, &STREAM_CONFIG_HEADER, stream_config);
-
-        let (response, access_token) = self
-            .client
-            .init_streaming_authorized(request, ctx.clone())
-            .await?;
-        let response = match response.into_result(kind, ctx.clone()).await {
-            Ok(response) => response,
-            Err(error) => {
-                self.client
-                    .invalidate_access_token_if_rejected(&error, access_token.as_deref());
-                return Err(error);
-            }
-        };
-        let (mut bytes_stream, poison_handle) = response.into_stream();
-        let auth_client = self.client.clone();
-
-        let mut buffer = BytesMut::new();
-        let mut decoder = FrameDecoder;
-
-        Ok(Box::pin(try_stream! {
-            let mut advice_seen = false;
-
-            while let Some(chunk) = bytes_stream.next().await {
-                let chunk = chunk.map_err(|e| ApiError::from_http(e, ctx.clone()))?;
-                buffer.extend_from_slice(&chunk);
-
-                loop {
-                    match decoder.decode(&mut buffer) {
-                        Ok(Some(SessionMessage::Regular(msg))) => {
-                            if !advice_seen && msg.reconnect_advised() {
-                                advice_seen = true;
-                                poison_handle.poison();
-                                reconnect.advise();
-                            }
-                            yield msg.try_into_proto().map_err(|e| {
-                                ApiError::Protocol(ProtocolError::new(
-                                    format!("protobuf decode: {e}"),
-                                    ctx.clone(),
-                                ))
-                            })?;
-                        }
-                        Ok(Some(SessionMessage::Terminal(msg))) => {
-                            let error = ApiError::from_terminal_message(msg, kind, ctx.clone());
-                            if error.should_retire_connection() {
-                                poison_handle.poison();
-                            }
-                            auth_client.invalidate_access_token_if_rejected(
-                                &error,
-                                access_token.as_deref(),
-                            );
-                            Err::<(), ApiError>(error)?;
-                        }
-                        Ok(None) => break,
-                        Err(err) => Err(ApiError::Protocol(ProtocolError::new(
-                            format!("s2s frame decode: {err}"),
-                            ctx.clone(),
-                        )))?,
-                    }
-                }
-            }
-            if !buffer.is_empty() {
-                Err(ApiError::ConnectionLost(ConnectionLostError::new(
-                    format!(
-                        "truncated s2s frame at end of stream ({} bytes remaining)",
-                        buffer.len()
-                    ),
-                    false,
-                    ctx.clone(),
-                )))?;
-            }
-        }))
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub async fn append_session<I>(
-        &self,
-        name: &StreamName,
-        encoded_chunks: I,
-        encryption: Option<&HeaderValue>,
-        stream_config: Option<&HeaderValue>,
-        reconnect: ReconnectAdvice,
-        attempt: u32,
-    ) -> Result<Streaming<AppendAck>, ApiError>
-    where
-        I: Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send + 'static,
-    {
-        let ctx = ErrorContext::stream("append_session", self.name.as_ref(), name.as_ref(), false);
-        if self.client.is_closed() {
-            return Err(ApiError::ClientClosed(ClientClosedError::new(ctx)));
-        }
-        let url = self.uri(format!("v1/streams/{}/records", urlencoding::encode(name)));
-        let request = self
-            .client
-            .post(url)
-            .header(CONTENT_TYPE, CONTENT_TYPE_S2S)
-            .header(S2_ATTEMPT, HeaderValue::from(attempt))
-            .body(client::Body::wrap_stream(encoded_chunks))
-            .timeout(self.client.request_timeout)
-            .build()
-            .map_err(|e| ApiError::from_http(e, ctx.clone()))?;
-        self.open_s2s(
-            request,
-            encryption,
-            stream_config,
-            reconnect,
-            TerminalKind::Append,
-            ctx,
-        )
-        .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub async fn read_session(
-        &self,
-        name: &StreamName,
-        start: ReadStart,
-        end: ReadEnd,
-        encryption: Option<&HeaderValue>,
-        stream_config: Option<&HeaderValue>,
-        reconnect: ReconnectAdvice,
-        attempt: u32,
-    ) -> Result<Streaming<ReadBatch>, ApiError> {
-        let ctx = ErrorContext::stream("read_session", self.name.as_ref(), name.as_ref(), true);
-        if self.client.is_closed() {
-            return Err(ApiError::ClientClosed(ClientClosedError::new(ctx)));
-        }
-        let url = self.uri(format!("v1/streams/{}/records", urlencoding::encode(name)));
-        let request = self
-            .client
-            .get(url)
-            .header(CONTENT_TYPE, CONTENT_TYPE_S2S)
-            .header(S2_ATTEMPT, HeaderValue::from(attempt))
-            .query(&start)
-            .query(&end)
-            .timeout(self.client.request_timeout)
-            .build()
-            .map_err(|e| ApiError::from_http(e, ctx.clone()))?;
-        self.open_s2s(
-            request,
-            encryption,
-            stream_config,
-            reconnect,
-            TerminalKind::Read,
-            ctx,
-        )
-        .await
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum TerminalKind {
-    Append,
-    Read,
-}
-
-#[derive(serde::Deserialize)]
-struct AppendConditionFailedBody {
-    seq_num_mismatch: Option<u64>,
-    fencing_token_mismatch: Option<String>,
-}
-
-pub(crate) fn parse_append_error_response(
-    status: StatusCode,
-    body: &[u8],
-    context: ErrorContext,
-) -> ApiError {
-    if status == StatusCode::PRECONDITION_FAILED
-        && let Ok(parsed) = serde_json::from_slice::<AppendConditionFailedBody>(body)
-    {
-        match (parsed.seq_num_mismatch, parsed.fencing_token_mismatch) {
-            (Some(assignable_seq_num), None) => {
-                let server = ServerError::from_response(status, body, context);
-                return ApiError::SeqNumMismatch(SeqNumMismatchError::new(
-                    assignable_seq_num,
-                    server,
-                ));
-            }
-            (None, Some(token)) => {
-                let server = ServerError::from_response(status, body, context);
-                return ApiError::FencingTokenMismatch(FencingTokenMismatchError::new(
-                    FencingToken::from_server(token),
-                    server,
-                ));
-            }
-            _ => {}
-        }
-    }
-    ApiError::Server(ServerError::from_response(status, body, context))
-}
-
-pub(crate) fn parse_read_error_response(
-    status: StatusCode,
-    body: &[u8],
-    context: ErrorContext,
-) -> ApiError {
-    let context = context.into_read_only();
-    if status == StatusCode::RANGE_NOT_SATISFIABLE
-        && let Ok(tail) = serde_json::from_slice::<TailResponse>(body)
-    {
-        let server = ServerError::from_response(status, body, context);
-        return ApiError::ReadUnwritten(ReadUnwrittenError::new(tail.tail.into(), server));
-    }
-    ApiError::Server(ServerError::from_response(status, body, context))
-}
-
-impl Deref for BasinClient {
-    type Target = BaseClient;
-
-    fn deref(&self) -> &Self::Target {
-        &self.client
-    }
-}
-
-#[derive(Debug, thiserror::Error, serde::Deserialize)]
-#[error("{code}: {message}")]
-pub(crate) struct ServerErrorBody {
-    pub code: String,
-    pub message: String,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum ApiError {
-    #[error(transparent)]
-    Server(#[from] ServerError),
-    #[error(transparent)]
-    SeqNumMismatch(#[from] SeqNumMismatchError),
-    #[error(transparent)]
-    FencingTokenMismatch(#[from] FencingTokenMismatchError),
-    #[error(transparent)]
-    ReadUnwritten(#[from] ReadUnwrittenError),
-    #[error(transparent)]
-    Validation(#[from] ValidationError),
-    #[error(transparent)]
-    Connect(#[from] ConnectError),
-    #[error(transparent)]
-    ConnectionLost(#[from] ConnectionLostError),
-    #[error(transparent)]
-    Timeout(#[from] TimeoutError),
-    #[error(transparent)]
-    Protocol(#[from] ProtocolError),
-    #[error(transparent)]
-    ClientClosed(#[from] ClientClosedError),
-    #[error(transparent)]
-    Aborted(#[from] AbortedError),
-    #[cfg(feature = "_hidden")]
-    #[error("access token provider failed: {0}")]
-    AccessTokenProvider(crate::types::AccessTokenProviderError),
-    #[error(
-        "append may have taken effect in an earlier attempt; final attempt failed: {final_attempt_error}"
-    )]
-    IndefiniteAppend {
-        #[source]
-        final_attempt_error: Box<Self>,
-    },
-}
-
-impl ApiError {
-    pub(crate) fn from_http(err: client::HttpError, context: ErrorContext) -> Self {
-        classify_http_error(err, context)
-    }
-
-    pub(crate) fn from_terminal_message(
-        msg: TerminalMessage,
-        kind: TerminalKind,
-        context: ErrorContext,
-    ) -> Self {
-        let status = match StatusCode::from_u16(msg.status) {
-            Ok(status) if (300..600).contains(&status.as_u16()) => status,
-            Ok(status) => {
-                return Self::Protocol(ProtocolError::new(
-                    format!("unexpected non-error status code in terminal frame: {status}"),
-                    context,
-                ));
-            }
-            Err(err) => {
-                return Self::Protocol(ProtocolError::new(
-                    format!("invalid status code in terminal frame: {err}"),
-                    context,
-                ));
-            }
-        };
-        match kind {
-            TerminalKind::Append => parse_append_error_response(status, &msg.body, context),
-            TerminalKind::Read => parse_read_error_response(status, &msg.body, context),
-        }
-    }
-
-    pub(crate) fn with_context(self, context: &ErrorContext) -> Self {
-        match self {
-            Self::Server(e) => Self::Server(e.with_context(context)),
-            Self::SeqNumMismatch(e) => Self::SeqNumMismatch(e.with_context(context)),
-            Self::FencingTokenMismatch(e) => Self::FencingTokenMismatch(e.with_context(context)),
-            Self::ReadUnwritten(e) => Self::ReadUnwritten(e.with_context(context)),
-            Self::Validation(e) => Self::Validation(e),
-            Self::Connect(e) => Self::Connect(e.with_context(context)),
-            Self::ConnectionLost(e) => Self::ConnectionLost(e.with_context(context)),
-            Self::Timeout(e) => Self::Timeout(e.with_context(context)),
-            Self::Protocol(e) => Self::Protocol(e.with_context(context)),
-            Self::ClientClosed(e) => Self::ClientClosed(e.with_context(context)),
-            Self::Aborted(e) => Self::Aborted(e.with_context(context)),
-            #[cfg(feature = "_hidden")]
-            Self::AccessTokenProvider(e) => Self::AccessTokenProvider(e),
-            Self::IndefiniteAppend {
-                final_attempt_error,
-            } => Self::IndefiniteAppend {
-                final_attempt_error: Box::new(final_attempt_error.with_context(context)),
-            },
-        }
-    }
-
-    pub(crate) fn into_read_only(self) -> Self {
-        match self {
-            Self::Server(e) => Self::Server(e.into_read_only()),
-            Self::SeqNumMismatch(e) => Self::SeqNumMismatch(e),
-            Self::FencingTokenMismatch(e) => Self::FencingTokenMismatch(e),
-            Self::ReadUnwritten(e) => Self::ReadUnwritten(e),
-            Self::Validation(e) => Self::Validation(e),
-            Self::Connect(e) => Self::Connect(e.into_read_only()),
-            Self::ConnectionLost(e) => Self::ConnectionLost(e.into_read_only()),
-            Self::Timeout(e) => Self::Timeout(e.into_read_only()),
-            Self::Protocol(e) => Self::Protocol(e.into_read_only()),
-            Self::ClientClosed(e) => Self::ClientClosed(e),
-            Self::Aborted(e) => Self::Aborted(e.into_read_only()),
-            #[cfg(feature = "_hidden")]
-            Self::AccessTokenProvider(e) => Self::AccessTokenProvider(e),
-            Self::IndefiniteAppend {
-                final_attempt_error,
-            } => Self::IndefiniteAppend {
-                final_attempt_error: Box::new(final_attempt_error.into_read_only()),
-            },
-        }
-    }
-
-    pub(crate) fn mark_unsent_connection_lost(self, unsent: bool) -> Self {
-        if !unsent {
-            return self;
-        }
-        match self {
-            Self::ConnectionLost(e) => Self::ConnectionLost(e.with_no_side_effects(true)),
-            other => other,
-        }
-    }
-
-    pub fn is_retryable(&self) -> bool {
-        match self {
-            Self::Server(e) => e.is_retryable(),
-            Self::SeqNumMismatch(e) => e.is_retryable(),
-            Self::FencingTokenMismatch(e) => e.is_retryable(),
-            Self::ReadUnwritten(e) => e.is_retryable(),
-            Self::Validation(_) => false,
-            Self::Connect(e) => e.is_retryable(),
-            Self::ConnectionLost(e) => e.is_retryable(),
-            Self::Timeout(e) => e.is_retryable(),
-            Self::Protocol(e) => e.is_retryable(),
-            Self::ClientClosed(e) => e.is_retryable(),
-            Self::Aborted(e) => e.is_retryable(),
-            Self::IndefiniteAppend {
-                final_attempt_error,
-            } => final_attempt_error.is_retryable(),
-            #[cfg(feature = "_hidden")]
-            Self::AccessTokenProvider(error) => error.is_retryable(),
-        }
-    }
-
-    pub(crate) fn is_server_draining(&self) -> bool {
-        matches!(self, Self::Server(e) if e.is_server_draining())
-    }
-
-    pub(crate) fn should_retire_connection(&self) -> bool {
-        matches!(self, Self::Server(e) if e.should_retire_connection())
-    }
-
-    pub(crate) fn is_authentication_error(&self) -> bool {
-        matches!(self, Self::Server(e) if e.is_authentication_error())
-    }
-}
-
-impl AppendRetryError for ApiError {
-    fn has_no_side_effects(&self) -> bool {
-        match self {
-            Self::Server(e) => e.has_no_side_effects(),
-            Self::SeqNumMismatch(e) => e.has_no_side_effects(),
-            Self::FencingTokenMismatch(e) => e.has_no_side_effects(),
-            Self::ReadUnwritten(e) => e.has_no_side_effects(),
-            Self::Validation(_) => true,
-            Self::Connect(e) => e.has_no_side_effects(),
-            Self::ConnectionLost(e) => e.has_no_side_effects(),
-            Self::Timeout(e) => e.has_no_side_effects(),
-            Self::Protocol(e) => e.has_no_side_effects(),
-            Self::ClientClosed(e) => e.has_no_side_effects(),
-            Self::Aborted(e) => e.has_no_side_effects(),
-            Self::IndefiniteAppend { .. } => false,
-            #[cfg(feature = "_hidden")]
-            Self::AccessTokenProvider(_) => true,
-        }
-    }
-
-    fn into_indefinite_failure(self) -> Self {
-        Self::IndefiniteAppend {
-            final_attempt_error: Box::new(self),
-        }
-    }
-}
-
-pub type Streaming<R> = Pin<Box<dyn Send + Stream<Item = Result<R, ApiError>>>>;
+pub(crate) type Streaming<R, E> = Pin<Box<dyn Send + Stream<Item = Result<R, E>>>>;
 
 pub(crate) fn authorization_header(access_token: &str) -> Result<HeaderValue, ValidationError> {
     if access_token.is_empty() {
@@ -1131,6 +64,16 @@ pub(crate) fn authorization_header(access_token: &str) -> Result<HeaderValue, Va
     Ok(header)
 }
 
+pub(crate) fn set_header_opt(
+    request: &mut client::Request,
+    name: &HeaderName,
+    value: Option<&HeaderValue>,
+) {
+    if let Some(value) = value {
+        request.headers_mut().insert(name.clone(), value.clone());
+    }
+}
+
 struct PreparedClientConfig {
     default_headers: HeaderMap,
     access_token_mode: AccessTokenMode,
@@ -1138,8 +81,7 @@ struct PreparedClientConfig {
     access_token_provider: Option<Arc<dyn crate::types::AccessTokenProvider>>,
 }
 
-#[derive(Clone)]
-pub struct BaseClient {
+struct BaseClientInner {
     client: Arc<dyn client::RequestExecutor>,
     shutdown: ShutdownSignal,
     default_headers: HeaderMap,
@@ -1147,9 +89,12 @@ pub struct BaseClient {
     #[cfg(feature = "_hidden")]
     access_token_provider: Option<Arc<dyn crate::types::AccessTokenProvider>>,
     request_timeout: Duration,
-    retry_builder: RetryBackoffBuilder,
+    retry: RetryConfig,
     compression: Compression,
 }
+
+#[derive(Clone)]
+pub(crate) struct BaseClient(Arc<BaseClientInner>);
 
 impl std::fmt::Debug for BaseClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1158,7 +103,7 @@ impl std::fmt::Debug for BaseClient {
 }
 
 impl BaseClient {
-    pub fn init(config: &S2Config) -> Result<Self, ValidationError> {
+    pub(crate) fn init(config: &S2Config) -> Result<Self, ValidationError> {
         // Validate config and static token BEFORE initializing TLS so invalid configs never get
         // masked by missing TLS providers or native CA errors.
         let prepared = Self::prepare(config)?;
@@ -1178,7 +123,10 @@ impl BaseClient {
     }
 
     #[cfg(feature = "_hidden")]
-    pub fn init_with_connector<C>(config: &S2Config, connector: C) -> Result<Self, ValidationError>
+    pub(crate) fn init_with_connector<C>(
+        config: &S2Config,
+        connector: C,
+    ) -> Result<Self, ValidationError>
     where
         C: client::Connect,
     {
@@ -1246,143 +194,144 @@ impl BaseClient {
     where
         C: client::Connect,
     {
-        let client = client::Pool::new(
+        let pool = client::Pool::new(
             connector,
             config.connection_timeout,
             config.http2,
             shutdown.clone(),
         );
 
-        Self {
-            client: Arc::new(client),
+        Self(Arc::new(BaseClientInner {
+            client: Arc::new(pool),
             shutdown,
             default_headers: prepared.default_headers,
             access_token_mode: prepared.access_token_mode,
             #[cfg(feature = "_hidden")]
             access_token_provider: prepared.access_token_provider,
             request_timeout: config.request_timeout,
-            retry_builder: retry_builder(&config.retry),
+            retry: config.retry,
             compression: config.compression,
-        }
+        }))
     }
 
-    pub fn close(&self) {
-        self.shutdown.close();
-        self.client.close();
+    pub(crate) fn close(&self) {
+        self.0.shutdown.close();
+        self.0.client.close();
     }
 
-    pub fn is_closed(&self) -> bool {
-        self.shutdown.is_closed()
+    pub(crate) fn is_closed(&self) -> bool {
+        self.0.shutdown.is_closed()
     }
 
     pub(crate) fn shutdown_signal(&self) -> ShutdownSignal {
-        self.shutdown.clone()
+        self.0.shutdown.clone()
     }
 
-    pub fn get(&self, uri: Uri) -> client::RequestBuilder {
+    pub(crate) fn request_timeout(&self) -> Duration {
+        self.0.request_timeout
+    }
+
+    pub(crate) fn retry_config(&self) -> RetryConfig {
+        self.0.retry
+    }
+
+    pub(crate) fn get(&self, uri: Uri) -> client::RequestBuilder {
         client::RequestBuilder::get(uri)
-            .timeout(self.request_timeout)
-            .headers(&self.default_headers)
+            .timeout(self.0.request_timeout)
+            .headers(&self.0.default_headers)
     }
 
-    pub fn post(&self, uri: Uri) -> client::RequestBuilder {
+    pub(crate) fn post(&self, uri: Uri) -> client::RequestBuilder {
         client::RequestBuilder::post(uri)
-            .timeout(self.request_timeout)
-            .headers(&self.default_headers)
-            .compression(self.compression)
+            .timeout(self.0.request_timeout)
+            .headers(&self.0.default_headers)
+            .compression(self.0.compression)
     }
 
-    pub fn patch(&self, uri: Uri) -> client::RequestBuilder {
+    pub(crate) fn patch(&self, uri: Uri) -> client::RequestBuilder {
         client::RequestBuilder::patch(uri)
-            .timeout(self.request_timeout)
-            .headers(&self.default_headers)
-            .compression(self.compression)
+            .timeout(self.0.request_timeout)
+            .headers(&self.0.default_headers)
+            .compression(self.0.compression)
     }
 
-    pub fn put(&self, uri: Uri) -> client::RequestBuilder {
+    pub(crate) fn put(&self, uri: Uri) -> client::RequestBuilder {
         client::RequestBuilder::put(uri)
-            .timeout(self.request_timeout)
-            .headers(&self.default_headers)
-            .compression(self.compression)
+            .timeout(self.0.request_timeout)
+            .headers(&self.0.default_headers)
+            .compression(self.0.compression)
     }
 
-    pub fn delete(&self, uri: Uri) -> client::RequestBuilder {
+    pub(crate) fn delete(&self, uri: Uri) -> client::RequestBuilder {
         client::RequestBuilder::delete(uri)
-            .timeout(self.request_timeout)
-            .headers(&self.default_headers)
+            .timeout(self.0.request_timeout)
+            .headers(&self.0.default_headers)
     }
 
-    pub async fn init_streaming(
-        &self,
-        request: client::Request,
-    ) -> Result<StreamingResponse, client::HttpError> {
-        self.client.init_streaming(request).await
+    pub(crate) fn unary<'a>(
+        &'a self,
+        request: Result<client::Request, client::HttpError>,
+        scope: OpScope<'a>,
+    ) -> UnaryCall<'a> {
+        UnaryCall {
+            client: self,
+            request,
+            scope,
+            retry_safety: RetrySafety::All,
+        }
     }
 
-    #[cfg(not(feature = "_hidden"))]
-    async fn init_streaming_authorized(
-        &self,
-        request: client::Request,
-        context: ErrorContext,
-    ) -> Result<(StreamingResponse, Option<String>), ApiError> {
-        self.init_streaming(request)
-            .await
-            .map(|response| (response, None))
-            .map_err(|e| ApiError::from_http(e, context))
-    }
-
-    #[cfg(feature = "_hidden")]
-    async fn init_streaming_authorized(
+    async fn init_streaming_authorized<E: TransportError>(
         &self,
         mut request: client::Request,
         context: ErrorContext,
-    ) -> Result<(StreamingResponse, Option<String>), ApiError> {
-        let access_token = self.authorize(&mut request).await?;
+    ) -> Result<(StreamingResponse, Option<String>), E> {
+        let access_token = self.authorize::<E>(&mut request).await?;
         let response = self
+            .0
+            .client
             .init_streaming(request)
             .await
-            .map_err(|e| ApiError::from_http(e, context))?;
+            .map_err(|e| E::from_http(e, context))?;
         Ok((response, access_token))
     }
 
-    async fn execute_unary_in_flight(
+    async fn execute_unary_in_flight<E: TransportError>(
         &self,
         mut request: client::Request,
         scope: OpScope<'_>,
         attempts: u32,
-    ) -> Result<(UnaryResponse, Option<String>), ApiError> {
-        let shutdown = self.shutdown.clone();
+    ) -> Result<(UnaryResponse, Option<String>), E> {
+        let shutdown = self.shutdown_signal();
         let access_token = tokio::select! {
             biased;
             _ = shutdown.cancelled() => {
-                return Err(ApiError::Aborted(AbortedError::new(
-                    "client closed",
-                    scope.context(attempts),
-                )));
+                return Err(AbortedError::new("client closed", scope.context(attempts)).into());
             }
-            res = self.authorize(&mut request) => res?,
+            res = self.authorize::<E>(&mut request) => res?,
         };
-        let response = self.client.execute_unary(request).await.map_err(|e| {
+        let response = self.0.client.execute_unary(request).await.map_err(|e| {
             let ctx = scope.context(attempts);
             match e {
-                // Once a unary call passed entry-time closed check, closing the client aborts it
-                // rather than returning ClientClosedError (`C12`).
-                client::HttpError::ClientClosed => {
-                    ApiError::Aborted(AbortedError::new("client closed", ctx))
-                }
-                other => ApiError::from_http(other, ctx),
+                // Once a unary call passed the entry-time closed check, closing the client aborts
+                // it rather than returning ClientClosedError (`C12`).
+                client::HttpError::ClientClosed => AbortedError::new("client closed", ctx).into(),
+                other => E::from_http(other, ctx),
             }
         })?;
         Ok((response, access_token))
     }
 
-    async fn authorize(&self, _request: &mut client::Request) -> Result<Option<String>, ApiError> {
+    async fn authorize<E: TransportError>(
+        &self,
+        _request: &mut client::Request,
+    ) -> Result<Option<String>, E> {
         #[cfg(feature = "_hidden")]
-        if let Some(provider) = self.access_token_provider.as_ref() {
+        if let Some(provider) = self.0.access_token_provider.as_ref() {
             let access_token = provider
                 .access_token()
                 .await
-                .map_err(ApiError::AccessTokenProvider)?;
+                .map_err(E::from_access_token_provider)?;
             _request
                 .headers_mut()
                 .insert(AUTHORIZATION, authorization_header(&access_token)?);
@@ -1394,132 +343,84 @@ impl BaseClient {
     fn invalidate_access_token(&self, _access_token: Option<&str>) {
         #[cfg(feature = "_hidden")]
         if let (Some(provider), Some(access_token)) =
-            (self.access_token_provider.as_ref(), _access_token)
+            (self.0.access_token_provider.as_ref(), _access_token)
         {
             provider.invalidate_access_token(access_token);
         }
     }
 
-    fn invalidate_access_token_if_rejected(&self, error: &ApiError, access_token: Option<&str>) {
+    fn invalidate_access_token_if_rejected<E: TransportError>(
+        &self,
+        error: &E,
+        access_token: Option<&str>,
+    ) {
         if error.is_authentication_error() {
             self.invalidate_access_token(access_token);
         }
     }
-
-    fn request<'a>(&'a self, request: client::Request, scope: OpScope<'a>) -> RequestBuilder<'a> {
-        RequestBuilder {
-            client: self,
-            request,
-            scope,
-            retry_enabled: true,
-            append_retry_policy: None,
-            definite_retries_only: false,
-            frame_signal: None,
-            error_handler: None,
-        }
-    }
 }
 
-fn set_header_opt(request: &mut client::Request, name: &HeaderName, value: Option<&HeaderValue>) {
-    if let Some(value) = value {
-        request.headers_mut().insert(name.clone(), value.clone());
-    }
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum RetrySafety {
+    /// Safe to retry any retryable error (reads, idempotent ops, or request-token ops).
+    All,
+    /// Non-idempotent op without a request token (`T2d`): retry only definite errors.
+    DefiniteOnly,
+    /// Unary append (`T2b`, `T2c`): obeys `AppendRetryPolicy` and tracks prior uncertainty.
+    Append(AppendRetryPolicy),
 }
 
-pub fn retry_builder(config: &RetryConfig) -> RetryBackoffBuilder {
-    RetryBackoffBuilder::default()
-        .with_min_base_delay(config.min_base_delay)
-        .with_max_base_delay(config.max_base_delay)
-        .with_max_retries(config.max_retries())
-}
-
-type ErrorHandlerFn = Box<
-    dyn Fn(StatusCode, UnaryResponse, ErrorContext) -> Result<UnaryResponse, ApiError>
-        + Send
-        + Sync,
->;
-
-struct RequestBuilder<'a> {
+pub(crate) struct UnaryCall<'a> {
     client: &'a BaseClient,
-    request: client::Request,
+    request: Result<client::Request, client::HttpError>,
     scope: OpScope<'a>,
-    retry_enabled: bool,
-    append_retry_policy: Option<AppendRetryPolicy>,
-    definite_retries_only: bool,
-    frame_signal: Option<FrameSignal>,
-    error_handler: Option<ErrorHandlerFn>,
+    retry_safety: RetrySafety,
 }
 
-impl<'a> RequestBuilder<'a> {
-    fn with_append_retry_policy(self, policy: AppendRetryPolicy) -> Self {
-        Self {
-            append_retry_policy: Some(policy),
-            frame_signal: Some(FrameSignal::new()),
-            ..self
-        }
+impl<'a> UnaryCall<'a> {
+    pub(crate) fn definite_retries_only(mut self) -> Self {
+        self.retry_safety = RetrySafety::DefiniteOnly;
+        self
     }
 
-    fn with_definite_retries_only(self) -> Self {
-        Self {
-            definite_retries_only: true,
-            frame_signal: Some(FrameSignal::new()),
-            ..self
-        }
+    pub(crate) fn append_retry_policy(mut self, policy: AppendRetryPolicy) -> Self {
+        self.retry_safety = RetrySafety::Append(policy);
+        self
     }
 
-    fn error_handler<F>(self, handler: F) -> Self
-    where
-        F: Fn(StatusCode, UnaryResponse, ErrorContext) -> Result<UnaryResponse, ApiError>
-            + Send
-            + Sync
-            + 'static,
-    {
-        Self {
-            error_handler: Some(Box::new(handler)),
-            ..self
-        }
-    }
-
-    async fn send(self) -> Result<UnaryResponse, ApiError> {
+    async fn send_raw<E: TransportError>(self) -> Result<(UnaryResponse, u32), E> {
         if self.client.is_closed() {
-            return Err(ApiError::ClientClosed(ClientClosedError::new(
-                self.scope.context(1),
-            )));
+            return Err(ClientClosedError::new(self.scope.context(1)).into());
         }
 
         // Compress the unary request body once before the retry loop so retries clone O(1)
         // `Bytes` without re-compressing.
-        let shutdown = self.client.shutdown_signal();
-        let request = tokio::select! {
-            biased;
-            _ = shutdown.cancelled() => {
-                return Err(ApiError::Aborted(AbortedError::new(
-                    "client closed",
-                    self.scope.context(1),
-                )));
-            }
-            res = self.request.compress() => {
-                res.map_err(|e| ApiError::from_http(e, self.scope.context(1)))?
-            }
-        };
+        let request = self
+            .request
+            .and_then(client::Request::compress)
+            .map_err(|e| E::from_http(e, self.scope.context(1)))?;
 
-        let mut retry_backoff: Option<RetryBackoff> = self
-            .retry_enabled
-            .then(|| self.client.retry_builder.build());
+        let frame_signal = matches!(
+            self.retry_safety,
+            RetrySafety::DefiniteOnly | RetrySafety::Append(_)
+        )
+        .then(FrameSignal::new);
+
+        let mut retry_backoff = RetryBackoff::from_config(&self.client.retry_config());
         let mut prior_uncertainty = false;
-        let mut attempts: u32 = 0;
 
         loop {
-            attempts += 1;
+            let attempts = retry_backoff.attempt_number();
 
-            if let Some(ref signal) = self.frame_signal {
+            if let Some(ref signal) = frame_signal {
                 signal.reset();
             }
 
             let attempt_request = {
                 let mut r = request.try_clone().expect("body should not be a stream");
-                r.headers_mut().insert(S2_ATTEMPT, HeaderValue::from(attempts));
-                if let Some(ref signal) = self.frame_signal {
+                r.headers_mut()
+                    .insert(S2_ATTEMPT, HeaderValue::from(attempts));
+                if let Some(ref signal) = frame_signal {
                     r = r.with_monitored_body(signal.clone());
                 }
                 r
@@ -1527,64 +428,60 @@ impl<'a> RequestBuilder<'a> {
 
             let response = self
                 .client
-                .execute_unary_in_flight(attempt_request, self.scope, attempts)
+                .execute_unary_in_flight::<E>(attempt_request, self.scope, attempts)
                 .await;
 
             let (err, retry_after, access_token) = match response {
                 Ok((mut resp, access_token)) => {
                     if resp.status().is_success() {
-                        return Ok(resp);
+                        return Ok((resp, attempts));
                     }
                     let retry_after = parse_retry_after_ms(resp.headers());
                     let poison_handle = resp.take_poison_handle();
-                    let attempt_ctx = self.scope.context(attempts);
-                    let result = if let Some(ref handler) = self.error_handler {
-                        resp.into_result_with_handler(attempt_ctx, handler)
-                    } else {
-                        resp.into_result(attempt_ctx)
-                    };
-
-                    match result {
-                        Ok(resp) => return Ok(resp),
-                        Err(err) => {
-                            if err.should_retire_connection()
-                                && let Some(handle) = poison_handle
-                            {
-                                handle.poison();
-                            }
-                            (err, retry_after, access_token)
-                        }
+                    let status = resp.status();
+                    let err = E::from_http_response(
+                        status,
+                        &resp.into_bytes(),
+                        self.scope.context(attempts),
+                    );
+                    if err.should_retire_connection()
+                        && let Some(handle) = poison_handle
+                    {
+                        handle.poison();
                     }
+                    (err, retry_after, access_token)
                 }
                 Err(err) => (err, None, None),
             };
 
-            let unsent = self.frame_signal.as_ref().is_some_and(|s| !s.is_signalled());
+            let unsent = frame_signal.as_ref().is_some_and(|s| !s.is_signalled());
             let err = err.mark_unsent_connection_lost(unsent);
 
+            let access_token_mode = self.client.0.access_token_mode;
             let refreshable_authentication_error =
-                self.client.access_token_mode.is_refreshable() && err.is_authentication_error();
+                access_token_mode.is_refreshable() && err.is_authentication_error();
             if refreshable_authentication_error {
                 self.client.invalidate_access_token(access_token.as_deref());
             }
 
             if is_safe_to_retry(
                 &err,
-                self.append_retry_policy,
-                self.definite_retries_only,
-                self.frame_signal.as_ref(),
-                self.client.access_token_mode,
-            ) && let Some(backoff) = retry_backoff.as_mut().and_then(|b| b.next())
+                self.retry_safety,
+                frame_signal.as_ref(),
+                access_token_mode,
+            ) && let Some(backoff) = retry_backoff.next()
             {
-                let backoff = retry_after.map_or(backoff, |ra| ra.max(backoff));
+                let delay = retry_after.map_or(backoff, |ra| ra.max(backoff));
                 debug!(
                     %err,
-                    ?backoff,
-                    num_retries_remaining = retry_backoff.as_ref().map(|b| b.remaining()).unwrap_or(0),
+                    attempt = attempts,
+                    ?delay,
+                    ?retry_after,
+                    num_retries_remaining = retry_backoff.remaining(),
                     "retrying request"
                 );
-                if self.append_retry_policy.is_some()
-                    && err.attempt_may_have_side_effects(self.frame_signal.as_ref())
+                if matches!(self.retry_safety, RetrySafety::Append(_))
+                    && attempt_may_have_side_effects(&err, frame_signal.as_ref())
                 {
                     prior_uncertainty = true;
                 }
@@ -1592,47 +489,115 @@ impl<'a> RequestBuilder<'a> {
                 let aborted = tokio::select! {
                     biased;
                     _ = shutdown.cancelled() => true,
-                    _ = tokio::time::sleep(backoff) => false,
+                    _ = tokio::time::sleep(delay) => false,
                 };
                 if aborted {
-                    return Err(ApiError::Aborted(AbortedError::new(
-                        "client closed",
-                        self.scope.context(attempts),
-                    )));
+                    return Err(
+                        AbortedError::new("client closed", self.scope.context(attempts)).into(),
+                    );
                 }
             } else {
                 debug!(
                     %err,
+                    attempt = attempts,
                     is_retryable = err.is_retryable() || refreshable_authentication_error,
-                    retry_enabled = self.retry_enabled,
-                    retries_exhausted = retry_backoff.as_ref().is_none_or(|b| b.is_exhausted()),
+                    retries_exhausted = retry_backoff.is_exhausted(),
                     "not retrying request"
                 );
-                let attempt_ctx = self.scope.context(attempts);
-                let err = err.with_context(&attempt_ctx);
                 return Err(err.with_prior_uncertainty(prior_uncertainty));
             }
         }
     }
+
+    pub(crate) async fn send_json<T: DeserializeOwned>(
+        self,
+    ) -> Result<T, crate::error::RequestError> {
+        self.send_json_as().await
+    }
+
+    pub(crate) async fn send_json_as<T: DeserializeOwned, E: TransportError>(self) -> Result<T, E> {
+        let scope = self.scope;
+        let (response, attempts) = self.send_raw::<E>().await?;
+        response
+            .json::<T>()
+            .map_err(|e| E::from_http(e, scope.context(attempts)))
+    }
+
+    pub(crate) async fn send_proto<T: Message + Default, E: TransportError>(
+        self,
+    ) -> Result<(T, u32), E> {
+        let scope = self.scope;
+        let (response, attempts) = self.send_raw::<E>().await?;
+        let decoded = T::decode(response.into_bytes()).map_err(|e| {
+            E::from(ProtocolError::new(
+                format!("protobuf decode: {e}"),
+                scope.context(attempts),
+            ))
+        })?;
+        Ok((decoded, attempts))
+    }
+
+    pub(crate) async fn send_ensure<T: DeserializeOwned>(
+        self,
+    ) -> Result<ProvisionResult<T>, crate::error::RequestError> {
+        let scope = self.scope;
+        let (response, attempts) = self.send_raw::<crate::error::RequestError>().await?;
+        let status = response.status();
+        let header_value = response
+            .headers()
+            .get(&PROVISION_RESULT_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let info = response
+            .json::<T>()
+            .map_err(|e| crate::error::RequestError::from_http(e, scope.context(attempts)))?;
+        Ok(provision_result_from_parts(
+            status,
+            header_value.as_deref(),
+            info,
+        ))
+    }
+
+    pub(crate) async fn send_delete(
+        self,
+        ignore_not_found: ErrorCode,
+    ) -> Result<(), crate::error::RequestError> {
+        match self.send_raw::<crate::error::RequestError>().await {
+            Ok(_) => Ok(()),
+            Err(err)
+                if err
+                    .server_error()
+                    .is_some_and(|s| s.known_code() == Some(ignore_not_found)) =>
+            {
+                Ok(())
+            }
+            Err(err) => Err(err),
+        }
+    }
 }
 
-fn is_safe_to_retry(
-    err: &ApiError,
-    policy: Option<AppendRetryPolicy>,
-    definite_retries_only: bool,
+fn attempt_may_have_side_effects<E: TransportError>(
+    err: &E,
+    frame_signal: Option<&FrameSignal>,
+) -> bool {
+    !err.has_no_side_effects() && frame_signal.is_none_or(FrameSignal::is_signalled)
+}
+
+fn is_safe_to_retry<E: TransportError>(
+    err: &E,
+    safety: RetrySafety,
     frame_signal: Option<&FrameSignal>,
     access_token_mode: AccessTokenMode,
 ) -> bool {
-    let policy_compliant = if definite_retries_only {
-        // T2d: non-idempotent ops without a request token retry only after a definite error.
-        // (`ConnectionLostError` occurring before sending was already marked definite above.)
-        err.has_no_side_effects()
-    } else {
-        match policy {
-            None | Some(AppendRetryPolicy::All) => true,
-            Some(AppendRetryPolicy::NoSideEffects) => {
-                !err.attempt_may_have_side_effects(frame_signal)
-            }
+    let policy_compliant = match safety {
+        RetrySafety::All | RetrySafety::Append(AppendRetryPolicy::All) => true,
+        RetrySafety::DefiniteOnly => {
+            // T2d: non-idempotent ops without a request token retry only after a definite error.
+            // (`ConnectionLostError` occurring before sending was already marked definite above.)
+            err.has_no_side_effects()
+        }
+        RetrySafety::Append(AppendRetryPolicy::NoSideEffects) => {
+            !attempt_may_have_side_effects(err, frame_signal)
         }
     };
     policy_compliant
@@ -1641,99 +606,228 @@ fn is_safe_to_retry(
 }
 
 #[derive(Debug, Clone)]
-enum ClientKind {
-    Account,
-    Basin(BasinName),
+pub(crate) struct BasinClient {
+    pub(crate) name: BasinName,
+    base: BaseClient,
+    config: Arc<S2Config>,
+    base_url: Uri,
+    basin_header: Option<HeaderValue>,
 }
 
-fn base_url(endpoints: &S2Endpoints, kind: ClientKind) -> Uri {
-    let authority = match kind {
-        ClientKind::Account => endpoints.account_authority.clone(),
-        ClientKind::Basin(basin) => match &endpoints.basin_authority {
-            BasinAuthority::ParentZone(zone) => format!("{basin}.{zone}")
-                .try_into()
-                .expect("valid authority as basin pre-validated"),
-            BasinAuthority::Direct(endpoint) => endpoint.clone(),
-        },
-    };
-    let scheme = &endpoints.scheme;
-    format!("{scheme}://{authority}")
-        .parse()
-        .expect("valid URI")
-}
-
-trait UnaryResult {
-    fn into_result(self, context: ErrorContext) -> Result<UnaryResponse, ApiError>;
-    fn into_result_with_handler<F>(
-        self,
-        context: ErrorContext,
-        handler: F,
-    ) -> Result<UnaryResponse, ApiError>
-    where
-        F: FnOnce(StatusCode, UnaryResponse, ErrorContext) -> Result<UnaryResponse, ApiError>;
-}
-
-impl UnaryResult for UnaryResponse {
-    fn into_result(self, context: ErrorContext) -> Result<UnaryResponse, ApiError> {
-        let status = self.status();
-        if status.is_success() {
-            Ok(self)
-        } else {
-            Err(ApiError::Server(ServerError::from_response(
-                status,
-                &self.into_bytes(),
-                context,
-            )))
+impl BasinClient {
+    pub(crate) fn init(name: BasinName, config: Arc<S2Config>, base: BaseClient) -> Self {
+        let base_url = config
+            .endpoints
+            .basin_origin(&name)
+            .parse()
+            .expect("valid basin URI");
+        let basin_header = config
+            .endpoints
+            .uses_basin_header()
+            .then(|| HeaderValue::from_str(&name).expect("valid basin header value"));
+        Self {
+            name,
+            base,
+            config,
+            base_url,
+            basin_header,
         }
     }
 
-    fn into_result_with_handler<F>(
-        self,
-        context: ErrorContext,
-        handler: F,
-    ) -> Result<UnaryResponse, ApiError>
+    pub(crate) fn base(&self) -> &BaseClient {
+        &self.base
+    }
+
+    pub(crate) fn config(&self) -> &S2Config {
+        &self.config
+    }
+
+    pub(crate) fn is_closed(&self) -> bool {
+        self.base.is_closed()
+    }
+
+    pub(crate) fn shutdown_signal(&self) -> ShutdownSignal {
+        self.base.shutdown_signal()
+    }
+
+    pub(crate) fn uri(&self, path: impl AsRef<str>) -> Uri {
+        client::uri_with_path(&self.base_url, path)
+    }
+
+    fn apply_basin_header(&self, request: &mut client::Request) {
+        if let Some(ref header) = self.basin_header {
+            request.headers_mut().insert(S2_BASIN, header.clone());
+        }
+    }
+
+    pub(crate) fn unary<'a>(
+        &'a self,
+        request: Result<client::Request, client::HttpError>,
+        scope: OpScope<'a>,
+    ) -> UnaryCall<'a> {
+        let request = request.map(|mut req| {
+            self.apply_basin_header(&mut req);
+            req
+        });
+        self.base.unary(request, scope)
+    }
+
+    async fn open_s2s<T, E>(
+        &self,
+        mut request: client::Request,
+        headers: &StreamHeaders,
+        reconnect: ReconnectAdvice,
+        ctx: ErrorContext,
+    ) -> Result<Streaming<T, E>, E>
     where
-        F: FnOnce(StatusCode, UnaryResponse, ErrorContext) -> Result<UnaryResponse, ApiError>,
+        T: Message + Default + 'static,
+        E: TransportError + Send + 'static,
     {
-        let status = self.status();
-        if status.is_success() {
-            Ok(self)
-        } else {
-            handler(status, self, context)
+        self.apply_basin_header(&mut request);
+        set_header_opt(
+            &mut request,
+            &S2_ENCRYPTION_KEY_HEADER,
+            headers.encryption.as_ref(),
+        );
+        set_header_opt(
+            &mut request,
+            &STREAM_CONFIG_HEADER,
+            headers.stream_config.as_ref(),
+        );
+
+        let (response, access_token) = self
+            .base
+            .init_streaming_authorized::<E>(request, ctx.clone())
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let (bytes, poison_handle) = response.into_bytes_with_poison_handle().await;
+            let error = E::from_http_response(status, &bytes, ctx);
+            if error.should_retire_connection() {
+                poison_handle.poison();
+            }
+            self.base
+                .invalidate_access_token_if_rejected(&error, access_token.as_deref());
+            return Err(error);
         }
+
+        let (mut bytes_stream, poison_handle) = response.into_stream();
+        let auth_client = self.base.clone();
+
+        let mut buffer = BytesMut::new();
+        let mut decoder = FrameDecoder;
+
+        Ok(Box::pin(try_stream! {
+            let mut advice_seen = false;
+
+            while let Some(chunk) = bytes_stream.next().await {
+                let chunk = chunk.map_err(|e| E::from_http(e, ctx.clone()))?;
+                buffer.extend_from_slice(&chunk);
+
+                loop {
+                    match decoder.decode(&mut buffer) {
+                        Ok(Some(SessionMessage::Regular(msg))) => {
+                            if !advice_seen && msg.reconnect_advised() {
+                                advice_seen = true;
+                                poison_handle.poison();
+                                reconnect.advise();
+                            }
+                            yield msg.try_into_proto().map_err(|e| {
+                                E::from(ProtocolError::new(
+                                    format!("protobuf decode: {e}"),
+                                    ctx.clone(),
+                                ))
+                            })?;
+                        }
+                        Ok(Some(SessionMessage::Terminal(msg))) => {
+                            let error = E::from_terminal_message(msg, ctx.clone());
+                            if error.should_retire_connection() {
+                                poison_handle.poison();
+                            }
+                            auth_client.invalidate_access_token_if_rejected(
+                                &error,
+                                access_token.as_deref(),
+                            );
+                            Err::<(), E>(error)?;
+                        }
+                        Ok(None) => break,
+                        Err(err) => Err(E::from(ProtocolError::new(
+                            format!("s2s frame decode: {err}"),
+                            ctx.clone(),
+                        )))?,
+                    }
+                }
+            }
+            if !buffer.is_empty() {
+                Err(E::from(ConnectionLostError::new(
+                    format!(
+                        "truncated s2s frame at end of stream ({} bytes remaining)",
+                        buffer.len()
+                    ),
+                    false,
+                    ctx.clone(),
+                )))?;
+            }
+        }))
     }
-}
 
-#[async_trait]
-trait StreamingResult {
-    async fn into_result(
-        self,
-        kind: TerminalKind,
-        context: ErrorContext,
-    ) -> Result<StreamingResponse, ApiError>;
-}
-
-#[async_trait]
-impl StreamingResult for StreamingResponse {
-    async fn into_result(
-        self,
-        kind: TerminalKind,
-        context: ErrorContext,
-    ) -> Result<StreamingResponse, ApiError> {
-        if self.status().is_success() {
-            return Ok(self);
+    pub(crate) async fn append_session<I>(
+        &self,
+        op: &'static str,
+        name: &StreamName,
+        encoded_chunks: I,
+        headers: &StreamHeaders,
+        reconnect: ReconnectAdvice,
+        attempt: u32,
+    ) -> Result<Streaming<AppendAck, AppendSessionError>, AppendSessionError>
+    where
+        I: Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send + 'static,
+    {
+        let ctx = ErrorContext::stream(op, self.name.as_ref(), name.as_ref(), false);
+        if self.base.is_closed() {
+            return Err(ClientClosedError::new(ctx).into());
         }
+        let url = self.uri(format!("v1/streams/{}/records", urlencoding::encode(name)));
+        let request = self
+            .base
+            .post(url)
+            .header(CONTENT_TYPE, CONTENT_TYPE_S2S)
+            .header(S2_ATTEMPT, HeaderValue::from(attempt))
+            .body(client::Body::wrap_stream(encoded_chunks))
+            .timeout(self.base.request_timeout())
+            .build()
+            .map_err(|e| AppendSessionError::from_http(e, ctx.clone()))?;
+        self.open_s2s(request, headers, reconnect, ctx).await
+    }
 
-        let status = self.status();
-        let (bytes, poison_handle) = self.into_bytes_with_poison_handle().await;
-        let error = match kind {
-            TerminalKind::Append => parse_append_error_response(status, &bytes, context),
-            TerminalKind::Read => parse_read_error_response(status, &bytes, context),
-        };
-        if error.should_retire_connection() {
-            poison_handle.poison();
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn read_session(
+        &self,
+        op: &'static str,
+        name: &StreamName,
+        start: ReadStart,
+        end: ReadEnd,
+        headers: &StreamHeaders,
+        reconnect: ReconnectAdvice,
+        attempt: u32,
+    ) -> Result<Streaming<ReadBatch, ReadSessionError>, ReadSessionError> {
+        let ctx = ErrorContext::stream(op, self.name.as_ref(), name.as_ref(), true);
+        if self.base.is_closed() {
+            return Err(ClientClosedError::new(ctx).into());
         }
-        Err(error)
+        let url = self.uri(format!("v1/streams/{}/records", urlencoding::encode(name)));
+        let request = self
+            .base
+            .get(url)
+            .header(CONTENT_TYPE, CONTENT_TYPE_S2S)
+            .header(S2_ATTEMPT, HeaderValue::from(attempt))
+            .query(&start)
+            .query(&end)
+            .timeout(self.base.request_timeout())
+            .build()
+            .map_err(|e| ReadSessionError::from_http(e, ctx.clone()))?;
+        self.open_s2s(request, headers, reconnect, ctx).await
     }
 }
 
@@ -1747,43 +841,23 @@ fn parse_retry_after_ms(headers: &HeaderMap) -> Option<Duration> {
         }
     };
     if raw.is_empty() || !raw.bytes().all(|b| b.is_ascii_digit()) {
-        debug!(value = raw, "ignoring malformed {RETRY_AFTER_MS_HEADER} header");
+        debug!(
+            value = raw,
+            "ignoring malformed {RETRY_AFTER_MS_HEADER} header"
+        );
         return None;
     }
     match raw.parse::<u64>() {
         Ok(ms) => Some(Duration::from_millis(ms)),
         Err(e) => {
-            debug!(?e, value = raw, "ignoring out-of-range {RETRY_AFTER_MS_HEADER} header");
+            debug!(
+                ?e,
+                value = raw,
+                "ignoring out-of-range {RETRY_AFTER_MS_HEADER} header"
+            );
             None
         }
     }
-}
-
-trait IgnoreNotFoundCode {
-    fn ignore_not_found_code(self, expected_code: &str) -> Result<(), ApiError>;
-}
-
-impl IgnoreNotFoundCode for Result<UnaryResponse, ApiError> {
-    fn ignore_not_found_code(self, expected_code: &str) -> Result<(), ApiError> {
-        match self {
-            Ok(_) => Ok(()),
-            Err(ApiError::Server(ref server))
-                if server.status == StatusCode::NOT_FOUND
-                    && server.code.as_deref() == Some(expected_code) =>
-            {
-                Ok(())
-            }
-            Err(err) => Err(err),
-        }
-    }
-}
-
-fn provision_result_header_value(response: &UnaryResponse) -> Option<String> {
-    response
-        .headers()
-        .get(&PROVISION_RESULT_HEADER)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned)
 }
 
 fn provision_result_from_parts<T>(
@@ -1804,17 +878,19 @@ fn provision_result_from_parts<T>(
 mod tests {
     use std::error::Error;
     #[cfg(feature = "_hidden")]
-    use std::sync::Mutex;
-    #[cfg(feature = "_hidden")]
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    };
 
     #[cfg(feature = "_hidden")]
     use async_trait::async_trait;
     #[cfg(feature = "_hidden")]
     use hyper_util::client::legacy::connect::HttpConnector;
+    use s2_api::v1::{metrics::AccountMetricSetRequest, stream::s2s::TerminalMessage};
 
     use super::*;
-    use crate::error::AppendError;
+    use crate::error::{AppendError, RequestError, ServerError};
 
     #[cfg(feature = "_hidden")]
     #[derive(Default)]
@@ -1832,7 +908,7 @@ mod tests {
         ) -> Result<UnaryResponse, client::HttpError> {
             let mut headers = self.unary.lock().unwrap();
             headers.push(request.headers_mut().clone());
-            // Exercise a real retry through RequestBuilder::send.
+            // Exercise a real retry through UnaryCall::send_raw.
             Ok(if headers.len() == 1 {
                 UnaryResponse::new_for_test(
                     StatusCode::SERVICE_UNAVAILABLE,
@@ -1860,6 +936,25 @@ mod tests {
     }
 
     #[cfg(feature = "_hidden")]
+    fn base_with_executor(
+        config: &S2Config,
+        executor: Arc<dyn client::RequestExecutor>,
+        retry: RetryConfig,
+    ) -> BaseClient {
+        let prepared = BaseClient::prepare(config).unwrap();
+        BaseClient(Arc::new(BaseClientInner {
+            client: executor,
+            shutdown: ShutdownSignal::new(),
+            default_headers: prepared.default_headers,
+            access_token_mode: prepared.access_token_mode,
+            access_token_provider: prepared.access_token_provider,
+            request_timeout: config.request_timeout,
+            retry,
+            compression: config.compression,
+        }))
+    }
+
+    #[cfg(feature = "_hidden")]
     #[tokio::test]
     async fn default_headers_reach_account_basin_streaming_and_retry_requests() {
         let mut session = HeaderValue::from_static("session-1");
@@ -1884,55 +979,62 @@ mod tests {
             (S2_BASIN, HeaderValue::from_static("wrong-basin")),
         ]);
         let config = S2Config::new("actual-token")
-            .with_endpoints(S2Endpoints::for_endpoint("http://example.test").unwrap())
+            .with_endpoints(crate::types::S2Endpoints::for_endpoint("http://example.test").unwrap())
             .with_compression(Compression::Gzip)
             .with_default_headers(headers)
             .unwrap();
         let executor = Arc::new(HeaderCapture::default());
-        let mut base = BaseClient::init_with_connector(&config, HttpConnector::new()).unwrap();
-        base.client = executor.clone();
-        base.retry_builder = RetryBackoffBuilder::default()
+        let retry = RetryConfig::new()
             .with_min_base_delay(Duration::ZERO)
             .with_max_base_delay(Duration::ZERO)
-            .with_max_retries(1);
-        let account = AccountClient::init(config.clone(), base);
-        account
-            .list_basins(ListBasinsRequest {
-                prefix: None,
-                start_after: None,
-                limit: None,
-            })
+            .with_max_attempts(2)
+            .unwrap();
+        let base = base_with_executor(&config, executor.clone(), retry);
+
+        let account_uri: Uri = "http://example.test/v1/basins".parse().unwrap();
+        let _: s2_api::v1::basin::ListBasinsResponse = base
+            .unary(
+                base.get(account_uri).build(),
+                OpScope::account("list_basins", true),
+            )
+            .send_json()
             .await
             .unwrap();
-        let basin = account.basin_client("test-basin".parse().unwrap());
-        basin
-            .list_streams(ListStreamsRequest {
-                prefix: None,
-                start_after: None,
-                limit: None,
-            })
+
+        let basin = BasinClient::init(
+            "test-basin".parse().unwrap(),
+            Arc::new(config.clone()),
+            base,
+        );
+        let _: s2_api::v1::stream::ListStreamsResponse = basin
+            .unary(
+                basin.base().get(basin.uri("v1/streams")).build(),
+                OpScope::basin("list_streams", basin.name.as_ref(), true),
+            )
+            .send_json()
             .await
             .unwrap();
 
         let stream = "test-stream".parse().unwrap();
+        let stream_headers = StreamHeaders::default();
         assert!(
             basin
                 .read_session(
+                    "read_session",
                     &stream,
                     ReadStart {
                         seq_num: None,
                         timestamp: None,
                         tail_offset: None,
-                        clamp: None
+                        clamp: None,
                     },
                     ReadEnd {
                         count: None,
                         bytes: None,
                         until: None,
-                        wait: None
+                        wait: None,
                     },
-                    None,
-                    None,
+                    &stream_headers,
                     ReconnectAdvice::default(),
                     1,
                 )
@@ -1942,10 +1044,10 @@ mod tests {
         assert!(
             basin
                 .append_session(
+                    "append_session",
                     &stream,
                     futures_util::stream::empty(),
-                    None,
-                    None,
+                    &stream_headers,
                     ReconnectAdvice::default(),
                     1,
                 )
@@ -1983,8 +1085,8 @@ mod tests {
     #[case::none(Compression::None, None, "gzip, zstd")]
     #[case::gzip(Compression::Gzip, Some("gzip"), "gzip")]
     #[case::zstd(Compression::Zstd, Some("zstd"), "zstd")]
-    #[tokio::test]
-    async fn default_accept_encoding_respects_configured_compression(
+    #[test]
+    fn default_accept_encoding_respects_configured_compression(
         #[case] compression: Compression,
         #[case] content_encoding: Option<&str>,
         #[case] accept_encoding: &str,
@@ -2003,7 +1105,6 @@ mod tests {
             .build()
             .unwrap()
             .compress()
-            .await
             .unwrap();
         let headers = request.headers_mut();
         assert_eq!(
@@ -2016,8 +1117,8 @@ mod tests {
     }
 
     #[cfg(feature = "_hidden")]
-    #[tokio::test]
-    async fn default_headers_are_replaced_and_isolated_between_clients() {
+    #[test]
+    fn default_headers_are_replaced_and_isolated_between_clients() {
         let first_headers = HeaderMap::from_iter([
             (
                 http::header::HeaderName::from_static("x-origin-session"),
@@ -2140,6 +1241,10 @@ mod tests {
         }
     }
 
+    fn append_server_error(status: StatusCode, code: &str) -> AppendError {
+        AppendError::Server(ServerError::new_for_test(status, Some(code), "test"))
+    }
+
     #[rstest::rstest]
     #[case(StatusCode::FORBIDDEN, "permission_denied", false, false)]
     #[case(StatusCode::FORBIDDEN, "permission_denied", true, true)]
@@ -2153,12 +1258,8 @@ mod tests {
         #[case] prior_uncertainty: bool,
         #[case] wrapped: bool,
     ) {
-        let error =
-            AppendError::from(server_error(status, code).with_prior_uncertainty(prior_uncertainty));
-        assert_eq!(
-            matches!(error, AppendError::IndefiniteAppend(_)),
-            wrapped
-        );
+        let error = append_server_error(status, code).with_prior_uncertainty(prior_uncertainty);
+        assert_eq!(matches!(error, AppendError::IndefiniteAppend(_)), wrapped);
         if wrapped {
             assert!(error.server_error().is_none());
             assert!(!error.has_no_side_effects());
@@ -2169,7 +1270,10 @@ mod tests {
                 .unwrap();
             assert!(latest.has_no_side_effects());
             let server = latest.server_error().unwrap();
-            assert_eq!((server.status, server.code.as_deref()), (status, Some(code)));
+            assert_eq!(
+                (server.status, server.code.as_deref()),
+                (status, Some(code))
+            );
             assert_eq!(server.message, "test");
             assert_eq!(error.is_retryable(), server.is_retryable());
             assert_eq!(
@@ -2180,7 +1284,10 @@ mod tests {
             );
         } else {
             let server = error.server_error().unwrap();
-            assert_eq!((server.status, server.code.as_deref()), (status, Some(code)));
+            assert_eq!(
+                (server.status, server.code.as_deref()),
+                (status, Some(code))
+            );
             assert_eq!(server.message, "test");
             assert_eq!(error.is_retryable(), server.is_retryable());
             assert_eq!(error.has_no_side_effects(), server.has_no_side_effects());
@@ -2189,7 +1296,7 @@ mod tests {
 
     #[rstest::rstest]
     #[case::condition_failed(
-        parse_append_error_response(
+        AppendError::from_http_response(
             StatusCode::PRECONDITION_FAILED,
             br#"{"seq_num_mismatch":42}"#,
             ErrorContext::default(),
@@ -2197,27 +1304,26 @@ mod tests {
         "assignable_seq_num=42"
     )]
     #[case::unrecognized_condition(
-        ApiError::from_terminal_message(
+        AppendError::from_terminal_message(
             TerminalMessage {
                 status: 412,
                 body: bytes::Bytes::from_static(br#"{"some_future_mismatch":7}"#),
             },
-            TerminalKind::Append,
             ErrorContext::default(),
         ),
         r#"{"some_future_mismatch":7}"#
     )]
     #[case::invalid_access_token(
-        ApiError::Validation(ValidationError("invalid access token: invalid header".to_owned())),
+        AppendError::Validation(ValidationError("invalid access token: invalid header".to_owned())),
         "invalid access token: invalid header"
     )]
     #[test]
     fn unary_append_wraps_definite_terminal_errors(
-        #[case] error: ApiError,
+        #[case] error: AppendError,
         #[case] expected_substr: &str,
     ) {
         assert!(error.has_no_side_effects());
-        let error = AppendError::from(error.with_prior_uncertainty(true));
+        let error = error.with_prior_uncertainty(true);
         assert!(matches!(error, AppendError::IndefiniteAppend(_)));
         assert!(!error.has_no_side_effects());
         assert!(!error.is_retryable());
@@ -2234,108 +1340,68 @@ mod tests {
         );
     }
 
-    fn server_error(status: StatusCode, code: &str) -> ApiError {
-        ApiError::Server(ServerError::new_for_test(status, Some(code), "test"))
-    }
-
     #[test]
-    fn safe_to_retry_unary_no_policy() {
-        let retryable = server_error(StatusCode::INTERNAL_SERVER_ERROR, "internal");
-        let non_retryable = server_error(StatusCode::BAD_REQUEST, "bad_request");
+    fn safe_to_retry_matrix() {
+        let retryable = append_server_error(StatusCode::INTERNAL_SERVER_ERROR, "internal");
+        let non_retryable = append_server_error(StatusCode::BAD_REQUEST, "bad_request");
+        let no_side_effect = append_server_error(StatusCode::TOO_MANY_REQUESTS, "rate_limited");
+        let transaction_conflict =
+            append_server_error(StatusCode::CONFLICT, "transaction_conflict");
         let mode = AccessTokenMode::Static;
 
-        // Non-append requests (no policy) — retry if retryable.
-        assert!(is_safe_to_retry(&retryable, None, false, None, mode));
-        assert!(!is_safe_to_retry(&non_retryable, None, false, None, mode));
-    }
+        // RetrySafety::All & Append(All)
+        for safety in [
+            RetrySafety::All,
+            RetrySafety::Append(AppendRetryPolicy::All),
+        ] {
+            assert!(is_safe_to_retry(&retryable, safety, None, mode));
+            assert!(!is_safe_to_retry(&non_retryable, safety, None, mode));
+        }
 
-    #[test]
-    fn safe_to_retry_unary_all_policy() {
-        let retryable = server_error(StatusCode::INTERNAL_SERVER_ERROR, "internal");
-        let non_retryable = server_error(StatusCode::BAD_REQUEST, "bad_request");
-        let policy = Some(AppendRetryPolicy::All);
-        let mode = AccessTokenMode::Static;
-
-        // All policy — retry if retryable, no frame signal checks.
-        assert!(is_safe_to_retry(&retryable, policy, false, None, mode));
-        assert!(!is_safe_to_retry(&non_retryable, policy, false, None, mode));
-    }
-
-    #[test]
-    fn safe_to_retry_unary_no_side_effects_policy() {
-        let retryable = server_error(StatusCode::INTERNAL_SERVER_ERROR, "internal");
-        let non_retryable = server_error(StatusCode::BAD_REQUEST, "bad_request");
-        let no_side_effect = server_error(StatusCode::TOO_MANY_REQUESTS, "rate_limited");
-        let transaction_conflict = server_error(StatusCode::CONFLICT, "transaction_conflict");
-        let policy = Some(AppendRetryPolicy::NoSideEffects);
+        // Unsignalled frame signal -> safe under NoSideEffects, still unsafe under DefiniteOnly
         let signal = FrameSignal::new();
-        let mode = AccessTokenMode::Static;
-
-        // Signal not set — safe to retry under NoSideEffects (T2c).
         assert!(is_safe_to_retry(
             &retryable,
-            policy,
-            false,
+            RetrySafety::Append(AppendRetryPolicy::NoSideEffects),
             Some(&signal),
             mode,
         ));
-
-        // T2d (definite_retries_only): indefinite 500 is NOT retried even if signal wasn't set.
         assert!(!is_safe_to_retry(
             &retryable,
-            None,
-            true,
+            RetrySafety::DefiniteOnly,
             Some(&signal),
             mode,
         ));
 
-        // Signal set + error with possible side effects — not safe.
+        // Signalled frame signal
         signal.signal();
         assert!(!is_safe_to_retry(
             &retryable,
-            policy,
-            false,
+            RetrySafety::Append(AppendRetryPolicy::NoSideEffects),
             Some(&signal),
             mode,
         ));
-
-        // Signal set + no-side-effect error — safe.
         assert!(is_safe_to_retry(
             &no_side_effect,
-            policy,
-            false,
+            RetrySafety::Append(AppendRetryPolicy::NoSideEffects),
             Some(&signal),
             mode,
         ));
         assert!(is_safe_to_retry(
             &transaction_conflict,
-            policy,
-            false,
+            RetrySafety::Append(AppendRetryPolicy::NoSideEffects),
             Some(&signal),
             mode,
         ));
-
-        // Signal set + non-retryable — never safe.
         assert!(!is_safe_to_retry(
             &non_retryable,
-            policy,
-            false,
-            Some(&signal),
-            mode,
-        ));
-
-        // Definite-only non-append ops (T2d: issue_access_token, create_network_policy).
-        assert!(!is_safe_to_retry(
-            &retryable,
-            None,
-            true,
+            RetrySafety::Append(AppendRetryPolicy::NoSideEffects),
             Some(&signal),
             mode,
         ));
         assert!(is_safe_to_retry(
             &no_side_effect,
-            None,
-            true,
+            RetrySafety::DefiniteOnly,
             Some(&signal),
             mode,
         ));
@@ -2359,12 +1425,18 @@ mod tests {
 
         assert!(request.headers_mut().get(AUTHORIZATION).is_none());
 
-        client.authorize(&mut request).await.unwrap();
+        client
+            .authorize::<RequestError>(&mut request)
+            .await
+            .unwrap();
         let first = request.headers_mut().get(AUTHORIZATION).unwrap();
         assert_eq!(first, "Bearer token-1");
         assert!(first.is_sensitive());
 
-        client.authorize(&mut request).await.unwrap();
+        client
+            .authorize::<RequestError>(&mut request)
+            .await
+            .unwrap();
         let second = request.headers_mut().get(AUTHORIZATION).unwrap();
         assert_eq!(second, "Bearer token-2");
         assert!(second.is_sensitive());
@@ -2378,27 +1450,28 @@ mod tests {
             rejected: Mutex::new(Vec::new()),
         });
         let executor = Arc::new(RejectOldTokenExecutor::default());
-        let client = BaseClient {
+        let retry = RetryConfig::new()
+            .with_min_base_delay(Duration::ZERO)
+            .with_max_base_delay(Duration::ZERO)
+            .with_max_attempts(2)
+            .unwrap();
+        let client = BaseClient(Arc::new(BaseClientInner {
             client: executor.clone(),
             shutdown: ShutdownSignal::new(),
             default_headers: HeaderMap::new(),
             access_token_mode: AccessTokenMode::Refreshable,
             access_token_provider: Some(provider.clone()),
             request_timeout: Duration::from_secs(1),
-            retry_builder: RetryBackoffBuilder::default()
-                .with_min_base_delay(Duration::ZERO)
-                .with_max_base_delay(Duration::ZERO)
-                .with_max_retries(1),
+            retry,
             compression: Compression::None,
-        };
+        }));
         let request = client
             .get("http://example.test/v1/basins".parse().unwrap())
-            .build()
-            .unwrap();
+            .build();
 
-        let response = client
-            .request(request, OpScope::account("list_basins", true))
-            .send()
+        let (response, _) = client
+            .unary(request, OpScope::account("list_basins", true))
+            .send_raw::<RequestError>()
             .await
             .unwrap();
 
@@ -2424,13 +1497,13 @@ mod tests {
     #[cfg(feature = "_hidden")]
     #[test]
     fn transient_provider_failures_are_retryable_without_side_effects() {
-        let transient = ApiError::AccessTokenProvider(
+        let transient = RequestError::AccessTokenProvider(
             crate::types::AccessTokenProviderError::transient("temporarily unavailable"),
         );
         assert!(transient.is_retryable());
         assert!(transient.has_no_side_effects());
 
-        let permanent = ApiError::AccessTokenProvider(
+        let permanent = RequestError::AccessTokenProvider(
             crate::types::AccessTokenProviderError::permanent("login required"),
         );
         assert!(!permanent.is_retryable());
@@ -2440,13 +1513,9 @@ mod tests {
     #[cfg(any(feature = "rustls-aws-lc-rs", feature = "rustls-ring"))]
     #[tokio::test]
     async fn dns_errors_are_classified_as_connect() {
-        let config = crate::types::S2Config::new("test-token".to_owned())
+        let config = S2Config::new("test-token".to_owned())
             .with_endpoints(
-                crate::types::S2Endpoints::new(
-                    "https://no-such-basin.invalid".parse().unwrap(),
-                    "https://no-such-basin.invalid".parse().unwrap(),
-                )
-                .unwrap(),
+                crate::types::S2Endpoints::for_endpoint("https://no-such-basin.invalid").unwrap(),
             )
             // Skip native root CA loading so the test works in sandboxed
             // CI environments without keychain access.
@@ -2455,17 +1524,19 @@ mod tests {
         let url = "https://no-such-basin.invalid/v1/streams"
             .parse::<Uri>()
             .unwrap();
-        let request = client.get(url).build().unwrap();
-        let err: ApiError = match client
-            .request(request, OpScope::account("list_streams", true))
-            .send()
+        let err: RequestError = match client
+            .unary(
+                client.get(url).build(),
+                OpScope::account("list_streams", true),
+            )
+            .send_raw::<RequestError>()
             .await
         {
             Err(e) => e,
             Ok(_) => panic!("should fail with DNS error"),
         };
         assert!(
-            matches!(&err, ApiError::Connect(c) if c.message.contains("dns")),
+            matches!(&err, RequestError::Connect(c) if c.message.contains("dns")),
             "expected a connect error with dns cause, got: {err}"
         );
     }
@@ -2502,7 +1573,10 @@ mod tests {
         for (raw, expected) in [
             ("0", Some(Duration::ZERO)),
             ("1500", Some(Duration::from_millis(1500))),
-            ("18446744073709551615", Some(Duration::from_millis(u64::MAX))),
+            (
+                "18446744073709551615",
+                Some(Duration::from_millis(u64::MAX)),
+            ),
             ("", None),
             ("+100", None),
             ("-1", None),
@@ -2513,10 +1587,7 @@ mod tests {
             ("18446744073709551616", None),
         ] {
             let mut headers = HeaderMap::new();
-            headers.insert(
-                RETRY_AFTER_MS_HEADER,
-                HeaderValue::from_str(raw).unwrap(),
-            );
+            headers.insert(RETRY_AFTER_MS_HEADER, HeaderValue::from_str(raw).unwrap());
             assert_eq!(parse_retry_after_ms(&headers), expected, "raw={raw:?}");
         }
 
@@ -2526,37 +1597,6 @@ mod tests {
             HeaderValue::from_bytes(b"\xff").unwrap(),
         );
         assert_eq!(parse_retry_after_ms(&non_utf8), None);
-    }
-
-    // spec: r1 M4
-    #[test]
-    fn ignore_not_found_code_matches_only_expected_404_code() {
-        let matching: Result<UnaryResponse, ApiError> =
-            Err(server_error(StatusCode::NOT_FOUND, "stream_not_found"));
-        assert!(matching.ignore_not_found_code("stream_not_found").is_ok());
-
-        let wrong_code: Result<UnaryResponse, ApiError> =
-            Err(server_error(StatusCode::NOT_FOUND, "basin_not_found"));
-        assert!(matches!(
-            wrong_code.ignore_not_found_code("stream_not_found"),
-            Err(ApiError::Server(server))
-                if server.status == StatusCode::NOT_FOUND
-                    && server.code.as_deref() == Some("basin_not_found")
-        ));
-
-        let wrong_status: Result<UnaryResponse, ApiError> =
-            Err(server_error(StatusCode::CONFLICT, "stream_not_found"));
-        assert!(matches!(
-            wrong_status.ignore_not_found_code("stream_not_found"),
-            Err(ApiError::Server(server)) if server.status == StatusCode::CONFLICT
-        ));
-
-        let server_err: Result<UnaryResponse, ApiError> =
-            Err(server_error(StatusCode::INTERNAL_SERVER_ERROR, "unavailable"));
-        assert!(matches!(
-            server_err.ignore_not_found_code("stream_not_found"),
-            Err(ApiError::Server(server)) if server.status == StatusCode::INTERNAL_SERVER_ERROR
-        ));
     }
 
     // spec: r1 C1, L3
@@ -2569,130 +1609,5 @@ mod tests {
         let valid = authorization_header("secret-token").unwrap();
         assert_eq!(valid, "Bearer secret-token");
         assert!(valid.is_sensitive());
-    }
-
-    // spec: r1 C6, E2, F1, T9
-    #[test]
-    fn spec_vectors_s2s_frames_through_api_error() {
-        use std::path::Path;
-
-        use bytes::BytesMut;
-        use serde::Deserialize;
-        use tokio_util::codec::Decoder as _;
-
-        #[derive(Deserialize)]
-        struct File {
-            cases: Vec<Case>,
-        }
-        #[derive(Deserialize)]
-        struct Case {
-            rule: String,
-            name: String,
-            bytes: Vec<Piece>,
-            expect: Expect,
-        }
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum Piece {
-            Hex { hex: String },
-            Zeros { zeros: usize },
-        }
-        #[derive(Deserialize)]
-        struct Expect {
-            messages: Vec<serde_json::Value>,
-            end: End,
-        }
-        #[derive(Deserialize)]
-        struct End {
-            #[serde(rename = "type")]
-            kind: String,
-            status: Option<u16>,
-            code: Option<String>,
-            message: Option<String>,
-        }
-
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../api/specs/sdk/vectors/s2s-frames.json");
-        let raw = std::fs::read_to_string(&path).expect("read s2s-frames.json");
-        let file: File = serde_json::from_str(&raw).expect("parse s2s-frames.json");
-        assert!(!file.cases.is_empty());
-
-        for case in &file.cases {
-            let label = format!("[{}] {}", case.rule, case.name);
-            let mut wire = Vec::new();
-            for piece in &case.bytes {
-                match piece {
-                    Piece::Hex { hex } => {
-                        for i in (0..hex.len()).step_by(2) {
-                            wire.push(u8::from_str_radix(&hex[i..i + 2], 16).unwrap());
-                        }
-                    }
-                    Piece::Zeros { zeros } => wire.resize(wire.len() + *zeros, 0),
-                }
-            }
-
-            let mut decoder = FrameDecoder;
-            let mut buf = BytesMut::from(wire.as_slice());
-            let mut regular_count = 0usize;
-            let end_err: Option<ApiError> = loop {
-                match decoder.decode(&mut buf) {
-                    Ok(Some(SessionMessage::Regular(data))) => match data.decompressed() {
-                        Ok(_) => regular_count += 1,
-                        Err(err) => {
-                            break Some(ApiError::Protocol(ProtocolError::new(
-                                err.to_string(),
-                                ErrorContext::default(),
-                            )));
-                        }
-                    },
-                    Ok(Some(SessionMessage::Terminal(term))) => {
-                        break Some(ApiError::from_terminal_message(
-                            term,
-                            TerminalKind::Read,
-                            ErrorContext::default(),
-                        ));
-                    }
-                    Ok(None) => {
-                        if !buf.is_empty() {
-                            break Some(ApiError::ConnectionLost(ConnectionLostError::new(
-                                "truncated s2s frame",
-                                true,
-                                ErrorContext::default(),
-                            )));
-                        }
-                        break None;
-                    }
-                    Err(err) => {
-                        break Some(ApiError::Protocol(ProtocolError::new(
-                            err.to_string(),
-                            ErrorContext::default(),
-                        )));
-                    }
-                }
-            };
-
-            assert_eq!(regular_count, case.expect.messages.len(), "{label}");
-            match case.expect.end.kind.as_str() {
-                "clean" => assert!(end_err.is_none(), "{label}: expected clean, got {end_err:?}"),
-                "ServerError" => match end_err {
-                    Some(ApiError::Server(s)) => {
-                        assert_eq!(Some(s.status.as_u16()), case.expect.end.status, "{label}");
-                        assert_eq!(s.code, case.expect.end.code, "{label}");
-                        if let Some(expected_msg) = &case.expect.end.message {
-                            assert_eq!(&s.message, expected_msg, "{label}");
-                        }
-                    }
-                    other => panic!("{label}: expected ServerError, got {other:?}"),
-                },
-                "ProtocolError" => assert!(
-                    matches!(end_err, Some(ApiError::Protocol(_))),
-                    "{label}: expected ProtocolError, got {end_err:?}"
-                ),
-                "ConnectionLostError" => assert!(
-                    matches!(end_err, Some(ApiError::ConnectionLost(_))),
-                    "{label}: expected ConnectionLostError, got {end_err:?}"
-                ),
-                other => panic!("{label}: unknown end type {other:?}"),
-            }
-        }
     }
 }

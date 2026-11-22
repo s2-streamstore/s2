@@ -55,10 +55,7 @@ fn invalid_time_ranges(now: Timestamp) -> [(Timestamp, Timestamp); 3] {
 }
 
 async fn append_sample(stream: &S2Stream) -> Result<(), Box<dyn std::error::Error>> {
-    let input = AppendInput::new(AppendRecordBatch::try_from_iter([AppendRecord::new(
-        "metrics",
-    )?])?);
-    stream.append(input).await?;
+    stream.append(AppendRecord::new("metrics")?).await?;
     Ok(())
 }
 
@@ -92,7 +89,17 @@ fn long_metrics_enabled() -> bool {
     std::env::var("S2_METRICS_LONG").is_ok()
 }
 
+async fn fetch_with_timeout<Fut>(label: &str, fut: Fut) -> Result<Vec<Metric>, RequestError>
+where
+    Fut: Future<Output = Result<Vec<Metric>, RequestError>>,
+{
+    tokio::time::timeout(METRICS_TIMEOUT, fut)
+        .await
+        .unwrap_or_else(|_| panic!("{label} metrics request timed out"))
+}
+
 async fn poll_metrics<Fetch, Fut, Ready>(
+    label: &str,
     timeout: Duration,
     interval: Duration,
     mut fetch: Fetch,
@@ -107,7 +114,7 @@ where
     let mut last_err: Option<RequestError> = None;
 
     loop {
-        match fetch().await {
+        match fetch_with_timeout(label, fetch()).await {
             Ok(value) => {
                 if ready(&value) {
                     return Ok(value);
@@ -131,6 +138,48 @@ where
     }
 }
 
+async fn poll_fast_metrics<Fetch, Fut>(
+    label: &str,
+    fetch: Fetch,
+) -> Result<Vec<Metric>, Box<dyn std::error::Error>>
+where
+    Fetch: FnMut() -> Fut,
+    Fut: Future<Output = Result<Vec<Metric>, RequestError>>,
+{
+    poll_metrics(
+        label,
+        FAST_METRICS_POLL_MAX,
+        FAST_METRICS_POLL_INTERVAL,
+        fetch,
+        metrics_have_data,
+    )
+    .await
+}
+
+async fn fetch_or_poll_storage<Fetch, Fut, Ready>(
+    label: &str,
+    mut fetch: Fetch,
+    ready: Ready,
+) -> Result<Vec<Metric>, Box<dyn std::error::Error>>
+where
+    Fetch: FnMut() -> Fut,
+    Fut: Future<Output = Result<Vec<Metric>, RequestError>>,
+    Ready: FnMut(&[Metric]) -> bool,
+{
+    if long_metrics_enabled() {
+        poll_metrics(
+            label,
+            STORAGE_METRICS_POLL_MAX,
+            STORAGE_METRICS_POLL_INTERVAL,
+            fetch,
+            ready,
+        )
+        .await
+    } else {
+        Ok(fetch_with_timeout(label, fetch()).await?)
+    }
+}
+
 #[test_context(S2Stream)]
 #[tokio_shared_rt::test(shared)]
 async fn account_metrics_active_basins(
@@ -139,42 +188,21 @@ async fn account_metrics_active_basins(
     append_sample(stream).await?;
 
     let client = s2();
-    let long_metrics = long_metrics_enabled();
-    let metrics = if long_metrics {
-        poll_metrics(
-            STORAGE_METRICS_POLL_MAX,
-            STORAGE_METRICS_POLL_INTERVAL,
-            || async {
-                tokio::time::timeout(
-                    METRICS_TIMEOUT,
-                    client.get_account_metrics(AccountMetricSet::ActiveBasins(time_range(1))),
-                )
-                .await
-                .expect("account metrics request timed out")
-            },
-            |metrics| {
-                metrics
-                    .iter()
-                    .any(|m| matches!(m, Metric::Label(l) if !l.values.is_empty()))
-            },
-        )
-        .await?
-    } else {
-        tokio::time::timeout(
-            METRICS_TIMEOUT,
-            client.get_account_metrics(AccountMetricSet::ActiveBasins(time_range(1))),
-        )
-        .await
-        .expect("account metrics request timed out")?
+    let has_labels = |metrics: &[Metric]| {
+        metrics
+            .iter()
+            .any(|m| matches!(m, Metric::Label(l) if !l.values.is_empty()))
     };
+    let metrics = fetch_or_poll_storage(
+        "account",
+        || client.get_account_metrics(AccountMetricSet::ActiveBasins(time_range(1))),
+        has_labels,
+    )
+    .await?;
 
     assert!(metrics.iter().all(|m| matches!(m, Metric::Label(_))));
-    if long_metrics {
-        assert!(
-            metrics
-                .iter()
-                .any(|m| matches!(m, Metric::Label(l) if !l.values.is_empty()))
-        );
+    if long_metrics_enabled() {
+        assert!(has_labels(&metrics));
     }
 
     Ok(())
@@ -188,21 +216,11 @@ async fn account_metrics_account_ops_default_interval(
     append_sample(stream).await?;
 
     let client = s2();
-    let metrics = poll_metrics(
-        FAST_METRICS_POLL_MAX,
-        FAST_METRICS_POLL_INTERVAL,
-        || async {
-            tokio::time::timeout(
-                METRICS_TIMEOUT,
-                client.get_account_metrics(AccountMetricSet::AccountOps(time_range_and_interval(
-                    1, None,
-                ))),
-            )
-            .await
-            .expect("account metrics request timed out")
-        },
-        metrics_have_data,
-    )
+    let metrics = poll_fast_metrics("account", || {
+        client.get_account_metrics(AccountMetricSet::AccountOps(time_range_and_interval(
+            1, None,
+        )))
+    })
     .await?;
 
     assert!(metrics.iter().all(|m| {
@@ -219,111 +237,30 @@ async fn account_metrics_account_ops_default_interval(
 
 #[test_context(S2Stream)]
 #[tokio_shared_rt::test(shared)]
-async fn account_metrics_account_ops_minute_interval(
+async fn account_metrics_account_ops_intervals(
     stream: &S2Stream,
 ) -> Result<(), Box<dyn std::error::Error>> {
     append_sample(stream).await?;
 
     let client = s2();
-    let metrics = poll_metrics(
-        FAST_METRICS_POLL_MAX,
-        FAST_METRICS_POLL_INTERVAL,
-        || async {
-            tokio::time::timeout(
-                METRICS_TIMEOUT,
-                client.get_account_metrics(AccountMetricSet::AccountOps(time_range_and_interval(
-                    1,
-                    Some(TimeseriesInterval::Minute),
-                ))),
-            )
-            .await
-            .expect("account metrics request timed out")
-        },
-        metrics_have_data,
-    )
-    .await?;
-
-    assert!(metrics.iter().all(|m| {
-        matches!(
-            m,
-            Metric::Accumulation(acc)
-                if acc.interval == TimeseriesInterval::Minute
-        )
-    }));
-
-    Ok(())
-}
-
-#[test_context(S2Stream)]
-#[tokio_shared_rt::test(shared)]
-async fn account_metrics_account_ops_hour_interval(
-    stream: &S2Stream,
-) -> Result<(), Box<dyn std::error::Error>> {
-    append_sample(stream).await?;
-
-    let client = s2();
-    let metrics = poll_metrics(
-        FAST_METRICS_POLL_MAX,
-        FAST_METRICS_POLL_INTERVAL,
-        || async {
-            tokio::time::timeout(
-                METRICS_TIMEOUT,
-                client.get_account_metrics(AccountMetricSet::AccountOps(time_range_and_interval(
-                    24,
-                    Some(TimeseriesInterval::Hour),
-                ))),
-            )
-            .await
-            .expect("account metrics request timed out")
-        },
-        metrics_have_data,
-    )
-    .await?;
-
-    assert!(metrics.iter().all(|m| {
-        matches!(
-            m,
-            Metric::Accumulation(acc)
-                if acc.interval == TimeseriesInterval::Hour
-        )
-    }));
-
-    Ok(())
-}
-
-#[test_context(S2Stream)]
-#[tokio_shared_rt::test(shared)]
-async fn account_metrics_account_ops_day_interval(
-    stream: &S2Stream,
-) -> Result<(), Box<dyn std::error::Error>> {
-    append_sample(stream).await?;
-
-    let client = s2();
-    let metrics = poll_metrics(
-        FAST_METRICS_POLL_MAX,
-        FAST_METRICS_POLL_INTERVAL,
-        || async {
-            tokio::time::timeout(
-                METRICS_TIMEOUT,
-                client.get_account_metrics(AccountMetricSet::AccountOps(time_range_and_interval(
-                    24 * 7,
-                    Some(TimeseriesInterval::Day),
-                ))),
-            )
-            .await
-            .expect("account metrics request timed out")
-        },
-        metrics_have_data,
-    )
-    .await?;
-
-    assert!(metrics.iter().all(|m| {
-        matches!(
-            m,
-            Metric::Accumulation(acc)
-                if acc.interval == TimeseriesInterval::Day
-        )
-    }));
+    for (hours, interval) in [
+        (1, TimeseriesInterval::Minute),
+        (24, TimeseriesInterval::Hour),
+        (24 * 7, TimeseriesInterval::Day),
+    ] {
+        let metrics = poll_fast_metrics("account", || {
+            client.get_account_metrics(AccountMetricSet::AccountOps(time_range_and_interval(
+                hours,
+                Some(interval.clone()),
+            )))
+        })
+        .await?;
+        assert!(
+            metrics
+                .iter()
+                .all(|m| { matches!(m, Metric::Accumulation(acc) if acc.interval == interval) })
+        );
+    }
 
     Ok(())
 }
@@ -336,15 +273,14 @@ async fn account_metrics_empty_time_range(
     append_sample(stream).await?;
 
     let client = s2();
-    let metrics = tokio::time::timeout(
-        METRICS_TIMEOUT,
+    let metrics = fetch_with_timeout(
+        "account",
         client.get_account_metrics(AccountMetricSet::ActiveBasins(TimeRange::new(
             ts(0),
             ts(3600),
         )?)),
     )
-    .await
-    .expect("account metrics request timed out")?;
+    .await?;
 
     assert!(metrics.iter().all(|m| matches!(m, Metric::Label(_))));
 
@@ -357,43 +293,24 @@ async fn basin_metrics_storage(stream: &S2Stream) -> Result<(), Box<dyn std::err
     append_sample(stream).await?;
 
     let client = s2();
-    let long_metrics = long_metrics_enabled();
-    let metrics = if long_metrics {
-        poll_metrics(
-            STORAGE_METRICS_POLL_MAX,
-            STORAGE_METRICS_POLL_INTERVAL,
-            || async {
-                tokio::time::timeout(
-                    METRICS_TIMEOUT,
-                    client.get_basin_metrics(
-                        stream.basin_name().clone(),
-                        BasinMetricSet::Storage(time_range(1)),
-                    ),
-                )
-                .await
-                .expect("basin metrics request timed out")
-            },
-            metrics_have_data,
-        )
-        .await?
-    } else {
-        tokio::time::timeout(
-            METRICS_TIMEOUT,
+    let metrics = fetch_or_poll_storage(
+        "basin",
+        || {
             client.get_basin_metrics(
                 stream.basin_name().clone(),
                 BasinMetricSet::Storage(time_range(1)),
-            ),
-        )
-        .await
-        .expect("basin metrics request timed out")?
-    };
+            )
+        },
+        metrics_have_data,
+    )
+    .await?;
 
     assert!(
         metrics
             .iter()
-            .all(|m| { matches!(m, Metric::Gauge(g) if g.unit == MetricUnit::Bytes) })
+            .all(|m| matches!(m, Metric::Gauge(g) if g.unit == MetricUnit::Bytes))
     );
-    if long_metrics {
+    if long_metrics_enabled() {
         assert!(metrics_have_data(&metrics));
     }
 
@@ -406,22 +323,12 @@ async fn basin_metrics_append_ops(stream: &S2Stream) -> Result<(), Box<dyn std::
     append_sample(stream).await?;
 
     let client = s2();
-    let metrics = poll_metrics(
-        FAST_METRICS_POLL_MAX,
-        FAST_METRICS_POLL_INTERVAL,
-        || async {
-            tokio::time::timeout(
-                METRICS_TIMEOUT,
-                client.get_basin_metrics(
-                    stream.basin_name().clone(),
-                    BasinMetricSet::AppendOps(time_range_and_interval(1, None)),
-                ),
-            )
-            .await
-            .expect("basin metrics request timed out")
-        },
-        metrics_have_data,
-    )
+    let metrics = poll_fast_metrics("basin", || {
+        client.get_basin_metrics(
+            stream.basin_name().clone(),
+            BasinMetricSet::AppendOps(time_range_and_interval(1, None)),
+        )
+    })
     .await?;
 
     assert!(
@@ -440,22 +347,12 @@ async fn basin_metrics_read_ops(stream: &S2Stream) -> Result<(), Box<dyn std::er
     read_sample(stream).await?;
 
     let client = s2();
-    let metrics = poll_metrics(
-        FAST_METRICS_POLL_MAX,
-        FAST_METRICS_POLL_INTERVAL,
-        || async {
-            tokio::time::timeout(
-                METRICS_TIMEOUT,
-                client.get_basin_metrics(
-                    stream.basin_name().clone(),
-                    BasinMetricSet::ReadOps(time_range_and_interval(1, None)),
-                ),
-            )
-            .await
-            .expect("basin metrics request timed out")
-        },
-        metrics_have_data,
-    )
+    let metrics = poll_fast_metrics("basin", || {
+        client.get_basin_metrics(
+            stream.basin_name().clone(),
+            BasinMetricSet::ReadOps(time_range_and_interval(1, None)),
+        )
+    })
     .await?;
 
     assert!(
@@ -476,28 +373,18 @@ async fn basin_metrics_read_throughput(
     read_sample(stream).await?;
 
     let client = s2();
-    let metrics = poll_metrics(
-        FAST_METRICS_POLL_MAX,
-        FAST_METRICS_POLL_INTERVAL,
-        || async {
-            tokio::time::timeout(
-                METRICS_TIMEOUT,
-                client.get_basin_metrics(
-                    stream.basin_name().clone(),
-                    BasinMetricSet::ReadThroughput(time_range_and_interval(1, None)),
-                ),
-            )
-            .await
-            .expect("basin metrics request timed out")
-        },
-        metrics_have_data,
-    )
+    let metrics = poll_fast_metrics("basin", || {
+        client.get_basin_metrics(
+            stream.basin_name().clone(),
+            BasinMetricSet::ReadThroughput(time_range_and_interval(1, None)),
+        )
+    })
     .await?;
 
     assert!(
         metrics
             .iter()
-            .all(|m| { matches!(m, Metric::Accumulation(acc) if acc.unit == MetricUnit::Bytes) })
+            .all(|m| matches!(m, Metric::Accumulation(acc) if acc.unit == MetricUnit::Bytes))
     );
 
     Ok(())
@@ -511,28 +398,18 @@ async fn basin_metrics_append_throughput(
     append_sample(stream).await?;
 
     let client = s2();
-    let metrics = poll_metrics(
-        FAST_METRICS_POLL_MAX,
-        FAST_METRICS_POLL_INTERVAL,
-        || async {
-            tokio::time::timeout(
-                METRICS_TIMEOUT,
-                client.get_basin_metrics(
-                    stream.basin_name().clone(),
-                    BasinMetricSet::AppendThroughput(time_range_and_interval(1, None)),
-                ),
-            )
-            .await
-            .expect("basin metrics request timed out")
-        },
-        metrics_have_data,
-    )
+    let metrics = poll_fast_metrics("basin", || {
+        client.get_basin_metrics(
+            stream.basin_name().clone(),
+            BasinMetricSet::AppendThroughput(time_range_and_interval(1, None)),
+        )
+    })
     .await?;
 
     assert!(
         metrics
             .iter()
-            .all(|m| { matches!(m, Metric::Accumulation(acc) if acc.unit == MetricUnit::Bytes) })
+            .all(|m| matches!(m, Metric::Accumulation(acc) if acc.unit == MetricUnit::Bytes))
     );
 
     Ok(())
@@ -544,22 +421,12 @@ async fn basin_metrics_basin_ops(stream: &S2Stream) -> Result<(), Box<dyn std::e
     append_sample(stream).await?;
 
     let client = s2();
-    let metrics = poll_metrics(
-        FAST_METRICS_POLL_MAX,
-        FAST_METRICS_POLL_INTERVAL,
-        || async {
-            tokio::time::timeout(
-                METRICS_TIMEOUT,
-                client.get_basin_metrics(
-                    stream.basin_name().clone(),
-                    BasinMetricSet::BasinOps(time_range_and_interval(1, None)),
-                ),
-            )
-            .await
-            .expect("basin metrics request timed out")
-        },
-        metrics_have_data,
-    )
+    let metrics = poll_fast_metrics("basin", || {
+        client.get_basin_metrics(
+            stream.basin_name().clone(),
+            BasinMetricSet::BasinOps(time_range_and_interval(1, None)),
+        )
+    })
     .await?;
 
     assert!(
@@ -577,45 +444,25 @@ async fn stream_metrics_storage(stream: &S2Stream) -> Result<(), Box<dyn std::er
     append_sample(stream).await?;
 
     let client = s2();
-    let long_metrics = long_metrics_enabled();
-    let metrics = if long_metrics {
-        poll_metrics(
-            STORAGE_METRICS_POLL_MAX,
-            STORAGE_METRICS_POLL_INTERVAL,
-            || async {
-                tokio::time::timeout(
-                    METRICS_TIMEOUT,
-                    client.get_stream_metrics(
-                        stream.basin_name().clone(),
-                        stream.stream_name().clone(),
-                        StreamMetricSet::Storage(time_range(1)),
-                    ),
-                )
-                .await
-                .expect("stream metrics request timed out")
-            },
-            metrics_have_data,
-        )
-        .await?
-    } else {
-        tokio::time::timeout(
-            METRICS_TIMEOUT,
+    let metrics = fetch_or_poll_storage(
+        "stream",
+        || {
             client.get_stream_metrics(
                 stream.basin_name().clone(),
                 stream.stream_name().clone(),
                 StreamMetricSet::Storage(time_range(1)),
-            ),
-        )
-        .await
-        .expect("stream metrics request timed out")?
-    };
+            )
+        },
+        metrics_have_data,
+    )
+    .await?;
 
     assert!(
         metrics
             .iter()
-            .all(|m| { matches!(m, Metric::Gauge(g) if g.unit == MetricUnit::Bytes) })
+            .all(|m| matches!(m, Metric::Gauge(g) if g.unit == MetricUnit::Bytes))
     );
-    if long_metrics {
+    if long_metrics_enabled() {
         assert!(metrics_have_data(&metrics));
     }
 
@@ -633,12 +480,11 @@ async fn account_metrics_invalid_time_ranges(
     let now = Timestamp::now();
 
     for (start, end) in invalid_time_ranges(now) {
-        let result = tokio::time::timeout(
-            METRICS_TIMEOUT,
+        let result = fetch_with_timeout(
+            "account",
             client.get_account_metrics(AccountMetricSet::ActiveBasins(TimeRange::new(start, end)?)),
         )
-        .await
-        .expect("account metrics request timed out");
+        .await;
 
         assert_matches!(
             result,
@@ -666,9 +512,7 @@ async fn account_metrics_all_sets(stream: &S2Stream) -> Result<(), Box<dyn std::
     ];
 
     for set in sets {
-        let _ = tokio::time::timeout(METRICS_TIMEOUT, client.get_account_metrics(set))
-            .await
-            .expect("account metrics request timed out")?;
+        let _ = fetch_with_timeout("account", client.get_account_metrics(set)).await?;
     }
 
     Ok(())
@@ -682,15 +526,14 @@ async fn basin_metrics_empty_time_range(
     append_sample(stream).await?;
 
     let client = s2();
-    let metrics = tokio::time::timeout(
-        METRICS_TIMEOUT,
+    let metrics = fetch_with_timeout(
+        "basin",
         client.get_basin_metrics(
             stream.basin_name().clone(),
             BasinMetricSet::Storage(TimeRange::new(ts(0), ts(3600))?),
         ),
     )
-    .await
-    .expect("basin metrics request timed out")?;
+    .await?;
 
     assert!(metrics.iter().all(|m| matches!(m, Metric::Gauge(_))));
 
@@ -708,15 +551,14 @@ async fn basin_metrics_invalid_time_ranges(
     let now = Timestamp::now();
 
     for (start, end) in invalid_time_ranges(now) {
-        let result = tokio::time::timeout(
-            METRICS_TIMEOUT,
+        let result = fetch_with_timeout(
+            "basin",
             client.get_basin_metrics(
                 stream.basin_name().clone(),
                 BasinMetricSet::Storage(TimeRange::new(start, end)?),
             ),
         )
-        .await
-        .expect("basin metrics request timed out");
+        .await;
 
         assert_matches!(
             result,
@@ -748,12 +590,11 @@ async fn basin_metrics_all_sets(stream: &S2Stream) -> Result<(), Box<dyn std::er
     ];
 
     for set in sets {
-        let _ = tokio::time::timeout(
-            METRICS_TIMEOUT,
+        let _ = fetch_with_timeout(
+            "basin",
             client.get_basin_metrics(stream.basin_name().clone(), set),
         )
-        .await
-        .expect("basin metrics request timed out")?;
+        .await?;
     }
 
     Ok(())
@@ -767,16 +608,15 @@ async fn stream_metrics_empty_time_range(
     append_sample(stream).await?;
 
     let client = s2();
-    let metrics = tokio::time::timeout(
-        METRICS_TIMEOUT,
+    let metrics = fetch_with_timeout(
+        "stream",
         client.get_stream_metrics(
             stream.basin_name().clone(),
             stream.stream_name().clone(),
             StreamMetricSet::Storage(TimeRange::new(ts(0), ts(3600))?),
         ),
     )
-    .await
-    .expect("stream metrics request timed out")?;
+    .await?;
 
     assert!(metrics.iter().all(|m| matches!(m, Metric::Gauge(_))));
 
@@ -794,16 +634,15 @@ async fn stream_metrics_invalid_time_ranges(
     let now = Timestamp::now();
 
     for (start, end) in invalid_time_ranges(now) {
-        let result = tokio::time::timeout(
-            METRICS_TIMEOUT,
+        let result = fetch_with_timeout(
+            "stream",
             client.get_stream_metrics(
                 stream.basin_name().clone(),
                 stream.stream_name().clone(),
                 StreamMetricSet::Storage(TimeRange::new(start, end)?),
             ),
         )
-        .await
-        .expect("stream metrics request timed out");
+        .await;
 
         assert_matches!(
             result,

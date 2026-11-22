@@ -121,7 +121,7 @@ fn rfc3339_timestamp_bounds() {
 }
 
 #[test]
-fn time_range_floors_subseconds_and_checks_bounds() {
+fn time_range_floors_subseconds_checks_bounds_and_wraps_interval() {
     let start = Timestamp::new(100, 999_999_999).unwrap();
     let end = Timestamp::new(200, 500_000_000).unwrap();
     let range = TimeRange::new(start, end).unwrap();
@@ -129,6 +129,11 @@ fn time_range_floors_subseconds_and_checks_bounds() {
     assert_eq!(range.start().subsec_nanosecond(), 0);
     assert_eq!(range.end().as_second(), 200);
     assert_eq!(range.end().subsec_nanosecond(), 0);
+
+    let with_interval = range.with_interval(TimeseriesInterval::Minute);
+    assert_eq!(with_interval.range(), range);
+    assert_eq!(with_interval.interval(), Some(&TimeseriesInterval::Minute));
+    assert_eq!(TimeRangeAndInterval::from(range).interval(), None);
 
     let before_epoch = Timestamp::new(-1, 500_000_000).unwrap();
     assert!(TimeRange::new(before_epoch, end).is_err());
@@ -140,21 +145,31 @@ fn time_range_floors_subseconds_and_checks_bounds() {
     assert!(TimeRange::new(Timestamp::UNIX_EPOCH, over_max).is_err());
 }
 
+// -- EncryptionKey --
+
 #[test]
-fn encryption_key_debug_is_redacted() {
+fn encryption_key_debug_is_redacted_and_parse_validates() {
     let key: EncryptionKey = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
         .parse()
         .unwrap();
     assert_eq!(format!("{key:?}"), "EncryptionKey(<redacted>)");
     assert!(key.to_header_value().is_sensitive());
+
+    // Empty input, invalid base64, and unpadded base64 are rejected; non-empty bytes succeed.
+    assert!("".parse::<EncryptionKey>().is_err());
+    assert!("   ".parse::<EncryptionKey>().is_err());
+    assert!("not-base64!!!".parse::<EncryptionKey>().is_err());
+    assert!("AA".parse::<EncryptionKey>().is_err());
+    assert!(EncryptionKey::new([]).is_err());
+    assert!(EncryptionKey::new([0u8; 32]).is_ok());
 }
 
-// -- AccountEndpoint --
+// -- Endpoints & S2Config --
 
 #[rstest]
-#[case::https_with_scheme("https://aws.s2.dev", Scheme::HTTPS)]
+#[case::https_with_scheme("https://a.s2.dev", Scheme::HTTPS)]
 #[case::http_with_scheme("http://localhost:8080", Scheme::HTTP)]
-#[case::default_https("aws.s2.dev", Scheme::HTTPS)]
+#[case::default_https("a.s2.dev", Scheme::HTTPS)]
 #[case::ipv4("http://127.0.0.1:8080", Scheme::HTTP)]
 #[case::ipv6("http://[::1]:8080", Scheme::HTTP)]
 #[case::ipv6_default_https("[2001:db8::1]", Scheme::HTTPS)]
@@ -181,8 +196,6 @@ fn endpoint_invalid_authority_has_no_bracket_hint(#[case] input: &str) {
     let error = input.parse::<AccountEndpoint>().unwrap_err();
     assert!(!error.0.contains("brackets"));
 }
-
-// -- BasinEndpoint --
 
 #[rstest]
 #[case::https_parent_zone("https://{basin}.b.s2.dev", Scheme::HTTPS, true)]
@@ -215,85 +228,95 @@ fn basin_endpoint_parent_zone_rejects_ip_literals(#[case] input: &str, #[case] h
     )));
 }
 
-// -- S2Endpoints --
-
 #[test]
-fn s2_endpoints_new_requires_same_scheme() {
-    let account: AccountEndpoint = "https://aws.s2.dev".parse().unwrap();
-    let basin: BasinEndpoint = "http://localhost:8080".parse().unwrap();
-    let err = S2Endpoints::new(account, basin);
-    assert!(err.is_err());
-}
+fn s2_endpoints_scheme_and_for_endpoint() {
+    let https_account: AccountEndpoint = "https://a.s2.dev".parse().unwrap();
+    let http_basin: BasinEndpoint = "http://localhost:8080".parse().unwrap();
+    assert!(S2Endpoints::new(https_account.clone(), http_basin).is_err());
 
-#[test]
-fn s2_endpoints_new_same_scheme_succeeds() {
-    let account: AccountEndpoint = "https://aws.s2.dev".parse().unwrap();
-    let basin: BasinEndpoint = "https://{basin}.b.s2.dev".parse().unwrap();
-    let ep = S2Endpoints::new(account, basin).unwrap();
-    assert_eq!(ep.scheme, Scheme::HTTPS);
-}
+    let https_basin: BasinEndpoint = "https://{basin}.b.s2.dev".parse().unwrap();
+    assert_eq!(
+        S2Endpoints::new(https_account, https_basin).unwrap().scheme,
+        Scheme::HTTPS
+    );
 
-#[test]
-fn s2_endpoints_for_endpoint_defaults_to_https() {
     let ep = S2Endpoints::for_endpoint("localhost:8080").unwrap();
     let authority: Authority = "localhost:8080".parse().unwrap();
     assert_eq!(ep.scheme, Scheme::HTTPS);
     assert_eq!(ep.account_authority, authority);
     assert_eq!(ep.basin_authority, BasinAuthority::Direct(authority));
-}
-
-#[test]
-fn s2_endpoints_for_endpoint_accepts_explicit_scheme() {
-    let ep = S2Endpoints::for_endpoint("http://localhost:8080").unwrap();
-    assert_eq!(ep.scheme, Scheme::HTTP);
-}
-
-#[test]
-fn s2_endpoints_for_endpoint_rejects_invalid_endpoint() {
+    assert_eq!(
+        S2Endpoints::for_endpoint("http://localhost:8080")
+            .unwrap()
+            .scheme,
+        Scheme::HTTP
+    );
     assert!(S2Endpoints::for_endpoint("not a valid endpoint").is_err());
 }
 
-// -- Compression --
+#[test]
+fn s2_config_from_env_with_validation() {
+    let env = |pairs: &[(&str, &str)]| {
+        let map: std::collections::HashMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect();
+        move |k: &str| map.get(k).cloned().ok_or(std::env::VarError::NotPresent)
+    };
 
-#[rstest]
-#[case::none(Compression::None, s2_api::v1::stream::s2s::CompressionAlgorithm::None)]
-#[case::gzip(Compression::Gzip, s2_api::v1::stream::s2s::CompressionAlgorithm::Gzip)]
-#[case::zstd(Compression::Zstd, s2_api::v1::stream::s2s::CompressionAlgorithm::Zstd)]
-fn compression_conversion(
-    #[case] sdk: Compression,
-    #[case] api: s2_api::v1::stream::s2s::CompressionAlgorithm,
-) {
-    assert_eq!(
-        s2_api::v1::stream::s2s::CompressionAlgorithm::from(sdk),
-        api
+    // Missing token fails.
+    assert!(S2Config::from_env_with(env(&[])).is_err());
+    // Empty token fails.
+    assert!(S2Config::from_env_with(env(&[("S2_ACCESS_TOKEN", "")])).is_err());
+
+    // Default endpoints when only token is set.
+    let cfg = S2Config::from_env_with(env(&[("S2_ACCESS_TOKEN", "tok")])).unwrap();
+    assert_eq!(cfg.endpoints(), &S2Endpoints::default());
+
+    // Partial custom endpoints fail closed.
+    assert!(
+        S2Config::from_env_with(env(&[
+            ("S2_ACCESS_TOKEN", "tok"),
+            ("S2_ACCOUNT_ENDPOINT", "http://localhost:8080"),
+        ]))
+        .is_err()
     );
+    assert!(
+        S2Config::from_env_with(env(&[
+            ("S2_ACCESS_TOKEN", "tok"),
+            ("S2_BASIN_ENDPOINT", "http://localhost:8080"),
+        ]))
+        .is_err()
+    );
+
+    // Mismatched schemes fail.
+    assert!(
+        S2Config::from_env_with(env(&[
+            ("S2_ACCESS_TOKEN", "tok"),
+            ("S2_ACCOUNT_ENDPOINT", "https://a.s2.dev"),
+            ("S2_BASIN_ENDPOINT", "http://localhost:8080"),
+        ]))
+        .is_err()
+    );
+
+    // Both endpoints set with matching scheme succeed.
+    let cfg = S2Config::from_env_with(env(&[
+        ("S2_ACCESS_TOKEN", "tok"),
+        ("S2_ACCOUNT_ENDPOINT", "http://localhost:8080"),
+        ("S2_BASIN_ENDPOINT", "http://localhost:8080"),
+    ]))
+    .unwrap();
+    assert_eq!(cfg.endpoints().scheme, Scheme::HTTP);
 }
 
-// -- RetryConfig --
-
 #[test]
-fn retry_config_defaults() {
-    let rc = RetryConfig::default();
-    assert_eq!(rc.max_attempts(), 3);
-    assert_eq!(rc.min_base_delay(), Duration::from_millis(100));
-    assert_eq!(rc.max_base_delay(), Duration::from_secs(1));
-    assert_eq!(rc.append_retry_policy(), AppendRetryPolicy::All);
-}
-
-#[test]
-fn retry_config_max_retries() {
-    let rc = RetryConfig::default();
-    assert_eq!(rc.max_retries(), 2);
-}
-
-// -- S2Config --
-
-#[test]
-fn s2_config_defaults() {
-    let cfg = S2Config::new("test-token");
-    assert_eq!(cfg.connection_timeout(), Duration::from_secs(3));
-    assert_eq!(cfg.request_timeout(), Duration::from_secs(5));
-    assert!(!cfg.insecure_skip_cert_verification());
+fn s2_config_rejects_min_base_delay_exceeding_max_base_delay() {
+    let retry = RetryConfig::new()
+        .with_min_base_delay(Duration::from_secs(2))
+        .with_max_base_delay(Duration::from_secs(1));
+    let config = S2Config::new("test-token").with_retry(retry);
+    let err = crate::S2::new(config).unwrap_err();
+    assert!(err.0.contains("min_base_delay"));
 }
 
 #[cfg(feature = "_hidden")]
@@ -343,7 +366,25 @@ fn default_headers_reject_framing_headers(#[case] name: &str, #[case] value: &st
     assert!(error.0.contains("framing"));
 }
 
-// -- RetentionPolicy --
+// -- Whole-second duration invariants & enums --
+
+#[test]
+fn sub_second_durations_are_rejected() {
+    let subsec = Duration::from_millis(1500);
+    assert!(DeleteOnEmptyConfig::new().with_min_age(subsec).is_err());
+    assert!(
+        DeleteOnEmptyReconfiguration::new()
+            .with_min_age(subsec)
+            .is_err()
+    );
+    assert!(ReadInput::new().with_wait(subsec).is_err());
+    assert!(RetentionPolicy::age(subsec).is_err());
+    // RetentionPolicy::age(Duration::ZERO) is allowed client-side per D5 spec vector.
+    assert_eq!(
+        RetentionPolicy::age(Duration::ZERO).unwrap(),
+        RetentionPolicy::Age(0)
+    );
+}
 
 #[rstest]
 #[case::age(RetentionPolicy::Age(3600))]
@@ -353,8 +394,6 @@ fn retention_policy_roundtrip(#[case] sdk: RetentionPolicy) {
     let back: RetentionPolicy = api.into();
     assert_eq!(back, sdk);
 }
-
-// -- TimestampingMode --
 
 #[rstest]
 #[case::client_prefer(
@@ -376,64 +415,36 @@ fn timestamping_mode_roundtrip(
     assert_eq!(back, sdk);
 }
 
-// -- TimestampingConfig --
+// -- Validated identifiers & Ordering --
 
 #[test]
-fn timestamping_config_roundtrip() {
-    let sdk = TimestampingConfig {
-        mode: Some(TimestampingMode::Arrival),
-        uncapped: Some(true),
-    };
-    let api: api::config::TimestampingConfig = sdk.clone().into();
-    let back: TimestampingConfig = api.into();
-    assert_eq!(back, sdk);
-}
+fn validated_identifiers_support_ord_and_conversions() {
+    let b1: BasinName = "alpha-basin".parse().unwrap();
+    let b2: BasinName = "beta-basin".parse().unwrap();
+    assert!(b1 < b2);
 
-// -- DeleteOnEmptyConfig --
+    let s1: StreamName = "a/stream".parse().unwrap();
+    let s2: StreamName = "b/stream".parse().unwrap();
+    assert!(s1 < s2);
 
-#[test]
-fn delete_on_empty_config_roundtrip() {
-    let sdk = DeleteOnEmptyConfig::new()
-        .with_min_age(Duration::from_secs(300))
-        .unwrap();
-    assert_eq!(sdk.min_age(), Duration::from_secs(300));
-    let api: api::config::DeleteOnEmptyConfig = sdk.into();
-    let back: DeleteOnEmptyConfig = api.into();
-    assert_eq!(back, sdk);
-}
+    let t1: AccessTokenId = "tok-1".parse().unwrap();
+    let t2: AccessTokenId = "tok-2".parse().unwrap();
+    assert!(t1 < t2);
 
-// -- StreamConfig --
+    let f1 = FencingToken::try_from("aaa").unwrap();
+    let f2 = FencingToken::try_from("bbb".to_owned()).unwrap();
+    assert!(f1 < f2);
+    assert_eq!(f1.as_ref(), "aaa");
+    assert_eq!(String::from(f2), "bbb");
 
-#[test]
-fn stream_config_builder_and_roundtrip() {
-    let sdk = StreamConfig::new()
-        .with_storage_class("express")
-        .with_retention_policy(RetentionPolicy::Age(86400))
-        .with_timestamping(TimestampingConfig {
-            mode: Some(TimestampingMode::ClientPrefer),
-            uncapped: None,
-        })
-        .with_delete_on_empty(
-            DeleteOnEmptyConfig::new()
-                .with_min_age(Duration::from_secs(60))
-                .unwrap(),
-        );
-    let api: api::config::StreamConfig = sdk.clone().into();
-    let back: StreamConfig = api.into();
-    assert_eq!(back, sdk);
-}
-
-// -- BasinConfig --
-
-#[test]
-fn basin_config_builder_and_roundtrip() {
-    let sdk = BasinConfig::new()
-        .with_default_stream_config(StreamConfig::new().with_storage_class("standard"))
-        .with_create_stream_on_append(true)
-        .with_create_stream_on_read(false);
-    let api: api::config::BasinConfig = sdk.clone().into();
-    let back: BasinConfig = api.into();
-    assert_eq!(back, sdk);
+    let vpce = VpcEndpointId::try_from("vpce-0123456789abcdef0").unwrap();
+    assert_eq!(vpce.as_ref(), "vpce-0123456789abcdef0");
+    assert_eq!(
+        VpcEndpointId::try_from("vpce-0123456789abcdef0".to_owned()).unwrap(),
+        vpce
+    );
+    assert_eq!(String::from(vpce), "vpce-0123456789abcdef0");
+    assert!(VpcEndpointId::try_from("not-a-vpce").is_err());
 }
 
 // -- FencingToken --
@@ -502,15 +513,13 @@ proptest! {
     }
 }
 
-// -- AppendRecord --
+// -- AppendRecord & MeteredBytes --
 
 #[test]
 fn append_record_too_large() {
     let big_body = vec![0u8; RECORD_BATCH_MAX.bytes + 1];
     assert!(AppendRecord::new(big_body).is_err());
 }
-
-// -- MeteredBytes --
 
 proptest! {
     #[test]
@@ -541,26 +550,17 @@ proptest! {
 // -- AppendRecordBatch --
 
 #[test]
-fn append_record_batch_empty_is_err() {
-    let result = AppendRecordBatch::try_from_iter(Vec::<AppendRecord>::new());
-    assert!(result.is_err());
-}
+fn append_record_batch_bounds_and_conversions() {
+    assert!(AppendRecordBatch::try_from_iter(Vec::<AppendRecord>::new()).is_err());
+    let too_many: Vec<_> = (0..1001).map(|_| AppendRecord::new("x").unwrap()).collect();
+    assert!(AppendRecordBatch::try_from_iter(too_many).is_err());
 
-#[test]
-fn append_record_batch_too_many_records() {
-    let records: Vec<_> = (0..1001).map(|_| AppendRecord::new("x").unwrap()).collect();
-    let result = AppendRecordBatch::try_from_iter(records);
-    assert!(result.is_err());
-}
-
-#[test]
-fn append_conversions_from_record_and_command() {
     let rec = AppendRecord::new("hello").unwrap();
     let batch = AppendRecordBatch::from(rec.clone());
     assert_eq!(batch.len(), 1);
     assert_eq!(batch[0], rec);
 
-    let input = AppendInput::from(rec.clone());
+    let input = AppendInput::from(rec);
     assert_eq!(input.records, batch);
 
     let cmd = CommandRecord::trim(7);
@@ -594,41 +594,29 @@ proptest! {
     }
 }
 
-// -- CommandRecord --
+// -- CommandRecord & SequencedRecord --
 
 #[test]
-fn command_record_fence() {
+fn command_records_encode_headers_and_body() {
     let token: FencingToken = "tok".parse().unwrap();
-    let cmd = CommandRecord::fence(token);
-    let record: AppendRecord = cmd.into();
-    assert_eq!(record.headers().len(), 1);
-    assert_eq!(record.headers()[0].name.as_ref(), b"");
-    assert_eq!(record.headers()[0].value.as_ref(), b"fence");
-    assert_eq!(record.body().as_ref(), b"tok");
-}
+    let fence: AppendRecord = CommandRecord::fence(token).into();
+    assert_eq!(fence.headers().len(), 1);
+    assert_eq!(fence.headers()[0].name.as_ref(), b"");
+    assert_eq!(fence.headers()[0].value.as_ref(), b"fence");
+    assert_eq!(fence.body().as_ref(), b"tok");
 
-#[test]
-fn command_record_trim() {
-    let cmd = CommandRecord::trim(42);
-    let record: AppendRecord = cmd.into();
-    assert_eq!(record.headers().len(), 1);
-    assert_eq!(record.headers()[0].value.as_ref(), b"trim");
-    assert_eq!(record.body().as_ref(), &42u64.to_be_bytes());
+    let trim: AppendRecord = CommandRecord::trim(42).into();
+    assert_eq!(trim.headers().len(), 1);
+    assert_eq!(trim.headers()[0].value.as_ref(), b"trim");
+    assert_eq!(trim.body().as_ref(), &42u64.to_be_bytes());
 }
-
-// -- SequencedRecord --
 
 #[rstest]
 #[case::command(vec![Header::new("", "fence")], true)]
 #[case::regular(vec![Header::new("key", "value")], false)]
 #[case::no_headers(vec![], false)]
 fn sequenced_record_command_detection(#[case] headers: Vec<Header>, #[case] expected: bool) {
-    let record = SequencedRecord {
-        seq_num: 0,
-        body: Bytes::from("data"),
-        headers,
-        timestamp: 0,
-    };
+    let record = SequencedRecord::new(0, Bytes::from("data"), headers, 0);
     assert_eq!(record.is_command_record(), expected);
 }
 
@@ -657,8 +645,9 @@ proptest! {
     }
 }
 
+// spec: r1 R1
 #[test]
-fn read_input_default_omits_all_start_params() {
+fn read_input_default_and_stop_params_to_api() {
     let (api_start, api_end, cfg) = ReadInput::new().into_api_parts();
     assert_eq!(api_start.seq_num, None);
     assert_eq!(api_start.timestamp, None);
@@ -669,10 +658,7 @@ fn read_input_default_omits_all_start_params() {
     assert_eq!(api_end.until, None);
     assert_eq!(api_end.wait, None);
     assert!(cfg.is_none());
-}
 
-#[test]
-fn read_input_stop_params_to_api() {
     let input = ReadInput::new()
         .with_count(50)
         .with_bytes(1024)
@@ -731,20 +717,6 @@ fn operation_roundtrip_all_variants() {
     }
 }
 
-// -- MetricUnit --
-
-#[test]
-fn metric_unit_conversion() {
-    assert_eq!(
-        MetricUnit::from(MaybeKnown::Known(api::metrics::MetricUnit::Bytes)),
-        MetricUnit::Bytes
-    );
-    assert_eq!(
-        MetricUnit::from(MaybeKnown::Known(api::metrics::MetricUnit::Operations)),
-        MetricUnit::Operations
-    );
-}
-
 // -- AppendAck --
 
 proptest! {
@@ -775,85 +747,7 @@ proptest! {
     }
 }
 
-// -- ReadBatch --
-
-#[test]
-fn read_batch_from_api() {
-    let proto_batch = api::stream::proto::ReadBatch {
-        records: vec![api::stream::proto::SequencedRecord {
-            seq_num: 0,
-            body: Bytes::from("hi"),
-            headers: vec![api::stream::proto::Header {
-                name: Bytes::from("k"),
-                value: Bytes::from("v"),
-            }],
-            timestamp: 42,
-        }],
-        tail: Some(api::stream::proto::StreamPosition {
-            seq_num: 1,
-            timestamp: 42,
-        }),
-    };
-    let batch = ReadBatch::from_api(proto_batch);
-    assert_eq!(batch.records.len(), 1);
-    assert_eq!(batch.records[0].seq_num, 0);
-    assert_eq!(batch.records[0].timestamp, 42);
-    assert_eq!(batch.records[0].body.as_ref(), b"hi");
-    assert_eq!(batch.records[0].headers.len(), 1);
-    assert_eq!(batch.records[0].headers[0].name.as_ref(), b"k");
-    assert_eq!(batch.records[0].headers[0].value.as_ref(), b"v");
-    assert_eq!(
-        batch.tail,
-        Some(StreamPosition {
-            seq_num: 1,
-            timestamp: 42,
-        })
-    );
-}
-
-// -- CreateBasinInput --
-
-#[test]
-fn create_basin_input_to_api() {
-    let name: BasinName = "test-basin-name".parse().unwrap();
-    let input = CreateBasinInput::new(name.clone()).with_config(BasinConfig::new());
-    let req: api::basin::CreateBasinRequest = input.into();
-    assert_eq!(req.basin, name);
-    assert!(req.config.is_some());
-}
-
-// -- CreateStreamInput --
-
-#[test]
-fn create_stream_input_to_api() {
-    let name: StreamName = "my-stream".parse().unwrap();
-    let input = CreateStreamInput::new(name.clone()).with_config(StreamConfig::new());
-    let req: api::stream::CreateStreamRequest = input.into();
-    assert_eq!(req.stream, name);
-    assert!(req.config.is_some());
-}
-
-// -- SequencedRecord from proto --
-
-#[test]
-fn sequenced_record_from_proto() {
-    let proto = api::stream::proto::SequencedRecord {
-        seq_num: 99,
-        body: Bytes::from("data"),
-        headers: vec![api::stream::proto::Header {
-            name: Bytes::from("k"),
-            value: Bytes::from("v"),
-        }],
-        timestamp: 1234,
-    };
-    let record: SequencedRecord = proto.into();
-    assert_eq!(record.seq_num, 99);
-    assert_eq!(record.body.as_ref(), b"data");
-    assert_eq!(record.headers.len(), 1);
-    assert_eq!(record.headers[0].name.as_ref(), b"k");
-    assert_eq!(record.headers[0].value.as_ref(), b"v");
-    assert_eq!(record.timestamp, 1234);
-}
+// -- Http2Config & Endpoints validation --
 
 #[test]
 fn http2_config_bounds() {

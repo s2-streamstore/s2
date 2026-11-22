@@ -80,13 +80,20 @@ impl TimeRange {
     pub fn end(&self) -> Timestamp {
         timestamp_from_epoch_secs(self.end_secs)
     }
+
+    /// Attach an accumulation interval to this time range.
+    pub fn with_interval(self, interval: TimeseriesInterval) -> TimeRangeAndInterval {
+        TimeRangeAndInterval {
+            range: self,
+            interval: Some(interval),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Time range and accumulation interval for metrics queries.
 pub struct TimeRangeAndInterval {
-    start_secs: u32,
-    end_secs: u32,
+    range: TimeRange,
     interval: Option<TimeseriesInterval>,
 }
 
@@ -101,23 +108,25 @@ impl TimeRangeAndInterval {
     /// Returns [`ValidationError`] if either timestamp is outside the `0..=u32::MAX` Unix epoch
     /// second range.
     pub fn new(start: Timestamp, end: Timestamp) -> Result<Self, ValidationError> {
-        let start_secs = validate_metrics_timestamp(start, "start")?;
-        let end_secs = validate_metrics_timestamp(end, "end")?;
         Ok(Self {
-            start_secs,
-            end_secs,
+            range: TimeRange::new(start, end)?,
             interval: None,
         })
     }
 
+    /// Return the underlying time range.
+    pub fn range(&self) -> TimeRange {
+        self.range
+    }
+
     /// Start timestamp (inclusive), floored to whole Unix seconds.
     pub fn start(&self) -> Timestamp {
-        timestamp_from_epoch_secs(self.start_secs)
+        self.range.start()
     }
 
     /// End timestamp (exclusive), floored to whole Unix seconds.
     pub fn end(&self) -> Timestamp {
-        timestamp_from_epoch_secs(self.end_secs)
+        self.range.end()
     }
 
     /// Return the interval to accumulate over, if explicitly configured.
@@ -130,6 +139,15 @@ impl TimeRangeAndInterval {
         Self {
             interval: Some(interval),
             ..self
+        }
+    }
+}
+
+impl From<TimeRange> for TimeRangeAndInterval {
+    fn from(range: TimeRange) -> Self {
+        Self {
+            range,
+            interval: None,
         }
     }
 }
@@ -167,24 +185,24 @@ pub enum AccountMetricSet {
 impl From<AccountMetricSet> for api::metrics::AccountMetricSetRequest {
     fn from(value: AccountMetricSet) -> Self {
         let (set, start, end, interval, token_ids) = match value {
-            AccountMetricSet::ActiveBasins(args) => (
+            AccountMetricSet::ActiveBasins(range) => (
                 api::metrics::AccountMetricSet::ActiveBasins,
-                Some(args.start_secs),
-                Some(args.end_secs),
+                Some(range.start_secs),
+                Some(range.end_secs),
                 None,
                 Vec::new(),
             ),
             AccountMetricSet::AccountOps(args) => (
                 api::metrics::AccountMetricSet::AccountOps,
-                Some(args.start_secs),
-                Some(args.end_secs),
+                Some(args.range.start_secs),
+                Some(args.range.end_secs),
                 args.interval,
                 Vec::new(),
             ),
             AccountMetricSet::EstimatedBillableUsage(args) => (
                 api::metrics::AccountMetricSet::EstimatedBillableUsage,
-                Some(args.start_secs),
-                Some(args.end_secs),
+                Some(args.range.start_secs),
+                Some(args.range.end_secs),
                 args.interval,
                 Vec::new(),
             ),
@@ -253,48 +271,38 @@ pub enum BasinMetricSet {
 
 impl From<BasinMetricSet> for api::metrics::BasinMetricSetRequest {
     fn from(value: BasinMetricSet) -> Self {
-        let (set, start, end, interval) = match value {
-            BasinMetricSet::Storage(args) => (
-                api::metrics::BasinMetricSet::Storage,
-                args.start_secs,
-                args.end_secs,
-                None,
-            ),
+        let (set, range, interval) = match value {
+            BasinMetricSet::Storage(range) => (api::metrics::BasinMetricSet::Storage, range, None),
             BasinMetricSet::AppendOps(args) => (
                 api::metrics::BasinMetricSet::AppendOps,
-                args.start_secs,
-                args.end_secs,
+                args.range,
                 args.interval,
             ),
             BasinMetricSet::ReadOps(args) => (
                 api::metrics::BasinMetricSet::ReadOps,
-                args.start_secs,
-                args.end_secs,
+                args.range,
                 args.interval,
             ),
             BasinMetricSet::ReadThroughput(args) => (
                 api::metrics::BasinMetricSet::ReadThroughput,
-                args.start_secs,
-                args.end_secs,
+                args.range,
                 args.interval,
             ),
             BasinMetricSet::AppendThroughput(args) => (
                 api::metrics::BasinMetricSet::AppendThroughput,
-                args.start_secs,
-                args.end_secs,
+                args.range,
                 args.interval,
             ),
             BasinMetricSet::BasinOps(args) => (
                 api::metrics::BasinMetricSet::BasinOps,
-                args.start_secs,
-                args.end_secs,
+                args.range,
                 args.interval,
             ),
         };
         Self {
             set,
-            start: Some(start),
-            end: Some(end),
+            start: Some(range.start_secs),
+            end: Some(range.end_secs),
             interval: interval.map(Into::into),
         }
     }
@@ -310,19 +318,13 @@ pub enum StreamMetricSet {
 
 impl From<StreamMetricSet> for api::metrics::StreamMetricSetRequest {
     fn from(value: StreamMetricSet) -> Self {
-        let (set, start, end, interval) = match value {
-            StreamMetricSet::Storage(args) => (
-                api::metrics::StreamMetricSet::Storage,
-                args.start_secs,
-                args.end_secs,
-                None,
-            ),
-        };
-        Self {
-            set,
-            start: Some(start),
-            end: Some(end),
-            interval,
+        match value {
+            StreamMetricSet::Storage(range) => Self {
+                set: api::metrics::StreamMetricSet::Storage,
+                start: Some(range.start_secs),
+                end: Some(range.end_secs),
+                interval: None,
+            },
         }
     }
 }

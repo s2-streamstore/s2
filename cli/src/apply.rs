@@ -104,8 +104,8 @@ fn delete_on_empty_to_sdk(
 ) -> Option<s2_sdk::types::DeleteOnEmptyConfig> {
     delete_on_empty.min_age.map(|min_age| {
         s2_sdk::types::DeleteOnEmptyConfig::new()
-            .with_min_age(std::time::Duration::from_secs(min_age.0.as_secs()))
-            .expect("whole-second duration")
+            .with_min_age(min_age.0)
+            .expect("validated whole-second duration")
     })
 }
 

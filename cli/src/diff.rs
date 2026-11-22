@@ -3,7 +3,7 @@
 use colored::Colorize;
 use s2_api::v1::{MaybeKnown, access::AccessTokenInfo as ApiAccessTokenInfo};
 use s2_common::access::{PermittedOperationGroups, ReadWritePermissions, ResourceSet};
-use s2_sdk::types::AccessTokenId;
+use s2_sdk::types::{AccessTokenId, Timestamp};
 use serde::Serialize;
 use serde_json::{Map, Value};
 
@@ -510,7 +510,9 @@ fn access_token_view(info: ApiAccessTokenInfo) -> Result<Value, CliError> {
     Ok(serde_json::to_value(AccessTokenInfoView {
         expires_at: match expires_at {
             None => "never".to_owned(),
-            Some(at) => humantime::format_rfc3339_seconds(at.into()).to_string(),
+            Some(at) => Timestamp::from_second(at.as_second())
+                .expect("valid timestamp second")
+                .to_string(),
         },
         auto_prefix_streams,
         network_policy: match network_policy {

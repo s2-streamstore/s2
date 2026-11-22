@@ -6,23 +6,17 @@ use s2_sdk::{
     S2,
     types::{
         AppendRecord, BasinConfig, BasinName, BasinReconfiguration, CreateBasinInput,
-        CreateStreamInput, EncryptionAlgorithm, ReadFrom, ReadInput, S2Config, StreamName,
+        CreateStreamInput, EncryptionAlgorithm, ReadFrom, ReadInput, StreamName, Timestamp,
     },
 };
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let access_token = std::env::var("S2_ACCESS_TOKEN")?;
     let basin_name: BasinName = std::env::var("S2_BASIN")?.parse()?;
-    let stream_name: StreamName = format!(
-        "docs-encryption-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_millis()
-    )
-    .parse()?;
+    let stream_name: StreamName =
+        format!("docs-encryption-{}", Timestamp::now().as_millisecond()).parse()?;
 
-    let client = S2::new(S2Config::new(access_token))?;
+    let client = S2::from_env()?;
 
     // ANCHOR: basin-cipher
     client

@@ -19,7 +19,7 @@ use s2_sdk::{
         ListNetworkPoliciesInput, ListStreamsInput, LocationInfo, LocationName, MeteredBytes,
         Metric, NetworkPolicy, NetworkPolicyInfo, NetworkPolicySelector, PublicNetPolicy, ReadFrom,
         ReadInput, SequencedRecord, StreamInfo, StreamMetricSet, StreamNamePrefix, StreamPosition,
-        StreamReconfiguration, TimeRange, TimeRangeAndInterval, TimeseriesInterval, Timestamp,
+        StreamReconfiguration, TimeRangeAndInterval, TimeseriesInterval, Timestamp,
     },
 };
 
@@ -100,9 +100,7 @@ pub async fn list_basins(
 pub async fn create_basin(s2: &S2, args: CreateBasinArgs) -> Result<BasinInfo, CliError> {
     let mut input = CreateBasinInput::new(args.basin.into()).with_config(args.config.into());
     if let Some(location) = args.location {
-        input = input
-            .with_location(location)
-            .map_err(|e| CliError::InvalidArgs(miette::miette!("{e}")))?;
+        input = input.with_location(location);
     }
     s2.create_basin(input)
         .await
@@ -279,10 +277,9 @@ pub async fn issue_access_token(s2: &S2, args: IssueAccessTokenArgs) -> Result<S
 
     let mut input = IssueAccessTokenInput::new(args.id, scope);
     if let Some(expires_in) = args.expires_in {
-        let expiry_time = std::time::SystemTime::now() + *expires_in;
-        let dt = Timestamp::try_from(expiry_time).map_err(|e| {
-            CliError::InvalidArgs(miette::miette!("Invalid expiration time: {}", e))
-        })?;
+        let dt = Timestamp::now()
+            .checked_add(*expires_in)
+            .map_err(|e| CliError::InvalidArgs(miette::miette!("Invalid expiration time: {e}")))?;
         input = input
             .with_expires_at(dt)
             .map_err(|e| CliError::InvalidArgs(miette::miette!("Invalid expiration time: {e}")))?;
@@ -437,9 +434,7 @@ pub async fn get_account_metrics(
     let (range, set) = match args.metric {
         AccountMetricCommand::ActiveBasins(t) => {
             let range = resolve_time_range(&t, None::<Interval>);
-            let set = AccountMetricSet::ActiveBasins(
-                TimeRange::new(range.start(), range.end()).expect("valid resolved range"),
-            );
+            let set = AccountMetricSet::ActiveBasins(range.range());
             (Some(range), set)
         }
         AccountMetricCommand::AccountOps(t) => {
@@ -472,9 +467,7 @@ pub async fn get_basin_metrics(
     let (range, set) = match args.metric {
         BasinMetricCommand::Storage(t) => {
             let range = resolve_time_range(&t, None::<Interval>);
-            let set = BasinMetricSet::Storage(
-                TimeRange::new(range.start(), range.end()).expect("valid resolved range"),
-            );
+            let set = BasinMetricSet::Storage(range.range());
             (range, set)
         }
         BasinMetricCommand::AppendOps(t) => {
@@ -515,9 +508,7 @@ pub async fn get_stream_metrics(
     let (range, set) = match args.metric {
         StreamMetricCommand::Storage(t) => {
             let range = resolve_time_range(&t, None::<Interval>);
-            let set = StreamMetricSet::Storage(
-                TimeRange::new(range.start(), range.end()).expect("valid resolved range"),
-            );
+            let set = StreamMetricSet::Storage(range.range());
             (range, set)
         }
     };
@@ -924,10 +915,7 @@ fn resolve_time_range(
     interval: Option<impl Into<TimeseriesInterval>>,
 ) -> TimeRangeAndInterval {
     const DEFAULT_SPAN_SECS: u32 = 30 * 24 * 60 * 60;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as u32;
+    let now = u32::try_from(Timestamp::now().as_second().max(0)).unwrap_or(u32::MAX);
     let end = resolve_time(args.end_timestamp, args.end_ago, now).unwrap_or(now);
     let start = resolve_time(args.start_timestamp, args.start_ago, now)
         .unwrap_or_else(|| end.saturating_sub(DEFAULT_SPAN_SECS));

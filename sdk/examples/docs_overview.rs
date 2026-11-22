@@ -4,9 +4,9 @@
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ANCHOR: create-client
-    use s2_sdk::{S2, types::S2Config};
+    use s2_sdk::S2;
 
-    let client = S2::new(S2Config::new(std::env::var("S2_ACCESS_TOKEN")?))?;
+    let client = S2::from_env()?;
 
     let basin = client.basin("my-basin".parse()?);
     let stream = basin.stream("my-stream".parse()?);

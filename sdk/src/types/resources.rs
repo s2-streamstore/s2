@@ -152,7 +152,8 @@ impl From<EncryptionAlgorithm> for MaybeKnown<api::config::EncryptionAlgorithm> 
 #[non_exhaustive]
 /// Retention policy for records in a stream.
 pub enum RetentionPolicy {
-    /// Age in seconds. Records older than this age are automatically trimmed.
+    /// Age in seconds. Must be greater than `0`. Records older than this age are automatically
+    /// trimmed.
     Age(u64),
     /// Records are retained indefinitely unless explicitly trimmed.
     Infinite,
@@ -537,18 +538,11 @@ impl CreateBasinInput {
     }
 
     /// Set the location of the basin.
-    pub fn with_location<S>(self, location: S) -> Result<Self, ValidationError>
-    where
-        S: TryInto<LocationName>,
-        S::Error: fmt::Display,
-    {
-        let location = location
-            .try_into()
-            .map_err(|e| ValidationError(e.to_string()))?;
-        Ok(Self {
+    pub fn with_location(self, location: LocationName) -> Self {
+        Self {
             location: Some(location),
             ..self
-        })
+        }
     }
 }
 
@@ -598,18 +592,11 @@ impl EnsureBasinInput {
     }
 
     /// Set the location of the basin.
-    pub fn with_location<S>(self, location: S) -> Result<Self, ValidationError>
-    where
-        S: TryInto<LocationName>,
-        S::Error: fmt::Display,
-    {
-        let location = location
-            .try_into()
-            .map_err(|e| ValidationError(e.to_string()))?;
-        Ok(Self {
+    pub fn with_location(self, location: LocationName) -> Self {
+        Self {
             location: Some(location),
             ..self
-        })
+        }
     }
 }
 

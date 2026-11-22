@@ -1,12 +1,12 @@
-use std::{marker::PhantomData, ops::Deref, str::FromStr};
+use std::marker::PhantomData;
 
-use compact_str::{CompactString, ToCompactString};
+use compact_str::CompactString;
 use jiff::Timestamp;
 
 use super::{
     ValidationError,
     location::LocationName,
-    strings::{NameProps, PrefixProps, StartAfterProps, StrProps},
+    strings::{NameProps, PrefixProps, StartAfterProps, StrProps, impl_validated_str},
 };
 use crate::{caps, resources::ListItemsRequest};
 
@@ -83,12 +83,9 @@ impl<T: StrProps> BasinNameStr<T> {
 
         Ok(())
     }
-
-    fn try_from_compact(name: CompactString) -> Result<Self, ValidationError> {
-        Self::validate_str(&name)?;
-        Ok(Self(name, PhantomData))
-    }
 }
+
+impl_validated_str!(BasinNameStr<T: StrProps>);
 
 #[cfg(feature = "utoipa")]
 impl<T> utoipa::PartialSchema for BasinNameStr<T>
@@ -116,83 +113,6 @@ where
         } else {
             std::borrow::Cow::Borrowed("BasinNameStr")
         }
-    }
-}
-
-impl<T: StrProps> serde::Serialize for BasinNameStr<T> {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_str(&self.0)
-    }
-}
-
-impl<'de, T: StrProps> serde::Deserialize<'de> for BasinNameStr<T> {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let s = CompactString::deserialize(deserializer)?;
-        Self::try_from_compact(s).map_err(serde::de::Error::custom)
-    }
-}
-
-impl<T: StrProps> AsRef<str> for BasinNameStr<T> {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
-impl<T: StrProps> Deref for BasinNameStr<T> {
-    type Target = str;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl<T: StrProps> TryFrom<String> for BasinNameStr<T> {
-    type Error = ValidationError;
-
-    fn try_from(name: String) -> Result<Self, Self::Error> {
-        Self::validate_str(&name)?;
-        Ok(Self(CompactString::from(name), PhantomData))
-    }
-}
-
-impl<T: StrProps> TryFrom<&str> for BasinNameStr<T> {
-    type Error = ValidationError;
-
-    fn try_from(name: &str) -> Result<Self, Self::Error> {
-        name.parse()
-    }
-}
-
-impl<T: StrProps> FromStr for BasinNameStr<T> {
-    type Err = ValidationError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Self::validate_str(s)?;
-        Ok(Self(s.to_compact_string(), PhantomData))
-    }
-}
-
-impl<T: StrProps> std::fmt::Debug for BasinNameStr<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl<T: StrProps> std::fmt::Display for BasinNameStr<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl<T: StrProps> From<BasinNameStr<T>> for String {
-    fn from(value: BasinNameStr<T>) -> Self {
-        value.0.into_string()
     }
 }
 

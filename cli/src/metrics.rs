@@ -1,9 +1,6 @@
 //! Output of metric sets beyond the generic per-metric rendering.
 
-use std::{
-    collections::BTreeMap,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+use std::{collections::BTreeMap, time::Duration};
 
 use colored::Colorize;
 use s2_sdk::types::{
@@ -34,12 +31,9 @@ fn format_interval(interval: &TimeseriesInterval) -> &str {
 
 /// `2h 5m` for a time in the past, by its two largest units, and `None` for one that is not (a
 /// clock behind the server's would otherwise give a negative age).
-pub fn format_age(ts: Timestamp, now: SystemTime) -> Option<String> {
-    let secs = u64::try_from(ts.as_second()).ok()?;
-    let elapsed = now
-        .duration_since(UNIX_EPOCH + Duration::from_secs(secs))
-        .ok()?;
-    let elapsed = humantime::format_duration(Duration::from_secs(elapsed.as_secs())).to_string();
+pub fn format_age(ts: Timestamp, now: Timestamp) -> Option<String> {
+    let elapsed_secs = u64::try_from(now.as_second().checked_sub(ts.as_second())?).ok()?;
+    let elapsed = humantime::format_duration(Duration::from_secs(elapsed_secs)).to_string();
     let largest: Vec<&str> = elapsed.split(' ').take(2).collect();
     Some(largest.join(" "))
 }
@@ -90,7 +84,7 @@ fn field<'a>(record: &'a RecordMetric, name: &str) -> &'a str {
 /// was), and its user agent. Columns line up across all sections.
 pub fn render_token_activity(
     records: &[&RecordMetric],
-    now: SystemTime,
+    now: Timestamp,
     width: Option<usize>,
 ) -> String {
     // Denials first: they are what a reader checking a policy or a leaked token looks for.
@@ -177,10 +171,6 @@ pub fn render_token_activity(
     out
 }
 
-fn timestamp(ts: Timestamp) -> String {
-    ts.to_string()
-}
-
 fn value(unit: &MetricUnit, value: f64) -> String {
     match unit {
         // Usage of a small account is fractions of a cent.
@@ -225,11 +215,9 @@ fn table(heading: [&str; 2], rows: &[(String, String)], total: bool) -> String {
 /// The time range metrics were asked for, as the heading of any view of them.
 pub fn render_time_range(start: Timestamp, end: Timestamp) -> String {
     format!(
-        "{} {}\n{}   {}\n\n",
+        "{} {start}\n{}   {end}\n\n",
         "start:".dimmed(),
-        timestamp(start),
         "end:".dimmed(),
-        timestamp(end)
     )
 }
 
@@ -268,7 +256,7 @@ pub fn render_gauge(gauge: &GaugeMetric) -> String {
     let rows: Vec<(String, String)> = shown
         .iter()
         .map(|i| gauge.values[*i])
-        .map(|(ts, point)| (timestamp(ts), value(&gauge.unit, point)))
+        .map(|(ts, point)| (ts.to_string(), value(&gauge.unit, point)))
         .collect();
 
     let unit = format_unit(&gauge.unit);
@@ -276,7 +264,7 @@ pub fn render_gauge(gauge: &GaugeMetric) -> String {
         "{}: {} {unit} at {}\n\n{}",
         gauge.name,
         value(&gauge.unit, *latest).bold(),
-        timestamp(*latest_at),
+        latest_at,
         table(["time", unit], &rows, false)
     );
     if shown.len() < len {
@@ -304,7 +292,7 @@ pub fn render_estimated_billable_usage(metrics: &[Metric], by_interval: bool) ->
     let usd = |usd: f64| value(&MetricUnit::Usd, usd);
 
     let (heading, mut rows): (&str, Vec<(String, String)>) = if by_interval {
-        let rows = total.values.iter().map(|(ts, v)| (timestamp(*ts), usd(*v)));
+        let rows = total.values.iter().map(|(ts, v)| (ts.to_string(), usd(*v)));
         ("interval start", rows.collect())
     } else {
         let dimensions = series.iter().filter(|series| series.name != TOTAL);
@@ -373,7 +361,7 @@ mod tests {
     #[test]
     fn token_activity_groups_by_outcome() {
         colored::control::set_override(false);
-        let now = UNIX_EPOCH + Duration::from_secs(10_000);
+        let now = Timestamp::from_second(10_000).unwrap();
         let metrics = [
             record(
                 6_400,
@@ -423,7 +411,7 @@ mod tests {
     #[test]
     fn token_activity_heads_each_token_and_omits_empty_columns() {
         colored::control::set_override(false);
-        let now = UNIX_EPOCH + Duration::from_secs(100);
+        let now = Timestamp::from_second(100).unwrap();
         let metrics = [
             record(
                 40,

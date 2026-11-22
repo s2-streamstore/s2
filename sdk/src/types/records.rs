@@ -11,7 +11,7 @@ use s2_common::{
 
 use super::{StreamConfig, whole_seconds};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 /// Token for fencing appends to a stream.
 ///
 /// **Note:** It must not exceed 36 bytes in length.
@@ -24,13 +24,18 @@ impl FencingToken {
         Self(value)
     }
 
-    /// Generate a random alphanumeric fencing token of `n` bytes.
-    pub fn generate(n: usize) -> Result<Self, ValidationError> {
-        if n > MAX_FENCING_TOKEN_LENGTH {
+    fn validate_len(len: usize) -> Result<(), ValidationError> {
+        if len > MAX_FENCING_TOKEN_LENGTH {
             return Err(ValidationError(format!(
                 "fencing token exceeds {MAX_FENCING_TOKEN_LENGTH} bytes in length",
             )));
         }
+        Ok(())
+    }
+
+    /// Generate a random alphanumeric fencing token of `n` bytes.
+    pub fn generate(n: usize) -> Result<Self, ValidationError> {
+        Self::validate_len(n)?;
         Ok(Self(
             rand::rng()
                 .sample_iter(&rand::distr::Alphanumeric)
@@ -45,18 +50,43 @@ impl FromStr for FencingToken {
     type Err = ValidationError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s.len() > MAX_FENCING_TOKEN_LENGTH {
-            return Err(ValidationError(format!(
-                "fencing token exceeds {MAX_FENCING_TOKEN_LENGTH} bytes in length",
-            )));
-        }
+        Self::validate_len(s.len())?;
         Ok(FencingToken(s.to_string()))
+    }
+}
+
+impl TryFrom<&str> for FencingToken {
+    type Error = ValidationError;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        s.parse()
+    }
+}
+
+impl TryFrom<String> for FencingToken {
+    type Error = ValidationError;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        Self::validate_len(s.len())?;
+        Ok(Self(s))
+    }
+}
+
+impl From<FencingToken> for String {
+    fn from(value: FencingToken) -> Self {
+        value.0
+    }
+}
+
+impl AsRef<str> for FencingToken {
+    fn as_ref(&self) -> &str {
+        &self.0
     }
 }
 
 impl fmt::Display for FencingToken {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
+        f.write_str(&self.0)
     }
 }
 
@@ -282,12 +312,6 @@ impl PartialEq for AppendRecordBatch {
 
 impl Eq for AppendRecordBatch {}
 
-impl From<Metered<Vec<AppendRecord>>> for AppendRecordBatch {
-    fn from(records: Metered<Vec<AppendRecord>>) -> Self {
-        Self(records)
-    }
-}
-
 impl From<AppendRecord> for AppendRecordBatch {
     fn from(record: AppendRecord) -> Self {
         let mut batch = Metered::with_capacity(1);
@@ -303,6 +327,13 @@ impl From<CommandRecord> for AppendRecordBatch {
 }
 
 impl AppendRecordBatch {
+    pub(crate) fn from_metered(records: Metered<Vec<AppendRecord>>) -> Self {
+        debug_assert!(!records.is_empty());
+        debug_assert!(records.len() <= RECORD_BATCH_MAX.count);
+        debug_assert!(records.metered_size() <= RECORD_BATCH_MAX.bytes);
+        Self(records)
+    }
+
     /// Try to create an [`AppendRecordBatch`] from an iterator of records.
     pub fn try_from_iter<I, R>(iter: I) -> Result<Self, ValidationError>
     where
@@ -336,7 +367,7 @@ impl AppendRecordBatch {
             return Err(ValidationError("batch is empty".into()));
         }
 
-        Ok(records.into())
+        Ok(Self::from_metered(records))
     }
 }
 
@@ -810,20 +841,15 @@ pub struct SequencedRecord {
 }
 
 impl SequencedRecord {
-    /// Construct a sequenced record from its plain-data fields.
+    /// Construct a sequenced record.
     ///
     /// This is intended for building fixtures in downstream tests.
-    pub fn from_parts(
-        seq_num: u64,
-        timestamp: u64,
-        headers: Vec<Header>,
-        body: impl Into<Bytes>,
-    ) -> Self {
+    pub fn new(seq_num: u64, body: impl Into<Bytes>, headers: Vec<Header>, timestamp: u64) -> Self {
         Self {
             seq_num,
-            timestamp,
             body: body.into(),
             headers,
+            timestamp,
         }
     }
 
@@ -870,8 +896,10 @@ impl ReadBatch {
     pub fn new(records: Vec<SequencedRecord>, tail: Option<StreamPosition>) -> Self {
         Self { records, tail }
     }
+}
 
-    pub(crate) fn from_api(batch: api::stream::proto::ReadBatch) -> Self {
+impl From<api::stream::proto::ReadBatch> for ReadBatch {
+    fn from(batch: api::stream::proto::ReadBatch) -> Self {
         Self {
             records: batch.records.into_iter().map(Into::into).collect(),
             tail: batch.tail.map(Into::into),

@@ -2,7 +2,8 @@ use std::{
     collections::HashMap,
     convert::Infallible,
     future::Future,
-    pin::Pin,
+    io::{Read as _, Write as _},
+    pin::pin,
     sync::{
         Arc, Mutex, OnceLock, RwLock as StdRwLock, Weak,
         atomic::{AtomicU64, Ordering},
@@ -10,15 +11,9 @@ use std::{
     time::Duration,
 };
 
-use async_compression::{
-    Level,
-    tokio::{
-        bufread::{GzipDecoder, ZstdDecoder},
-        write::{GzipEncoder, ZstdEncoder},
-    },
-};
 use async_trait::async_trait;
 use bytes::Bytes;
+use flate2::{Compression as FlateCompression, read::MultiGzDecoder, write::GzEncoder};
 use futures_core::Stream;
 use futures_util::StreamExt;
 use http::{
@@ -38,7 +33,6 @@ use hyper_util::{
 };
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
     sync::{Notify, watch},
     time::{Instant, timeout, timeout_at},
 };
@@ -47,7 +41,7 @@ use tower_service::Service;
 
 use crate::{
     frame_signal::{FrameSignal, RequestFrameMonitorBody},
-    types::Http2Config,
+    types::{Compression, Http2Config},
 };
 
 const APPLICATION_JSON: HeaderValue = HeaderValue::from_static("application/json");
@@ -55,6 +49,7 @@ const MAX_CONCURRENT_REQUESTS_PER_CLIENT: usize = 50;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(20);
 const KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_DECOMPRESSED_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 
 pub(crate) type BoxError = Box<dyn std::error::Error + Send + Sync>;
 type BoxBody = UnsyncBoxBody<Bytes, BoxError>;
@@ -98,24 +93,6 @@ where
     type Fut = C::Future;
 }
 
-#[derive(Debug, Clone, Copy, Default)]
-pub enum Compression {
-    #[default]
-    None,
-    Gzip,
-    Zstd,
-}
-
-impl From<crate::types::Compression> for Compression {
-    fn from(c: crate::types::Compression) -> Self {
-        match c {
-            crate::types::Compression::None => Compression::None,
-            crate::types::Compression::Gzip => Compression::Gzip,
-            crate::types::Compression::Zstd => Compression::Zstd,
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub(crate) struct ShutdownSignal {
     tx: Arc<watch::Sender<bool>>,
@@ -141,14 +118,11 @@ impl ShutdownSignal {
         *self.tx.borrow()
     }
 
-    pub(crate) fn cancelled(&self) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> {
+    pub(crate) fn cancelled(&self) -> impl Future<Output = ()> + Send + 'static {
         let mut rx = self.tx.subscribe();
-        Box::pin(async move {
-            if *rx.borrow_and_update() {
-                return;
-            }
+        async move {
             let _ = rx.wait_for(|closed| *closed).await;
-        })
+        }
     }
 }
 
@@ -180,14 +154,14 @@ enum BodyInner {
     Streaming(BoxBody),
 }
 
-pub struct Body(BodyInner);
+pub(crate) struct Body(BodyInner);
 
 impl Body {
     fn empty() -> Self {
         Self(BodyInner::Empty)
     }
 
-    pub fn wrap_stream<S, E>(stream: S) -> Self
+    pub(crate) fn wrap_stream<S, E>(stream: S) -> Self
     where
         S: Stream<Item = Result<Bytes, E>> + Send + 'static,
         E: Into<BoxError> + 'static,
@@ -197,9 +171,26 @@ impl Body {
     }
 
     pub(crate) fn monitored(self, signal: FrameSignal) -> Self {
-        Self(BodyInner::Streaming(BoxBody::new(
-            RequestFrameMonitorBody::new(self.into_http_body(), signal),
-        )))
+        let boxed = match self.0 {
+            BodyInner::Empty => {
+                debug_assert!(
+                    false,
+                    "monitored body should be non-empty so FrameSignal can observe frames"
+                );
+                BoxBody::new(RequestFrameMonitorBody::new(
+                    Empty::new().map_err(|e: Infallible| match e {}),
+                    signal,
+                ))
+            }
+            BodyInner::Full(bytes) => BoxBody::new(RequestFrameMonitorBody::new(
+                Full::new(bytes).map_err(|e: Infallible| match e {}),
+                signal,
+            )),
+            BodyInner::Streaming(stream) => {
+                BoxBody::new(RequestFrameMonitorBody::new(stream, signal))
+            }
+        };
+        Self(BodyInner::Streaming(boxed))
     }
 
     fn as_bytes(&self) -> Option<&[u8]> {
@@ -233,7 +224,7 @@ impl From<Vec<u8>> for Body {
     }
 }
 
-pub struct Request {
+pub(crate) struct Request {
     method: Method,
     uri: Uri,
     headers: HeaderMap,
@@ -243,19 +234,19 @@ pub struct Request {
 }
 
 impl Request {
-    pub fn headers_mut(&mut self) -> &mut HeaderMap {
+    pub(crate) fn headers_mut(&mut self) -> &mut HeaderMap {
         &mut self.headers
     }
 
-    pub fn with_monitored_body(self, signal: FrameSignal) -> Self {
+    pub(crate) fn with_monitored_body(self, signal: FrameSignal) -> Self {
         Self {
             body: self.body.monitored(signal),
             ..self
         }
     }
 
-    pub async fn compress(self) -> Result<Self, HttpError> {
-        let (body, content_encoding) = compress_body(self.body, self.compression).await?;
+    pub(crate) fn compress(self) -> Result<Self, HttpError> {
+        let (body, content_encoding) = compress_body(self.body, self.compression)?;
         let mut headers = self.headers;
         if let Some(encoding) = content_encoding {
             headers.insert(CONTENT_ENCODING, encoding);
@@ -268,7 +259,7 @@ impl Request {
         })
     }
 
-    pub fn origin_uri(&self) -> (String, Uri) {
+    pub(crate) fn origin(&self) -> String {
         let scheme = self
             .uri
             .scheme_str()
@@ -279,15 +270,13 @@ impl Request {
             .uri
             .port_u16()
             .filter(|&p| !((scheme == "http" && p == 80) || (scheme == "https" && p == 443)));
-        let origin = match port {
+        match port {
             Some(port) => format!("{scheme}://{host}:{port}"),
             None => format!("{scheme}://{host}"),
-        };
-        let uri = origin.parse::<Uri>().unwrap_or_else(|_| self.uri.clone());
-        (origin, uri)
+        }
     }
 
-    pub fn try_clone(&self) -> Option<Self> {
+    pub(crate) fn try_clone(&self) -> Option<Self> {
         let body = match &self.body.0 {
             BodyInner::Empty => Body::empty(),
             BodyInner::Full(bytes) => Body(BodyInner::Full(bytes.clone())),
@@ -305,7 +294,7 @@ impl Request {
     }
 }
 
-pub struct RequestBuilder {
+pub(crate) struct RequestBuilder {
     method: Method,
     uri: Uri,
     headers: HeaderMap,
@@ -316,7 +305,7 @@ pub struct RequestBuilder {
 }
 
 impl RequestBuilder {
-    pub fn new(method: Method, uri: Uri) -> Self {
+    pub(crate) fn new(method: Method, uri: Uri) -> Self {
         Self {
             method,
             uri,
@@ -328,27 +317,27 @@ impl RequestBuilder {
         }
     }
 
-    pub fn get(uri: Uri) -> Self {
+    pub(crate) fn get(uri: Uri) -> Self {
         Self::new(Method::GET, uri)
     }
 
-    pub fn post(uri: Uri) -> Self {
+    pub(crate) fn post(uri: Uri) -> Self {
         Self::new(Method::POST, uri)
     }
 
-    pub fn patch(uri: Uri) -> Self {
+    pub(crate) fn patch(uri: Uri) -> Self {
         Self::new(Method::PATCH, uri)
     }
 
-    pub fn put(uri: Uri) -> Self {
+    pub(crate) fn put(uri: Uri) -> Self {
         Self::new(Method::PUT, uri)
     }
 
-    pub fn delete(uri: Uri) -> Self {
+    pub(crate) fn delete(uri: Uri) -> Self {
         Self::new(Method::DELETE, uri)
     }
 
-    pub fn query<T: Serialize + ?Sized>(mut self, query: &T) -> Self {
+    pub(crate) fn query<T: Serialize + ?Sized>(mut self, query: &T) -> Self {
         if self.error.is_some() {
             return self;
         }
@@ -370,7 +359,7 @@ impl RequestBuilder {
         self
     }
 
-    pub fn json<T: Serialize + ?Sized>(mut self, json: &T) -> Self {
+    pub(crate) fn json<T: Serialize + ?Sized>(mut self, json: &T) -> Self {
         if self.error.is_some() {
             return self;
         }
@@ -385,18 +374,21 @@ impl RequestBuilder {
         self
     }
 
-    pub fn body<B: Into<Body>>(mut self, body: B) -> Self {
+    pub(crate) fn body<B: Into<Body>>(mut self, body: B) -> Self {
         self.body = Some(body.into());
         self
     }
 
-    pub fn header<K, V>(mut self, key: K, value: V) -> Self
+    pub(crate) fn header<K, V>(mut self, key: K, value: V) -> Self
     where
         K: TryInto<HeaderName>,
         K::Error: Into<http::Error>,
         V: TryInto<HeaderValue>,
         V::Error: Into<http::Error>,
     {
+        if self.error.is_some() {
+            return self;
+        }
         match (key.try_into(), value.try_into()) {
             (Ok(name), Ok(value)) => {
                 self.headers.insert(name, value);
@@ -407,23 +399,27 @@ impl RequestBuilder {
         self
     }
 
-    pub fn headers(mut self, headers: &HeaderMap) -> Self {
-        // An owned HeaderMap replaces each key's existing values while preserving duplicates.
-        self.headers.extend(headers.clone());
+    pub(crate) fn headers(mut self, headers: &HeaderMap) -> Self {
+        if self.headers.is_empty() {
+            self.headers = headers.clone();
+        } else {
+            // An owned HeaderMap replaces each key's existing values while preserving duplicates.
+            self.headers.extend(headers.clone());
+        }
         self
     }
 
-    pub fn timeout(mut self, timeout: Duration) -> Self {
+    pub(crate) fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
         self
     }
 
-    pub fn compression(mut self, compression: impl Into<Compression>) -> Self {
-        self.compression = compression.into();
+    pub(crate) fn compression(mut self, compression: Compression) -> Self {
+        self.compression = compression;
         self
     }
 
-    pub fn build(self) -> Result<Request, HttpError> {
+    pub(crate) fn build(self) -> Result<Request, HttpError> {
         if let Some(e) = self.error {
             return Err(e);
         }
@@ -439,7 +435,7 @@ impl RequestBuilder {
     }
 }
 
-pub struct UnaryResponse {
+pub(crate) struct UnaryResponse {
     status: StatusCode,
     headers: HeaderMap,
     bytes: Bytes,
@@ -457,11 +453,11 @@ impl UnaryResponse {
         }
     }
 
-    pub fn status(&self) -> StatusCode {
+    pub(crate) fn status(&self) -> StatusCode {
         self.status
     }
 
-    pub fn headers(&self) -> &HeaderMap {
+    pub(crate) fn headers(&self) -> &HeaderMap {
         &self.headers
     }
 
@@ -469,11 +465,11 @@ impl UnaryResponse {
         self.poison_handle.take()
     }
 
-    pub fn into_bytes(self) -> Bytes {
+    pub(crate) fn into_bytes(self) -> Bytes {
         self.bytes
     }
 
-    pub fn json<T: DeserializeOwned>(self) -> Result<T, HttpError> {
+    pub(crate) fn json<T: DeserializeOwned>(self) -> Result<T, HttpError> {
         serde_json::from_slice(&self.bytes).map_err(HttpError::ResponseDecode)
     }
 }
@@ -499,7 +495,7 @@ trait PoisonTarget: Send + Sync {
 ///
 /// Poisoning is idempotent and allocates nothing per request.
 #[derive(Clone)]
-pub struct PoisonHandle {
+pub(crate) struct PoisonHandle {
     target: Weak<dyn PoisonTarget>,
     id: ConnectionId,
 }
@@ -530,7 +526,7 @@ fn is_dead_connection_hyper_error(err: &hyper::Error) -> bool {
     false
 }
 
-pub struct StreamingResponse {
+pub(crate) struct StreamingResponse {
     status: StatusCode,
     headers: HeaderMap,
     body: Incoming,
@@ -558,7 +554,7 @@ impl StreamingResponse {
         }
     }
 
-    pub fn status(&self) -> StatusCode {
+    pub(crate) fn status(&self) -> StatusCode {
         self.status
     }
 
@@ -570,23 +566,23 @@ impl StreamingResponse {
     /// `404` or `412` into a retryable timeout.
     pub(crate) async fn into_bytes_with_poison_handle(self) -> (Bytes, PoisonHandle) {
         let Self {
+            status,
             headers,
             body,
             permit,
             poison_handle,
             deadline,
-            ..
         } = self;
-        let bytes = collect_error_body(body, deadline, &poison_handle).await;
-        let bytes = match decompress_body(&headers, bytes).await {
-            Ok(bytes) => bytes,
-            Err(_) => Bytes::new(),
-        };
+        let bytes =
+            collect_and_decompress_error_body(status, &headers, body, deadline, &poison_handle)
+                .await;
         drop(permit);
         (bytes, poison_handle)
     }
 
-    pub fn into_stream(self) -> (impl Stream<Item = Result<Bytes, HttpError>>, PoisonHandle) {
+    pub(crate) fn into_stream(
+        self,
+    ) -> (impl Stream<Item = Result<Bytes, HttpError>>, PoisonHandle) {
         let Self {
             body,
             permit,
@@ -610,7 +606,9 @@ impl StreamingResponse {
     }
 }
 
-async fn collect_error_body(
+async fn collect_and_decompress_error_body(
+    status: StatusCode,
+    headers: &HeaderMap,
     body: Incoming,
     deadline: Option<Instant>,
     poison_handle: &PoisonHandle,
@@ -621,31 +619,51 @@ async fn collect_error_body(
             Err(_) => {
                 // Dropping `body` resets the HTTP/2 stream; retiring the connection prevents
                 // reusing a stalled peer while preserving the already-received HTTP status.
+                tracing::debug!(
+                    status = status.as_u16(),
+                    "timed out reading non-2xx error body; preserving HTTP status"
+                );
                 poison_handle.poison();
                 return Bytes::new();
             }
         },
         None => body.collect().await,
     };
-    match collect_res {
+    let bytes = match collect_res {
         Ok(collected) => collected.to_bytes(),
         Err(err) => {
+            tracing::debug!(
+                status = status.as_u16(),
+                error = %format_error_chain(&err),
+                "failed reading non-2xx error body; preserving HTTP status"
+            );
             if is_dead_connection_hyper_error(&err) {
                 poison_handle.poison();
             }
+            return Bytes::new();
+        }
+    };
+    match decompress_body(headers, bytes) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            tracing::debug!(
+                status = status.as_u16(),
+                %err,
+                "failed decompressing non-2xx error body; preserving HTTP status"
+            );
             Bytes::new()
         }
     }
 }
 
 #[async_trait]
-pub trait RequestExecutor: Send + Sync {
+pub(crate) trait RequestExecutor: Send + Sync {
     async fn execute_unary(&self, request: Request) -> Result<UnaryResponse, HttpError>;
     async fn init_streaming(&self, request: Request) -> Result<StreamingResponse, HttpError>;
     fn close(&self) {}
 }
 
-pub fn default_http_connector(connect_timeout: Option<Duration>) -> HttpConnector {
+pub(crate) fn default_http_connector(connect_timeout: Option<Duration>) -> HttpConnector {
     let mut connector = HttpConnector::new();
     connector.enforce_http(true);
     connector.set_nodelay(true);
@@ -655,7 +673,7 @@ pub fn default_http_connector(connect_timeout: Option<Duration>) -> HttpConnecto
     connector
 }
 
-pub fn default_connector(
+pub(crate) fn default_connector(
     connect_timeout: Option<Duration>,
     insecure_skip_cert_verification: bool,
     rustls_crypto_provider: Option<Arc<rustls::crypto::CryptoProvider>>,
@@ -788,52 +806,36 @@ fn uri_with_path_and_query(uri: &Uri, path_and_query: &str) -> Result<Uri, http:
     format!("{scheme}://{authority}{path_and_query}").parse()
 }
 
-async fn compress_body(
+fn compress_body(
     body: Body,
     compression: Compression,
 ) -> Result<(Body, Option<HeaderValue>), HttpError> {
-    if matches!(body.0, BodyInner::Empty) {
+    if matches!(body.0, BodyInner::Empty) || matches!(compression, Compression::None) {
         return Ok((body, None));
     }
+    let Some(data) = body.as_bytes() else {
+        return Err(HttpError::RequestCompression(
+            "streaming request bodies cannot be compressed".into(),
+        ));
+    };
     match compression {
-        Compression::None => Ok((body, None)),
+        Compression::None => unreachable!(),
         Compression::Gzip => {
-            let Some(data) = body.as_bytes() else {
-                return Err(HttpError::RequestCompression(
-                    "streaming request bodies cannot be compressed".into(),
-                ));
-            };
-            let mut encoder = GzipEncoder::with_quality(Vec::new(), Level::Fastest);
+            let mut encoder = GzEncoder::new(Vec::new(), FlateCompression::fast());
             encoder
                 .write_all(data)
-                .await
                 .map_err(|e| HttpError::RequestCompression(e.to_string()))?;
-            encoder
-                .shutdown()
-                .await
+            let compressed = encoder
+                .finish()
                 .map_err(|e| HttpError::RequestCompression(e.to_string()))?;
-            let compressed = encoder.into_inner();
             Ok((
                 Body::from(compressed),
                 Some(HeaderValue::from_static("gzip")),
             ))
         }
         Compression::Zstd => {
-            let Some(data) = body.as_bytes() else {
-                return Err(HttpError::RequestCompression(
-                    "streaming request bodies cannot be compressed".into(),
-                ));
-            };
-            let mut encoder = ZstdEncoder::with_quality(Vec::new(), Level::Fastest);
-            encoder
-                .write_all(data)
-                .await
+            let compressed = zstd::stream::encode_all(data, 1)
                 .map_err(|e| HttpError::RequestCompression(e.to_string()))?;
-            encoder
-                .shutdown()
-                .await
-                .map_err(|e| HttpError::RequestCompression(e.to_string()))?;
-            let compressed = encoder.into_inner();
             Ok((
                 Body::from(compressed),
                 Some(HeaderValue::from_static("zstd")),
@@ -842,42 +844,29 @@ async fn compress_body(
     }
 }
 
-const MAX_DECOMPRESSED_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
-
-async fn decompress_single(encoding: &str, bytes: Bytes) -> Result<Bytes, HttpError> {
+fn read_bounded(reader: impl std::io::Read) -> Result<Bytes, HttpError> {
     let limit = (MAX_DECOMPRESSED_RESPONSE_BYTES as u64) + 1;
+    let mut decompressed = Vec::new();
+    reader
+        .take(limit)
+        .read_to_end(&mut decompressed)
+        .map_err(|e| HttpError::ResponseCompression(e.to_string()))?;
+    if decompressed.len() > MAX_DECOMPRESSED_RESPONSE_BYTES {
+        return Err(HttpError::ResponseCompression(format!(
+            "decompressed response exceeds {MAX_DECOMPRESSED_RESPONSE_BYTES} byte limit"
+        )));
+    }
+    Ok(Bytes::from(decompressed))
+}
+
+fn decompress_single(encoding: &str, bytes: Bytes) -> Result<Bytes, HttpError> {
     match encoding {
         "" | "identity" => Ok(bytes),
-        "gzip" => {
-            let mut decoder = GzipDecoder::new(bytes.as_ref());
-            decoder.multiple_members(true);
-            let mut decompressed = Vec::new();
-            decoder
-                .take(limit)
-                .read_to_end(&mut decompressed)
-                .await
-                .map_err(|e| HttpError::ResponseCompression(e.to_string()))?;
-            if decompressed.len() > MAX_DECOMPRESSED_RESPONSE_BYTES {
-                return Err(HttpError::ResponseCompression(format!(
-                    "decompressed response exceeds {MAX_DECOMPRESSED_RESPONSE_BYTES} byte limit"
-                )));
-            }
-            Ok(Bytes::from(decompressed))
-        }
+        "gzip" => read_bounded(MultiGzDecoder::new(bytes.as_ref())),
         "zstd" => {
-            let decoder = ZstdDecoder::new(bytes.as_ref());
-            let mut decompressed = Vec::new();
-            decoder
-                .take(limit)
-                .read_to_end(&mut decompressed)
-                .await
+            let decoder = zstd::stream::Decoder::new(bytes.as_ref())
                 .map_err(|e| HttpError::ResponseCompression(e.to_string()))?;
-            if decompressed.len() > MAX_DECOMPRESSED_RESPONSE_BYTES {
-                return Err(HttpError::ResponseCompression(format!(
-                    "decompressed response exceeds {MAX_DECOMPRESSED_RESPONSE_BYTES} byte limit"
-                )));
-            }
-            Ok(Bytes::from(decompressed))
+            read_bounded(decoder)
         }
         other => Err(HttpError::ResponseCompression(format!(
             "unsupported content-encoding: {other}"
@@ -885,7 +874,7 @@ async fn decompress_single(encoding: &str, bytes: Bytes) -> Result<Bytes, HttpEr
     }
 }
 
-async fn decompress_body(headers: &HeaderMap, mut bytes: Bytes) -> Result<Bytes, HttpError> {
+fn decompress_body(headers: &HeaderMap, mut bytes: Bytes) -> Result<Bytes, HttpError> {
     let mut encodings = Vec::new();
     for raw in headers.get_all(CONTENT_ENCODING) {
         let s = raw.to_str().map_err(|e| {
@@ -899,7 +888,7 @@ async fn decompress_body(headers: &HeaderMap, mut bytes: Bytes) -> Result<Bytes,
         }
     }
     for encoding in encodings.into_iter().rev() {
-        bytes = decompress_single(&encoding, bytes).await?;
+        bytes = decompress_single(&encoding, bytes)?;
     }
     Ok(bytes)
 }
@@ -1036,6 +1025,7 @@ struct CheckedOutSender {
     sender: http2::SendRequest<BoxBody>,
     permit: RequestPermit,
     poison_handle: PoisonHandle,
+    deadline: Option<Instant>,
 }
 
 struct HostPoolState {
@@ -1059,16 +1049,19 @@ where
     C: Send + Sync,
 {
     fn poison(&self, id: ConnectionId) {
-        let mut state = self.state.write().unwrap();
-        let before = state.connections.len();
-        state.connections.retain(|conn| conn.id != id);
-        let removed = before - state.connections.len();
-        tracing::debug!(
-            origin = %self.origin,
-            connection = ?id,
-            removed,
-            "retired pooled connection"
-        );
+        let removed = {
+            let mut state = self.state.write().unwrap();
+            let before = state.connections.len();
+            state.connections.retain(|conn| conn.id != id);
+            before - state.connections.len()
+        };
+        if removed > 0 {
+            tracing::debug!(
+                origin = %self.origin,
+                connection = ?id,
+                "retired pooled connection"
+            );
+        }
     }
 }
 
@@ -1176,6 +1169,7 @@ where
     fn spawn_connection(self: &Arc<Self>, id: ConnectionId, tx: watch::Sender<DialOutcome>) {
         let weak_pool = Arc::downgrade(self);
         let connector = self.connector.clone();
+        let origin = self.origin.clone();
         let origin_uri = self.origin_uri.clone();
         let connection_timeout = self.connection_timeout;
         let http2 = self.http2;
@@ -1200,6 +1194,12 @@ where
                     return;
                 }
                 Err(DialError::Connect(msg)) => {
+                    tracing::debug!(
+                        origin = %origin,
+                        connection = ?id,
+                        error = %msg,
+                        "HTTP/2 dial failed"
+                    );
                     let _ = tx.send(DialOutcome::Failed(Arc::new(msg)));
                     if let Some(pool) = weak_pool.upgrade() {
                         pool.remove(id);
@@ -1225,6 +1225,7 @@ where
                 res = conn => {
                     if let Err(err) = res {
                         tracing::debug!(
+                            origin = %origin,
                             connection = ?id,
                             error = %format_error_chain(&err),
                             "HTTP/2 connection closed"
@@ -1261,6 +1262,7 @@ where
     /// future deadline among remaining idle connections (`C13c`).
     fn reap_idle(&self, now: Instant, idle_timeout: Duration) -> Option<Instant> {
         let mut state = self.state.write().unwrap();
+        let before = state.connections.len();
         let mut next_deadline: Option<Instant> = None;
         state.connections.retain(|conn| {
             if !conn.is_live() {
@@ -1277,6 +1279,15 @@ where
             }
             true
         });
+        let reaped = before - state.connections.len();
+        if reaped > 0 {
+            tracing::debug!(
+                origin = %self.origin,
+                reaped,
+                remaining = state.connections.len(),
+                "reaped idle HTTP/2 connections"
+            );
+        }
         next_deadline
     }
 
@@ -1371,7 +1382,7 @@ struct PoolHosts<C> {
     map: HashMap<String, Arc<HostPool<C>>>,
 }
 
-pub struct Pool<C> {
+pub(crate) struct Pool<C> {
     connection_timeout: Duration,
     http2: Http2Config,
     hosts: Arc<StdRwLock<PoolHosts<C>>>,
@@ -1413,16 +1424,18 @@ where
             let shutdown = self.shutdown.clone();
             let notify = self.reaper_notify.clone();
             AbortOnDropHandle::new(tokio::spawn(async move {
-                let mut shutdown_fut = shutdown.cancelled();
+                let mut shutdown_fut = pin!(shutdown.cancelled());
                 loop {
                     let next_deadline = reap_idle_connections(&hosts, Instant::now(), IDLE_TIMEOUT);
                     match next_deadline {
                         Some(deadline) => {
+                            // `IDLE_TIMEOUT` is uniform across all connections, so no newly-idle
+                            // connection can expire earlier than `deadline`; sleep until then
+                            // rather than waking on every request completion.
                             tokio::select! {
                                 biased;
                                 _ = &mut shutdown_fut => break,
                                 _ = tokio::time::sleep_until(deadline) => {}
-                                _ = notify.notified() => {}
                             }
                         }
                         None => {
@@ -1441,7 +1454,7 @@ where
     fn get_or_create_host_pool(
         &self,
         origin: &str,
-        origin_uri: &Uri,
+        fallback_uri: &Uri,
     ) -> Result<Arc<HostPool<C>>, HttpError> {
         {
             let hosts = self.hosts.read().unwrap();
@@ -1460,9 +1473,12 @@ where
             .map
             .entry(origin.to_owned())
             .or_insert_with(|| {
+                let origin_uri = origin
+                    .parse::<Uri>()
+                    .unwrap_or_else(|_| fallback_uri.clone());
                 Arc::new(HostPool::new(
                     origin.to_owned(),
-                    origin_uri.clone(),
+                    origin_uri,
                     self.connector.clone(),
                     self.connection_timeout,
                     self.http2,
@@ -1476,10 +1492,10 @@ where
     fn checkout_for_origin(
         &self,
         origin: &str,
-        origin_uri: &Uri,
+        fallback_uri: &Uri,
     ) -> Result<(Arc<HostPool<C>>, Checkout), HttpError> {
         loop {
-            let pool = self.get_or_create_host_pool(origin, origin_uri)?;
+            let pool = self.get_or_create_host_pool(origin, fallback_uri)?;
             if let Some(checkout) = pool.checkout() {
                 return Ok((pool, checkout));
             }
@@ -1488,20 +1504,22 @@ where
         }
     }
 
-    /// Acquire a live, ready HTTP/2 `SendRequest` for `origin_uri`.
+    /// Acquire a live, ready HTTP/2 `SendRequest` for `origin`.
     ///
     /// Phase 1 (`T7a`): connection establishment (DNS/TCP/TLS/H2 handshake) is bounded by
     /// `connection_timeout`, completely independent of `request_timeout`.
+    /// Phase 2 (`T7b`): once the connection is dialed, a single `deadline` bounds `sender.ready()`,
+    /// request headers/response headers, and unary body collection.
     /// If a reused idle connection closed right before `ready()`, transparently evict it and
     /// dial once so the caller sees no spurious error.
     async fn checkout_ready(
         &self,
         origin: &str,
-        origin_uri: &Uri,
+        fallback_uri: &Uri,
         request_timeout: Option<Duration>,
     ) -> Result<CheckedOutSender, HttpError> {
         for attempt in 0..2 {
-            let (pool, checkout) = self.checkout_for_origin(origin, origin_uri)?;
+            let (pool, checkout) = self.checkout_for_origin(origin, fallback_uri)?;
             let (id, mut sender, permit, reused) = match checkout {
                 Checkout::Ready { id, sender, permit } => (id, sender, permit, true),
                 Checkout::Connecting { id, mut rx, permit } => {
@@ -1510,8 +1528,9 @@ where
                 }
             };
 
-            let ready_res = match request_timeout {
-                Some(dur) => timeout(dur, sender.ready())
+            let deadline = request_timeout.map(|d| Instant::now() + d);
+            let ready_res = match deadline {
+                Some(dl) => timeout_at(dl, sender.ready())
                     .await
                     .map_err(|_| HttpError::Timeout)?,
                 None => sender.ready().await,
@@ -1526,12 +1545,19 @@ where
                         sender,
                         permit,
                         poison_handle,
+                        deadline,
                     });
                 }
                 Err(err) => {
                     pool.remove(id);
                     drop(permit);
                     if reused && attempt == 0 {
+                        tracing::debug!(
+                            origin = %origin,
+                            connection = ?id,
+                            error = %format_error_chain(&err),
+                            "evicted stale pooled HTTP/2 connection; redialing"
+                        );
                         continue;
                     }
                     return Err(HttpError::Transport(err));
@@ -1539,6 +1565,30 @@ where
             }
         }
         unreachable!("at most two checkout attempts")
+    }
+
+    async fn send_with<T, F, Fut>(&self, request: Request, run: F) -> Result<T, HttpError>
+    where
+        F: FnOnce(CheckedOutSender, Request) -> Fut,
+        Fut: Future<Output = Result<T, HttpError>>,
+    {
+        if self.shutdown.is_closed() {
+            return Err(HttpError::ClientClosed);
+        }
+        self.ensure_reaper_started();
+        let origin = request.origin();
+        let request_timeout = request.timeout;
+        let shutdown = self.shutdown.clone();
+        tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => Err(HttpError::Aborted),
+            res = async {
+                let checked_out = self
+                    .checkout_ready(&origin, &request.uri, request_timeout)
+                    .await?;
+                run(checked_out, request).await
+            } => res,
+        }
     }
 }
 
@@ -1571,12 +1621,12 @@ fn reap_idle_connections<C: Connect>(
     next_deadline
 }
 
-async fn execute_unary_with(
+async fn send_http_request(
     mut sender: http2::SendRequest<BoxBody>,
     request: Request,
-    poison_handle: PoisonHandle,
-) -> Result<UnaryResponse, HttpError> {
-    let request_timeout = request.timeout;
+    poison_handle: &PoisonHandle,
+    deadline: Option<Instant>,
+) -> Result<http::Response<Incoming>, HttpError> {
     let http_request = build_http_request(
         request.method,
         &request.uri,
@@ -1584,10 +1634,8 @@ async fn execute_unary_with(
         request.body.into_http_body(),
     )?;
 
-    let deadline = request_timeout.map(|d| Instant::now() + d);
-
     let send_fut = sender.send_request(http_request);
-    let response = match deadline {
+    match deadline {
         Some(dl) => timeout_at(dl, send_fut)
             .await
             .map_err(|_| HttpError::Timeout)?,
@@ -1598,7 +1646,20 @@ async fn execute_unary_with(
             poison_handle.poison();
         }
         HttpError::Transport(err)
-    })?;
+    })
+}
+
+async fn execute_unary_with(
+    checked_out: CheckedOutSender,
+    request: Request,
+) -> Result<UnaryResponse, HttpError> {
+    let CheckedOutSender {
+        sender,
+        permit: _permit,
+        poison_handle,
+        deadline,
+    } = checked_out;
+    let response = send_http_request(sender, request, &poison_handle, deadline).await?;
 
     let (parts, body) = response.into_parts();
     let bytes = if parts.status.is_success() {
@@ -1616,15 +1677,18 @@ async fn execute_unary_with(
                 HttpError::Transport(err)
             })?
             .to_bytes();
-        decompress_body(&parts.headers, bytes).await?
+        decompress_body(&parts.headers, bytes)?
     } else {
         // Non-2xx headers already received (`E2`): preserve HTTP status even if collecting
         // or decompressing the error body stalls or fails.
-        let bytes = collect_error_body(body, deadline, &poison_handle).await;
-        match decompress_body(&parts.headers, bytes).await {
-            Ok(bytes) => bytes,
-            Err(_) => Bytes::new(),
-        }
+        collect_and_decompress_error_body(
+            parts.status,
+            &parts.headers,
+            body,
+            deadline,
+            &poison_handle,
+        )
+        .await
     };
 
     Ok(UnaryResponse {
@@ -1636,34 +1700,16 @@ async fn execute_unary_with(
 }
 
 async fn init_streaming_with(
-    mut sender: http2::SendRequest<BoxBody>,
+    checked_out: CheckedOutSender,
     request: Request,
-    permit: RequestPermit,
-    poison_handle: PoisonHandle,
 ) -> Result<StreamingResponse, HttpError> {
-    let request_timeout = request.timeout;
-    let http_request = build_http_request(
-        request.method,
-        &request.uri,
-        request.headers,
-        request.body.into_http_body(),
-    )?;
-
-    let deadline = request_timeout.map(|d| Instant::now() + d);
-
-    let send_fut = sender.send_request(http_request);
-    let response = match deadline {
-        Some(dl) => timeout_at(dl, send_fut)
-            .await
-            .map_err(|_| HttpError::Timeout)?,
-        None => send_fut.await,
-    }
-    .map_err(|err| {
-        if is_dead_connection_hyper_error(&err) {
-            poison_handle.poison();
-        }
-        HttpError::Transport(err)
-    })?;
+    let CheckedOutSender {
+        sender,
+        permit,
+        poison_handle,
+        deadline,
+    } = checked_out;
+    let response = send_http_request(sender, request, &poison_handle, deadline).await?;
 
     let (parts, body) = response.into_parts();
     Ok(StreamingResponse::new(
@@ -1682,47 +1728,11 @@ where
     C: Connect,
 {
     async fn execute_unary(&self, request: Request) -> Result<UnaryResponse, HttpError> {
-        if self.shutdown.is_closed() {
-            return Err(HttpError::ClientClosed);
-        }
-        self.ensure_reaper_started();
-        let (origin, origin_uri) = request.origin_uri();
-        let request_timeout = request.timeout;
-        let shutdown = self.shutdown.clone();
-        tokio::select! {
-            biased;
-            _ = shutdown.cancelled() => Err(HttpError::Aborted),
-            res = async {
-                let CheckedOutSender {
-                    sender,
-                    permit: _permit,
-                    poison_handle,
-                } = self.checkout_ready(&origin, &origin_uri, request_timeout).await?;
-                execute_unary_with(sender, request, poison_handle).await
-            } => res,
-        }
+        self.send_with(request, execute_unary_with).await
     }
 
     async fn init_streaming(&self, request: Request) -> Result<StreamingResponse, HttpError> {
-        if self.shutdown.is_closed() {
-            return Err(HttpError::ClientClosed);
-        }
-        self.ensure_reaper_started();
-        let (origin, origin_uri) = request.origin_uri();
-        let request_timeout = request.timeout;
-        let shutdown = self.shutdown.clone();
-        tokio::select! {
-            biased;
-            _ = shutdown.cancelled() => Err(HttpError::Aborted),
-            res = async {
-                let CheckedOutSender {
-                    sender,
-                    permit,
-                    poison_handle,
-                } = self.checkout_ready(&origin, &origin_uri, request_timeout).await?;
-                init_streaming_with(sender, request, permit, poison_handle).await
-            } => res,
-        }
+        self.send_with(request, init_streaming_with).await
     }
 
     fn close(&self) {
@@ -1741,6 +1751,7 @@ where
 #[cfg(test)]
 mod tests {
     use std::{
+        pin::Pin,
         sync::atomic::{AtomicUsize, Ordering},
         task::{Context, Poll},
     };
@@ -1758,6 +1769,7 @@ mod tests {
     struct DuplexH2Connector {
         dials: Arc<AtomicUsize>,
         active_connections: Arc<AtomicUsize>,
+        conn_closed: Arc<Notify>,
         dial_delay: Duration,
         stall_error_body: bool,
     }
@@ -1767,17 +1779,32 @@ mod tests {
             Self {
                 dials: Arc::new(AtomicUsize::new(0)),
                 active_connections: Arc::new(AtomicUsize::new(0)),
+                conn_closed: Arc::new(Notify::new()),
                 dial_delay: Duration::ZERO,
                 stall_error_body: false,
             }
         }
+
+        async fn wait_active_connections(&self, expected: usize) {
+            while self.active_connections.load(Ordering::SeqCst) != expected {
+                let notified = self.conn_closed.notified();
+                if self.active_connections.load(Ordering::SeqCst) == expected {
+                    break;
+                }
+                notified.await;
+            }
+        }
     }
 
-    struct ActiveConnGuard(Arc<AtomicUsize>);
+    struct ActiveConnGuard {
+        active: Arc<AtomicUsize>,
+        closed: Arc<Notify>,
+    }
 
     impl Drop for ActiveConnGuard {
         fn drop(&mut self) {
-            self.0.fetch_sub(1, Ordering::SeqCst);
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            self.closed.notify_waiters();
         }
     }
 
@@ -1794,6 +1821,7 @@ mod tests {
         fn call(&mut self, _dst: Uri) -> Self::Future {
             let dials = self.dials.clone();
             let active_connections = self.active_connections.clone();
+            let conn_closed = self.conn_closed.clone();
             let dial_delay = self.dial_delay;
             let stall_error_body = self.stall_error_body;
             Box::pin(async move {
@@ -1807,7 +1835,10 @@ mod tests {
                         return;
                     };
                     active_connections.fetch_add(1, Ordering::SeqCst);
-                    let _guard = ActiveConnGuard(active_connections);
+                    let _guard = ActiveConnGuard {
+                        active: active_connections,
+                        closed: conn_closed,
+                    };
                     while let Some(Ok((_req, mut respond))) = conn.accept().await {
                         if stall_error_body {
                             let resp = http::Response::builder()
@@ -1999,13 +2030,12 @@ mod tests {
     async fn poison_evicts_only_targeted_connection_preserving_siblings() {
         let http2 = Http2Config::new().with_max_concurrent_requests(1).unwrap();
         let connector = DuplexH2Connector::new();
-        let active_connections = connector.active_connections.clone();
-        let pool = test_pool_with(connector, http2);
+        let pool = test_pool_with(connector.clone(), http2);
         let (id1, p1) = checkout_permit(&pool, TEST_ORIGIN).await;
         let (id2, p2) = checkout_permit(&pool, TEST_ORIGIN).await;
         assert_ne!(id1, id2);
         assert_eq!(host_connection_count(&pool, TEST_ORIGIN), 2);
-        assert_eq!(active_connections.load(Ordering::SeqCst), 2);
+        assert_eq!(connector.active_connections.load(Ordering::SeqCst), 2);
 
         let uri: Uri = TEST_ORIGIN.parse().unwrap();
         let host_pool = pool.get_or_create_host_pool(TEST_ORIGIN, &uri).unwrap();
@@ -2014,13 +2044,7 @@ mod tests {
 
         // Dropping the retired connection's last permit/sender closes its underlying socket.
         drop(p1);
-        for _ in 0..16 {
-            if active_connections.load(Ordering::SeqCst) == 1 {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-        assert_eq!(active_connections.load(Ordering::SeqCst), 1);
+        connector.wait_active_connections(1).await;
 
         // Freeing the healthy sibling's permit allows reusing it rather than dialing a new one.
         drop(p2);
@@ -2067,33 +2091,26 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn reaper_removes_idle_connections_at_90s() {
         let connector = DuplexH2Connector::new();
-        let active_connections = connector.active_connections.clone();
-        let pool = test_pool_with(connector, Http2Config::new());
+        let pool = test_pool_with(connector.clone(), Http2Config::new());
         let req = RequestBuilder::get("http://localhost:8080/test".parse().unwrap())
             .build()
             .unwrap();
         let resp = pool.execute_unary(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(host_connection_count(&pool, TEST_ORIGIN), 1);
-        assert_eq!(active_connections.load(Ordering::SeqCst), 1);
+        assert_eq!(connector.active_connections.load(Ordering::SeqCst), 1);
 
         // Just before 90s: still pooled and open.
         tokio::time::advance(IDLE_TIMEOUT - Duration::from_secs(1)).await;
         tokio::task::yield_now().await;
         assert_eq!(host_connection_count(&pool, TEST_ORIGIN), 1);
-        assert_eq!(active_connections.load(Ordering::SeqCst), 1);
+        assert_eq!(connector.active_connections.load(Ordering::SeqCst), 1);
 
         // At 90s: reaped promptly and the underlying connection closes.
         tokio::time::advance(Duration::from_secs(2)).await;
-        for _ in 0..16 {
-            if active_connections.load(Ordering::SeqCst) == 0 {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
+        connector.wait_active_connections(0).await;
         assert_eq!(host_connection_count(&pool, TEST_ORIGIN), 0);
         assert!(!pool.hosts.read().unwrap().map.contains_key(TEST_ORIGIN));
-        assert_eq!(active_connections.load(Ordering::SeqCst), 0);
     }
 
     // spec: r1 C13
@@ -2215,8 +2232,8 @@ mod tests {
         let r2 = RequestBuilder::get("http://example.com/v1".parse().unwrap())
             .build()
             .unwrap();
-        assert_eq!(r1.origin_uri().0, "http://example.com");
-        assert_eq!(r1.origin_uri().0, r2.origin_uri().0);
+        assert_eq!(r1.origin(), "http://example.com");
+        assert_eq!(r1.origin(), r2.origin());
 
         let r3 = RequestBuilder::get("HTTPS://A.S2.DEV:443/v1".parse().unwrap())
             .build()
@@ -2224,21 +2241,31 @@ mod tests {
         let r4 = RequestBuilder::get("https://a.s2.dev/v1".parse().unwrap())
             .build()
             .unwrap();
-        assert_eq!(r3.origin_uri().0, "https://a.s2.dev");
-        assert_eq!(r3.origin_uri().0, r4.origin_uri().0);
+        assert_eq!(r3.origin(), "https://a.s2.dev");
+        assert_eq!(r3.origin(), r4.origin());
 
         let r5 = RequestBuilder::get("https://a.s2.dev:8443/v1".parse().unwrap())
             .build()
             .unwrap();
-        assert_eq!(r5.origin_uri().0, "https://a.s2.dev:8443");
+        assert_eq!(r5.origin(), "https://a.s2.dev:8443");
     }
 
-    #[tokio::test]
-    async fn compress_body_skips_empty_body() {
+    #[test]
+    fn compress_body_skips_empty_body_and_roundtrips() {
         for compression in [Compression::Gzip, Compression::Zstd] {
-            let (body, enc) = compress_body(Body::empty(), compression).await.unwrap();
+            let (body, enc) = compress_body(Body::empty(), compression).unwrap();
             assert!(enc.is_none());
             assert!(matches!(body.0, BodyInner::Empty));
+
+            let payload = b"hello world hello world hello world".to_vec();
+            let (compressed, enc) =
+                compress_body(Body::from(payload.clone()), compression).unwrap();
+            let enc = enc.expect("encoding header");
+            let mut headers = HeaderMap::new();
+            headers.insert(CONTENT_ENCODING, enc);
+            let raw = Bytes::copy_from_slice(compressed.as_bytes().unwrap());
+            let decoded = decompress_body(&headers, raw).unwrap();
+            assert_eq!(decoded.as_ref(), payload.as_slice());
         }
     }
 }

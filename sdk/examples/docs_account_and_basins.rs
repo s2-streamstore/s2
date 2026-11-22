@@ -5,18 +5,18 @@
 use s2_sdk::{
     S2,
     types::{
-        AccessTokenScopeInput, BasinMatcher, BasinName, CreateBasinInput, CreateStreamInput,
-        IssueAccessTokenInput, ListAllStreamsInput, ListBasinsInput, ListStreamsInput,
-        OperationGroupPermissions, ReadWritePermissions, S2Config, StreamMatcher,
+        AccessTokenScopeInput, BasinMatcher, BasinName, BasinNamePrefix, CreateBasinInput,
+        CreateStreamInput, IssueAccessTokenInput, ListAccessTokensInput, ListAllStreamsInput,
+        ListBasinsInput, ListStreamsInput, OperationGroupPermissions, ReadWritePermissions,
+        StreamMatcher,
     },
 };
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let access_token = std::env::var("S2_ACCESS_TOKEN")?;
     let basin_name: BasinName = std::env::var("S2_BASIN")?.parse()?;
 
-    let client = S2::new(S2Config::new(access_token))?;
+    let client = S2::from_env()?;
 
     // ANCHOR: basin-operations
     // List basins
@@ -44,7 +44,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     // Create a stream
-    // Optionally, pass `.with_config(StreamConfig { .. })` to CreateStreamInput.
+    // Optionally, pass `.with_config(StreamConfig::new()...)` to CreateStreamInput.
     basin
         .create_stream(CreateStreamInput::new("user-actions".parse()?))
         .await?;
@@ -59,7 +59,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ANCHOR: access-token-basic
     // List tokens (returns metadata, not the secret)
-    let tokens = client.list_access_tokens(Default::default()).await?;
+    let tokens = client
+        .list_access_tokens(ListAccessTokensInput::new())
+        .await?;
 
     // Issue a token scoped to streams under "users/1234/"
     let _token = client
@@ -70,7 +72,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     OperationGroupPermissions::new()
                         .with_stream(ReadWritePermissions::read_write()),
                 )
-                .with_basins(BasinMatcher::Prefix("".parse()?)) // all basins
+                .with_basins(BasinMatcher::Prefix(BasinNamePrefix::default())) // all basins
                 .with_streams(StreamMatcher::Prefix("users/1234/".parse()?)),
             )
             .with_expires_at("2027-01-01T00:00:00Z".parse()?)?,

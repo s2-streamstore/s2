@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use s2_sdk::{
     S2,
-    types::{AccountEndpoint, BasinEndpoint, RetryConfig, S2Config, S2Endpoints},
+    types::{RetryConfig, S2Config, S2Endpoints},
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -14,10 +14,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         // ANCHOR: custom-endpoints
         let client = S2::new(
-            S2Config::new("local-token").with_endpoints(S2Endpoints::new(
-                AccountEndpoint::new("http://localhost:8080")?,
-                BasinEndpoint::new("http://localhost:8080")?,
-            )?),
+            S2Config::new("local-token")
+                .with_endpoints(S2Endpoints::for_endpoint("http://localhost:8080")?),
         )?;
         // ANCHOR_END: custom-endpoints
         println!("Created client with custom endpoints: {:?}", client);
@@ -33,11 +31,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     .all(|v| std::env::var(v).is_ok())
     {
         // ANCHOR: env-endpoints
-        // Reads S2_ACCOUNT_ENDPOINT and S2_BASIN_ENDPOINT.
-        let client = S2::new(
-            S2Config::new(std::env::var("S2_ACCESS_TOKEN")?)
-                .with_endpoints(S2Endpoints::from_env()?),
-        )?;
+        // Reads S2_ACCESS_TOKEN, S2_ACCOUNT_ENDPOINT, and S2_BASIN_ENDPOINT.
+        let client = S2::from_env()?;
         // ANCHOR_END: env-endpoints
         println!("Created client from environment: {:?}", client);
     }

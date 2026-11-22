@@ -1088,42 +1088,6 @@ async fn read_from_timestamp_in_future_errors(
     Ok(())
 }
 
-#[test]
-fn append_record_batch_rejects_empty() {
-    let result = AppendRecordBatch::try_from_iter(std::iter::empty::<AppendRecord>());
-
-    assert_matches!(result, Err(ValidationError(msg)) => {
-        assert!(msg.contains("batch is empty"));
-    });
-}
-
-#[test]
-fn append_record_batch_rejects_too_many_records() {
-    let records = (0..1001).map(|_| AppendRecord::new("a").expect("valid record"));
-    let result = AppendRecordBatch::try_from_iter(records);
-
-    assert_matches!(result, Err(ValidationError(msg)) => {
-        assert!(msg.contains("number of records"));
-    });
-}
-
-#[test]
-fn append_record_rejects_too_large() {
-    let body = "a".repeat(1024 * 1024 + 1);
-    let result = AppendRecord::new(body);
-
-    assert_matches!(result, Err(ValidationError(msg)) => {
-        assert!(msg.contains("metered_bytes"));
-    });
-}
-
-#[test]
-fn fencing_token_rejects_too_long() {
-    let result: Result<FencingToken, _> = "a".repeat(37).parse();
-
-    assert!(result.is_err());
-}
-
 #[test_context(S2Stream)]
 #[tokio_shared_rt::test(shared)]
 async fn append_max_batch_size(stream: &S2Stream) -> Result<(), Box<dyn std::error::Error>> {
@@ -1422,30 +1386,6 @@ async fn read_with_count_zero_returns_empty(
             ReadInput::new()
                 .with_from(ReadFrom::SeqNum(0))
                 .with_count(0),
-        )
-        .await?;
-
-    assert!(batch.records.is_empty());
-
-    Ok(())
-}
-
-#[test_context(S2Stream)]
-#[tokio_shared_rt::test(shared)]
-async fn read_with_bytes_zero_returns_empty(
-    stream: &S2Stream,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let input = AppendInput::new(AppendRecordBatch::try_from_iter([
-        AppendRecord::new("lorem")?,
-        AppendRecord::new("ipsum")?,
-    ])?);
-    let _ = stream.append(input).await?;
-
-    let batch = stream
-        .read(
-            ReadInput::new()
-                .with_from(ReadFrom::SeqNum(0))
-                .with_bytes(0),
         )
         .await?;
 

@@ -12,26 +12,26 @@ use pin_project_lite::pin_project;
 /// the first time `poll_frame()` produces a frame. At error time, an unset
 /// signal proves the request data never left the process, making retry safe.
 #[derive(Debug, Clone)]
-pub struct FrameSignal(Arc<AtomicBool>);
+pub(crate) struct FrameSignal(Arc<AtomicBool>);
 
 impl FrameSignal {
     /// Create a new unsignalled [`FrameSignal`].
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self(Arc::new(AtomicBool::new(false)))
     }
 
     /// Returns `true` if the signal has been set.
-    pub fn is_signalled(&self) -> bool {
+    pub(crate) fn is_signalled(&self) -> bool {
         self.0.load(Ordering::Acquire)
     }
 
     /// Reset the signal to unsignalled.
-    pub fn reset(&self) {
+    pub(crate) fn reset(&self) {
         self.0.store(false, Ordering::Release);
     }
 
     /// Set the signal to signalled.
-    pub fn signal(&self) {
+    pub(crate) fn signal(&self) {
         self.0.store(true, Ordering::Release);
     }
 }
@@ -45,10 +45,14 @@ impl Default for FrameSignal {
 pin_project! {
     /// A body wrapper that signals a [`FrameSignal`] when a frame is yielded.
     ///
-    /// Wraps any `B: http_body::Body` and delegates all operations to the inner
+    /// Wraps a non-empty `B: http_body::Body` and delegates all operations to the inner
     /// body. On each successful `poll_frame()` that yields a frame, the
     /// associated [`FrameSignal`] is set to signalled.
-    pub struct RequestFrameMonitorBody<B> {
+    ///
+    /// Note: an empty body yields no frames and therefore never signals; callers must only
+    /// rely on `!signal.is_signalled()` as proof of an unsent request when the request has
+    /// a non-empty body (such as JSON or protobuf payloads).
+    pub(crate) struct RequestFrameMonitorBody<B> {
         #[pin]
         inner: B,
         signal: FrameSignal,
@@ -57,7 +61,7 @@ pin_project! {
 
 impl<B> RequestFrameMonitorBody<B> {
     /// Wrap an inner body with frame monitoring.
-    pub fn new(inner: B, signal: FrameSignal) -> Self {
+    pub(crate) fn new(inner: B, signal: FrameSignal) -> Self {
         Self { inner, signal }
     }
 }
@@ -97,29 +101,6 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn signal_starts_unsignalled() {
-        let signal = FrameSignal::new();
-        assert!(!signal.is_signalled());
-    }
-
-    #[test]
-    fn signal_round_trip() {
-        let signal = FrameSignal::new();
-        signal.signal();
-        assert!(signal.is_signalled());
-        signal.reset();
-        assert!(!signal.is_signalled());
-    }
-
-    #[test]
-    fn clone_shares_state() {
-        let a = FrameSignal::new();
-        let b = a.clone();
-        a.signal();
-        assert!(b.is_signalled());
-    }
-
     #[tokio::test]
     async fn empty_body_does_not_signal() {
         let signal = FrameSignal::new();
@@ -142,16 +123,13 @@ mod tests {
     async fn reset_between_attempts() {
         let signal = FrameSignal::new();
 
-        // First attempt: signal gets set.
         let body = RequestFrameMonitorBody::new(Full::new(Bytes::from("data")), signal.clone());
         body.collect().await.unwrap();
         assert!(signal.is_signalled());
 
-        // Reset before retry.
         signal.reset();
         assert!(!signal.is_signalled());
 
-        // Second attempt with empty body: stays unsignalled.
         let body = RequestFrameMonitorBody::new(Empty::<Bytes>::new(), signal.clone());
         body.collect().await.unwrap();
         assert!(!signal.is_signalled());

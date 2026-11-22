@@ -2,26 +2,18 @@ use s2_sdk::{
     S2,
     read_session::ReadSessionConfig,
     types::{
-        AppendInput, AppendRecord, AppendRecordBatch, BasinName, CreateBasinInput,
-        CreateStreamInput, ReadFrom, ReadInput, S2Config, S2Endpoints, StreamName,
+        AppendRecord, AppendRecordBatch, BasinName, CreateBasinInput, CreateStreamInput, ReadFrom,
+        ReadInput, StreamName,
     },
 };
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let access_token =
-        std::env::var("S2_ACCESS_TOKEN").map_err(|_| "S2_ACCESS_TOKEN env var not set")?;
-    let mut config = S2Config::new(access_token);
-    if std::env::var_os("S2_ACCOUNT_ENDPOINT").is_some()
-        || std::env::var_os("S2_BASIN_ENDPOINT").is_some()
-    {
-        config = config.with_endpoints(S2Endpoints::from_env()?);
-    }
+    let s2 = S2::from_env()?;
 
     let suffix = &uuid::Uuid::new_v4().simple().to_string()[..8];
     let basin_name: BasinName = format!("caught-up-{suffix}").parse()?;
     let stream_name: StreamName = "example".parse()?;
-    let s2 = S2::new(config)?;
     let basin = s2.basin(basin_name.clone());
 
     s2.create_basin(CreateBasinInput::new(basin_name.clone()))
@@ -32,15 +24,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stream = basin.stream(stream_name.clone());
 
     stream
-        .append(AppendInput::new(AppendRecordBatch::try_from_iter([
+        .append(AppendRecordBatch::try_from_iter([
             AppendRecord::new("first")?,
             AppendRecord::new("second")?,
-        ])?))
+        ])?)
         .await?;
 
     let mut session = stream.read_session(
         ReadInput::new().with_from(ReadFrom::TailOffset(2)),
-        ReadSessionConfig::default(),
+        ReadSessionConfig::new(),
     )?;
     let mut caught_up = session.caught_up();
 
@@ -57,11 +49,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let ack = stream
-        .append(AppendInput::new(AppendRecordBatch::try_from_iter([
-            AppendRecord::new("third")?,
-        ])?))
-        .await?;
+    let ack = stream.append(AppendRecord::new("third")?).await?;
     println!(
         "Appended another record at sequence number {}",
         ack.start.seq_num

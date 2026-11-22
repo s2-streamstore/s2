@@ -1,10 +1,10 @@
-use std::{marker::PhantomData, ops::Deref, str::FromStr, time::Duration};
+use std::{marker::PhantomData, time::Duration};
 
-use compact_str::{CompactString, ToCompactString};
+use compact_str::CompactString;
 
 use super::{
     ValidationError,
-    strings::{NameProps, PrefixProps, StartAfterProps, StrProps},
+    strings::{NameProps, PrefixProps, StartAfterProps, StrProps, impl_validated_str},
 };
 use crate::{
     caps,
@@ -53,12 +53,9 @@ impl<T: StrProps> StreamNameStr<T> {
 
         Ok(())
     }
-
-    fn try_from_compact(name: CompactString) -> Result<Self, ValidationError> {
-        Self::validate_str(&name)?;
-        Ok(Self(name, PhantomData))
-    }
 }
+
+impl_validated_str!(StreamNameStr<T: StrProps>);
 
 #[cfg(feature = "utoipa")]
 impl<T> utoipa::PartialSchema for StreamNameStr<T>
@@ -76,83 +73,6 @@ where
 
 #[cfg(feature = "utoipa")]
 impl<T> utoipa::ToSchema for StreamNameStr<T> where T: StrProps {}
-
-impl<T: StrProps> serde::Serialize for StreamNameStr<T> {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_str(&self.0)
-    }
-}
-
-impl<'de, T: StrProps> serde::Deserialize<'de> for StreamNameStr<T> {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let s = CompactString::deserialize(deserializer)?;
-        Self::try_from_compact(s).map_err(serde::de::Error::custom)
-    }
-}
-
-impl<T: StrProps> AsRef<str> for StreamNameStr<T> {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
-impl<T: StrProps> Deref for StreamNameStr<T> {
-    type Target = str;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl<T: StrProps> TryFrom<String> for StreamNameStr<T> {
-    type Error = ValidationError;
-
-    fn try_from(name: String) -> Result<Self, Self::Error> {
-        Self::validate_str(&name)?;
-        Ok(Self(CompactString::from(name), PhantomData))
-    }
-}
-
-impl<T: StrProps> TryFrom<&str> for StreamNameStr<T> {
-    type Error = ValidationError;
-
-    fn try_from(name: &str) -> Result<Self, Self::Error> {
-        name.parse()
-    }
-}
-
-impl<T: StrProps> FromStr for StreamNameStr<T> {
-    type Err = ValidationError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Self::validate_str(s)?;
-        Ok(Self(s.to_compact_string(), PhantomData))
-    }
-}
-
-impl<T: StrProps> std::fmt::Debug for StreamNameStr<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl<T: StrProps> std::fmt::Display for StreamNameStr<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl<T: StrProps> From<StreamNameStr<T>> for String {
-    fn from(value: StreamNameStr<T>) -> Self {
-        value.0.into_string()
-    }
-}
 
 pub type StreamName = StreamNameStr<NameProps>;
 

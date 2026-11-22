@@ -8,10 +8,9 @@ Revision 1 (Draft).
 
 # Getting started
 
-1. Ensure you have added [tokio](https://crates.io/crates/tokio) and [futures](https://crates.io/crates/futures) as dependencies.
+1. Ensure you have added [tokio](https://crates.io/crates/tokio) as a dependency:
    ```bash
    cargo add tokio --features full
-   cargo add futures
    ```
 
 1. Add the `s2-sdk` dependency to your project:
@@ -20,23 +19,21 @@ Revision 1 (Draft).
    cargo add s2-sdk
    ```
 
-1. Generate an access token by logging into the web console at [s2.dev](https://s2.dev/dashboard).
+1. Generate an access token by logging into the web console at [s2.dev](https://s2.dev/dashboard),
+   then export `S2_ACCESS_TOKEN`.
 
-1. Perform an operation.
+1. Perform an operation:
 
    ```no_run
-    use s2_sdk::{
-        S2,
-        types::{ListBasinsInput, S2Config},
-    };
+   use s2_sdk::{S2, types::ListBasinsInput};
 
-    #[tokio::main]
-    async fn main() -> Result<(), Box<dyn std::error::Error>> {
-        let s2 = S2::new(S2Config::new("<YOUR_ACCESS_TOKEN>"))?;
-        let page = s2.list_basins(ListBasinsInput::new()).await?;
-        println!("My basins: {:?}", page.values);
-        Ok(())
-    }
+   #[tokio::main]
+   async fn main() -> Result<(), Box<dyn std::error::Error>> {
+       let s2 = S2::from_env()?;
+       let page = s2.list_basins(ListBasinsInput::new()).await?;
+       println!("My basins: {:?}", page.values);
+       Ok(())
+   }
    ```
 
 See [`S2`] for account-level operations, [`S2Basin`] for basin-level operations,
@@ -90,7 +87,6 @@ issue.
 )]
 #![warn(missing_docs)]
 
-#[rustfmt::skip]
 mod api;
 mod client;
 mod frame_signal;
