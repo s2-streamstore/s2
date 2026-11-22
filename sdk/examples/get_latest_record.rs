@@ -1,6 +1,6 @@
 use s2_sdk::{
     S2,
-    types::{BasinName, ReadFrom, ReadInput, StreamName},
+    types::{BasinName, ReadInput, ReadStart, StreamName},
 };
 
 #[tokio::main]
@@ -16,7 +16,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stream = s2.basin(basin_name).stream(stream_name);
 
     let input = ReadInput::new()
-        .with_start(ReadFrom::TailOffset(1))
+        .with_start(ReadStart::TailOffset(1))
         .with_count(1);
     let batch = stream.read(input).await?;
     println!("{batch:#?}");

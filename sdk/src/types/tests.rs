@@ -67,11 +67,11 @@ fn string_strategy(max_chars: usize) -> impl Strategy<Value = String> {
         .prop_map(|chars| chars.into_iter().collect())
 }
 
-fn read_from_strategy() -> impl Strategy<Value = ReadFrom> {
+fn read_start_strategy() -> impl Strategy<Value = ReadStart> {
     prop_oneof![
-        any::<u64>().prop_map(ReadFrom::SeqNum),
-        any::<u64>().prop_map(ReadFrom::Timestamp),
-        any::<u64>().prop_map(ReadFrom::TailOffset),
+        any::<u64>().prop_map(ReadStart::SeqNum),
+        any::<u64>().prop_map(ReadStart::Timestamp),
+        any::<u64>().prop_map(ReadStart::TailOffset),
     ]
 }
 
@@ -625,13 +625,13 @@ fn sequenced_record_command_detection(#[case] headers: Vec<Header>, #[case] expe
 proptest! {
     #[test]
     fn read_input_to_api_sets_only_selected_position_field(
-        from in read_from_strategy(),
+        from in read_start_strategy(),
         clamp in any::<bool>(),
     ) {
         let (seq_num, timestamp, tail_offset) = match from {
-            ReadFrom::SeqNum(value) => (Some(value), None, None),
-            ReadFrom::Timestamp(value) => (None, Some(value), None),
-            ReadFrom::TailOffset(value) => (None, None, Some(value)),
+            ReadStart::SeqNum(value) => (Some(value), None, None),
+            ReadStart::Timestamp(value) => (None, Some(value), None),
+            ReadStart::TailOffset(value) => (None, None, Some(value)),
         };
         let input = ReadInput::new().with_start(from).with_clamp(clamp);
         prop_assert_eq!(input.start(), Some(from));

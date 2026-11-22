@@ -17,9 +17,9 @@ use s2_sdk::{
         ListAccessTokensInput, ListAllAccessTokensInput, ListAllBasinsInput,
         ListAllNetworkPoliciesInput, ListAllStreamsInput, ListBasinsInput,
         ListNetworkPoliciesInput, ListStreamsInput, LocationInfo, LocationName, MeteredBytes,
-        Metric, NetworkPolicy, NetworkPolicyInfo, NetworkPolicySelector, PublicNetPolicy, ReadFrom,
-        ReadInput, SequencedRecord, StreamInfo, StreamMetricSet, StreamNamePrefix, StreamPosition,
-        StreamReconfiguration, TimeRangeAndInterval, TimeseriesInterval, Timestamp,
+        Metric, NetworkPolicy, NetworkPolicyInfo, NetworkPolicySelector, PublicNetPolicy,
+        ReadInput, ReadStart, SequencedRecord, StreamInfo, StreamMetricSet, StreamNamePrefix,
+        StreamPosition, StreamReconfiguration, TimeRangeAndInterval, TimeseriesInterval, Timestamp,
     },
 };
 
@@ -681,18 +681,18 @@ pub fn read(
     let stream = stream_with_encryption(s2, args.uri.clone(), encryption_key);
 
     let from = match (args.seq_num, args.timestamp, args.tail_offset, args.ago) {
-        (Some(seq), None, None, None) => ReadFrom::SeqNum(seq),
-        (None, Some(ts), None, None) => ReadFrom::Timestamp(ts),
-        (None, None, Some(offset), None) => ReadFrom::TailOffset(offset),
+        (Some(seq), None, None, None) => ReadStart::SeqNum(seq),
+        (None, Some(ts), None, None) => ReadStart::Timestamp(ts),
+        (None, None, Some(offset), None) => ReadStart::TailOffset(offset),
         (None, None, None, Some(ago)) => {
             let ts = SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .unwrap()
                 .as_millis()
                 .saturating_sub(ago.as_millis()) as u64;
-            ReadFrom::Timestamp(ts)
+            ReadStart::Timestamp(ts)
         }
-        (None, None, None, None) => ReadFrom::TailOffset(0),
+        (None, None, None, None) => ReadStart::TailOffset(0),
         _ => unreachable!("clap ensures only one start option"),
     };
 
@@ -840,7 +840,7 @@ pub fn tail(
     // Use clamp to handle empty streams gracefully - if we ask for
     // TailOffset(10) but there are fewer records, clamp to the actual start.
     let mut input = ReadInput::new()
-        .with_start(ReadFrom::TailOffset(args.lines))
+        .with_start(ReadStart::TailOffset(args.lines))
         .with_clamp(true);
     if !args.follow {
         input = input.with_count(args.lines);

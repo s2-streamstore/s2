@@ -361,7 +361,7 @@ impl ReadSessionState {
 
     /// Return the sequence number of the next record the session will deliver.
     ///
-    /// An unclamped `ReadFrom::SeqNum` start is known immediately; any other start returns `None`
+    /// An unclamped `ReadStart::SeqNum` start is known immediately; any other start returns `None`
     /// until resolved by the first server response. Updated before each record (or batch) is
     /// handed to the caller, and advances on heartbeats. Retained after iteration ends.
     pub fn next_seq_num(&self) -> Option<u64> {

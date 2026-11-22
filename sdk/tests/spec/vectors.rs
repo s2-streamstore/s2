@@ -26,7 +26,7 @@ use s2_sdk::{
         CommandRecord, Compression, DeleteOnEmptyConfig, DeleteOnEmptyReconfiguration,
         EncryptionAlgorithm, EncryptionKey, FencingToken, Header, IssueAccessTokenInput,
         MeteredBytes, Metric, MetricUnit, Operation, OperationGroupPermissions, PrivateNet,
-        PrivateNetPolicy, PublicNetPolicy, ReadFrom, ReadInput, RetentionPolicy, RetryConfig,
+        PrivateNetPolicy, PublicNetPolicy, ReadInput, ReadStart, RetentionPolicy, RetryConfig,
         S2Config, S2Endpoints, SequencedRecord, StreamMatcher, StreamMetricSet, TimeRange,
         TimeRangeAndInterval, TimeseriesInterval, Timestamp, TimestampingMode, ValidationError,
     },
@@ -417,16 +417,16 @@ fn spec_vectors_numbers() {
                 "read.start.seq_num" => match raw.parse::<u64>() {
                     Ok(v) => {
                         assert!(expect_valid, "{label}");
-                        let input = ReadInput::new().with_start(ReadFrom::SeqNum(v));
-                        assert_eq!(input.start(), Some(ReadFrom::SeqNum(v)), "{label}");
+                        let input = ReadInput::new().with_start(ReadStart::SeqNum(v));
+                        assert_eq!(input.start(), Some(ReadStart::SeqNum(v)), "{label}");
                     }
                     Err(_) => assert!(!expect_valid, "{label}: expected valid u64"),
                 },
                 "read.start.timestamp" => match raw.parse::<u64>() {
                     Ok(v) => {
                         assert!(expect_valid, "{label}");
-                        let input = ReadInput::new().with_start(ReadFrom::Timestamp(v));
-                        assert_eq!(input.start(), Some(ReadFrom::Timestamp(v)), "{label}");
+                        let input = ReadInput::new().with_start(ReadStart::Timestamp(v));
+                        assert_eq!(input.start(), Some(ReadStart::Timestamp(v)), "{label}");
                     }
                     Err(_) => assert!(!expect_valid, "{label}: expected valid u64"),
                 },
@@ -1260,7 +1260,7 @@ fn spec_f2_f3_f4_open_enums_tagged_unions_closed_request_enums_and_unknown_error
     // Unknown variant).
     fn check_closed_request_enums(
         c: Compression,
-        f: ReadFrom,
+        f: ReadStart,
         am: AccountMetricSet,
         bm: BasinMetricSet,
         sm: StreamMetricSet,
@@ -1269,7 +1269,7 @@ fn spec_f2_f3_f4_open_enums_tagged_unions_closed_request_enums_and_unknown_error
             Compression::None | Compression::Gzip | Compression::Zstd => {}
         }
         match f {
-            ReadFrom::SeqNum(_) | ReadFrom::Timestamp(_) | ReadFrom::TailOffset(_) => {}
+            ReadStart::SeqNum(_) | ReadStart::Timestamp(_) | ReadStart::TailOffset(_) => {}
         }
         match am {
             AccountMetricSet::ActiveBasins(_)
@@ -1296,7 +1296,7 @@ fn spec_f2_f3_f4_open_enums_tagged_unions_closed_request_enums_and_unknown_error
     .unwrap();
     check_closed_request_enums(
         Compression::None,
-        ReadFrom::SeqNum(0),
+        ReadStart::SeqNum(0),
         AccountMetricSet::ActiveBasins(range),
         BasinMetricSet::Storage(range),
         StreamMetricSet::Storage(range),

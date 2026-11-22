@@ -6,7 +6,7 @@ use s2_sdk::{
     S2,
     types::{
         AppendRecord, BasinConfig, BasinName, BasinReconfiguration, CreateBasinInput,
-        CreateStreamInput, EncryptionAlgorithm, ReadFrom, ReadInput, StreamName, Timestamp,
+        CreateStreamInput, EncryptionAlgorithm, ReadInput, ReadStart, StreamName, Timestamp,
     },
 };
 
@@ -49,7 +49,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let batch = stream
         .read(
             ReadInput::new()
-                .with_start(ReadFrom::SeqNum(0))
+                .with_start(ReadStart::SeqNum(0))
                 .with_count(10),
         )
         .await?;

@@ -638,7 +638,7 @@ impl AppendAck {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Starting position for reading from a stream.
-pub enum ReadFrom {
+pub enum ReadStart {
     /// Read from this sequence number.
     SeqNum(u64),
     /// Read from this timestamp.
@@ -651,7 +651,7 @@ pub enum ReadFrom {
 /// Input for [`read`](crate::S2Stream::read), [`read_session`](crate::S2Stream::read_session),
 /// and [`read_batch_session`](crate::S2Stream::read_batch_session) operations.
 pub struct ReadInput {
-    start: Option<ReadFrom>,
+    start: Option<ReadStart>,
     clamp: bool,
     count: Option<u64>,
     bytes: Option<u64>,
@@ -660,8 +660,8 @@ pub struct ReadInput {
     stream_config: Option<StreamConfig>,
 }
 
-impl From<ReadFrom> for ReadInput {
-    fn from(start: ReadFrom) -> Self {
+impl From<ReadStart> for ReadInput {
+    fn from(start: ReadStart) -> Self {
         Self::new().with_start(start)
     }
 }
@@ -673,7 +673,7 @@ impl ReadInput {
     }
 
     /// Return the starting position, if specified (otherwise begins at the tail).
-    pub fn start(&self) -> Option<ReadFrom> {
+    pub fn start(&self) -> Option<ReadStart> {
         self.start
     }
 
@@ -710,7 +710,7 @@ impl ReadInput {
     /// Set the starting position.
     ///
     /// Defaults to `None` (no start parameter is sent, causing the API to begin at the tail).
-    pub fn with_start(self, start: ReadFrom) -> Self {
+    pub fn with_start(self, start: ReadStart) -> Self {
         Self {
             start: Some(start),
             ..self
@@ -799,9 +799,9 @@ impl ReadInput {
         Option<StreamConfig>,
     ) {
         let (seq_num, timestamp, tail_offset) = match self.start {
-            Some(ReadFrom::SeqNum(n)) => (Some(n), None, None),
-            Some(ReadFrom::Timestamp(t)) => (None, Some(t), None),
-            Some(ReadFrom::TailOffset(o)) => (None, None, Some(o)),
+            Some(ReadStart::SeqNum(n)) => (Some(n), None, None),
+            Some(ReadStart::Timestamp(t)) => (None, Some(t), None),
+            Some(ReadStart::TailOffset(o)) => (None, None, Some(o)),
             None => (None, None, None),
         };
         let start = api::stream::ReadStart {
