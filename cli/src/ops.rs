@@ -696,7 +696,7 @@ pub fn read(
         _ => unreachable!("clap ensures only one start option"),
     };
 
-    let mut input = ReadInput::new().with_from(from).with_clamp(args.clamp);
+    let mut input = ReadInput::new().with_start(from).with_clamp(args.clamp);
     if let Some(count) = args.count {
         input = input.with_count(count);
     }
@@ -840,7 +840,7 @@ pub fn tail(
     // Use clamp to handle empty streams gracefully - if we ask for
     // TailOffset(10) but there are fewer records, clamp to the actual start.
     let mut input = ReadInput::new()
-        .with_from(ReadFrom::TailOffset(args.lines))
+        .with_start(ReadFrom::TailOffset(args.lines))
         .with_clamp(true);
     if !args.follow {
         input = input.with_count(args.lines);

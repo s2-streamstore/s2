@@ -633,10 +633,10 @@ proptest! {
             ReadFrom::Timestamp(value) => (None, Some(value), None),
             ReadFrom::TailOffset(value) => (None, None, Some(value)),
         };
-        let (api, _, _) = ReadInput::new()
-            .with_from(from)
-            .with_clamp(clamp)
-            .into_api_parts();
+        let input = ReadInput::new().with_start(from).with_clamp(clamp);
+        prop_assert_eq!(input.start(), Some(from));
+        prop_assert_eq!(ReadInput::from(from).start(), Some(from));
+        let (api, _, _) = input.into_api_parts();
 
         prop_assert_eq!(api.seq_num, seq_num);
         prop_assert_eq!(api.timestamp, timestamp);

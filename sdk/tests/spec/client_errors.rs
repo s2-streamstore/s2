@@ -1556,7 +1556,7 @@ async fn spec_c5_c7_c10_c11_d1_a1_transport_user_agent_inputs_concurrency_and_bi
     assert_eq!(ack.tail.seq_num, 1);
 
     let read_batch = stream
-        .read(ReadInput::new().with_from(ReadFrom::SeqNum(0)))
+        .read(ReadInput::new().with_start(ReadFrom::SeqNum(0)))
         .await
         .unwrap();
     assert_eq!(read_batch.records.len(), 1);
@@ -1992,7 +1992,7 @@ async fn spec_t2_t7_t7b_m1_retry_safety_request_tokens_and_timeouts() {
     let batch = stream_t
         .read(
             ReadInput::new()
-                .with_from(ReadFrom::SeqNum(0))
+                .with_start(ReadFrom::SeqNum(0))
                 .with_wait(Duration::from_secs(1))
                 .unwrap(),
         )

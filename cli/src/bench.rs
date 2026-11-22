@@ -574,7 +574,7 @@ pub fn bench_read(
     bench_read_inner(
         stream,
         record_size,
-        ReadInput::new().with_from(ReadFrom::SeqNum(0)),
+        ReadInput::new().with_start(ReadFrom::SeqNum(0)),
         write_done_records,
         bench_start,
     )
@@ -589,7 +589,7 @@ pub fn bench_read_catchup(
         stream,
         record_size,
         ReadInput::new()
-            .with_from(ReadFrom::SeqNum(0))
+            .with_start(ReadFrom::SeqNum(0))
             .with_wait(Duration::ZERO)
             .expect("whole-second duration"),
         Arc::new(AtomicU64::new(WRITE_DONE_SENTINEL)),

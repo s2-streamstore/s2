@@ -51,7 +51,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let batch = stream
         .read(
             ReadInput::new()
-                .with_from(ReadFrom::SeqNum(0))
+                .with_start(ReadFrom::SeqNum(0))
                 .with_count(100),
         )
         .await?;
@@ -112,7 +112,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ANCHOR: read-session
     let mut session = stream.read_session(
-        ReadInput::new().with_from(ReadFrom::SeqNum(0)),
+        ReadInput::new().with_start(ReadFrom::SeqNum(0)),
         ReadSessionConfig::new(),
     )?;
 
@@ -125,7 +125,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ANCHOR: read-session-tail-offset
     // Start reading from 10 records before the current tail
     let mut session = stream.read_session(
-        ReadInput::new().with_from(ReadFrom::TailOffset(10)),
+        ReadInput::new().with_start(ReadFrom::TailOffset(10)),
         ReadSessionConfig::new(),
     )?;
 
@@ -141,7 +141,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .as_millisecond()
         .max(0) as u64;
     let mut session = stream.read_session(
-        ReadInput::new().with_from(ReadFrom::Timestamp(one_hour_ago)),
+        ReadInput::new().with_start(ReadFrom::Timestamp(one_hour_ago)),
         ReadSessionConfig::new(),
     )?;
 
@@ -158,7 +158,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .max(0) as u64;
     let mut session = stream.read_session(
         ReadInput::new()
-            .with_from(ReadFrom::SeqNum(0))
+            .with_start(ReadFrom::SeqNum(0))
             .with_until(one_hour_ago),
         ReadSessionConfig::new(),
     )?;
@@ -174,7 +174,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // for new ones
     let mut session = stream.read_session(
         ReadInput::new()
-            .with_from(ReadFrom::SeqNum(0))
+            .with_start(ReadFrom::SeqNum(0))
             .with_wait(Duration::from_secs(30))?,
         ReadSessionConfig::new(),
     )?;

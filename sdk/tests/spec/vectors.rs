@@ -417,16 +417,16 @@ fn spec_vectors_numbers() {
                 "read.start.seq_num" => match raw.parse::<u64>() {
                     Ok(v) => {
                         assert!(expect_valid, "{label}");
-                        let input = ReadInput::new().with_from(ReadFrom::SeqNum(v));
-                        assert_eq!(input.from(), Some(ReadFrom::SeqNum(v)), "{label}");
+                        let input = ReadInput::new().with_start(ReadFrom::SeqNum(v));
+                        assert_eq!(input.start(), Some(ReadFrom::SeqNum(v)), "{label}");
                     }
                     Err(_) => assert!(!expect_valid, "{label}: expected valid u64"),
                 },
                 "read.start.timestamp" => match raw.parse::<u64>() {
                     Ok(v) => {
                         assert!(expect_valid, "{label}");
-                        let input = ReadInput::new().with_from(ReadFrom::Timestamp(v));
-                        assert_eq!(input.from(), Some(ReadFrom::Timestamp(v)), "{label}");
+                        let input = ReadInput::new().with_start(ReadFrom::Timestamp(v));
+                        assert_eq!(input.start(), Some(ReadFrom::Timestamp(v)), "{label}");
                     }
                     Err(_) => assert!(!expect_valid, "{label}: expected valid u64"),
                 },

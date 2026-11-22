@@ -651,13 +651,19 @@ pub enum ReadFrom {
 /// Input for [`read`](crate::S2Stream::read), [`read_session`](crate::S2Stream::read_session),
 /// and [`read_batch_session`](crate::S2Stream::read_batch_session) operations.
 pub struct ReadInput {
-    from: Option<ReadFrom>,
+    start: Option<ReadFrom>,
     clamp: bool,
     count: Option<u64>,
     bytes: Option<u64>,
     until: Option<u64>,
     wait_secs: Option<u32>,
     stream_config: Option<StreamConfig>,
+}
+
+impl From<ReadFrom> for ReadInput {
+    fn from(start: ReadFrom) -> Self {
+        Self::new().with_start(start)
+    }
 }
 
 impl ReadInput {
@@ -667,8 +673,8 @@ impl ReadInput {
     }
 
     /// Return the starting position, if specified (otherwise begins at the tail).
-    pub fn from(&self) -> Option<ReadFrom> {
-        self.from
+    pub fn start(&self) -> Option<ReadFrom> {
+        self.start
     }
 
     /// Return whether to start from the tail if the requested starting position is beyond it.
@@ -704,9 +710,9 @@ impl ReadInput {
     /// Set the starting position.
     ///
     /// Defaults to `None` (no start parameter is sent, causing the API to begin at the tail).
-    pub fn with_from(self, from: ReadFrom) -> Self {
+    pub fn with_start(self, start: ReadFrom) -> Self {
         Self {
-            from: Some(from),
+            start: Some(start),
             ..self
         }
     }
@@ -792,7 +798,7 @@ impl ReadInput {
         api::stream::ReadEnd,
         Option<StreamConfig>,
     ) {
-        let (seq_num, timestamp, tail_offset) = match self.from {
+        let (seq_num, timestamp, tail_offset) = match self.start {
             Some(ReadFrom::SeqNum(n)) => (Some(n), None, None),
             Some(ReadFrom::Timestamp(t)) => (None, Some(t), None),
             Some(ReadFrom::TailOffset(o)) => (None, None, Some(o)),

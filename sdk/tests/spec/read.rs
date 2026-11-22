@@ -218,7 +218,7 @@ async fn spec_r5_r6_r7_r8_read_session_records_batches_readahead_state_and_caugh
 
     let mut session = stream
         .read_session(
-            ReadInput::new().with_from(ReadFrom::SeqNum(0)),
+            ReadInput::new().with_start(ReadFrom::SeqNum(0)),
             ReadSessionConfig::default(),
         )
         .expect("R5: sync open succeeds");
@@ -355,7 +355,7 @@ async fn spec_r5_r6_r7_r8_read_session_records_batches_readahead_state_and_caugh
         .stream(stream_name.clone())
         .read_batch_session(
             ReadInput::new()
-                .with_from(ReadFrom::SeqNum(0))
+                .with_start(ReadFrom::SeqNum(0))
                 .with_count(2),
             ReadSessionConfig::default(),
         )
@@ -390,7 +390,7 @@ async fn spec_r5_r6_r7_r8_read_session_records_batches_readahead_state_and_caugh
         .basin(basin_name)
         .stream(stream_name)
         .read_session(
-            ReadInput::new().with_from(ReadFrom::SeqNum(0)),
+            ReadInput::new().with_start(ReadFrom::SeqNum(0)),
             ReadSessionConfig::default(),
         )
         .unwrap();
@@ -524,7 +524,7 @@ async fn spec_r9_r10_read_session_closing_buffered_delivery_and_abort() {
         .basin(basin_name.clone())
         .stream(stream_name.clone())
         .read_session(
-            ReadInput::new().with_from(ReadFrom::SeqNum(0)),
+            ReadInput::new().with_start(ReadFrom::SeqNum(0)),
             ReadSessionConfig::default(),
         )
         .unwrap();
@@ -574,7 +574,7 @@ async fn spec_r9_r10_read_session_closing_buffered_delivery_and_abort() {
         .basin(basin_name)
         .stream(stream_name)
         .read_session(
-            ReadInput::new().with_from(ReadFrom::SeqNum(0)),
+            ReadInput::new().with_start(ReadFrom::SeqNum(0)),
             ReadSessionConfig::default(),
         )
         .unwrap();
@@ -640,7 +640,7 @@ async fn spec_t7d_read_session_heartbeat_timeout_and_backpressure_pause() {
         .basin(basin_name)
         .stream(stream_name)
         .read_session(
-            ReadInput::new().with_from(ReadFrom::SeqNum(0)),
+            ReadInput::new().with_start(ReadFrom::SeqNum(0)),
             ReadSessionConfig::default(),
         )
         .unwrap();
@@ -787,7 +787,7 @@ async fn spec_r11_t5_t5b_read_session_resume_clamp_wait_416_and_unbounded() {
         .stream(stream_name.clone())
         .read_session(
             ReadInput::new()
-                .with_from(ReadFrom::TailOffset(2))
+                .with_start(ReadFrom::TailOffset(2))
                 .with_clamp(true)
                 .with_count(5)
                 .with_wait(Duration::from_secs(10))
@@ -909,7 +909,7 @@ async fn spec_r11_t5_t5b_read_session_resume_clamp_wait_416_and_unbounded() {
         .stream(stream_name.clone())
         .read_session(
             ReadInput::new()
-                .with_from(ReadFrom::SeqNum(0))
+                .with_start(ReadFrom::SeqNum(0))
                 .with_wait(Duration::from_secs(30))
                 .unwrap(),
             ReadSessionConfig::default(),
@@ -970,7 +970,7 @@ async fn spec_r11_t5_t5b_read_session_resume_clamp_wait_416_and_unbounded() {
         .stream(stream_name)
         .read_session(
             ReadInput::new()
-                .with_from(ReadFrom::SeqNum(0))
+                .with_start(ReadFrom::SeqNum(0))
                 .with_count(1),
             ReadSessionConfig::new().with_retry_policy(ReadSessionRetryPolicy::Unbounded),
         )
@@ -1033,7 +1033,7 @@ async fn spec_t6a_read_session_reconnect_advice_cooldown() {
         .stream(stream_name)
         .read_session(
             ReadInput::new()
-                .with_from(ReadFrom::SeqNum(0))
+                .with_start(ReadFrom::SeqNum(0))
                 .with_count(3),
             ReadSessionConfig::default(),
         )
@@ -1134,7 +1134,7 @@ async fn regression_read_session_r11c_reduced_wait_refreshes_after_record() {
         .stream(stream_name)
         .read_session(
             ReadInput::new()
-                .with_from(ReadFrom::SeqNum(0))
+                .with_start(ReadFrom::SeqNum(0))
                 .with_wait(Duration::from_secs(4))
                 .unwrap()
                 .with_count(2),
@@ -1242,7 +1242,7 @@ async fn regression_read_session_r11d_caught_up_and_count_exhausted() {
         .stream(stream_name.clone())
         .read_session(
             ReadInput::new()
-                .with_from(ReadFrom::SeqNum(0))
+                .with_start(ReadFrom::SeqNum(0))
                 .with_wait(Duration::ZERO)
                 .unwrap(),
             ReadSessionConfig::default(),
@@ -1318,7 +1318,7 @@ async fn regression_read_session_r11d_caught_up_and_count_exhausted() {
         .stream(stream_name.clone())
         .read_session(
             ReadInput::new()
-                .with_from(ReadFrom::SeqNum(0))
+                .with_start(ReadFrom::SeqNum(0))
                 .with_wait(Duration::ZERO)
                 .unwrap(),
             ReadSessionConfig::default(),
@@ -1382,7 +1382,7 @@ async fn regression_read_session_r11d_caught_up_and_count_exhausted() {
         .stream(stream_name)
         .read_session(
             ReadInput::new()
-                .with_from(ReadFrom::SeqNum(0))
+                .with_start(ReadFrom::SeqNum(0))
                 .with_count(1),
             ReadSessionConfig::default(),
         )

@@ -49,7 +49,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let batch = stream
         .read(
             ReadInput::new()
-                .with_from(ReadFrom::SeqNum(0))
+                .with_start(ReadFrom::SeqNum(0))
                 .with_count(10),
         )
         .await?;
