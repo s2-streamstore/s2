@@ -1212,6 +1212,10 @@ where
                 pool.promote_ready(id, sender.clone());
             }
             let _ = tx.send(DialOutcome::Ready(sender));
+            // Drop the watch sender immediately so its stored `SendRequest` is released once
+            // waiting callers finish dialing; otherwise `conn` stays open after idle reaping
+            // or connection retirement.
+            drop(tx);
 
             // Drive the HTTP/2 connection until all handles close, an error occurs, or
             // client shutdown fires (`C12`, dropping `conn` and its socket immediately).
@@ -1351,7 +1355,11 @@ async fn wait_for_dial(
             _ = shutdown.cancelled() => return Err(HttpError::Aborted),
             changed = rx.changed() => {
                 if changed.is_err() {
-                    return Err(HttpError::Aborted);
+                    return match &*rx.borrow_and_update() {
+                        DialOutcome::Ready(sender) => Ok(sender.clone()),
+                        DialOutcome::Failed(msg) => Err(HttpError::Connect((**msg).clone())),
+                        DialOutcome::Pending | DialOutcome::Aborted => Err(HttpError::Aborted),
+                    };
                 }
             }
         }
@@ -1749,6 +1757,7 @@ mod tests {
     #[derive(Clone)]
     struct DuplexH2Connector {
         dials: Arc<AtomicUsize>,
+        active_connections: Arc<AtomicUsize>,
         dial_delay: Duration,
         stall_error_body: bool,
     }
@@ -1757,9 +1766,18 @@ mod tests {
         fn new() -> Self {
             Self {
                 dials: Arc::new(AtomicUsize::new(0)),
+                active_connections: Arc::new(AtomicUsize::new(0)),
                 dial_delay: Duration::ZERO,
                 stall_error_body: false,
             }
+        }
+    }
+
+    struct ActiveConnGuard(Arc<AtomicUsize>);
+
+    impl Drop for ActiveConnGuard {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
         }
     }
 
@@ -1775,6 +1793,7 @@ mod tests {
 
         fn call(&mut self, _dst: Uri) -> Self::Future {
             let dials = self.dials.clone();
+            let active_connections = self.active_connections.clone();
             let dial_delay = self.dial_delay;
             let stall_error_body = self.stall_error_body;
             Box::pin(async move {
@@ -1787,6 +1806,8 @@ mod tests {
                     let Ok(mut conn) = h2::server::handshake(server_io).await else {
                         return;
                     };
+                    active_connections.fetch_add(1, Ordering::SeqCst);
+                    let _guard = ActiveConnGuard(active_connections);
                     while let Some(Ok((_req, mut respond))) = conn.accept().await {
                         if stall_error_body {
                             let resp = http::Response::builder()
@@ -1977,23 +1998,36 @@ mod tests {
     #[tokio::test]
     async fn poison_evicts_only_targeted_connection_preserving_siblings() {
         let http2 = Http2Config::new().with_max_concurrent_requests(1).unwrap();
-        let pool = test_pool_with(DuplexH2Connector::new(), http2);
+        let connector = DuplexH2Connector::new();
+        let active_connections = connector.active_connections.clone();
+        let pool = test_pool_with(connector, http2);
         let (id1, p1) = checkout_permit(&pool, TEST_ORIGIN).await;
         let (id2, p2) = checkout_permit(&pool, TEST_ORIGIN).await;
         assert_ne!(id1, id2);
         assert_eq!(host_connection_count(&pool, TEST_ORIGIN), 2);
+        assert_eq!(active_connections.load(Ordering::SeqCst), 2);
 
         let uri: Uri = TEST_ORIGIN.parse().unwrap();
         let host_pool = pool.get_or_create_host_pool(TEST_ORIGIN, &uri).unwrap();
         host_pool.poison(id1);
         assert_eq!(host_connection_count(&pool, TEST_ORIGIN), 1);
 
+        // Dropping the retired connection's last permit/sender closes its underlying socket.
+        drop(p1);
+        for _ in 0..16 {
+            if active_connections.load(Ordering::SeqCst) == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(active_connections.load(Ordering::SeqCst), 1);
+
         // Freeing the healthy sibling's permit allows reusing it rather than dialing a new one.
         drop(p2);
         let (id3, p3) = checkout_permit(&pool, TEST_ORIGIN).await;
         assert_eq!(id3, id2);
         assert_eq!(host_connection_count(&pool, TEST_ORIGIN), 1);
-        drop((p1, p3));
+        drop(p3);
     }
 
     // spec: r1 C13a
@@ -2032,24 +2066,34 @@ mod tests {
     // spec: r1 C13c
     #[tokio::test(start_paused = true)]
     async fn reaper_removes_idle_connections_at_90s() {
-        let pool = test_pool();
+        let connector = DuplexH2Connector::new();
+        let active_connections = connector.active_connections.clone();
+        let pool = test_pool_with(connector, Http2Config::new());
         let req = RequestBuilder::get("http://localhost:8080/test".parse().unwrap())
             .build()
             .unwrap();
         let resp = pool.execute_unary(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(host_connection_count(&pool, TEST_ORIGIN), 1);
+        assert_eq!(active_connections.load(Ordering::SeqCst), 1);
 
-        // Just before 90s: still pooled.
+        // Just before 90s: still pooled and open.
         tokio::time::advance(IDLE_TIMEOUT - Duration::from_secs(1)).await;
         tokio::task::yield_now().await;
         assert_eq!(host_connection_count(&pool, TEST_ORIGIN), 1);
+        assert_eq!(active_connections.load(Ordering::SeqCst), 1);
 
-        // At 90s: reaped promptly without waiting an extra 30s tick.
+        // At 90s: reaped promptly and the underlying connection closes.
         tokio::time::advance(Duration::from_secs(2)).await;
-        tokio::task::yield_now().await;
+        for _ in 0..16 {
+            if active_connections.load(Ordering::SeqCst) == 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
         assert_eq!(host_connection_count(&pool, TEST_ORIGIN), 0);
         assert!(!pool.hosts.read().unwrap().map.contains_key(TEST_ORIGIN));
+        assert_eq!(active_connections.load(Ordering::SeqCst), 0);
     }
 
     // spec: r1 C13
