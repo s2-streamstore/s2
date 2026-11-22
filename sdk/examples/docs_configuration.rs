@@ -2,7 +2,7 @@
 //!
 //! Run with: cargo run --example docs_configuration
 
-use std::{num::NonZeroU32, time::Duration};
+use std::time::Duration;
 
 use s2_sdk::{
     S2,
@@ -49,7 +49,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let client = S2::new(
             S2Config::new(access_token).with_retry(
                 RetryConfig::new()
-                    .with_max_attempts(NonZeroU32::new(5).unwrap())
+                    .with_max_attempts(5)?
                     .with_min_base_delay(Duration::from_millis(100))
                     .with_max_base_delay(Duration::from_secs(2)),
             ),
@@ -64,8 +64,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // ANCHOR: timeout-config
         let client = S2::new(
             S2Config::new(access_token)
-                .with_connection_timeout(Duration::from_secs(5))
-                .with_request_timeout(Duration::from_secs(10)),
+                .with_connection_timeout(Duration::from_secs(5))?
+                .with_request_timeout(Duration::from_secs(10))?,
         )?;
         // ANCHOR_END: timeout-config
         println!("Created client with timeout config: {:?}", client);

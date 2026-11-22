@@ -6,8 +6,8 @@ use s2_sdk::{
     S2,
     types::{
         AppendInput, AppendRecord, AppendRecordBatch, BasinConfig, BasinName, BasinReconfiguration,
-        CreateBasinInput, CreateStreamInput, DeleteStreamInput, EncryptionAlgorithm, ReadFrom,
-        ReadInput, ReadLimits, ReadStart, ReadStop, ReconfigureBasinInput, S2Config, StreamName,
+        CreateBasinInput, CreateStreamInput, EncryptionAlgorithm, ReadFrom, ReadInput, ReadLimits,
+        ReadStart, ReadStop, ReconfigureBasinInput, S2Config, StreamName,
     },
 };
 
@@ -68,9 +68,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Read {} encrypted record(s)", batch.records.len());
 
-    basin
-        .delete_stream(DeleteStreamInput::new(stream_name))
-        .await?;
+    basin.delete_stream(stream_name).await?;
 
     Ok(())
 }

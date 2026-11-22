@@ -12,8 +12,10 @@ use serde::{Deserialize, Serialize};
     strum::Display,
     strum::EnumString,
     strum::IntoStaticStr,
+    strum::VariantArray,
 )]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
 #[non_exhaustive]
 // Keep this alphabetized.
@@ -52,6 +54,9 @@ pub enum ErrorCode {
 }
 
 impl ErrorCode {
+    #[doc(hidden)]
+    pub const ALL: &'static [Self] = <Self as strum::VariantArray>::VARIANTS;
+
     /// Whether this code represents an authentication or authorization failure.
     pub fn is_auth_error(self) -> bool {
         matches!(

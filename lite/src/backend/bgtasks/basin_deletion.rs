@@ -137,13 +137,13 @@ impl Backend {
 mod tests {
     use std::str::FromStr;
 
+    use jiff::Timestamp;
     use s2_common::{
         basin::BasinName,
         config::{BasinConfig, StreamConfig},
         resources::ListLimit,
         stream::{StreamName, StreamNameStartAfter},
     };
-    use time::OffsetDateTime;
 
     use super::super::tests::test_backend;
     use crate::backend::{
@@ -153,20 +153,20 @@ mod tests {
         test_util::DbWriteTestExt as _,
     };
 
-    fn basin_meta(deleted_at: Option<OffsetDateTime>) -> kv::basin_meta::BasinMeta {
+    fn basin_meta(deleted_at: Option<Timestamp>) -> kv::basin_meta::BasinMeta {
         kv::basin_meta::BasinMeta {
             config: BasinConfig::default(),
-            created_at: OffsetDateTime::now_utc(),
+            created_at: Timestamp::now(),
             deleted_at,
             creation_idempotency_key: None,
         }
     }
 
-    fn stream_meta(deleted_at: Option<OffsetDateTime>) -> kv::stream_meta::StreamMeta {
+    fn stream_meta(deleted_at: Option<Timestamp>) -> kv::stream_meta::StreamMeta {
         kv::stream_meta::StreamMeta {
             config: StreamConfig::default(),
             cipher: None,
-            created_at: OffsetDateTime::now_utc(),
+            created_at: Timestamp::now(),
             deleted_at,
             creation_idempotency_key: None,
         }
@@ -185,7 +185,7 @@ mod tests {
             .db
             .put(
                 kv::basin_meta::ser_key(basin),
-                kv::basin_meta::ser_value(&basin_meta(Some(OffsetDateTime::now_utc()))),
+                kv::basin_meta::ser_value(&basin_meta(Some(Timestamp::now()))),
             )
             .assert_durable()
             .await;
@@ -200,7 +200,7 @@ mod tests {
     }
 
     async fn seed_tombstoned_streams(backend: &Backend, basin: &BasinName, count: usize) {
-        let deleted_at = OffsetDateTime::from_unix_timestamp(1234567890).unwrap();
+        let deleted_at = Timestamp::from_second(1234567890).unwrap();
         let mut batch = slatedb::WriteBatch::new();
         for i in 0..count {
             let stream = stream_name_for_index(i);
@@ -248,7 +248,7 @@ mod tests {
             .db
             .put(
                 kv::basin_meta::ser_key(&basin),
-                kv::basin_meta::ser_value(&basin_meta(Some(OffsetDateTime::now_utc()))),
+                kv::basin_meta::ser_value(&basin_meta(Some(Timestamp::now()))),
             )
             .assert_durable()
             .await;
@@ -420,7 +420,7 @@ mod tests {
             .db
             .put(
                 kv::basin_meta::ser_key(&basin),
-                kv::basin_meta::ser_value(&basin_meta(Some(OffsetDateTime::now_utc()))),
+                kv::basin_meta::ser_value(&basin_meta(Some(Timestamp::now()))),
             )
             .assert_durable()
             .await;
@@ -464,7 +464,7 @@ mod tests {
         let backend = test_backend().await;
         let basin = BasinName::from_str("test-basin").unwrap();
         let stream = StreamName::from_str("tombstoned-stream").unwrap();
-        let deleted_at = OffsetDateTime::from_unix_timestamp(1234567890).unwrap();
+        let deleted_at = Timestamp::from_second(1234567890).unwrap();
 
         seed_basin_for_deletion(&backend, &basin).await;
         backend
@@ -503,7 +503,7 @@ mod tests {
         let backend = test_backend().await;
         let basin = BasinName::from_str("test-basin").unwrap();
         let stream = StreamName::from_str("tombstoned-stream").unwrap();
-        let deleted_at = OffsetDateTime::from_unix_timestamp(1234567890).unwrap();
+        let deleted_at = Timestamp::from_second(1234567890).unwrap();
 
         seed_basin_for_deletion(&backend, &basin).await;
         backend

@@ -15,15 +15,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stream = s2.basin(basin_name).stream(stream_name);
 
     let input = ReadInput::new();
-    let mut batches = stream
-        .read_session(input, ReadSessionConfig::default())
-        .await?;
+    let mut records = stream.read_session(input, ReadSessionConfig::default())?;
     loop {
         select! {
-            batch = batches.next() => {
-                let Some(batch) = batch else { break };
-                let batch = batch?;
-                println!("{batch:?}");
+            record = records.next() => {
+                let Some(record) = record else { break };
+                let record = record?;
+                println!("{record:?}");
             }
             _ = tokio::signal::ctrl_c() => break,
         }

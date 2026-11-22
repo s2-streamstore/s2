@@ -1318,9 +1318,6 @@ name = "deranged"
 version = "0.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e9de72ce2ad1f90dc62fa25f0f430ef85eb4b0d8fa0be4f30373bc40a21d28e"
-dependencies = [
- "serde_core",
-]
 
 [[package]]
 name = "digest"
@@ -1426,7 +1423,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e35d6e78f4cebb90e51d543db8fe41528851d6deeef6ef21ebd4bfdc1e784776"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2667,7 +2664,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3193,7 +3190,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3519,7 +3516,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3577,7 +3574,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3623,6 +3620,7 @@ dependencies = [
  "futures-util",
  "http",
  "itertools",
+ "jiff",
  "mime",
  "prost",
  "s2-common",
@@ -3630,7 +3628,6 @@ dependencies = [
  "serde_json",
  "strum",
  "thiserror 2.0.21",
- "time",
  "tokio-util",
  "zstd 0.14.4",
 ]
@@ -3646,12 +3643,12 @@ dependencies = [
  "compact_str",
  "enumset",
  "http",
+ "jiff",
  "rand 0.10.4",
  "secrecy",
  "serde",
  "strum",
  "thiserror 2.0.21",
- "time",
 ]
 
 [[package]]
@@ -3674,6 +3671,7 @@ dependencies = [
  "include_dir",
  "indexmap",
  "itertools",
+ "jiff",
  "parking_lot",
  "prometheus",
  "prost",
@@ -3691,7 +3689,6 @@ dependencies = [
  "strum",
  "thiserror 2.0.21",
  "tikv-jemallocator",
- "time",
  "tokio",
  "tokio-util",
  "tower-http 0.7.1",
@@ -3718,6 +3715,7 @@ dependencies = [
  "async-compression",
  "async-stream",
  "async-trait",
+ "base64ct",
  "bytes",
  "compact_str",
  "futures-core",
@@ -3729,6 +3727,7 @@ dependencies = [
  "hyper",
  "hyper-rustls",
  "hyper-util",
+ "jiff",
  "pin-project-lite",
  "prost",
  "rand 0.10.4",
@@ -3740,11 +3739,9 @@ dependencies = [
  "serde_json",
  "serde_urlencoded",
  "thiserror 2.0.21",
- "time",
  "tokio",
- "tokio-muxt",
- "tokio-stream",
  "tokio-util",
+ "tower-service",
  "tracing",
  "urlencoding",
  "uuid",
@@ -3801,7 +3798,7 @@ dependencies = [
 [[package]]
 name = "s2-verification"
 version = "0.4.0"
-source = "git+https://github.com/s2-streamstore/s2-verification?rev=d5cf3b755083a62785c732e8a271ae3e54033d58#d5cf3b755083a62785c732e8a271ae3e54033d58"
+source = "git+https://github.com/s2-streamstore/s2-verification?rev=e7c6ba78456806ef680bcde0c9d96cb566d93de0#e7c6ba78456806ef680bcde0c9d96cb566d93de0"
 dependencies = [
  "antithesis_sdk",
  "clap",
@@ -4628,16 +4625,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tokio-muxt"
-version = "0.8.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a08b20f8324114e2639a1a251692cc8a4154aa311bee55a83bdc82826b09a3b1"
-dependencies = [
- "pin-project",
- "tokio",
-]
-
-[[package]]
 name = "tokio-rustls"
 version = "0.26.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5177,7 +5164,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

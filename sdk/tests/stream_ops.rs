@@ -6,18 +6,11 @@ use assert_matches::assert_matches;
 use common::{S2Stream, SharedS2Basin, s2, s2_config, unique_basin_name, unique_stream_name};
 use futures_util::{StreamExt, poll};
 use rstest::rstest;
-use s2_sdk::{
-    append_session::AppendSessionConfig,
-    batching::{BatchLimits, BatchingConfig},
-    error::*,
-    producer::ProducerConfig,
-    types::*,
-};
+use s2_sdk::{append_session::AppendSessionConfig, error::*, producer::ProducerConfig, types::*};
 use test_context::test_context;
-use time::OffsetDateTime;
 
 fn now_millis() -> u64 {
-    (OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as u64
+    Timestamp::now().as_millisecond() as u64
 }
 
 fn past_millis(offset_ms: u64) -> u64 {
@@ -45,8 +38,8 @@ async fn tail_of_nonexistent_stream_errors(
 
     assert_matches!(
         result,
-        Err(ReadError::Request(RequestError::Server(ServerError { code, .. }))) => {
-            assert_eq!(code, "stream_not_found");
+        Err(ReadError::Server(ServerError { code, .. })) => {
+            assert_eq!(code.as_deref(), Some("stream_not_found"));
         }
     );
 
@@ -110,7 +103,9 @@ async fn append_with_headers(stream: &S2Stream) -> Result<(), Box<dyn std::error
 
     assert_eq!(ack.start.seq_num, 0);
 
-    let batch = stream.read(ReadInput::new()).await?;
+    let batch = stream
+        .read(ReadInput::new().with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0))))
+        .await?;
 
     assert_eq!(batch.records.len(), 1);
     assert_eq!(batch.records[0].headers.len(), headers.len());
@@ -195,6 +190,7 @@ async fn read_with_count_limit_exact(stream: &S2Stream) -> Result<(), Box<dyn st
     let batch = stream
         .read(
             ReadInput::new()
+                .with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0)))
                 .with_stop(ReadStop::new().with_limits(ReadLimits::new().with_count(3))),
         )
         .await?;
@@ -256,6 +252,7 @@ async fn read_with_count_over_max_clamps(
     let batch = stream
         .read(
             ReadInput::new()
+                .with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0)))
                 .with_stop(ReadStop::new().with_limits(ReadLimits::new().with_count(2000))),
         )
         .await?;
@@ -285,7 +282,10 @@ async fn read_with_bytes_limit_partial(
     let batch = stream
         .read(
             ReadInput::new()
-                .with_stop(ReadStop::new().with_limits(ReadLimits::new().with_bytes(bytes_limit))),
+                .with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0)))
+                .with_stop(
+                    ReadStop::new().with_limits(ReadLimits::new().with_bytes(bytes_limit as u64)),
+                ),
         )
         .await?;
 
@@ -310,7 +310,10 @@ async fn read_with_bytes_limit_exact(stream: &S2Stream) -> Result<(), Box<dyn st
     let batch = stream
         .read(
             ReadInput::new()
-                .with_stop(ReadStop::new().with_limits(ReadLimits::new().with_bytes(bytes_limit))),
+                .with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0)))
+                .with_stop(
+                    ReadStop::new().with_limits(ReadLimits::new().with_bytes(bytes_limit as u64)),
+                ),
         )
         .await?;
 
@@ -338,6 +341,7 @@ async fn read_with_bytes_limit_exceeds(
     let batch = stream
         .read(
             ReadInput::new()
+                .with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0)))
                 .with_stop(ReadStop::new().with_limits(ReadLimits::new().with_bytes(1000))),
         )
         .await?;
@@ -363,12 +367,15 @@ async fn read_with_bytes_over_max_clamps(
     )?])?);
     stream.append(input).await?;
 
-    let batch =
-        stream
-            .read(ReadInput::new().with_stop(
-                ReadStop::new().with_limits(ReadLimits::new().with_bytes(2 * 1024 * 1024)),
-            ))
-            .await?;
+    let batch = stream
+        .read(
+            ReadInput::new()
+                .with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0)))
+                .with_stop(
+                    ReadStop::new().with_limits(ReadLimits::new().with_bytes(2 * 1024 * 1024)),
+                ),
+        )
+        .await?;
 
     let read_bytes: usize = batch.records.iter().map(|r| r.metered_bytes()).sum();
     assert!(read_bytes <= 1024 * 1024);
@@ -399,7 +406,9 @@ async fn read_from_seq_num_with_bytes_limit(
         .read(
             ReadInput::new()
                 .with_start(ReadStart::new().with_from(ReadFrom::SeqNum(1)))
-                .with_stop(ReadStop::new().with_limits(ReadLimits::new().with_bytes(bytes_limit))),
+                .with_stop(
+                    ReadStop::new().with_limits(ReadLimits::new().with_bytes(bytes_limit as u64)),
+                ),
         )
         .await?;
 
@@ -427,6 +436,7 @@ async fn read_with_zero_bytes_limit(stream: &S2Stream) -> Result<(), Box<dyn std
     let batch = stream
         .read(
             ReadInput::new()
+                .with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0)))
                 .with_stop(ReadStop::new().with_limits(ReadLimits::new().with_bytes(0))),
         )
         .await?;
@@ -450,7 +460,11 @@ async fn read_with_unbounded_limit(stream: &S2Stream) -> Result<(), Box<dyn std:
     assert_eq!(ack.end.seq_num, 2);
 
     let batch = stream
-        .read(ReadInput::new().with_stop(ReadStop::new().with_limits(ReadLimits::new())))
+        .read(
+            ReadInput::new()
+                .with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0)))
+                .with_stop(ReadStop::new().with_limits(ReadLimits::new())),
+        )
         .await?;
 
     assert_eq!(batch.records.len(), 2);
@@ -494,9 +508,10 @@ async fn append_with_mismatched_seq_num_errors(
 
     assert_matches!(
         result,
-        Err(AppendError::ConditionFailed(
-            AppendConditionFailed::SeqNumMismatch(1)
-        ))
+        Err(AppendError::SeqNumMismatch(SeqNumMismatchError {
+            assignable_seq_num: 1,
+            ..
+        }))
     );
 
     Ok(())
@@ -507,7 +522,7 @@ async fn append_with_mismatched_seq_num_errors(
 async fn append_session_with_mismatched_seq_num_errors(
     stream: &S2Stream,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let session = stream.append_session(AppendSessionConfig::new());
+    let session = stream.append_session(AppendSessionConfig::new())?;
 
     let input1 = AppendInput::new(AppendRecordBatch::try_from_iter([AppendRecord::new(
         "lorem",
@@ -527,9 +542,10 @@ async fn append_session_with_mismatched_seq_num_errors(
 
     assert_matches!(
         result,
-        Err(AppendSessionError::Append(AppendError::ConditionFailed(
-            AppendConditionFailed::SeqNumMismatch(1)
-        )))
+        Err(AppendSessionError::SeqNumMismatch(SeqNumMismatchError {
+            assignable_seq_num: 1,
+            ..
+        }))
     );
 
     Ok(())
@@ -590,8 +606,11 @@ async fn append_with_mismatched_fencing_token_errors(
 
     assert_matches!(
         result,
-        Err(AppendError::ConditionFailed(AppendConditionFailed::FencingTokenMismatch(fencing_token))) => {
-            assert_eq!(fencing_token, fencing_token_1)
+        Err(AppendError::FencingTokenMismatch(FencingTokenMismatchError {
+            current_fencing_token,
+            ..
+        })) => {
+            assert_eq!(current_fencing_token, fencing_token_1)
         }
     );
 
@@ -603,7 +622,7 @@ async fn append_with_mismatched_fencing_token_errors(
 async fn append_session_with_mismatched_fencing_token_errors(
     stream: &S2Stream,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let session = stream.append_session(AppendSessionConfig::new());
+    let session = stream.append_session(AppendSessionConfig::new())?;
 
     let fencing_token_1 = FencingToken::generate(30).expect("valid fencing token");
     let input1 = AppendInput::new(AppendRecordBatch::try_from_iter([CommandRecord::fence(
@@ -626,8 +645,11 @@ async fn append_session_with_mismatched_fencing_token_errors(
 
     assert_matches!(
         result,
-        Err(AppendSessionError::Append(AppendError::ConditionFailed(AppendConditionFailed::FencingTokenMismatch(fencing_token)))) => {
-            assert_eq!(fencing_token, fencing_token_1)
+        Err(AppendSessionError::FencingTokenMismatch(FencingTokenMismatchError {
+            current_fencing_token,
+            ..
+        })) => {
+            assert_eq!(current_fencing_token, fencing_token_1)
         }
     );
 
@@ -641,9 +663,12 @@ async fn read_empty_stream_errors(stream: &S2Stream) -> Result<(), Box<dyn std::
 
     assert_matches!(
         result,
-        Err(ReadError::ReadUnwritten(StreamPosition {
-            seq_num: 0,
-            timestamp: 0,
+        Err(ReadError::ReadUnwritten(ReadUnwrittenError {
+            tail: StreamPosition {
+                seq_num: 0,
+                timestamp: 0,
+                ..
+            },
             ..
         }))
     );
@@ -669,7 +694,10 @@ async fn read_beyond_tail_errors(stream: &S2Stream) -> Result<(), Box<dyn std::e
 
     assert_matches!(
         result,
-        Err(ReadError::ReadUnwritten(StreamPosition { seq_num: 1, .. }))
+        Err(ReadError::ReadUnwritten(ReadUnwrittenError {
+            tail: StreamPosition { seq_num: 1, .. },
+            ..
+        }))
     );
 
     Ok(())
@@ -701,7 +729,10 @@ async fn read_beyond_tail_with_clamp_to_tail_errors(
 
     assert_matches!(
         result,
-        Err(ReadError::ReadUnwritten(StreamPosition { seq_num: 1, .. }))
+        Err(ReadError::ReadUnwritten(ReadUnwrittenError {
+            tail: StreamPosition { seq_num: 1, .. },
+            ..
+        }))
     );
 
     Ok(())
@@ -729,7 +760,7 @@ async fn read_beyond_tail_with_clamp_to_tail_and_wait_returns_empty_batch(
                         .with_from(ReadFrom::SeqNum(10))
                         .with_clamp_to_tail(true),
                 )
-                .with_stop(ReadStop::new().with_wait(1)),
+                .with_stop(ReadStop::new().with_wait(Duration::from_secs(1))?),
         )
         .await?;
 
@@ -752,17 +783,22 @@ async fn read_session_beyond_tail_errors(
     assert_eq!(ack.start.seq_num, 0);
     assert_eq!(ack.end.seq_num, 1);
 
-    let result = stream
-        .read_session(
-            ReadInput::new().with_start(ReadStart::new().with_from(ReadFrom::SeqNum(10))),
-            ReadSessionConfig::default(),
-        )
-        .await;
+    let mut session = stream.read_session(
+        ReadInput::new().with_start(ReadStart::new().with_from(ReadFrom::SeqNum(10))),
+        ReadSessionConfig::default(),
+    )?;
 
-    assert!(result.is_err());
+    let err = session
+        .next()
+        .await
+        .expect("should yield error")
+        .expect_err("should be err");
     assert_matches!(
-        result.err().expect("should be err"),
-        ReadSessionError::Read(ReadError::ReadUnwritten(StreamPosition { seq_num: 1, .. }))
+        err,
+        ReadSessionError::ReadUnwritten(ReadUnwrittenError {
+            tail: StreamPosition { seq_num: 1, .. },
+            ..
+        })
     );
 
     Ok(())
@@ -782,21 +818,19 @@ async fn read_session_beyond_tail_with_clamp_to_tail(
     assert_eq!(ack.start.seq_num, 0);
     assert_eq!(ack.end.seq_num, 1);
 
-    let mut session = stream
-        .read_session(
-            ReadInput::new().with_start(
-                ReadStart::new()
-                    .with_from(ReadFrom::SeqNum(10))
-                    .with_clamp_to_tail(true),
-            ),
-            ReadSessionConfig::default(),
-        )
-        .await?;
+    let mut session = stream.read_session(
+        ReadInput::new().with_start(
+            ReadStart::new()
+                .with_from(ReadFrom::SeqNum(10))
+                .with_clamp_to_tail(true),
+        ),
+        ReadSessionConfig::default(),
+    )?;
 
-    assert_eq!(session.resume_seq_num(), None);
+    assert_eq!(session.next_seq_num(), None);
     let result = tokio::time::timeout(Duration::from_secs(1), session.next()).await;
     assert_matches!(result, Err(tokio::time::error::Elapsed { .. }));
-    assert_eq!(session.resume_seq_num(), Some(ack.tail.seq_num));
+    assert_eq!(session.next_seq_num(), Some(ack.tail.seq_num));
 
     Ok(())
 }
@@ -812,24 +846,22 @@ async fn read_session_reports_caught_up_after_tail_delivery(
             AppendRecord::new("second")?,
         ])?))
         .await?;
-    let mut session = stream
-        .read_session(
-            ReadInput::new().with_start(ReadStart::new().with_from(ReadFrom::TailOffset(2))),
-            ReadSessionConfig::default(),
-        )
-        .await?;
+    let mut session = stream.read_session(
+        ReadInput::new().with_start(ReadStart::new().with_from(ReadFrom::TailOffset(2))),
+        ReadSessionConfig::default(),
+    )?;
     let mut caught_up = session.caught_up();
     let mut seq_nums = Vec::new();
 
     assert!(!session.is_caught_up());
-    assert_eq!(session.resume_seq_num(), None);
+    assert_eq!(session.next_seq_num(), None);
     let caught_up_tail = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             tokio::select! {
                 tail = &mut caught_up => break tail,
-                batch = session.next() => {
-                    let batch = batch.expect("session should reach the tail")?;
-                    seq_nums.extend(batch.records.into_iter().map(|record| record.seq_num));
+                record = session.next() => {
+                    let record = record.expect("session should reach the tail")?;
+                    seq_nums.push(record.seq_num);
                 }
             }
         }
@@ -840,28 +872,21 @@ async fn read_session_reports_caught_up_after_tail_delivery(
     assert!(session.is_caught_up());
     assert_eq!(seq_nums, [ack.tail.seq_num - 2, ack.tail.seq_num - 1]);
     assert_eq!(caught_up_tail, ack.tail);
-    assert_eq!(session.resume_seq_num(), Some(ack.tail.seq_num));
+    assert_eq!(session.next_seq_num(), Some(ack.tail.seq_num));
 
     let next_ack = stream
         .append(AppendInput::new(AppendRecordBatch::try_from_iter([
             AppendRecord::new("third")?,
         ])?))
         .await?;
-    let next_batch = tokio::time::timeout(Duration::from_secs(30), session.next())
+    let next_record = tokio::time::timeout(Duration::from_secs(30), session.next())
         .await
         .expect("session should keep reading after catching up")
         .expect("session should remain open")?;
 
-    assert_eq!(
-        next_batch
-            .records
-            .iter()
-            .map(|record| record.seq_num)
-            .collect::<Vec<_>>(),
-        [ack.tail.seq_num]
-    );
+    assert_eq!(next_record.seq_num, ack.tail.seq_num);
     assert!(session.is_caught_up());
-    assert_eq!(next_batch.tail, Some(next_ack.tail));
+    assert_eq!(session.last_observed_tail(), Some(next_ack.tail));
 
     Ok(())
 }
@@ -881,7 +906,9 @@ async fn append_with_empty_header_value(
     assert_eq!(ack.start.seq_num, 0);
     assert_eq!(ack.end.seq_num, 1);
 
-    let batch = stream.read(ReadInput::new()).await?;
+    let batch = stream
+        .read(ReadInput::new().with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0))))
+        .await?;
 
     assert_eq!(batch.records.len(), 1);
     assert_eq!(batch.records[0].headers.len(), 2);
@@ -906,7 +933,9 @@ async fn append_mixed_records_with_and_without_headers(
     assert_eq!(ack.start.seq_num, 0);
     assert_eq!(ack.end.seq_num, 3);
 
-    let batch = stream.read(ReadInput::new()).await?;
+    let batch = stream
+        .read(ReadInput::new().with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0))))
+        .await?;
 
     assert_eq!(batch.records.len(), 3);
     assert_eq!(batch.records[0].headers.len(), 1);
@@ -1045,7 +1074,9 @@ async fn read_from_timestamp_with_bytes_limit(
         .read(
             ReadInput::new()
                 .with_start(ReadStart::new().with_from(ReadFrom::Timestamp(base_timestamp + 1)))
-                .with_stop(ReadStop::new().with_limits(ReadLimits::new().with_bytes(bytes_limit))),
+                .with_stop(
+                    ReadStop::new().with_limits(ReadLimits::new().with_bytes(bytes_limit as u64)),
+                ),
         )
         .await?;
 
@@ -1081,7 +1112,7 @@ async fn read_from_timestamp_in_future_errors(
         )
         .await;
 
-    assert_matches!(result, Err(ReadError::ReadUnwritten(tail)) => {
+    assert_matches!(result, Err(ReadError::ReadUnwritten(ReadUnwrittenError { tail, .. })) => {
         assert_eq!(tail.seq_num, 2);
         assert_eq!(tail.timestamp, base_timestamp + 1);
     });
@@ -1179,14 +1210,12 @@ async fn append_without_timestamp_client_require_errors(
 
     assert_matches!(
         result,
-        Err(AppendError::Request(RequestError::Server(ServerError { code, .. }))) => {
-            assert_eq!(code, "invalid");
+        Err(AppendError::Server(ServerError { code, .. })) => {
+            assert_eq!(code.as_deref(), Some("invalid"));
         }
     );
 
-    basin
-        .delete_stream(DeleteStreamInput::new(stream_name))
-        .await?;
+    basin.delete_stream(stream_name).await?;
 
     Ok(())
 }
@@ -1216,9 +1245,7 @@ async fn append_with_future_timestamp_uncapped_false_caps(
 
     assert!(ack.start.timestamp < future);
 
-    basin
-        .delete_stream(DeleteStreamInput::new(stream_name))
-        .await?;
+    basin.delete_stream(stream_name).await?;
 
     Ok(())
 }
@@ -1248,9 +1275,7 @@ async fn append_with_future_timestamp_uncapped_true_preserves(
 
     assert_eq!(ack.start.timestamp, future);
 
-    basin
-        .delete_stream(DeleteStreamInput::new(stream_name))
-        .await?;
+    basin.delete_stream(stream_name).await?;
 
     Ok(())
 }
@@ -1295,8 +1320,8 @@ async fn append_to_nonexistent_stream_errors(
 
     assert_matches!(
         result,
-        Err(AppendError::Request(RequestError::Server(ServerError { code, .. }))) => {
-            assert_eq!(code, "stream_not_found");
+        Err(AppendError::Server(ServerError { code, .. })) => {
+            assert_eq!(code.as_deref(), Some("stream_not_found"));
         }
     );
 
@@ -1315,8 +1340,8 @@ async fn append_invalid_command_header_errors(
 
     assert_matches!(
         result,
-        Err(AppendError::Request(RequestError::Server(ServerError { code, .. }))) => {
-            assert_eq!(code, "invalid");
+        Err(AppendError::Server(ServerError { code, .. })) => {
+            assert_eq!(code.as_deref(), Some("invalid"));
         }
     );
 
@@ -1336,8 +1361,8 @@ async fn append_invalid_command_header_with_extra_headers_errors(
 
     assert_matches!(
         result,
-        Err(AppendError::Request(RequestError::Server(ServerError { code, .. }))) => {
-            assert_eq!(code, "invalid");
+        Err(AppendError::Server(ServerError { code, .. })) => {
+            assert_eq!(code.as_deref(), Some("invalid"));
         }
     );
 
@@ -1420,7 +1445,7 @@ async fn read_empty_stream_with_wait_returns_empty(
     stream: &S2Stream,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let batch = stream
-        .read(ReadInput::new().with_stop(ReadStop::new().with_wait(1)))
+        .read(ReadInput::new().with_stop(ReadStop::new().with_wait(Duration::from_secs(1))?))
         .await?;
 
     assert!(batch.records.is_empty());
@@ -1442,6 +1467,7 @@ async fn read_with_count_zero_returns_empty(
     let batch = stream
         .read(
             ReadInput::new()
+                .with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0)))
                 .with_stop(ReadStop::new().with_limits(ReadLimits::new().with_count(0))),
         )
         .await?;
@@ -1465,6 +1491,7 @@ async fn read_with_bytes_zero_returns_empty(
     let batch = stream
         .read(
             ReadInput::new()
+                .with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0)))
                 .with_stop(ReadStop::new().with_limits(ReadLimits::new().with_bytes(0))),
         )
         .await?;
@@ -1491,7 +1518,13 @@ async fn read_from_tail_offset_variants(
     let result = stream
         .read(ReadInput::new().with_start(ReadStart::new().with_from(ReadFrom::TailOffset(0))))
         .await;
-    assert_matches!(result, Err(ReadError::ReadUnwritten(StreamPosition { .. })));
+    assert_matches!(
+        result,
+        Err(ReadError::ReadUnwritten(ReadUnwrittenError {
+            tail: StreamPosition { .. },
+            ..
+        }))
+    );
 
     let batch = stream
         .read(ReadInput::new().with_start(ReadStart::new().with_from(ReadFrom::TailOffset(3))))
@@ -1519,7 +1552,11 @@ async fn read_until_timestamp(stream: &S2Stream) -> Result<(), Box<dyn std::erro
     let _ = stream.append(input).await?;
 
     let batch = stream
-        .read(ReadInput::new().with_stop(ReadStop::new().with_until(..(base_timestamp + 2))))
+        .read(
+            ReadInput::new()
+                .with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0)))
+                .with_stop(ReadStop::new().with_until(..(base_timestamp + 2))),
+        )
         .await?;
 
     assert_eq!(batch.records.len(), 2);
@@ -1552,8 +1589,8 @@ async fn read_start_timestamp_ge_until_errors(
 
     assert_matches!(
         result,
-        Err(ReadError::Request(RequestError::Server(ServerError { code, .. }))) => {
-            assert_eq!(code, "invalid");
+        Err(ReadError::Server(ServerError { code, .. })) => {
+            assert_eq!(code.as_deref(), Some("invalid"));
         }
     );
 
@@ -1570,8 +1607,8 @@ async fn read_nonexistent_stream_errors(
 
     assert_matches!(
         result,
-        Err(ReadError::Request(RequestError::Server(ServerError { code, .. }))) => {
-            assert_eq!(code, "stream_not_found");
+        Err(ReadError::Server(ServerError { code, .. })) => {
+            assert_eq!(code.as_deref(), Some("stream_not_found"));
         }
     );
 
@@ -1583,7 +1620,7 @@ async fn read_nonexistent_stream_errors(
 async fn append_session_close_delivers_all_acks(
     stream: &S2Stream,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let session = stream.append_session(AppendSessionConfig::default());
+    let session = stream.append_session(AppendSessionConfig::default())?;
 
     let ticket1 = session
         .submit(AppendInput::new(AppendRecordBatch::try_from_iter([
@@ -1623,7 +1660,7 @@ async fn append_session_close_delivers_all_acks(
 async fn batch_submit_ticket_drop_should_not_affect_others(
     stream: &S2Stream,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let session = stream.append_session(AppendSessionConfig::default());
+    let session = stream.append_session(AppendSessionConfig::default())?;
 
     let _ticket1 = session
         .submit(AppendInput::new(AppendRecordBatch::try_from_iter([
@@ -1651,7 +1688,7 @@ async fn batch_submit_ticket_drop_should_not_affect_others(
 #[test_context(S2Stream)]
 #[tokio_shared_rt::test(shared)]
 async fn producer_delivers_all_acks(stream: &S2Stream) -> Result<(), Box<dyn std::error::Error>> {
-    let producer = stream.producer(ProducerConfig::default());
+    let producer = stream.producer(ProducerConfig::default())?;
 
     let ack1 = producer.submit(AppendRecord::new("lorem")?).await?.await?;
     let ack2 = producer.submit(AppendRecord::new("ipsum")?).await?.await?;
@@ -1669,10 +1706,8 @@ async fn producer_delivers_all_acks(stream: &S2Stream) -> Result<(), Box<dyn std
 async fn producer_flushes_partial_batch_without_waiting_for_linger(
     stream: &S2Stream,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let producer = stream.producer(
-        ProducerConfig::new()
-            .with_batching(BatchingConfig::new().with_linger(Duration::from_secs(60 * 60))),
-    );
+    let producer =
+        stream.producer(ProducerConfig::new().with_linger(Duration::from_secs(60 * 60)))?;
     let ticket = producer.submit(AppendRecord::new("lorem")?).await?;
 
     tokio::time::timeout(Duration::from_secs(10), producer.flush())
@@ -1693,10 +1728,8 @@ async fn producer_flushes_partial_batch_without_waiting_for_linger(
 async fn producer_flush_delivers_all_indexed_acks(
     stream: &S2Stream,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let producer = stream.producer(
-        ProducerConfig::new()
-            .with_batching(BatchingConfig::new().with_linger(Duration::from_secs(60 * 60))),
-    );
+    let producer =
+        stream.producer(ProducerConfig::new().with_linger(Duration::from_secs(60 * 60)))?;
     let ticket1 = producer.submit(AppendRecord::new("lorem")?).await?;
     let ticket2 = producer.submit(AppendRecord::new("ipsum")?).await?;
     let ticket3 = producer.submit(AppendRecord::new("dolor")?).await?;
@@ -1731,15 +1764,15 @@ async fn producer_flush_is_reusable_and_excludes_later_submission(
     let producer = stream.producer(
         ProducerConfig::new()
             .with_match_seq_num(0)
-            .with_batching(BatchingConfig::new().with_linger(Duration::from_secs(60 * 60))),
-    );
+            .with_linger(Duration::from_secs(60 * 60)),
+    )?;
     let ticket1 = producer.submit(AppendRecord::new("lorem")?).await?;
 
     let record2 = AppendRecord::new("ipsum")?;
     let permit2 = producer.reserve(record2.metered_bytes() as u32).await?;
     let mut flush = Box::pin(producer.flush());
     assert!(poll!(flush.as_mut()).is_pending());
-    let mut ticket2 = Box::pin(permit2.submit(record2));
+    let mut ticket2 = Box::pin(permit2.submit(record2)?);
 
     tokio::time::timeout(Duration::from_secs(10), flush)
         .await
@@ -1771,10 +1804,8 @@ async fn producer_flush_is_reusable_and_excludes_later_submission(
 async fn producer_empty_flush_is_immediate_and_reusable(
     stream: &S2Stream,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let producer = stream.producer(
-        ProducerConfig::new()
-            .with_batching(BatchingConfig::new().with_linger(Duration::from_secs(60 * 60))),
-    );
+    let producer =
+        stream.producer(ProducerConfig::new().with_linger(Duration::from_secs(60 * 60)))?;
 
     tokio::time::timeout(Duration::from_secs(10), producer.flush())
         .await
@@ -1806,8 +1837,8 @@ async fn producer_flush_propagates_condition_failure_to_covered_ticket(
     let producer = stream.producer(
         ProducerConfig::new()
             .with_match_seq_num(0)
-            .with_batching(BatchingConfig::new().with_linger(Duration::from_secs(60 * 60))),
-    );
+            .with_linger(Duration::from_secs(60 * 60)),
+    )?;
     let ticket = producer.submit(AppendRecord::new("ipsum")?).await?;
 
     let flush_result = tokio::time::timeout(Duration::from_secs(10), producer.flush())
@@ -1815,9 +1846,10 @@ async fn producer_flush_propagates_condition_failure_to_covered_ticket(
         .expect("failing producer flush timed out");
     assert_matches!(
         flush_result,
-        Err(ProducerError::Append(AppendSessionError::Append(
-            AppendError::ConditionFailed(AppendConditionFailed::SeqNumMismatch(1))
-        )))
+        Err(AppendSessionError::SeqNumMismatch(SeqNumMismatchError {
+            assignable_seq_num: 1,
+            ..
+        }))
     );
 
     let ticket_result = ticket
@@ -1825,15 +1857,17 @@ async fn producer_flush_propagates_condition_failure_to_covered_ticket(
         .expect("covered ticket should be ready when flush fails");
     assert_matches!(
         ticket_result,
-        Err(ProducerError::Append(AppendSessionError::Append(
-            AppendError::ConditionFailed(AppendConditionFailed::SeqNumMismatch(1))
-        )))
+        Err(AppendSessionError::SeqNumMismatch(SeqNumMismatchError {
+            assignable_seq_num: 1,
+            ..
+        }))
     );
     assert_matches!(
         producer.flush().await,
-        Err(ProducerError::Append(AppendSessionError::Append(
-            AppendError::ConditionFailed(AppendConditionFailed::SeqNumMismatch(1))
-        )))
+        Err(AppendSessionError::SeqNumMismatch(SeqNumMismatchError {
+            assignable_seq_num: 1,
+            ..
+        }))
     );
 
     Ok(())
@@ -1844,7 +1878,7 @@ async fn producer_flush_propagates_condition_failure_to_covered_ticket(
 async fn producer_close_delivers_all_indexed_acks_from_same_ack(
     stream: &S2Stream,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let producer = stream.producer(ProducerConfig::default());
+    let producer = stream.producer(ProducerConfig::default())?;
 
     let ticket1 = producer.submit(AppendRecord::new("lorem")?).await?;
     let ticket2 = producer.submit(AppendRecord::new("ipsum")?).await?;
@@ -1871,9 +1905,7 @@ async fn producer_close_delivers_all_indexed_acks_from_same_ack(
 async fn producer_close_delivers_all_indexed_acks_from_different_acks(
     stream: &S2Stream,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let producer = stream.producer(ProducerConfig::default().with_batching(
-        BatchingConfig::default().with_limits(BatchLimits::default().with_max_batch_records(1)?),
-    ));
+    let producer = stream.producer(ProducerConfig::default().with_max_batch_records(1)?)?;
 
     let ticket1 = producer.submit(AppendRecord::new("lorem")?).await?;
     let ticket2 = producer.submit(AppendRecord::new("ipsum")?).await?;
@@ -1900,10 +1932,8 @@ async fn producer_close_delivers_all_indexed_acks_from_different_acks(
 async fn producer_drop_errors_all_claimable_tickets(
     stream: &S2Stream,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let producer = stream.producer(
-        ProducerConfig::default()
-            .with_batching(BatchingConfig::default().with_linger(Duration::from_secs(1))),
-    );
+    let producer =
+        stream.producer(ProducerConfig::default().with_linger(Duration::from_secs(1)))?;
 
     let ticket1 = producer.submit(AppendRecord::new("lorem")?).await?;
     let ticket2 = producer.submit(AppendRecord::new("ipsum")?).await?;
@@ -1913,8 +1943,10 @@ async fn producer_drop_errors_all_claimable_tickets(
     let result1 = ticket1.await;
     let result2 = ticket2.await;
 
-    assert_matches!(result1, Err(ProducerError::ProducerDropped) => {});
-    assert_matches!(result2, Err(ProducerError::ProducerDropped) => {});
+    // A6a/A8c: records still being batched when the producer is dropped settle with
+    // SessionClosedError carrying the AbortedError session failure.
+    assert_matches!(result1, Err(AppendSessionError::SessionClosed(ref c)) if matches!(c.failure(), Some(AppendSessionError::Aborted(_))));
+    assert_matches!(result2, Err(AppendSessionError::SessionClosed(ref c)) if matches!(c.failure(), Some(AppendSessionError::Aborted(_))));
 
     Ok(())
 }
@@ -1924,7 +1956,7 @@ async fn producer_drop_errors_all_claimable_tickets(
 async fn producer_drop_errors_no_claimable_tickets(
     stream: &S2Stream,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let producer = stream.producer(ProducerConfig::default());
+    let producer = stream.producer(ProducerConfig::default())?;
 
     let ticket1 = producer.submit(AppendRecord::new("lorem")?).await?;
     let ticket2 = producer.submit(AppendRecord::new("ipsum")?).await?;
@@ -1949,7 +1981,7 @@ async fn producer_drop_errors_no_claimable_tickets(
 async fn record_submit_ticket_drop_should_not_affect_others(
     stream: &S2Stream,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let producer = stream.producer(ProducerConfig::default());
+    let producer = stream.producer(ProducerConfig::default())?;
 
     let _ticket1 = producer.submit(AppendRecord::new("lorem")?).await?;
     drop(_ticket1);
@@ -1973,7 +2005,7 @@ async fn create_stream_inherits_basin_default_config() -> Result<(), Box<dyn std
     let default_stream_config = StreamConfig::new()
         .with_storage_class("standard")
         .with_retention_policy(RetentionPolicy::Age(3600))
-        .with_delete_on_empty(DeleteOnEmptyConfig::new().with_min_age(Duration::from_secs(3600)));
+        .with_delete_on_empty(DeleteOnEmptyConfig::new().with_min_age(Duration::from_secs(3600))?);
     let basin_config = BasinConfig::new().with_default_stream_config(default_stream_config);
 
     s2.create_basin(CreateBasinInput::new(basin_name.clone()).with_config(basin_config))
@@ -1999,10 +2031,8 @@ async fn create_stream_inherits_basin_default_config() -> Result<(), Box<dyn std
         } if storage_class == "standard"
     );
 
-    basin
-        .delete_stream(DeleteStreamInput::new(stream_name))
-        .await?;
-    s2.delete_basin(DeleteBasinInput::new(basin_name)).await?;
+    basin.delete_stream(stream_name).await?;
+    s2.delete_basin(basin_name).await?;
 
     Ok(())
 }
@@ -2041,13 +2071,13 @@ async fn compression_roundtrip_unary(
     assert_eq!(ack.start.seq_num, 0);
     assert_eq!(ack.end.seq_num, 2);
 
-    let batch = stream.read(ReadInput::new()).await?;
+    let batch = stream
+        .read(ReadInput::new().with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0))))
+        .await?;
     assert_eq!(batch.records.len(), 2);
 
-    basin
-        .delete_stream(DeleteStreamInput::new(stream_name))
-        .await?;
-    s2.delete_basin(DeleteBasinInput::new(basin_name)).await?;
+    basin.delete_stream(stream_name).await?;
+    s2.delete_basin(basin_name).await?;
 
     Ok(())
 }
@@ -2086,13 +2116,13 @@ async fn compression_with_no_side_effects_unary(
     assert_eq!(ack.start.seq_num, 0);
     assert_eq!(ack.end.seq_num, 2);
 
-    let batch = stream.read(ReadInput::new()).await?;
+    let batch = stream
+        .read(ReadInput::new().with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0))))
+        .await?;
     assert_eq!(batch.records.len(), 2);
 
-    basin
-        .delete_stream(DeleteStreamInput::new(stream_name))
-        .await?;
-    s2.delete_basin(DeleteBasinInput::new(basin_name)).await?;
+    basin.delete_stream(stream_name).await?;
+    s2.delete_basin(basin_name).await?;
 
     Ok(())
 }
@@ -2125,7 +2155,7 @@ async fn compression_roundtrip_session(
     let stream = basin.stream(stream_name.clone());
 
     // Payload must be >= 1KiB to trigger compression (COMPRESSION_THRESHOLD_BYTES)
-    let session = stream.append_session(AppendSessionConfig::default());
+    let session = stream.append_session(AppendSessionConfig::default())?;
     let ticket = session
         .submit(AppendInput::new(AppendRecordBatch::try_from_iter([
             AppendRecord::new("s2".repeat(10240))?,
@@ -2137,17 +2167,15 @@ async fn compression_roundtrip_session(
     assert_eq!(ack.start.seq_num, 0);
     assert_eq!(ack.end.seq_num, 1);
 
-    let mut batches = stream
-        .read_session(ReadInput::new(), ReadSessionConfig::default())
-        .await?;
-    let batch = batches.next().await.expect("should have batch")?;
-    assert_eq!(batch.records.len(), 1);
-    assert_eq!(batch.records[0].body.len(), 20480);
+    let mut records = stream.read_session(
+        ReadInput::new().with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0))),
+        ReadSessionConfig::default(),
+    )?;
+    let record = records.next().await.expect("should have record")?;
+    assert_eq!(record.body.len(), 20480);
 
-    basin
-        .delete_stream(DeleteStreamInput::new(stream_name))
-        .await?;
-    s2.delete_basin(DeleteBasinInput::new(basin_name)).await?;
+    basin.delete_stream(stream_name).await?;
+    s2.delete_basin(basin_name).await?;
 
     Ok(())
 }
@@ -2159,17 +2187,31 @@ async fn append_session_for_non_existent_stream_errors(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let stream = basin.stream(unique_stream_name());
 
-    let session = stream.append_session(AppendSessionConfig::new());
+    let session = stream.append_session(AppendSessionConfig::new())?;
 
     let input = AppendInput::new(AppendRecordBatch::try_from_iter([AppendRecord::new(
         "lorem",
     )?])?);
 
-    let result = session.submit(input).await?.await;
+    let result = match session.submit(input).await {
+        Ok(ticket) => ticket.await,
+        Err(e) => Err(e),
+    };
 
-    assert_matches!(result, Err(AppendSessionError::Append(AppendError::Request(RequestError::Server(err)))) => {
-        assert_eq!(err.code, "stream_not_found");
-    });
+    match result {
+        Err(AppendSessionError::Server(err)) => {
+            assert_eq!(err.code.as_deref(), Some("stream_not_found"));
+        }
+        Err(AppendSessionError::SessionClosed(closed)) => {
+            assert_matches!(
+                closed.failure(),
+                Some(AppendSessionError::Server(err)) => {
+                    assert_eq!(err.code.as_deref(), Some("stream_not_found"));
+                }
+            );
+        }
+        other => panic!("unexpected result: {other:?}"),
+    }
 
     Ok(())
 }
@@ -2181,9 +2223,7 @@ async fn producer_for_non_existent_stream_errors(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let stream = basin.stream(unique_stream_name());
 
-    let producer = stream.producer(ProducerConfig::new().with_batching(
-        BatchingConfig::new().with_limits(BatchLimits::new().with_max_batch_records(10)?),
-    ));
+    let producer = stream.producer(ProducerConfig::new().with_max_batch_records(10)?)?;
     let num_records = 2000;
 
     let mut tickets = Vec::with_capacity(num_records);
@@ -2193,10 +2233,16 @@ async fn producer_for_non_existent_stream_errors(
             .await
         {
             Ok(ticket) => tickets.push(ticket),
-            Err(ProducerError::Append(AppendSessionError::Append(AppendError::Request(
-                RequestError::Server(err),
-            )))) => {
-                assert_eq!(err.code, "stream_not_found");
+            Err(AppendSessionError::Server(err)) => {
+                assert_eq!(err.code.as_deref(), Some("stream_not_found"));
+            }
+            Err(AppendSessionError::SessionClosed(closed)) => {
+                assert_matches!(
+                    closed.failure(),
+                    Some(AppendSessionError::Server(err)) => {
+                        assert_eq!(err.code.as_deref(), Some("stream_not_found"));
+                    }
+                );
             }
             Err(e) => return Err(e.into()),
         }
@@ -2204,9 +2250,20 @@ async fn producer_for_non_existent_stream_errors(
 
     for ticket in tickets {
         let result = ticket.await;
-        assert_matches!(result, Err(ProducerError::Append(AppendSessionError::Append(AppendError::Request(RequestError::Server(err))))) => {
-            assert_eq!(err.code, "stream_not_found");
-        });
+        match result {
+            Err(AppendSessionError::Server(err)) => {
+                assert_eq!(err.code.as_deref(), Some("stream_not_found"));
+            }
+            Err(AppendSessionError::SessionClosed(closed)) => {
+                assert_matches!(
+                    closed.failure(),
+                    Some(AppendSessionError::Server(err)) => {
+                        assert_eq!(err.code.as_deref(), Some("stream_not_found"));
+                    }
+                );
+            }
+            other => panic!("unexpected ticket result: {other:?}"),
+        }
     }
 
     Ok(())
@@ -2229,7 +2286,7 @@ async fn stream_config_applies_only_when_append_creates_stream()
 
     let stream_config = StreamConfig::new()
         .with_retention_policy(RetentionPolicy::Age(3600))
-        .with_delete_on_empty(DeleteOnEmptyConfig::new().with_min_age(Duration::from_secs(300)));
+        .with_delete_on_empty(DeleteOnEmptyConfig::new().with_min_age(Duration::from_secs(300))?);
 
     let unary_stream = unique_stream_name();
     basin
@@ -2258,7 +2315,7 @@ async fn stream_config_applies_only_when_append_creates_stream()
     let session_stream = unique_stream_name();
     let producer = basin
         .stream(session_stream.clone())
-        .producer(ProducerConfig::new().with_stream_config(stream_config.clone()));
+        .producer(ProducerConfig::new().with_stream_config(stream_config.clone()))?;
     producer.submit(AppendRecord::new("hello")?).await?.await?;
     producer.close().await?;
     let config = basin.get_stream_config(session_stream).await?;
@@ -2292,7 +2349,7 @@ async fn stream_config_applies_only_when_append_creates_stream()
     assert_eq!(after, before);
     assert_ne!(after.retention_policy, Some(RetentionPolicy::Age(3600)));
 
-    s2.delete_basin(DeleteBasinInput::new(basin_name)).await?;
+    s2.delete_basin(basin_name).await?;
     Ok(())
 }
 
@@ -2311,16 +2368,27 @@ async fn stream_config_applies_when_read_creates_stream() -> Result<(), Box<dyn 
     let stream_config = StreamConfig::new().with_retention_policy(RetentionPolicy::Age(3600));
 
     let session_stream = unique_stream_name();
-    let _session = basin
-        .stream(session_stream.clone())
-        .read_session(
-            ReadInput::new().with_stream_config(stream_config),
-            ReadSessionConfig::default(),
-        )
-        .await?;
+    let mut session = basin.stream(session_stream.clone()).read_session(
+        ReadInput::new().with_stream_config(stream_config),
+        ReadSessionConfig::default(),
+    )?;
+    // Wait until the initial request connects and receives its first heartbeat before reading
+    // stream config, since read_session() initiates its request asynchronously (R5).
+    let mut caught_up = session.caught_up();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::select! {
+            res = &mut caught_up => res.map(|_| ()),
+            item = session.next() => match item {
+                Some(Err(e)) => Err(e),
+                _ => Ok(()),
+            },
+        }
+    })
+    .await
+    .expect("read session should connect and create stream")?;
     let config = basin.get_stream_config(session_stream).await?;
     assert_eq!(config.retention_policy, Some(RetentionPolicy::Age(3600)));
 
-    s2.delete_basin(DeleteBasinInput::new(basin_name)).await?;
+    s2.delete_basin(basin_name).await?;
     Ok(())
 }

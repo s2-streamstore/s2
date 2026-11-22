@@ -3,19 +3,10 @@ use s2_sdk::{
     S2,
     types::{
         AppendInput, AppendRecord, AppendRecordBatch, BasinName, CreateBasinInput,
-        CreateStreamInput, DeleteBasinInput, DeleteStreamInput, ReadBatch, ReadFrom, ReadInput,
-        ReadSessionConfig, ReadStart, S2Config, S2Endpoints, StreamName,
+        CreateStreamInput, ReadFrom, ReadInput, ReadSessionConfig, ReadStart, S2Config,
+        S2Endpoints, StreamName,
     },
 };
-
-fn print_batch(label: &str, batch: &ReadBatch) {
-    let seq_nums = batch
-        .records
-        .iter()
-        .map(|record| record.seq_num)
-        .collect::<Vec<_>>();
-    println!("{label}: {seq_nums:?}");
-}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -48,12 +39,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ])?))
         .await?;
 
-    let mut session = stream
-        .read_session(
-            ReadInput::new().with_start(ReadStart::new().with_from(ReadFrom::TailOffset(2))),
-            ReadSessionConfig::default(),
-        )
-        .await?;
+    let mut session = stream.read_session(
+        ReadInput::new().with_start(ReadStart::new().with_from(ReadFrom::TailOffset(2))),
+        ReadSessionConfig::default(),
+    )?;
     let mut caught_up = session.caught_up();
 
     loop {
@@ -62,8 +51,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("Caught up through sequence number {}", tail?.seq_num);
                 break;
             }
-            Some(batch) = session.next() => {
-                print_batch("Read before catching up", &batch?);
+            Some(record) = session.next() => {
+                let record = record?;
+                println!("Read before catching up: {}", record.seq_num);
             }
         }
     }
@@ -78,24 +68,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ack.start.seq_num
     );
 
-    while let Some(batch) = session.next().await {
-        let batch = batch?;
-        print_batch("Read after catching up", &batch);
-        if batch
-            .records
-            .iter()
-            .any(|record| record.seq_num == ack.start.seq_num)
-        {
+    while let Some(record) = session.next().await {
+        let record = record?;
+        println!("Read after catching up: {}", record.seq_num);
+        if record.seq_num == ack.start.seq_num {
             break;
         }
     }
     println!("Session is caught up again: {}", session.is_caught_up());
 
     drop(session);
-    basin
-        .delete_stream(DeleteStreamInput::new(stream_name))
-        .await?;
-    s2.delete_basin(DeleteBasinInput::new(basin_name)).await?;
+    basin.delete_stream(stream_name).await?;
+    s2.delete_basin(basin_name).await?;
 
     Ok(())
 }

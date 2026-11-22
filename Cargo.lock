@@ -4949,6 +4949,7 @@ dependencies = [
  "futures-util",
  "http",
  "itertools 0.15.0",
+ "jiff",
  "mime",
  "proptest",
  "prost",
@@ -4959,7 +4960,6 @@ dependencies = [
  "serde_json",
  "strum",
  "thiserror 2.0.21",
- "time",
  "tokio-util",
  "utoipa",
  "zstd 0.14.4",
@@ -5038,6 +5038,7 @@ dependencies = [
  "compact_str",
  "enumset",
  "http",
+ "jiff",
  "proptest",
  "rand 0.10.4",
  "rkyv",
@@ -5047,7 +5048,6 @@ dependencies = [
  "serde_json",
  "strum",
  "thiserror 2.0.21",
- "time",
  "utoipa",
 ]
 
@@ -5071,6 +5071,7 @@ dependencies = [
  "include_dir",
  "indexmap 2.14.2",
  "itertools 0.15.0",
+ "jiff",
  "parking_lot",
  "prometheus",
  "proptest",
@@ -5090,7 +5091,6 @@ dependencies = [
  "strum",
  "thiserror 2.0.21",
  "tikv-jemallocator",
- "time",
  "tokio",
  "tokio-util",
  "tower",
@@ -5121,6 +5121,7 @@ dependencies = [
  "async-compression",
  "async-stream",
  "async-trait",
+ "base64ct",
  "bytes",
  "compact_str",
  "futures-core",
@@ -5132,6 +5133,7 @@ dependencies = [
  "hyper",
  "hyper-rustls",
  "hyper-util",
+ "jiff",
  "pin-project-lite",
  "proptest",
  "prost",
@@ -5144,14 +5146,13 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_urlencoded",
+ "sha2",
  "test-context",
  "thiserror 2.0.21",
- "time",
  "tokio",
- "tokio-muxt",
  "tokio-shared-rt",
- "tokio-stream",
  "tokio-util",
+ "tower-service",
  "tracing",
  "urlencoding",
  "uuid",
@@ -6159,16 +6160,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.10",
-]
-
-[[package]]
-name = "tokio-muxt"
-version = "0.8.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a08b20f8324114e2639a1a251692cc8a4154aa311bee55a83bdc82826b09a3b1"
-dependencies = [
- "pin-project",
- "tokio",
 ]
 
 [[package]]

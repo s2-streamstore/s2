@@ -1,3 +1,4 @@
+use jiff::Timestamp;
 use s2_common::{
     self,
     network_policy::{
@@ -6,7 +7,6 @@ use s2_common::{
     },
 };
 use serde::{Deserialize, Serialize};
-use time::OffsetDateTime;
 
 use super::MaybeKnown;
 
@@ -141,8 +141,8 @@ pub struct NetworkPolicyInfo {
     /// Slug chosen at creation.
     pub slug: NetworkPolicySlug,
     /// Creation time in RFC 3339 format.
-    #[serde(with = "time::serde::rfc3339")]
-    pub created_at: OffsetDateTime,
+    #[cfg_attr(feature = "utoipa", schema(value_type = String, format = DateTime))]
+    pub created_at: Timestamp,
     /// The restriction.
     pub policy: NetworkPolicy,
 }

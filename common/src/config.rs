@@ -328,11 +328,11 @@ impl BasinConfig {
         }
 
         if let Maybe::Specified(create_stream_on_append) = create_stream_on_append {
-            self.create_stream_on_append = create_stream_on_append;
+            self.create_stream_on_append = create_stream_on_append.unwrap_or(false);
         }
 
         if let Maybe::Specified(create_stream_on_read) = create_stream_on_read {
-            self.create_stream_on_read = create_stream_on_read;
+            self.create_stream_on_read = create_stream_on_read.unwrap_or(false);
         }
 
         self
@@ -343,8 +343,8 @@ impl BasinConfig {
 pub struct BasinReconfiguration {
     pub default_stream_config: Maybe<Option<StreamReconfiguration>>,
     pub stream_cipher: Maybe<Option<EncryptionAlgorithm>>,
-    pub create_stream_on_append: Maybe<bool>,
-    pub create_stream_on_read: Maybe<bool>,
+    pub create_stream_on_append: Maybe<Option<bool>>,
+    pub create_stream_on_read: Maybe<Option<bool>>,
 }
 
 #[cfg(test)]

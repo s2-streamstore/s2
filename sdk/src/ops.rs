@@ -2,24 +2,34 @@
 use crate::client::Connect;
 use crate::{
     api::{AccountClient, BaseClient, BasinClient},
-    error::{AppendError, ReadError, RequestError},
+    error::{AppendError, ClientClosedError, ErrorContext, ReadError, RequestError},
     producer::{Producer, ProducerConfig},
     session::{
-        self, AppendSession, AppendSessionConfig, ReadSession, ReadSessionError, StreamHeaders,
+        self, AppendSession, AppendSessionConfig, ReadBatchSession, ReadSession, StreamHeaders,
     },
     types::{
         AccessTokenId, AccessTokenInfo, AppendAck, AppendInput, BasinConfig, BasinInfo, BasinName,
-        CreateBasinInput, CreateNetworkPolicyInput, CreateStreamInput, DeleteBasinInput,
-        DeleteStreamInput, EncryptionKey, EnsureBasinInput, EnsureOutput, EnsureStreamInput,
-        GetAccountMetricsInput, GetBasinMetricsInput, GetStreamMetricsInput, IssueAccessTokenInput,
-        ListAccessTokensInput, ListAllAccessTokensInput, ListAllBasinsInput,
-        ListAllNetworkPoliciesInput, ListAllStreamsInput, ListBasinsInput,
-        ListNetworkPoliciesInput, ListStreamsInput, LocationInfo, LocationName, Metric,
-        NetworkPolicyInfo, NetworkPolicySelector, Page, ReadBatch, ReadInput, ReadSessionConfig,
-        ReconfigureBasinInput, ReconfigureStreamInput, S2Config, StreamConfig, StreamInfo,
-        StreamName, StreamPosition, Streaming,
+        CreateBasinInput, CreateNetworkPolicyInput, CreateStreamInput, EncryptionKey,
+        EnsureBasinInput, EnsureOutput, EnsureStreamInput, GetAccountMetricsInput,
+        GetBasinMetricsInput, GetStreamMetricsInput, IssueAccessTokenInput, ListAccessTokensInput,
+        ListAllAccessTokensInput, ListAllBasinsInput, ListAllNetworkPoliciesInput,
+        ListAllStreamsInput, ListBasinsInput, ListNetworkPoliciesInput, ListStreamsInput,
+        LocationInfo, LocationName, Metric, NetworkPolicyInfo, NetworkPolicySelector, Page,
+        ReadBatch, ReadInput, ReadSessionConfig, ReconfigureBasinInput, ReconfigureStreamInput,
+        S2Config, StreamConfig, StreamInfo, StreamName, StreamPosition, Streaming, ValidationError,
+        idempotency_token,
     },
 };
+
+fn init_error(err: RequestError, op: &'static str) -> RequestError {
+    let ctx = ErrorContext::account(op, true);
+    match err {
+        RequestError::Validation(e) => {
+            RequestError::Validation(ValidationError(ctx.format_string(&e.0)))
+        }
+        other => other,
+    }
+}
 
 #[derive(Debug, Clone)]
 /// An S2 account.
@@ -30,7 +40,21 @@ pub struct S2 {
 impl S2 {
     /// Create a new [`S2`].
     pub fn new(config: S2Config) -> Result<Self, RequestError> {
-        let base_client = BaseClient::init(&config)?;
+        Self::init_with_op(config, "S2::new")
+    }
+
+    /// Create a new [`S2`] from environment variables.
+    ///
+    /// Reads `S2_ACCESS_TOKEN`, and optionally `S2_ACCOUNT_ENDPOINT` and `S2_BASIN_ENDPOINT`
+    /// (empty endpoint variables are treated as unset; if one is set, both must be set).
+    pub fn from_env() -> Result<Self, RequestError> {
+        let config = S2Config::from_env()
+            .map_err(|e| init_error(RequestError::Validation(e), "S2::from_env"))?;
+        Self::init_with_op(config, "S2::from_env")
+    }
+
+    fn init_with_op(config: S2Config, op: &'static str) -> Result<Self, RequestError> {
+        let base_client = BaseClient::init(&config).map_err(|e| init_error(e.into(), op))?;
         Ok(Self {
             client: AccountClient::init(config, base_client),
         })
@@ -42,10 +66,23 @@ impl S2 {
     where
         C: Connect + Clone + Send + Sync + 'static,
     {
-        let base_client = BaseClient::init_with_connector(&config, connector)?;
+        let base_client = BaseClient::init_with_connector(&config, connector)
+            .map_err(|e| init_error(e.into(), "S2::new"))?;
         Ok(Self {
             client: AccountClient::init(config, base_client),
         })
+    }
+
+    /// Close the client, aborting all active sessions and in-flight requests and terminating all
+    /// connections without waiting for the server.
+    ///
+    /// Repeated calls are idempotent. After `close()`, any new operation on this client or handles
+    /// derived from it fails immediately with [`ClientClosedError`].
+    ///
+    /// Dropping an [`S2`] without calling `close()` keeps it alive while any handle or session
+    /// opened from it remains open.
+    pub fn close(&self) {
+        self.client.close();
     }
 
     /// Get an [`S2Basin`].
@@ -67,8 +104,8 @@ impl S2 {
             response
                 .basins
                 .into_iter()
-                .map(TryInto::try_into)
-                .collect::<Result<Vec<_>, _>>()?,
+                .map(Into::into)
+                .collect::<Vec<_>>(),
             response.has_more,
         ))
     }
@@ -105,9 +142,11 @@ impl S2 {
 
     /// Create a basin.
     pub async fn create_basin(&self, input: CreateBasinInput) -> Result<BasinInfo, RequestError> {
-        let (request, idempotency_token) = input.into();
-        let info = self.client.create_basin(request, idempotency_token).await?;
-        Ok(info.try_into()?)
+        let info = self
+            .client
+            .create_basin(input.into(), idempotency_token())
+            .await?;
+        Ok(info.into())
     }
 
     /// Ensure a basin.
@@ -126,7 +165,7 @@ impl S2 {
             .client
             .ensure_basin(name, request)
             .await?
-            .try_map(BasinInfo::try_from)?
+            .map(BasinInfo::from)
             .into())
     }
 
@@ -146,11 +185,10 @@ impl S2 {
     }
 
     /// Delete a basin.
-    pub async fn delete_basin(&self, input: DeleteBasinInput) -> Result<(), RequestError> {
-        Ok(self
-            .client
-            .delete_basin(input.name, input.ignore_not_found)
-            .await?)
+    ///
+    /// Succeeds if the basin is already being deleted or does not exist.
+    pub async fn delete_basin(&self, name: BasinName) -> Result<(), RequestError> {
+        Ok(self.client.delete_basin(name).await?)
     }
 
     /// Reconfigure a basin.
@@ -177,8 +215,8 @@ impl S2 {
             response
                 .access_tokens
                 .into_iter()
-                .map(TryInto::try_into)
-                .collect::<Result<Vec<_>, _>>()?,
+                .map(Into::into)
+                .collect::<Vec<_>>(),
             response.has_more,
         ))
     }
@@ -226,11 +264,14 @@ impl S2 {
         &self,
         input: IssueAccessTokenInput,
     ) -> Result<String, RequestError> {
-        let response = self.client.issue_access_token(input.into()).await?;
+        let request = input.try_into()?;
+        let response = self.client.issue_access_token(request).await?;
         Ok(response.access_token)
     }
 
     /// Revoke an access token.
+    ///
+    /// Succeeds if the access token does not exist.
     pub async fn revoke_access_token(&self, id: AccessTokenId) -> Result<(), RequestError> {
         Ok(self.client.revoke_access_token(id).await?)
     }
@@ -248,8 +289,8 @@ impl S2 {
             response
                 .network_policies
                 .into_iter()
-                .map(TryInto::try_into)
-                .collect::<Result<Vec<_>, _>>()?,
+                .map(Into::into)
+                .collect::<Vec<_>>(),
             response.has_more,
         ))
     }
@@ -289,7 +330,7 @@ impl S2 {
         input: CreateNetworkPolicyInput,
     ) -> Result<NetworkPolicyInfo, RequestError> {
         let response = self.client.create_network_policy(input.into()).await?;
-        Ok(response.try_into()?)
+        Ok(response.into())
     }
 
     /// Get a network policy by slug or full reference.
@@ -298,11 +339,13 @@ impl S2 {
         selector: NetworkPolicySelector,
     ) -> Result<NetworkPolicyInfo, RequestError> {
         let response = self.client.get_network_policy(selector).await?;
-        Ok(response.try_into()?)
+        Ok(response.into())
     }
 
     /// Delete a network policy by slug or full reference. It must not be bound to any access
     /// token.
+    ///
+    /// Succeeds if the network policy does not exist.
     pub async fn delete_network_policy(
         &self,
         selector: NetworkPolicySelector,
@@ -392,8 +435,8 @@ impl S2Basin {
             response
                 .streams
                 .into_iter()
-                .map(TryInto::try_into)
-                .collect::<Result<Vec<_>, _>>()?,
+                .map(Into::into)
+                .collect::<Vec<_>>(),
             response.has_more,
         ))
     }
@@ -433,12 +476,11 @@ impl S2Basin {
         &self,
         input: CreateStreamInput,
     ) -> Result<StreamInfo, RequestError> {
-        let (request, idempotency_token) = input.into();
         let info = self
             .client
-            .create_stream(request, idempotency_token)
+            .create_stream(input.into(), idempotency_token())
             .await?;
-        Ok(info.try_into()?)
+        Ok(info.into())
     }
 
     /// Ensure a stream.
@@ -457,7 +499,7 @@ impl S2Basin {
             .client
             .ensure_stream(name, config)
             .await?
-            .try_map(StreamInfo::try_from)?
+            .map(StreamInfo::from)
             .into())
     }
 
@@ -477,11 +519,10 @@ impl S2Basin {
     }
 
     /// Delete a stream.
-    pub async fn delete_stream(&self, input: DeleteStreamInput) -> Result<(), RequestError> {
-        Ok(self
-            .client
-            .delete_stream(input.name, input.ignore_not_found)
-            .await?)
+    ///
+    /// Succeeds if the stream is already being deleted or does not exist.
+    pub async fn delete_stream(&self, name: StreamName) -> Result<(), RequestError> {
+        Ok(self.client.delete_stream(name).await?)
     }
 
     /// Reconfigure a stream.
@@ -531,6 +572,13 @@ impl S2Stream {
 
     /// Append records.
     pub async fn append(&self, mut input: AppendInput) -> Result<AppendAck, AppendError> {
+        let ctx = ErrorContext::stream(
+            "append",
+            self.client.name.as_ref(),
+            self.name.as_ref(),
+            false,
+        );
+        let expected_records = input.records.len() as u64;
         let stream_config = input
             .stream_config
             .take()
@@ -545,7 +593,9 @@ impl S2Stream {
                 self.client.config.retry.append_retry_policy,
             )
             .await?;
-        Ok(ack.into())
+        let ack = AppendAck::try_from_proto(ack, ctx.clone())?;
+        ack.validate_record_count(expected_records, &ctx)?;
+        Ok(ack)
     }
 
     /// Read records.
@@ -563,46 +613,98 @@ impl S2Stream {
                 stream_config.as_ref(),
             )
             .await?;
-        let mut batch = ReadBatch::from_api(batch);
-        if input.ignore_command_records {
-            batch.records.retain(|r| !r.is_command_record());
-        }
-        Ok(batch)
+        Ok(ReadBatch::from_api(batch))
     }
 
     /// Create an append session for submitting [`AppendInput`]s.
-    pub fn append_session(&self, config: AppendSessionConfig) -> AppendSession {
-        AppendSession::new(
+    pub fn append_session(
+        &self,
+        config: AppendSessionConfig,
+    ) -> Result<AppendSession, ClientClosedError> {
+        if self.client.is_closed() {
+            return Err(ClientClosedError::new(ErrorContext::stream(
+                "append_session",
+                self.client.name.as_ref(),
+                self.name.as_ref(),
+                false,
+            )));
+        }
+        Ok(AppendSession::new(
             self.client.clone(),
             self.name.clone(),
             self.headers(config.stream_config()),
             config,
-        )
+        ))
     }
 
     /// Create a producer for submitting individual [`AppendRecord`](crate::types::AppendRecord)s.
-    pub fn producer(&self, config: ProducerConfig) -> Producer {
-        Producer::new(
+    pub fn producer(&self, config: ProducerConfig) -> Result<Producer, ClientClosedError> {
+        if self.client.is_closed() {
+            return Err(ClientClosedError::new(ErrorContext::stream(
+                "producer",
+                self.client.name.as_ref(),
+                self.name.as_ref(),
+                false,
+            )));
+        }
+        Ok(Producer::new(
             self.client.clone(),
             self.name.clone(),
             self.headers(config.stream_config()),
             config,
-        )
+        ))
     }
 
-    /// Create a read session.
-    pub async fn read_session(
+    /// Create a continuous read session yielding individual
+    /// [`SequencedRecord`](crate::types::SequencedRecord)s (`R5`, `R6`).
+    ///
+    /// Initiates the first request immediately without waiting for a response; request errors
+    /// surface through iteration.
+    pub fn read_session(
         &self,
         input: ReadInput,
         config: ReadSessionConfig,
-    ) -> Result<ReadSession, ReadSessionError> {
-        session::read_session(
+    ) -> Result<ReadSession, ClientClosedError> {
+        if self.client.is_closed() {
+            return Err(ClientClosedError::new(ErrorContext::stream(
+                "read_session",
+                self.client.name.as_ref(),
+                self.name.as_ref(),
+                true,
+            )));
+        }
+        Ok(session::open_read_session(
             self.client.clone(),
             self.name.clone(),
             self.headers(input.stream_config.as_ref()),
             input,
             config,
-        )
-        .await
+        ))
+    }
+
+    /// Create a continuous read session yielding whole non-empty [`ReadBatch`]es (`R6a`).
+    ///
+    /// Initiates the first request immediately without waiting for a response; request errors
+    /// surface through iteration.
+    pub fn read_batch_session(
+        &self,
+        input: ReadInput,
+        config: ReadSessionConfig,
+    ) -> Result<ReadBatchSession, ClientClosedError> {
+        if self.client.is_closed() {
+            return Err(ClientClosedError::new(ErrorContext::stream(
+                "read_batch_session",
+                self.client.name.as_ref(),
+                self.name.as_ref(),
+                true,
+            )));
+        }
+        Ok(session::open_read_batch_session(
+            self.client.clone(),
+            self.name.clone(),
+            self.headers(input.stream_config.as_ref()),
+            input,
+            config,
+        ))
     }
 }

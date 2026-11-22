@@ -45,7 +45,7 @@ where
     }
 }
 
-use time::OffsetDateTime;
+use jiff::Timestamp;
 
 #[rustfmt::skip]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -188,8 +188,9 @@ pub struct AccessTokenInfo {
     /// Access token ID.
     pub id: AccessTokenId,
     /// Expiration time in RFC 3339 format.
-    #[serde(default, with = "time::serde::rfc3339::option")]
-    pub expires_at: Option<OffsetDateTime>,
+    #[serde(default)]
+    #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>, format = DateTime))]
+    pub expires_at: Option<Timestamp>,
     /// Namespace streams based on the configured stream-level scope.
     pub auto_prefix_streams: bool,
     /// Access token scope.
@@ -221,8 +222,9 @@ pub struct IssueAccessTokenRequest {
     pub id: AccessTokenId,
     /// Expiration time in RFC 3339 format.
     /// If not set, the expiration will be set to that of the requestor's token.
-    #[serde(default, with = "time::serde::rfc3339::option")]
-    pub expires_at: Option<OffsetDateTime>,
+    #[serde(default)]
+    #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>, format = DateTime))]
+    pub expires_at: Option<Timestamp>,
     /// Namespace streams based on the configured stream-level scope, which must be a prefix.
     /// Stream name arguments will be automatically prefixed, and the prefix will be stripped when listing streams.
     #[cfg_attr(feature = "utoipa", schema(value_type = bool, default = false, required = false))]

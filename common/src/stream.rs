@@ -1,7 +1,6 @@
 use std::{marker::PhantomData, ops::Deref, str::FromStr, time::Duration};
 
 use compact_str::{CompactString, ToCompactString};
-use time::OffsetDateTime;
 
 use super::{
     ValidationError,
@@ -175,8 +174,8 @@ impl From<StreamName> for StreamNameStartAfter {
 #[derive(Debug, Clone)]
 pub struct StreamInfo {
     pub name: StreamName,
-    pub created_at: OffsetDateTime,
-    pub deleted_at: Option<OffsetDateTime>,
+    pub created_at: jiff::Timestamp,
+    pub deleted_at: Option<jiff::Timestamp>,
     pub cipher: Option<EncryptionAlgorithm>,
 }
 

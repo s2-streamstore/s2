@@ -277,7 +277,7 @@ async fn test_create_stream_idempotency_and_request_token() {
     assert!(matches!(
         idempotent,
         ProvisionResult::Noop(ref info) if info.deleted_at.is_none()
-            && info.created_at <= time::OffsetDateTime::now_utc()
+            && info.created_at <= jiff::Timestamp::now()
     ));
 
     let different_token_result = backend

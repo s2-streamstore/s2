@@ -41,7 +41,7 @@ impl AdvisedReconnects {
 
     fn is_recent(&self) -> bool {
         self.last
-            .is_some_and(|at| at.elapsed() <= ADVISED_RECONNECT_IDLE)
+            .is_some_and(|at| at.elapsed() < ADVISED_RECONNECT_IDLE)
     }
 }
 

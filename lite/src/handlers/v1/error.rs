@@ -307,10 +307,22 @@ impl IntoResponse for ServiceError {
 
 impl From<ServiceError> for s2s::TerminalMessage {
     fn from(value: ServiceError) -> Self {
-        let (status, body) = value.to_response().to_parts();
+        let resp = value.to_response();
+        let (status, mut body) = resp.to_parts();
+        if body.len() > s2s::MAX_TERMINAL_BODY_BYTES {
+            let fallback = serde_json::to_string(&ErrorInfo {
+                code: match &resp {
+                    ErrorResponse::Standard(s) => s.info.code,
+                    _ => ErrorCode::Other.into(),
+                },
+                message: "error message exceeded frame limit".to_owned(),
+            })
+            .expect("compact fallback ErrorInfo serializes");
+            body = fallback;
+        }
         s2s::TerminalMessage {
             status: status.as_u16(),
-            body,
+            body: body.into(),
         }
     }
 }

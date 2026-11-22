@@ -5,11 +5,10 @@ use std::{future::Future, time::Duration};
 use assert_matches::assert_matches;
 use common::{S2Stream, s2};
 use s2_sdk::{
-    error::{ClientError, RequestError, ServerError},
+    error::{RequestError, ServerError},
     types::*,
 };
 use test_context::test_context;
-use time::OffsetDateTime;
 
 const METRICS_TIMEOUT: Duration = Duration::from_secs(60);
 const FAST_METRICS_POLL_MAX: Duration = Duration::from_secs(120);
@@ -17,15 +16,19 @@ const FAST_METRICS_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const STORAGE_METRICS_POLL_MAX: Duration = Duration::from_secs(8 * 60);
 const STORAGE_METRICS_POLL_INTERVAL: Duration = Duration::from_secs(10);
 
-fn epoch_range(hours_ago: u32) -> (u32, u32) {
-    let end = OffsetDateTime::now_utc().unix_timestamp() as u32;
-    let start = end.saturating_sub(hours_ago * 3600);
+fn ts(secs: u32) -> Timestamp {
+    Timestamp::from_second(i64::from(secs)).expect("u32 fits in Timestamp")
+}
+
+fn epoch_range(hours_ago: u32) -> (Timestamp, Timestamp) {
+    let end = Timestamp::now();
+    let start = end - Duration::from_secs(u64::from(hours_ago) * 3600);
     (start, end)
 }
 
 fn time_range(hours_ago: u32) -> TimeRange {
     let (start, end) = epoch_range(hours_ago);
-    TimeRange::new(start, end)
+    TimeRange::new(start, end).expect("valid time range")
 }
 
 fn time_range_and_interval(
@@ -33,18 +36,21 @@ fn time_range_and_interval(
     interval: Option<TimeseriesInterval>,
 ) -> TimeRangeAndInterval {
     let (start, end) = epoch_range(hours_ago);
-    let range = TimeRangeAndInterval::new(start, end);
+    let range = TimeRangeAndInterval::new(start, end).expect("valid time range");
     match interval {
         Some(interval) => range.with_interval(interval),
         None => range,
     }
 }
 
-fn invalid_time_ranges(now: u32) -> [(u32, u32); 3] {
+fn invalid_time_ranges(now: Timestamp) -> [(Timestamp, Timestamp); 3] {
     [
-        (now, now.saturating_sub(3600)),
-        (now.saturating_sub(3600), now.saturating_add(600)),
-        (now.saturating_sub(91 * 24 * 3600), now),
+        (now, now - Duration::from_secs(3600)),
+        (
+            now - Duration::from_secs(3600),
+            now + Duration::from_secs(600),
+        ),
+        (now - Duration::from_secs(91 * 24 * 3600), now),
     ]
 }
 
@@ -60,6 +66,7 @@ async fn read_sample(stream: &S2Stream) -> Result<(), Box<dyn std::error::Error>
     let _ = stream
         .read(
             ReadInput::new()
+                .with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0)))
                 .with_stop(ReadStop::new().with_limits(ReadLimits::new().with_count(1))),
         )
         .await?;
@@ -90,7 +97,7 @@ async fn poll_metrics<Fetch, Fut, Ready>(
     interval: Duration,
     mut fetch: Fetch,
     mut ready: Ready,
-) -> Result<Vec<Metric>, RequestError>
+) -> Result<Vec<Metric>, Box<dyn std::error::Error>>
 where
     Fetch: FnMut() -> Fut,
     Fut: Future<Output = Result<Vec<Metric>, RequestError>>,
@@ -118,12 +125,10 @@ where
         tokio::time::sleep(interval).await;
     }
 
-    Err(last_err.unwrap_or_else(|| {
-        RequestError::Client(ClientError::Other(format!(
-            "metrics not ready after {}s",
-            timeout.as_secs()
-        )))
-    }))
+    match last_err {
+        Some(err) => Err(Box::new(err)),
+        None => Err(format!("metrics not ready after {}s", timeout.as_secs()).into()),
+    }
 }
 
 #[test_context(S2Stream)]
@@ -344,7 +349,7 @@ async fn account_metrics_empty_time_range(
     let metrics = tokio::time::timeout(
         METRICS_TIMEOUT,
         client.get_account_metrics(GetAccountMetricsInput::new(AccountMetricSet::ActiveBasins(
-            TimeRange::new(0, 3600),
+            TimeRange::new(ts(0), ts(3600))?,
         ))),
     )
     .await
@@ -634,13 +639,13 @@ async fn account_metrics_invalid_time_ranges(
     append_sample(stream).await?;
 
     let client = s2();
-    let now = OffsetDateTime::now_utc().unix_timestamp() as u32;
+    let now = Timestamp::now();
 
     for (start, end) in invalid_time_ranges(now) {
         let result = tokio::time::timeout(
             METRICS_TIMEOUT,
             client.get_account_metrics(GetAccountMetricsInput::new(
-                AccountMetricSet::ActiveBasins(TimeRange::new(start, end)),
+                AccountMetricSet::ActiveBasins(TimeRange::new(start, end)?),
             )),
         )
         .await
@@ -649,7 +654,7 @@ async fn account_metrics_invalid_time_ranges(
         assert_matches!(
             result,
             Err(RequestError::Server(ServerError { code, .. })) => {
-                assert_eq!(code, "invalid");
+                assert_eq!(code.as_deref(), Some("invalid"));
             }
         );
     }
@@ -695,7 +700,7 @@ async fn basin_metrics_empty_time_range(
         METRICS_TIMEOUT,
         client.get_basin_metrics(GetBasinMetricsInput::new(
             stream.basin_name().clone(),
-            BasinMetricSet::Storage(TimeRange::new(0, 3600)),
+            BasinMetricSet::Storage(TimeRange::new(ts(0), ts(3600))?),
         )),
     )
     .await
@@ -714,14 +719,14 @@ async fn basin_metrics_invalid_time_ranges(
     append_sample(stream).await?;
 
     let client = s2();
-    let now = OffsetDateTime::now_utc().unix_timestamp() as u32;
+    let now = Timestamp::now();
 
     for (start, end) in invalid_time_ranges(now) {
         let result = tokio::time::timeout(
             METRICS_TIMEOUT,
             client.get_basin_metrics(GetBasinMetricsInput::new(
                 stream.basin_name().clone(),
-                BasinMetricSet::Storage(TimeRange::new(start, end)),
+                BasinMetricSet::Storage(TimeRange::new(start, end)?),
             )),
         )
         .await
@@ -730,7 +735,7 @@ async fn basin_metrics_invalid_time_ranges(
         assert_matches!(
             result,
             Err(RequestError::Server(ServerError { code, .. })) => {
-                assert_eq!(code, "invalid");
+                assert_eq!(code.as_deref(), Some("invalid"));
             }
         );
     }
@@ -781,7 +786,7 @@ async fn stream_metrics_empty_time_range(
         client.get_stream_metrics(GetStreamMetricsInput::new(
             stream.basin_name().clone(),
             stream.stream_name().clone(),
-            StreamMetricSet::Storage(TimeRange::new(0, 3600)),
+            StreamMetricSet::Storage(TimeRange::new(ts(0), ts(3600))?),
         )),
     )
     .await
@@ -800,7 +805,7 @@ async fn stream_metrics_invalid_time_ranges(
     append_sample(stream).await?;
 
     let client = s2();
-    let now = OffsetDateTime::now_utc().unix_timestamp() as u32;
+    let now = Timestamp::now();
 
     for (start, end) in invalid_time_ranges(now) {
         let result = tokio::time::timeout(
@@ -808,7 +813,7 @@ async fn stream_metrics_invalid_time_ranges(
             client.get_stream_metrics(GetStreamMetricsInput::new(
                 stream.basin_name().clone(),
                 stream.stream_name().clone(),
-                StreamMetricSet::Storage(TimeRange::new(start, end)),
+                StreamMetricSet::Storage(TimeRange::new(start, end)?),
             )),
         )
         .await
@@ -817,7 +822,7 @@ async fn stream_metrics_invalid_time_ranges(
         assert_matches!(
             result,
             Err(RequestError::Server(ServerError { code, .. })) => {
-                assert_eq!(code, "invalid");
+                assert_eq!(code.as_deref(), Some("invalid"));
             }
         );
     }

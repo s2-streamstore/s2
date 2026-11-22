@@ -44,9 +44,9 @@ use record_format::{
 use s2_sdk::{
     S2,
     types::{
-        AppendRetryPolicy, CreateStreamInput, DeleteOnEmptyConfig, DeleteStreamInput,
-        EncryptionKey, LocationInfo, MeteredBytes, Metric, PrivateNet, RetentionPolicy,
-        RetryConfig, StreamConfig as SdkStreamConfig, StreamName, TimestampingConfig,
+        AppendRetryPolicy, CreateStreamInput, DeleteOnEmptyConfig, EncryptionKey, LocationInfo,
+        MeteredBytes, Metric, PrivateNet, RetentionPolicy, RetryConfig,
+        StreamConfig as SdkStreamConfig, StreamName, Timestamp, TimestampingConfig,
         TimestampingMode,
     },
 };
@@ -777,7 +777,7 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
 
         Command::Read(args) => {
             let encryption_key = resolve_encryption_key(&args.encryption_key)?;
-            let mut batches = ops::read(&s2, &args, encryption_key.as_ref()).await?;
+            let mut batches = ops::read(&s2, &args, encryption_key.as_ref())?;
             let mut writer = args
                 .output
                 .writer()
@@ -840,7 +840,7 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
 
         Command::Tail(args) => {
             let encryption_key = resolve_encryption_key(&args.encryption_key)?;
-            let mut records = ops::tail(&s2, &args, encryption_key.as_ref()).await?;
+            let mut records = ops::tail(&s2, &args, encryption_key.as_ref())?;
             let mut writer = args
                 .output
                 .writer()
@@ -909,16 +909,15 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
                 "Creating temporary stream s2://{}/{} (storage class: {})",
                 basin_name,
                 stream_name,
-                args.storage_class
-                    .as_ref()
-                    .map(|sc| format!("{:?}", sc))
-                    .unwrap_or_else(|| "<default>".to_owned())
+                args.storage_class.as_deref().unwrap_or("<default>")
             );
 
             let mut stream_config = SdkStreamConfig::new()
                 .with_retention_policy(RetentionPolicy::Age(3600))
                 .with_delete_on_empty(
-                    DeleteOnEmptyConfig::new().with_min_age(Duration::from_secs(60)),
+                    DeleteOnEmptyConfig::new()
+                        .with_min_age(Duration::from_secs(60))
+                        .expect("whole-second duration"),
                 )
                 .with_timestamping(
                     TimestampingConfig::new()
@@ -963,7 +962,7 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
             .await;
 
             let delete_result = basin
-                .delete_stream(DeleteStreamInput::new(stream_name))
+                .delete_stream(stream_name)
                 .await
                 .map_err(|e| CliError::op(OpKind::Bench, e));
             bench_result?;
@@ -1156,14 +1155,12 @@ async fn write_record(
     Ok(())
 }
 
-fn format_timestamp(ts: u32) -> String {
-    use std::time::{Duration, UNIX_EPOCH};
-    let time = UNIX_EPOCH + Duration::from_secs(ts as u64);
-    humantime::format_rfc3339_seconds(time).to_string()
+fn format_timestamp(ts: Timestamp) -> String {
+    ts.to_string()
 }
 
 /// ` (2h 5m ago)` for a time in the past, and nothing for one that is not.
-fn format_ago(ts: u32) -> String {
+fn format_ago(ts: Timestamp) -> String {
     metrics::format_age(ts, std::time::SystemTime::now())
         .map(|age| format!(" ({age} ago)"))
         .unwrap_or_default()
@@ -1207,7 +1204,7 @@ fn print_estimated_billable_usage(metrics: &[Metric], by_interval: bool) {
 
 fn print_time_range(range: Option<&s2_sdk::types::TimeRangeAndInterval>) {
     if let Some(range) = range {
-        print!("{}", metrics::render_time_range(range.start, range.end));
+        print!("{}", metrics::render_time_range(range.start(), range.end()));
     }
 }
 

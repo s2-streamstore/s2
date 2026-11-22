@@ -2,7 +2,9 @@
 Rust SDK for [S2](https://s2.dev/).
 
 The Rust SDK provides ergonomic wrappers and utilities to interact with the
-[S2 API](https://s2.dev/docs/rest/records/overview).
+[S2 API](https://s2.dev/docs/rest/records/overview). It targets conformance with
+the [S2 SDK Specification](https://github.com/s2-streamstore/s2-specs/blob/main/sdk/spec.md),
+Revision 1 (Draft).
 
 # Getting started
 
@@ -113,5 +115,5 @@ pub mod append_session {
 }
 /// Continuous read sessions.
 pub mod read_session {
-    pub use crate::session::read::ReadSession;
+    pub use crate::session::read::{ReadBatchSession, ReadSession, ReadSessionState};
 }

@@ -19,7 +19,7 @@ async fn create_list_and_delete_basin() -> Result<(), Box<dyn std::error::Error>
         .await?;
 
     assert_eq!(basin_info.name, basin_name);
-    assert!(time::OffsetDateTime::from(basin_info.created_at) <= time::OffsetDateTime::now_utc());
+    assert!(basin_info.created_at <= Timestamp::now());
     assert!(basin_info.deleted_at.is_none());
 
     let page = s2
@@ -37,8 +37,7 @@ async fn create_list_and_delete_basin() -> Result<(), Box<dyn std::error::Error>
     );
     assert!(!page.has_more);
 
-    s2.delete_basin(DeleteBasinInput::new(basin_name.clone()))
-        .await?;
+    s2.delete_basin(basin_name.clone()).await?;
 
     let page = s2
         .list_basins(ListBasinsInput::new().with_prefix(basin_name.clone().into()))
@@ -72,7 +71,7 @@ async fn basin_config_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
             StreamConfig::new()
                 .with_storage_class("express")
                 .with_delete_on_empty(
-                    DeleteOnEmptyConfig::new().with_min_age(Duration::from_secs(60)),
+                    DeleteOnEmptyConfig::new().with_min_age(Duration::from_secs(60))?,
                 ),
         )
         .with_create_stream_on_read(true);
@@ -97,7 +96,7 @@ async fn basin_config_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
         } if storage_class == "express"
     );
 
-    s2.delete_basin(DeleteBasinInput::new(basin_name)).await?;
+    s2.delete_basin(basin_name).await?;
 
     Ok(())
 }
@@ -133,7 +132,7 @@ async fn reconfigure_basin() -> Result<(), Box<dyn std::error::Error>> {
         } if storage_class == "standard"
     );
 
-    s2.delete_basin(DeleteBasinInput::new(basin_name)).await?;
+    s2.delete_basin(basin_name).await?;
 
     Ok(())
 }
@@ -184,7 +183,7 @@ async fn ensure_basin_config_updated() -> Result<(), Box<dyn std::error::Error>>
         )
         .await?;
 
-    assert_matches!(output, EnsureOutput::ConfigUpdated(_));
+    assert_matches!(output, EnsureOutput::Updated(_));
 
     let updated_config = s2.get_basin_config(basin_name).await?;
 
@@ -212,7 +211,7 @@ async fn ensure_basin_config_unchanged() -> Result<(), Box<dyn std::error::Error
         .ensure_basin(EnsureBasinInput::new(basin_name.clone()).with_config(config.clone()))
         .await?;
 
-    assert_matches!(output, EnsureOutput::ConfigUnchanged(_));
+    assert_matches!(output, EnsureOutput::Noop(_));
 
     let updated_config = s2.get_basin_config(basin_name).await?;
 
@@ -237,8 +236,8 @@ async fn list_basins_with_limit() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(page.values.len(), 1);
     assert!(page.has_more);
 
-    s2.delete_basin(DeleteBasinInput::new(basin_name_1)).await?;
-    s2.delete_basin(DeleteBasinInput::new(basin_name_2)).await?;
+    s2.delete_basin(basin_name_1).await?;
+    s2.delete_basin(basin_name_2).await?;
 
     Ok(())
 }
@@ -266,8 +265,8 @@ async fn list_basins_with_prefix() -> Result<(), Box<dyn std::error::Error>> {
         assert_eq!(b.name, basin_name_1)
     });
 
-    s2.delete_basin(DeleteBasinInput::new(basin_name_1)).await?;
-    s2.delete_basin(DeleteBasinInput::new(basin_name_2)).await?;
+    s2.delete_basin(basin_name_1).await?;
+    s2.delete_basin(basin_name_2).await?;
 
     Ok(())
 }
@@ -296,35 +295,16 @@ async fn list_basins_with_prefix_and_start_after() -> Result<(), Box<dyn std::er
     assert_eq!(page.values.len(), 1);
     assert_eq!(page.values[0].name, basin_name_2);
 
-    s2.delete_basin(DeleteBasinInput::new(basin_name_1)).await?;
-    s2.delete_basin(DeleteBasinInput::new(basin_name_2)).await?;
+    s2.delete_basin(basin_name_1).await?;
+    s2.delete_basin(basin_name_2).await?;
 
     Ok(())
 }
 
 #[tokio::test]
-async fn delete_nonexistent_basin_errors() -> Result<(), Box<dyn std::error::Error>> {
+async fn delete_nonexistent_basin_succeeds() -> Result<(), Box<dyn std::error::Error>> {
     let s2 = s2();
-    let result = s2
-        .delete_basin(DeleteBasinInput::new(unique_basin_name()))
-        .await;
-
-    assert_matches!(
-        result,
-        Err(RequestError::Server(ServerError { code, .. })) => {
-            assert_eq!(code, "basin_not_found")
-        }
-    );
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn delete_nonexistent_basin_with_ignore() -> Result<(), Box<dyn std::error::Error>> {
-    let s2 = s2();
-    let result = s2
-        .delete_basin(DeleteBasinInput::new(unique_basin_name()).with_ignore_not_found(true))
-        .await;
+    let result = s2.delete_basin(unique_basin_name()).await;
 
     assert_matches!(result, Ok(()));
 
@@ -352,7 +332,7 @@ async fn get_basin_config() -> Result<(), Box<dyn std::error::Error>> {
         }) if storage_class == "express"
     );
 
-    s2.delete_basin(DeleteBasinInput::new(basin_name)).await?;
+    s2.delete_basin(basin_name).await?;
 
     Ok(())
 }
@@ -390,8 +370,7 @@ async fn issue_access_token_with_expiration_and_auto_prefix_streams()
     let s2 = s2();
     let token_id: AccessTokenId = uuid().parse().expect("valid token id");
 
-    let expires_at: S2DateTime =
-        (time::OffsetDateTime::now_utc() + time::Duration::hours(1)).try_into()?;
+    let expires_at = Timestamp::now() + Duration::from_secs(3600);
 
     let token = s2
         .issue_access_token(
@@ -404,7 +383,7 @@ async fn issue_access_token_with_expiration_and_auto_prefix_streams()
                     "namespace".parse().expect("valid prefix"),
                 )),
             )
-            .with_expires_at(expires_at)
+            .with_expires_at(expires_at)?
             .with_auto_prefix_streams(true),
         )
         .await?;
@@ -445,7 +424,7 @@ async fn issue_access_token_with_auto_prefix_streams_but_without_prefix_errors()
         .await;
 
     assert_matches!(result, Err(RequestError::Server(ServerError { code, message, .. })) => {
-        assert_eq!(code, "invalid");
+        assert_eq!(code.as_deref(), Some("invalid"));
         assert_eq!(message, "Auto prefixing is only allowed for streams with prefix matching");
     });
     Ok(())
@@ -459,7 +438,7 @@ async fn issue_access_token_with_no_permitted_ops_errors() -> Result<(), Box<dyn
 
     let result_matches = |result: Result<String, RequestError>| {
         assert_matches!(result, Err(RequestError::Server(ServerError { code, message, .. })) => {
-            assert_eq!(code, "invalid");
+            assert_eq!(code.as_deref(), Some("invalid"));
             assert_eq!(message, "Access token permissions cannot be empty");
         });
     };

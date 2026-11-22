@@ -21,9 +21,8 @@ use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use rand::{Rng, SeedableRng};
 use s2_sdk::{
     S2Stream,
-    batching::BatchingConfig,
-    error::ProducerError,
-    producer::{IndexedAppendAck, ProducerConfig},
+    error::AppendSessionError,
+    producer::{ProducerConfig, RecordAck},
     types::{
         AppendRecord, Header, MeteredBytes as _, RECORD_BATCH_MAX, ReadFrom, ReadInput,
         ReadSessionConfig, ReadStart, ReadStop, SequencedRecord,
@@ -65,7 +64,7 @@ pub fn default_linger(target_mibps: NonZeroU64, record_size: u32) -> Duration {
 }
 
 type PendingAck =
-    Pin<Box<dyn Future<Output = (Instant, Result<IndexedAppendAck, ProducerError>)> + Send>>;
+    Pin<Box<dyn Future<Output = (Instant, Result<RecordAck, AppendSessionError>)> + Send>>;
 
 pub struct BenchWriteSample {
     pub bytes: u64,
@@ -425,11 +424,16 @@ pub fn bench_write(
         new_record(Bytes::from(vec![0u8; body_size(record_size)]), 0, 0).metered_bytes();
     assert_eq!(metered_size, record_size);
 
-    let producer = stream.producer(
-        ProducerConfig::default().with_batching(BatchingConfig::new().with_linger(linger)),
-    );
+    let producer = stream.producer(ProducerConfig::default().with_linger(linger));
 
     async_stream::stream! {
+        let producer = match producer {
+            Ok(producer) => producer,
+            Err(e) => {
+                yield Err(CliError::op(OpKind::Bench, e));
+                return;
+            }
+        };
         let target_bps = target_mibps.get() as f64 * 1024.0 * 1024.0;
 
         let mut total_bytes: u64 = 0;
@@ -526,10 +530,18 @@ pub fn bench_write(
                             let hash = chain_hash(prev_hash, body.as_ref());
                             prev_hash = hash;
                             let record = new_record(body, timestamp, hash);
-                            pending_acks.push(Box::pin(async move {
-                                let res = permit.submit(record).await;
-                                (submit_time, res)
-                            }));
+                            match permit.submit(record) {
+                                Ok(ticket) => {
+                                    pending_acks.push(Box::pin(async move {
+                                        let res = ticket.await;
+                                        (submit_time, res)
+                                    }));
+                                }
+                                Err(e) => {
+                                    yield Err(CliError::op(OpKind::Bench, e));
+                                    return;
+                                }
+                            }
                             bytes_submitted += record_size;
                         }
                         Err(e) => {
@@ -575,7 +587,9 @@ pub fn bench_read_catchup(
     bench_read_inner(
         stream,
         record_size,
-        ReadStop::new().with_wait(0),
+        ReadStop::new()
+            .with_wait(Duration::ZERO)
+            .expect("whole-second duration"),
         Arc::new(AtomicU64::new(WRITE_DONE_SENTINEL)),
         bench_start,
     )
@@ -593,8 +607,7 @@ fn bench_read_inner(
             .with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0)))
             .with_stop(stop);
         let mut read_session = stream
-            .read_session(read_input, ReadSessionConfig::default())
-            .await
+            .read_batch_session(read_input, ReadSessionConfig::default())
             .map_err(|e| CliError::op(OpKind::Bench, e))?;
 
         let mut total_bytes: u64 = 0;
@@ -690,6 +703,11 @@ fn bench_read_inner(
                             if let Some(expected) = done_records() && total_records >= expected {
                                 break;
                             }
+                        }
+                        Some(Err(s2_sdk::error::ReadSessionError::ReadUnwritten(e)))
+                            if total_records == 0 && e.tail.seq_num == 0 =>
+                        {
+                            break;
                         }
                         Some(Err(e)) => {
                             yield Err(CliError::op(OpKind::Bench, e));

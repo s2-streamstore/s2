@@ -86,10 +86,18 @@ pub struct RetryBackoff {
 }
 
 impl RetryBackoff {
-    /// Return the next delay, continuing at the jittered maximum base delay after exhaustion.
+    /// Compute the base delay for `cur_retry` (`T3`: `min(min_base_delay * 2^n, max_base_delay)`).
+    fn base_delay_for(&self, retry_index: u32) -> Duration {
+        self.min_base_delay
+            .saturating_mul(2u32.saturating_pow(retry_index))
+            .min(self.max_base_delay)
+    }
+
+    /// Return the next exponential-backoff delay ignoring `max_retries` (`T3`, `T5b`).
     pub fn next_or_max(&mut self) -> Duration {
-        self.next()
-            .unwrap_or_else(|| jittered_delay(self.max_base_delay))
+        let base_delay = self.base_delay_for(self.cur_retry);
+        self.cur_retry = self.cur_retry.saturating_add(1);
+        jittered_delay(base_delay)
     }
 
     pub fn remaining(&self) -> u32 {
@@ -116,10 +124,7 @@ impl Iterator for RetryBackoff {
         if self.cur_retry >= self.max_retries {
             return None;
         }
-        let base_delay = (self
-            .min_base_delay
-            .saturating_mul(2u32.saturating_pow(self.cur_retry)))
-        .min(self.max_base_delay);
+        let base_delay = self.base_delay_for(self.cur_retry);
         self.cur_retry += 1;
         Some(jittered_delay(base_delay))
     }
@@ -164,6 +169,33 @@ mod tests {
     }
 
     #[test]
+    fn next_or_max_ramps_exponentially_even_with_zero_max_retries() {
+        let mut backoff = RetryBackoffBuilder::default()
+            .with_min_base_delay(Duration::from_millis(100))
+            .with_max_base_delay(Duration::from_millis(1000))
+            .with_max_retries(0)
+            .build();
+
+        let d0 = backoff.next_or_max();
+        assert!(d0 >= Duration::from_millis(100) && d0 <= Duration::from_millis(200));
+        let d1 = backoff.next_or_max();
+        assert!(d1 >= Duration::from_millis(200) && d1 <= Duration::from_millis(400));
+        let d2 = backoff.next_or_max();
+        assert!(d2 >= Duration::from_millis(400) && d2 <= Duration::from_millis(800));
+        let d3 = backoff.next_or_max();
+        assert!(d3 >= Duration::from_millis(800) && d3 <= Duration::from_millis(1600));
+        let d4 = backoff.next_or_max();
+        assert!(d4 >= Duration::from_millis(1000) && d4 <= Duration::from_millis(2000));
+        assert_eq!(backoff.used(), 5);
+
+        backoff.reset();
+        let after_reset = backoff.next_or_max();
+        assert!(
+            after_reset >= Duration::from_millis(100) && after_reset <= Duration::from_millis(200)
+        );
+    }
+
+    #[test]
     fn backoff_with_reset() {
         let mut backoff = RetryBackoffBuilder::default().with_max_retries(3).build();
 
@@ -202,12 +234,23 @@ mod tests {
     fn next_or_max_continues_with_capped_jitter() {
         let delay = Duration::from_secs(7);
         let mut backoff = RetryBackoffBuilder::default()
+            .with_min_base_delay(Duration::from_millis(100))
             .with_max_base_delay(delay)
             .with_max_retries(1)
             .build();
-        assert!(backoff.next().is_some());
+        // Retry 0: 100ms..=200ms (consumes the 1 budgeted retry).
+        let d0 = backoff.next().unwrap();
+        assert!(d0 >= Duration::from_millis(100) && d0 <= Duration::from_millis(200));
         assert!(backoff.next().is_none());
 
+        // Retries 1..=6 ramp exponentially: 200ms, 400ms, 800ms, 1.6s, 3.2s, 6.4s.
+        for retry in 1u32..=6 {
+            let expected = Duration::from_millis(100) * 2u32.pow(retry);
+            let next = backoff.next_or_max();
+            assert!(next >= expected && next <= expected * 2);
+        }
+
+        // Subsequent retries cap at max_base_delay (7s..=14s).
         for _ in 0..10 {
             let next = backoff.next_or_max();
             assert!(next >= delay);

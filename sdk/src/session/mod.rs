@@ -1,10 +1,13 @@
 pub mod append;
 pub mod read;
 
-pub(crate) use append::{AppendPermit, AppendPermits, AppendSessionInternal, BatchSubmitTicket};
+pub(crate) use append::{
+    AppendPermit, AppendPermits, AppendSessionInternal, BatchSubmitTicket, SessionLifecycle,
+    validate_reserve_bytes,
+};
 pub use append::{AppendSession, AppendSessionConfig};
-pub(crate) use read::read_session;
-pub use read::{ReadSession, ReadSessionError};
+pub use read::{ReadBatchSession, ReadSession};
+pub(crate) use read::{open_read_batch_session, open_read_session};
 
 /// Per-stream options sent as request headers on every (re)connect of a session.
 #[derive(Debug, Clone, Default)]

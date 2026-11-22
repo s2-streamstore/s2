@@ -8,6 +8,7 @@ use std::{
 use colored::Colorize;
 use s2_sdk::types::{
     AccumulationMetric, GaugeMetric, Metric, MetricUnit, RecordMetric, TimeseriesInterval,
+    Timestamp,
 };
 use serde_json::{Value, json};
 
@@ -33,9 +34,10 @@ fn format_interval(interval: &TimeseriesInterval) -> &str {
 
 /// `2h 5m` for a time in the past, by its two largest units, and `None` for one that is not (a
 /// clock behind the server's would otherwise give a negative age).
-pub fn format_age(ts: u32, now: SystemTime) -> Option<String> {
+pub fn format_age(ts: Timestamp, now: SystemTime) -> Option<String> {
+    let secs = u64::try_from(ts.as_second()).ok()?;
     let elapsed = now
-        .duration_since(UNIX_EPOCH + Duration::from_secs(ts as u64))
+        .duration_since(UNIX_EPOCH + Duration::from_secs(secs))
         .ok()?;
     let elapsed = humantime::format_duration(Duration::from_secs(elapsed.as_secs())).to_string();
     let largest: Vec<&str> = elapsed.split(' ').take(2).collect();
@@ -56,12 +58,12 @@ pub fn to_json(metrics: &[Metric]) -> Value {
                 "name": m.name,
                 "unit": format_unit(&m.unit),
                 "interval": format_interval(&m.interval),
-                "values": m.values,
+                "values": m.values.iter().map(|(ts, v)| (ts.as_second(), *v)).collect::<Vec<_>>(),
             }}),
             Metric::Gauge(m) => json!({"gauge": {
                 "name": m.name,
                 "unit": format_unit(&m.unit),
-                "values": m.values,
+                "values": m.values.iter().map(|(ts, v)| (ts.as_second(), *v)).collect::<Vec<_>>(),
             }}),
             Metric::Label(m) => json!({"label": {
                 "name": m.name,
@@ -69,7 +71,7 @@ pub fn to_json(metrics: &[Metric]) -> Value {
             }}),
             Metric::Record(m) => json!({"record": {
                 "name": m.name,
-                "timestamp": m.timestamp,
+                "timestamp": m.timestamp.as_second(),
                 "fields": m.fields,
             }}),
             Metric::Unknown(kind) => json!({ kind: {} }),
@@ -175,8 +177,8 @@ pub fn render_token_activity(
     out
 }
 
-fn timestamp(ts: u32) -> String {
-    humantime::format_rfc3339_seconds(UNIX_EPOCH + Duration::from_secs(ts as u64)).to_string()
+fn timestamp(ts: Timestamp) -> String {
+    ts.to_string()
 }
 
 fn value(unit: &MetricUnit, value: f64) -> String {
@@ -221,7 +223,7 @@ fn table(heading: [&str; 2], rows: &[(String, String)], total: bool) -> String {
 }
 
 /// The time range metrics were asked for, as the heading of any view of them.
-pub fn render_time_range(start: u32, end: u32) -> String {
+pub fn render_time_range(start: Timestamp, end: Timestamp) -> String {
     format!(
         "{} {}\n{}   {}\n\n",
         "start:".dimmed(),

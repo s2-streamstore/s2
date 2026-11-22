@@ -26,8 +26,9 @@
   </p>
 </div>
 
-The Rust SDK provides ergonomic interface and utilities to interact with the
-[S2 API](https://s2.dev/docs/rest/records/overview).
+The Rust SDK provides an ergonomic interface and utilities to interact with the
+[S2 API](https://s2.dev/docs/rest/records/overview). It targets conformance with
+the [S2 SDK Specification](https://github.com/s2-streamstore/s2-specs/blob/main/sdk/spec.md), Revision 1 (Draft).
 
 ## Getting started
 

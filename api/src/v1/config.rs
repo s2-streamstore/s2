@@ -325,7 +325,24 @@ impl StreamConfig {
     /// Encode as compact JSON for the `s2-stream-config` header.
     pub fn to_header_value(&self) -> HeaderValue {
         let json = serde_json::to_string(self).expect("StreamConfig serializes to JSON");
-        HeaderValue::from_str(&json).expect("compact JSON of StreamConfig is a valid header value")
+        if json.bytes().all(|b| (0x20..=0x7e).contains(&b)) {
+            return HeaderValue::from_str(&json)
+                .expect("compact printable-ASCII JSON of StreamConfig is a valid header value");
+        }
+        let mut escaped = String::with_capacity(json.len());
+        for ch in json.chars() {
+            if matches!(ch, '\x20'..='\x7e') {
+                escaped.push(ch);
+            } else {
+                let mut units = [0u16; 2];
+                for unit in ch.encode_utf16(&mut units) {
+                    use std::fmt::Write as _;
+                    let _ = write!(escaped, "\\u{unit:04x}");
+                }
+            }
+        }
+        HeaderValue::from_str(&escaped)
+            .expect("ASCII-escaped JSON of StreamConfig is a valid header value")
     }
 }
 
@@ -543,11 +560,11 @@ pub struct BasinReconfiguration {
     /// Create a stream on append.
     #[serde(default, skip_serializing_if = "Maybe::is_unspecified")]
     #[cfg_attr(feature = "utoipa", schema(value_type = Option<bool>))]
-    pub create_stream_on_append: Maybe<bool>,
+    pub create_stream_on_append: Maybe<Option<bool>>,
     /// Create a stream on read.
     #[serde(default, skip_serializing_if = "Maybe::is_unspecified")]
     #[cfg_attr(feature = "utoipa", schema(value_type = Option<bool>))]
-    pub create_stream_on_read: Maybe<bool>,
+    pub create_stream_on_read: Maybe<Option<bool>>,
 }
 
 impl TryFrom<BasinReconfiguration> for s2_common::config::BasinReconfiguration {
@@ -564,8 +581,8 @@ impl TryFrom<BasinReconfiguration> for s2_common::config::BasinReconfiguration {
         Ok(Self {
             default_stream_config: default_stream_config.try_map_opt(TryInto::try_into)?,
             stream_cipher: stream_cipher.try_map_opt(|cipher| cipher.known().map(Into::into))?,
-            create_stream_on_append: create_stream_on_append.map(Into::into),
-            create_stream_on_read: create_stream_on_read.map(Into::into),
+            create_stream_on_append,
+            create_stream_on_read,
         })
     }
 }
@@ -582,8 +599,8 @@ impl From<s2_common::config::BasinReconfiguration> for BasinReconfiguration {
         Self {
             default_stream_config: default_stream_config.map_opt(Into::into),
             stream_cipher: stream_cipher.map_opt(|cipher| EncryptionAlgorithm::from(cipher).into()),
-            create_stream_on_append: create_stream_on_append.map(Into::into),
-            create_stream_on_read: create_stream_on_read.map(Into::into),
+            create_stream_on_append,
+            create_stream_on_read,
         }
     }
 }
@@ -724,14 +741,8 @@ mod tests {
         (
             gen_maybe(gen_stream_reconfiguration()),
             gen_maybe(gen_encryption_algorithm()),
-            prop_oneof![
-                Just(Maybe::Unspecified),
-                any::<bool>().prop_map(Maybe::Specified),
-            ],
-            prop_oneof![
-                Just(Maybe::Unspecified),
-                any::<bool>().prop_map(Maybe::Specified),
-            ],
+            gen_maybe(any::<bool>()),
+            gen_maybe(any::<bool>()),
         )
             .prop_map(
                 |(
@@ -993,7 +1004,7 @@ mod tests {
                     ..Default::default()
                 })),
                 stream_cipher: Maybe::Specified(Some(new_algorithm.into())),
-                create_stream_on_append: Maybe::Specified(new_on_append),
+                create_stream_on_append: Maybe::Specified(Some(new_on_append)),
                 ..Default::default()
             };
             let result = base.reconfigure(reconfig);
@@ -1154,5 +1165,39 @@ mod tests {
             parsed.0,
             s2_common::config::OptionalStreamConfig::try_from(config).unwrap()
         );
+    }
+
+    #[test]
+    fn stream_config_header_value_escapes_non_ascii_and_del() {
+        let config = StreamConfig {
+            storage_class: Some("café-\x7f-🚀".into()),
+            ..Default::default()
+        };
+        let value = config.to_header_value();
+        assert!(!value.as_bytes().contains(&0x7f));
+        let decoded: StreamConfig = serde_json::from_str(value.to_str().unwrap()).unwrap();
+        assert_eq!(decoded.storage_class.as_deref(), Some("café-\x7f-🚀"));
+    }
+
+    #[test]
+    fn basin_reconfiguration_booleans_support_null_reset() {
+        let json = r#"{"create_stream_on_append":null,"create_stream_on_read":true}"#;
+        let api_reconfig: BasinReconfiguration = serde_json::from_str(json).unwrap();
+        assert_eq!(api_reconfig.create_stream_on_append, Maybe::Specified(None));
+        assert_eq!(
+            api_reconfig.create_stream_on_read,
+            Maybe::Specified(Some(true))
+        );
+
+        let common_reconfig = s2_common::config::BasinReconfiguration::try_from(api_reconfig)
+            .expect("valid basin reconfiguration");
+        let base = s2_common::config::BasinConfig {
+            create_stream_on_append: true,
+            create_stream_on_read: false,
+            ..Default::default()
+        };
+        let updated = base.reconfigure(common_reconfig);
+        assert!(!updated.create_stream_on_append);
+        assert!(updated.create_stream_on_read);
     }
 }

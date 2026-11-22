@@ -1,3 +1,4 @@
+use jiff::Timestamp;
 use s2_common::{
     basin::{BasinInfo, BasinName, ListBasinsRequest},
     config::{BasinConfig, BasinReconfiguration},
@@ -9,7 +10,6 @@ use slatedb::{
     IsolationLevel,
     config::{DurabilityLevel, ScanOptions},
 };
-use time::OffsetDateTime;
 
 use super::{
     Backend,
@@ -132,14 +132,14 @@ impl Backend {
                     .map(|req_token| creation_idempotency_key(req_token, &config));
                 ProvisionResult::Created(kv::basin_meta::BasinMeta {
                     config,
-                    created_at: OffsetDateTime::now_utc(),
+                    created_at: Timestamp::now(),
                     deleted_at: None,
                     creation_idempotency_key: new_creation_idempotency_key,
                 })
             }
             (None, ProvisionMode::Ensure) => ProvisionResult::Created(kv::basin_meta::BasinMeta {
                 config,
-                created_at: OffsetDateTime::now_utc(),
+                created_at: Timestamp::now(),
                 deleted_at: None,
                 creation_idempotency_key: None,
             }),
@@ -214,7 +214,7 @@ impl Backend {
             return Err(BasinNotFoundError { basin }.into());
         };
         if meta.deleted_at.is_none() {
-            meta.deleted_at = Some(OffsetDateTime::now_utc());
+            meta.deleted_at = Some(Timestamp::now());
             txn.put_bytes(meta_key, kv::basin_meta::ser_value(&meta))?;
             txn.put_bytes(
                 kv::basin_deletion_pending::ser_key(&basin),

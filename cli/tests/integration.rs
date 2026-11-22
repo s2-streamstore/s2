@@ -209,7 +209,7 @@ fn ls_basins() {
 fn delete_nonexistent_basin() {
     s2().args(["basin", "delete", "nonexistent-basin-12345"])
         .assert()
-        .failure();
+        .success();
 }
 
 #[test]
@@ -447,7 +447,7 @@ fn delete_nonexistent_stream() {
         &format!("s2://{basin}/nonexistent-stream-12345"),
     ])
     .assert()
-    .failure();
+    .success();
 }
 
 #[test]
@@ -1328,6 +1328,23 @@ fn fence_with_existing_token() {
     s2().args(["fence", &uri, "token-v3", "--fencing-token", "wrong-token"])
         .assert()
         .failure();
+
+    cleanup_stream(&basin, &stream);
+}
+
+#[test]
+#[serial]
+fn tail_empty_stream() {
+    let basin = ensure_test_basin("test-cli-data");
+    let stream = unique_name("test-data-tail-empty");
+    let uri = format!("s2://{basin}/{stream}");
+
+    s2().args(["stream", "create", &uri]).assert().success();
+
+    s2().args(["tail", &uri])
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty());
 
     cleanup_stream(&basin, &stream);
 }

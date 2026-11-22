@@ -1,7 +1,7 @@
 use std::{marker::PhantomData, ops::Deref, str::FromStr};
 
 use compact_str::{CompactString, ToCompactString};
-use time::OffsetDateTime;
+use jiff::Timestamp;
 
 use super::{
     ValidationError,
@@ -225,8 +225,8 @@ pub type ListBasinsRequest = ListItemsRequest<BasinNamePrefix, BasinNameStartAft
 pub struct BasinInfo {
     pub name: BasinName,
     pub location: Option<LocationName>,
-    pub created_at: OffsetDateTime,
-    pub deleted_at: Option<OffsetDateTime>,
+    pub created_at: Timestamp,
+    pub deleted_at: Option<Timestamp>,
 }
 
 #[cfg(test)]

@@ -242,7 +242,7 @@ pub struct AccessTokenScope {
 #[derive(Debug, Clone)]
 pub struct AccessTokenInfo {
     pub id: AccessTokenId,
-    pub expires_at: Option<time::OffsetDateTime>,
+    pub expires_at: Option<jiff::Timestamp>,
     pub auto_prefix_streams: bool,
     pub scope: AccessTokenScope,
     pub network_policy: Option<NetworkPolicyRef>,
@@ -251,7 +251,7 @@ pub struct AccessTokenInfo {
 #[derive(Debug, Clone)]
 pub struct IssueAccessTokenRequest {
     pub id: AccessTokenId,
-    pub expires_at: Option<time::OffsetDateTime>,
+    pub expires_at: Option<jiff::Timestamp>,
     pub auto_prefix_streams: bool,
     pub scope: AccessTokenScope,
     /// The policy the token is restricted by. A restricted issuer's own policy is inherited

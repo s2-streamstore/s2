@@ -798,7 +798,7 @@ impl From<PrivateNetPolicy> for NetworkPolicy {
 #[derive(Debug, Clone)]
 pub struct NetworkPolicyInfo {
     pub id: NetworkPolicyRef,
-    pub created_at: time::OffsetDateTime,
+    pub created_at: jiff::Timestamp,
     pub policy: NetworkPolicy,
 }
 
