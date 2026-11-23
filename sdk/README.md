@@ -72,7 +72,7 @@ By default, `s2-sdk` enables `rustls-aws-lc-rs` and `rustls-native-roots` (host 
 
 - `rustls-ring`: use `ring` instead of `aws-lc-rs` (`default-features = false, features = ["rustls-ring", "rustls-native-roots"]`).
 - `rustls-webpki-roots`: bundle Mozilla's root CA certificates for minimal containers (`FROM scratch`, distroless) without system CA bundles. When enabled alongside `rustls-native-roots`, native roots are tried first with automatic fallback to `webpki-roots`.
-- If Cargo feature unification enables both `rustls-aws-lc-rs` and `rustls-ring`, select one explicitly on `S2Config` with `with_rustls_aws_lc_rs_crypto_provider()`, `with_rustls_ring_crypto_provider()`, or `with_rustls_crypto_provider(...)`. Plaintext `http://` endpoints do not require a TLS provider.
+- Provider resolution order for HTTPS endpoints: (1) an explicit provider on `S2Config` (`with_rustls_crypto_provider(...)`, `with_rustls_aws_lc_rs_crypto_provider()`, or `with_rustls_ring_crypto_provider()`), (2) rustls's process-global default installed via `CryptoProvider::install_default()` (such as a FIPS provider), then (3) the compile-time feature fallback (`rustls-aws-lc-rs`, then `rustls-ring`). Plaintext `http://` endpoints do not require a TLS provider.
 
 ## Upgrading to Revision 1
 

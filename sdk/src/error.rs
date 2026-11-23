@@ -426,7 +426,22 @@ pub struct SeqNumMismatchError {
 }
 
 impl SeqNumMismatchError {
-    pub(crate) fn new(assignable_seq_num: u64, server: ServerError) -> Self {
+    /// Construct a [`SeqNumMismatchError`] for the given next assignable sequence number.
+    ///
+    /// Attaches a default HTTP `412` [`ServerError`]. Intended for building fixtures in
+    /// downstream tests.
+    #[must_use]
+    pub fn new(assignable_seq_num: u64) -> Self {
+        Self::from_server(
+            assignable_seq_num,
+            ServerError::new(
+                StatusCode::PRECONDITION_FAILED,
+                format!("sequence number mismatch (assignable_seq_num={assignable_seq_num})"),
+            ),
+        )
+    }
+
+    pub(crate) fn from_server(assignable_seq_num: u64, server: ServerError) -> Self {
         Self {
             assignable_seq_num,
             server: Box::new(server),
@@ -482,7 +497,23 @@ pub struct FencingTokenMismatchError {
 }
 
 impl FencingTokenMismatchError {
-    pub(crate) fn new(current_fencing_token: FencingToken, server: ServerError) -> Self {
+    /// Construct a [`FencingTokenMismatchError`] for the given current fencing token.
+    ///
+    /// Attaches a default HTTP `412` [`ServerError`]. Intended for building fixtures in
+    /// downstream tests.
+    #[must_use]
+    pub fn new(current_fencing_token: FencingToken) -> Self {
+        let server = ServerError::new(
+            StatusCode::PRECONDITION_FAILED,
+            format!(
+                "fencing token mismatch (current_fencing_token={:?})",
+                &*current_fencing_token
+            ),
+        );
+        Self::from_server(current_fencing_token, server)
+    }
+
+    pub(crate) fn from_server(current_fencing_token: FencingToken, server: ServerError) -> Self {
         Self {
             current_fencing_token,
             server: Box::new(server),
@@ -537,7 +568,22 @@ pub struct ReadUnwrittenError {
 }
 
 impl ReadUnwrittenError {
-    pub(crate) fn new(tail: StreamPosition, server: ServerError) -> Self {
+    /// Construct a [`ReadUnwrittenError`] for the given stream tail position.
+    ///
+    /// Attaches a default HTTP `416` [`ServerError`]. Intended for building fixtures in
+    /// downstream tests.
+    #[must_use]
+    pub fn new(tail: StreamPosition) -> Self {
+        Self::from_server(
+            tail,
+            ServerError::new(
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                format!("read from unwritten position (tail={tail})"),
+            ),
+        )
+    }
+
+    pub(crate) fn from_server(tail: StreamPosition, server: ServerError) -> Self {
         Self {
             tail,
             server: Box::new(server.into_read_only()),
@@ -615,7 +661,18 @@ macro_rules! define_message_error {
         }
 
         impl $name {
-            pub(crate) fn new(message: impl Into<String>, context: ErrorContext) -> Self {
+            /// Construct this error with the given diagnostic message.
+            ///
+            /// Intended for building fixtures in downstream tests.
+            #[must_use]
+            pub fn new(message: impl Into<String>) -> Self {
+                Self::new_with_context(message, ErrorContext::default())
+            }
+
+            pub(crate) fn new_with_context(
+                message: impl Into<String>,
+                context: ErrorContext,
+            ) -> Self {
                 Self {
                     message: message.into(),
                     context,
@@ -693,7 +750,24 @@ impl fmt::Debug for ConnectionLostError {
 }
 
 impl ConnectionLostError {
-    pub(crate) fn new(
+    /// Construct a [`ConnectionLostError`] with the given diagnostic message.
+    ///
+    /// Defaults [`has_no_side_effects`](Self::has_no_side_effects) to `false` (indefinite); call
+    /// [`with_no_side_effects`](Self::with_no_side_effects) to mark an unsent or server-refused
+    /// failure as definite. Intended for building fixtures in downstream tests.
+    #[must_use]
+    pub fn new(message: impl Into<String>) -> Self {
+        Self::new_with_context(message, false, ErrorContext::default())
+    }
+
+    /// Mark whether the connection failure occurred before any side effects were possible.
+    #[must_use]
+    pub fn with_no_side_effects(mut self, no_side_effects: bool) -> Self {
+        self.no_side_effects = no_side_effects;
+        self
+    }
+
+    pub(crate) fn new_with_context(
         message: impl Into<String>,
         no_side_effects: bool,
         context: ErrorContext,
@@ -775,7 +849,24 @@ impl fmt::Debug for ProtocolError {
 }
 
 impl ProtocolError {
-    pub(crate) fn new(message: impl Into<String>, context: ErrorContext) -> Self {
+    /// Construct a [`ProtocolError`] with the given diagnostic message.
+    ///
+    /// Defaults [`has_no_side_effects`](Self::has_no_side_effects) to `false` (indefinite); call
+    /// [`with_no_side_effects`](Self::with_no_side_effects) to mark a local pre-send failure as
+    /// definite. Intended for building fixtures in downstream tests.
+    #[must_use]
+    pub fn new(message: impl Into<String>) -> Self {
+        Self::new_with_context(message, ErrorContext::default())
+    }
+
+    /// Mark whether the protocol failure occurred before any side effects were possible.
+    #[must_use]
+    pub fn with_no_side_effects(mut self, no_side_effects: bool) -> Self {
+        self.no_side_effects = no_side_effects;
+        self
+    }
+
+    pub(crate) fn new_with_context(message: impl Into<String>, context: ErrorContext) -> Self {
         Self {
             message: message.into(),
             no_side_effects: false,
@@ -839,8 +930,22 @@ impl fmt::Debug for ClientClosedError {
     }
 }
 
+impl Default for ClientClosedError {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ClientClosedError {
-    pub(crate) fn new(context: ErrorContext) -> Self {
+    /// Construct a [`ClientClosedError`].
+    ///
+    /// Intended for building fixtures in downstream tests.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::new_with_context(ErrorContext::default())
+    }
+
+    pub(crate) fn new_with_context(context: ErrorContext) -> Self {
         Self { context }
     }
 
@@ -893,7 +998,11 @@ pub struct IndefiniteAppendError<E> {
 }
 
 impl<E> IndefiniteAppendError<E> {
-    pub(crate) fn new(final_attempt_error: E) -> Self {
+    /// Construct an [`IndefiniteAppendError`] wrapping the final attempt's definite error.
+    ///
+    /// Intended for building fixtures in downstream tests.
+    #[must_use]
+    pub fn new(final_attempt_error: E) -> Self {
         Self {
             final_attempt_error: Box::new(final_attempt_error),
         }
@@ -991,7 +1100,16 @@ impl<E: fmt::Debug> fmt::Debug for SessionClosedError<E> {
 }
 
 impl<E> SessionClosedError<E> {
-    pub(crate) fn new(failure: Option<E>, context: ErrorContext) -> Self {
+    /// Construct a [`SessionClosedError`] with an optional underlying session failure.
+    ///
+    /// Pass `None` for a clean close or `Some(failure)` when the session closed due to an error.
+    /// Intended for building fixtures in downstream tests.
+    #[must_use]
+    pub fn new(failure: Option<E>) -> Self {
+        Self::new_with_context(failure, ErrorContext::default())
+    }
+
+    pub(crate) fn new_with_context(failure: Option<E>, context: ErrorContext) -> Self {
         Self {
             failure: failure.map(Box::new),
             context,
@@ -1904,14 +2022,14 @@ pub(crate) trait TransportError:
         let status = match StatusCode::from_u16(msg.status) {
             Ok(status) if (300..600).contains(&status.as_u16()) => status,
             Ok(status) => {
-                return ProtocolError::new(
+                return ProtocolError::new_with_context(
                     format!("unexpected non-error status code in terminal frame: {status}"),
                     context,
                 )
                 .into();
             }
             Err(err) => {
-                return ProtocolError::new(
+                return ProtocolError::new_with_context(
                     format!("invalid status code in terminal frame: {err}"),
                     context,
                 )
@@ -1966,12 +2084,15 @@ where
         match (parsed.seq_num_mismatch, parsed.fencing_token_mismatch) {
             (Some(assignable_seq_num), None) => {
                 let server = ServerError::from_response(status, body, context);
-                return SeqNumMismatchError::new(assignable_seq_num, server).into();
+                return SeqNumMismatchError::from_server(assignable_seq_num, server).into();
             }
             (None, Some(token)) => {
                 let server = ServerError::from_response(status, body, context);
-                return FencingTokenMismatchError::new(FencingToken::from_server(token), server)
-                    .into();
+                return FencingTokenMismatchError::from_server(
+                    FencingToken::from_server(token),
+                    server,
+                )
+                .into();
             }
             _ => {}
         }
@@ -1988,7 +2109,7 @@ where
         && let Ok(tail) = serde_json::from_slice::<TailResponse>(body)
     {
         let server = ServerError::from_response(status, body, context);
-        return ReadUnwrittenError::new(StreamPosition::from_api(tail.tail), server).into();
+        return ReadUnwrittenError::from_server(StreamPosition::from_api(tail.tail), server).into();
     }
     ServerError::from_response(status, body, context).into()
 }
@@ -2094,32 +2215,42 @@ pub(crate) fn classify_http_error<E: TransportError>(
     context: ErrorContext,
 ) -> E {
     match err {
-        client::HttpError::Connect(message) => ConnectError::new(message, context).into(),
-        client::HttpError::Timeout => TimeoutError::new("request timed out", context).into(),
-        client::HttpError::Closed => AbortedError::new("client closed", context).into(),
+        client::HttpError::Connect(message) => {
+            ConnectError::new_with_context(message, context).into()
+        }
+        client::HttpError::Timeout => {
+            TimeoutError::new_with_context("request timed out", context).into()
+        }
+        client::HttpError::Closed => {
+            AbortedError::new_with_context("client closed", context).into()
+        }
         client::HttpError::Transport(hyper_err) => {
             let detail = client::format_error_chain(&hyper_err);
             if hyper_err.is_parse() {
-                return ProtocolError::new(detail, context).into();
+                return ProtocolError::new_with_context(detail, context).into();
             }
             let refused = source_err::<h2::Error>(&hyper_err)
                 .is_some_and(|e| e.reason() == Some(h2::Reason::REFUSED_STREAM));
-            ConnectionLostError::new(detail, refused, context).into()
+            ConnectionLostError::new_with_context(detail, refused, context).into()
         }
         client::HttpError::RequestBuild(message) => {
-            ProtocolError::new(format!("request build: {message}"), context).into()
+            ProtocolError::new_with_context(format!("request build: {message}"), context).into()
         }
         client::HttpError::RequestCompression(message) => {
-            ProtocolError::new(format!("request compression: {message}"), context).into()
+            ProtocolError::new_with_context(format!("request compression: {message}"), context)
+                .into()
         }
         client::HttpError::ResponseCompression(message) => {
-            ProtocolError::new(format!("response compression: {message}"), context).into()
+            ProtocolError::new_with_context(format!("response compression: {message}"), context)
+                .into()
         }
-        client::HttpError::ResponseTooLarge(limit) => {
-            ProtocolError::new(format!("response exceeded {limit} byte limit"), context).into()
-        }
+        client::HttpError::ResponseTooLarge(limit) => ProtocolError::new_with_context(
+            format!("response exceeded {limit} byte limit"),
+            context,
+        )
+        .into(),
         client::HttpError::ResponseDecode(error) => {
-            ProtocolError::new(format!("response decode: {error}"), context).into()
+            ProtocolError::new_with_context(format!("response decode: {error}"), context).into()
         }
     }
 }
@@ -2204,7 +2335,8 @@ mod tests {
         );
 
         // Clean SessionClosed(None) has no source and formats with context.
-        let closed_clean = AppendSessionError::SessionClosed(SessionClosedError::new(None, ctx));
+        let closed_clean =
+            AppendSessionError::SessionClosed(SessionClosedError::new_with_context(None, ctx));
         assert!(closed_clean.has_no_side_effects());
         assert!(!closed_clean.is_retryable());
         assert!(closed_clean.failure().is_none());
@@ -2215,7 +2347,7 @@ mod tests {
     // spec: r1 E1, E3
     #[test]
     fn read_errors_stay_definite_when_converted_to_s2_error() {
-        let timeout = ReadError::Timeout(TimeoutError::new("timed out", ErrorContext::default()));
+        let timeout = ReadError::Timeout(TimeoutError::new("timed out"));
         assert!(timeout.is_retryable());
         assert!(timeout.has_no_side_effects());
         let s2_err: S2Error = timeout.into();

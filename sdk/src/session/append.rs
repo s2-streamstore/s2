@@ -231,7 +231,7 @@ impl SessionLifecycle {
     }
 
     pub(crate) fn session_closed_err(&self, context: &ErrorContext) -> AppendSessionError {
-        AppendSessionError::SessionClosed(SessionClosedError::new(
+        AppendSessionError::SessionClosed(SessionClosedError::new_with_context(
             self.terminal_err(),
             context.clone(),
         ))
@@ -365,7 +365,7 @@ impl AppendSessionCore {
                     self.explicit_abort_msg,
                     self.dropped_abort_msg,
                 );
-                Some(AppendSessionError::Aborted(AbortedError::new(
+                Some(AppendSessionError::Aborted(AbortedError::new_with_context(
                     reason,
                     self.context.clone(),
                 )))
@@ -373,7 +373,10 @@ impl AppendSessionCore {
                 None
             }
         });
-        AppendSessionError::SessionClosed(SessionClosedError::new(failure, self.context.clone()))
+        AppendSessionError::SessionClosed(SessionClosedError::new_with_context(
+            failure,
+            self.context.clone(),
+        ))
     }
 
     pub(crate) fn submit(
@@ -1334,8 +1337,10 @@ impl AppendSessionTask {
             self.lifecycle.mark_closing();
             self.state.drain_queued_commands()
         };
-        let closed_err =
-            AppendSessionError::SessionClosed(SessionClosedError::new(None, self.context.clone()));
+        let closed_err = AppendSessionError::SessionClosed(SessionClosedError::new_with_context(
+            None,
+            self.context.clone(),
+        ));
         for cmd in queued {
             if let Command::Submit { ack_tx, .. } = cmd {
                 let _ = ack_tx.send(Err(closed_err.clone()));
@@ -1345,7 +1350,10 @@ impl AppendSessionTask {
     }
 
     fn abort_session(&mut self, reason: &'static str) {
-        let aborted = AppendSessionError::Aborted(AbortedError::new(reason, self.context.clone()));
+        let aborted = AppendSessionError::Aborted(AbortedError::new_with_context(
+            reason,
+            self.context.clone(),
+        ));
         let (queued, has_pending_work) = {
             // Hold gate across checking pending work AND publishing terminal_err / closing so
             // concurrent reserve()/submit() callers never observe
@@ -1377,7 +1385,7 @@ impl AppendSessionTask {
             return;
         }
 
-        let unsent = AppendSessionError::SessionClosed(SessionClosedError::new(
+        let unsent = AppendSessionError::SessionClosed(SessionClosedError::new_with_context(
             Some(aborted.clone()),
             self.context.clone(),
         ));
@@ -1442,7 +1450,7 @@ impl AppendSessionTask {
             self.lifecycle.set_terminal_err(session_failure.clone());
             self.state.drain_queued_commands()
         };
-        let closed_err = AppendSessionError::SessionClosed(SessionClosedError::new(
+        let closed_err = AppendSessionError::SessionClosed(SessionClosedError::new_with_context(
             Some(session_failure.clone()),
             self.context.clone(),
         ));
@@ -1667,7 +1675,7 @@ impl AppendSessionTask {
                                     };
                                 }
                                 return AttemptResult::Error {
-                                    err: AppendSessionError::ConnectionLost(ConnectionLostError::new(
+                                    err: AppendSessionError::ConnectionLost(ConnectionLostError::new_with_context(
                                         "response stream closed early during reconnect drain",
                                         false,
                                         self.context.clone(),
@@ -1688,7 +1696,7 @@ impl AppendSessionTask {
 
                             // T9: Clean end with unacked batches -> ConnectionLostError.
                             return AttemptResult::Error {
-                                err: AppendSessionError::ConnectionLost(ConnectionLostError::new(
+                                err: AppendSessionError::ConnectionLost(ConnectionLostError::new_with_context(
                                     "response stream closed early while appends in flight",
                                     unacked_sent == 0,
                                     self.context.clone(),
@@ -1720,16 +1728,16 @@ impl AppendSessionTask {
                         return AttemptResult::IdleEnded;
                     }
                     let err = match timer_kind.expect("timer_kind is Some") {
-                        TimerKind::WriteStall => AppendSessionError::Timeout(TimeoutError::new(
+                        TimerKind::WriteStall => AppendSessionError::Timeout(TimeoutError::new_with_context(
                             "append write timed out",
                             self.context.clone(),
                         )),
-                        TimerKind::Ack => AppendSessionError::Timeout(TimeoutError::new(
+                        TimerKind::Ack => AppendSessionError::Timeout(TimeoutError::new_with_context(
                             "append acknowledgement timed out",
                             self.context.clone(),
                         )),
                         TimerKind::BodyClosed => {
-                            AppendSessionError::ConnectionLost(ConnectionLostError::new(
+                            AppendSessionError::ConnectionLost(ConnectionLostError::new_with_context(
                                 "request body closed before response ended",
                                 unacked_sent == 0,
                                 self.context.clone(),
@@ -1986,17 +1994,21 @@ fn process_proto_ack(
     context: &ErrorContext,
 ) -> Result<(), AppendSessionError> {
     if send_cursor == 0 {
-        return Err(AppendSessionError::Protocol(ProtocolError::new(
-            "received ack for a batch that was not sent on this attempt",
-            context.clone(),
-        )));
+        return Err(AppendSessionError::Protocol(
+            ProtocolError::new_with_context(
+                "received ack for a batch that was not sent on this attempt",
+                context.clone(),
+            ),
+        ));
     }
 
     let Some(corresponding_append) = state.inflight_appends.front() else {
-        return Err(AppendSessionError::Protocol(ProtocolError::new(
-            "received ack without a corresponding append in flight",
-            context.clone(),
-        )));
+        return Err(AppendSessionError::Protocol(
+            ProtocolError::new_with_context(
+                "received ack without a corresponding append in flight",
+                context.clone(),
+            ),
+        ));
     };
 
     let ack = AppendAck::try_from_proto(
@@ -2009,10 +2021,12 @@ fn process_proto_ack(
         .prev_ack_end
         .is_some_and(|end| ack.start.seq_num < end.seq_num || ack.end.seq_num <= end.seq_num)
     {
-        return Err(AppendSessionError::Protocol(ProtocolError::new(
-            "ack range must not overlap or precede previous ack end",
-            context.clone(),
-        )));
+        return Err(AppendSessionError::Protocol(
+            ProtocolError::new_with_context(
+                "ack range must not overlap or precede previous ack end",
+                context.clone(),
+            ),
+        ));
     }
 
     let corresponding_append = state

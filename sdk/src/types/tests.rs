@@ -492,10 +492,8 @@ fn error_helpers_debug_and_conversions() {
         AppendError::Server(_)
     ));
 
-    let closed = SessionClosedError::<AppendSessionError>::new(
-        Some(AppendSessionError::Protocol(proto)),
-        ErrorContext::default(),
-    );
+    let closed =
+        SessionClosedError::<AppendSessionError>::new(Some(AppendSessionError::Protocol(proto)));
     let s2_from_closed: S2Error = closed.clone().into();
     assert!(matches!(s2_from_closed, S2Error::SessionClosed(_)));
     assert!(matches!(

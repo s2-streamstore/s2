@@ -859,7 +859,7 @@ impl S2Stream {
 
     fn ensure_open(&self, op: &'static str, read_only: bool) -> Result<(), ClientClosedError> {
         if self.client.is_closed() {
-            return Err(ClientClosedError::new(ErrorContext::stream(
+            return Err(ClientClosedError::new_with_context(ErrorContext::stream(
                 op,
                 self.client.name.as_ref(),
                 self.name.as_ref(),

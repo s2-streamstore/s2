@@ -914,7 +914,7 @@ impl S2Config {
                 .expect("valid user agent"),
             default_headers: HeaderMap::new(),
             insecure_skip_cert_verification: false,
-            rustls_crypto_provider: default_rustls_crypto_provider(),
+            rustls_crypto_provider: None,
         }
     }
 
@@ -1147,14 +1147,18 @@ impl S2Config {
 
     /// Use a specific rustls crypto provider for SDK TLS connections.
     ///
-    /// With default features (`rustls-aws-lc-rs`) enabled, the SDK uses the `aws-lc-rs`
-    /// provider. With `rustls-ring` enabled (and `rustls-aws-lc-rs` disabled), the SDK uses
-    /// `ring`. With neither provider feature enabled, the SDK uses rustls's process-global
-    /// provider if one has been installed, or returns an error for HTTPS endpoints otherwise.
+    /// When not set explicitly on [`S2Config`], HTTPS connections resolve a provider in this
+    /// order:
     ///
-    /// Use this when your application needs a specific rustls provider, such as
-    /// `ring` (including when workspace feature unification enables both `rustls-aws-lc-rs`
-    /// and `rustls-ring`) or a custom [`CryptoProvider`].
+    /// 1. Rustls's process-global default provider ([`CryptoProvider::get_default`], installed via
+    ///    [`CryptoProvider::install_default`]), if one has been installed.
+    /// 2. Compile-time crate feature fallback: `rustls-aws-lc-rs` (enabled by default), then
+    ///    `rustls-ring`.
+    /// 3. Otherwise, client initialization returns a [`ValidationError`] for HTTPS endpoints.
+    ///
+    /// Use this method to override the process-global or feature-default provider for a single
+    /// client (for example, to select a custom [`CryptoProvider`] or pick between `aws-lc-rs` and
+    /// `ring`).
     pub fn with_rustls_crypto_provider(self, provider: impl Into<Arc<CryptoProvider>>) -> Self {
         Self {
             rustls_crypto_provider: Some(provider.into()),
@@ -1187,19 +1191,4 @@ impl S2Config {
             .map_err(|e| ValidationError(format!("invalid user agent: {e}")))?;
         Ok(Self { user_agent, ..self })
     }
-}
-
-#[cfg(feature = "rustls-aws-lc-rs")]
-fn default_rustls_crypto_provider() -> Option<Arc<CryptoProvider>> {
-    Some(Arc::new(rustls::crypto::aws_lc_rs::default_provider()))
-}
-
-#[cfg(all(not(feature = "rustls-aws-lc-rs"), feature = "rustls-ring"))]
-fn default_rustls_crypto_provider() -> Option<Arc<CryptoProvider>> {
-    Some(Arc::new(rustls::crypto::ring::default_provider()))
-}
-
-#[cfg(all(not(feature = "rustls-aws-lc-rs"), not(feature = "rustls-ring")))]
-fn default_rustls_crypto_provider() -> Option<Arc<CryptoProvider>> {
-    None
 }

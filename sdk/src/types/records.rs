@@ -692,13 +692,13 @@ impl AppendAck {
         context: ErrorContext,
     ) -> Result<Self, ProtocolError> {
         let start = StreamPosition::from_proto(value.start.ok_or_else(|| {
-            ProtocolError::new("append ack missing start position", context.clone())
+            ProtocolError::new_with_context("append ack missing start position", context.clone())
         })?);
         let end = StreamPosition::from_proto(value.end.ok_or_else(|| {
-            ProtocolError::new("append ack missing end position", context.clone())
+            ProtocolError::new_with_context("append ack missing end position", context.clone())
         })?);
         let tail = StreamPosition::from_proto(value.tail.ok_or_else(|| {
-            ProtocolError::new("append ack missing tail position", context.clone())
+            ProtocolError::new_with_context("append ack missing tail position", context.clone())
         })?);
         let ack = Self { start, end, tail };
         ack.validate_record_count(expected_records, &context)?;
@@ -711,13 +711,13 @@ impl AppendAck {
         context: &ErrorContext,
     ) -> Result<(), ProtocolError> {
         let Some(num_acked_records) = self.end.seq_num.checked_sub(self.start.seq_num) else {
-            return Err(ProtocolError::new(
+            return Err(ProtocolError::new_with_context(
                 "ack end seq_num should be greater than or equal to start seq_num",
                 context.clone(),
             ));
         };
         if num_acked_records != expected_records {
-            return Err(ProtocolError::new(
+            return Err(ProtocolError::new_with_context(
                 format!(
                     "acked record count {num_acked_records} does not match submitted batch size {expected_records}"
                 ),

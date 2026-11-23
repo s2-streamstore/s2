@@ -46,6 +46,11 @@ pub enum ReadSessionRetryPolicy {
     ///
     /// This also applies to the initial attempt, so iteration may remain pending through
     /// retryable failures until it connects or the session is dropped or aborted.
+    ///
+    /// Retries are silent to the caller and logged only at `debug` level. If your application
+    /// needs per-outage error callbacks or disconnected/unhealthy status reporting, prefer
+    /// [`Budgeted`](Self::Budgeted) inside an outer reconnect loop that resumes from
+    /// [`ReadSession::next_seq_num`] (or [`ReadBatchSession::next_seq_num`]).
     Unbounded,
 }
 
@@ -361,7 +366,10 @@ impl ReadStateInner {
         self.phase = RequestPhase::Ended;
 
         let terminal_err = error.unwrap_or_else(|| {
-            ReadSessionError::SessionClosed(SessionClosedError::new(None, self.context.clone()))
+            ReadSessionError::SessionClosed(SessionClosedError::new_with_context(
+                None,
+                self.context.clone(),
+            ))
         });
         // Any future handed out *before* ending retains its resolved tail (`R8a`).
         // Subsequent `caught_up()` calls after the session ends see the terminal error (`R8d`).
@@ -446,7 +454,7 @@ impl ReadSessionState {
     pub fn caught_up(&self) -> CaughtUp {
         let mut inner = self.inner.lock().unwrap();
         if self.shutdown.is_cancelled() && inner.phase != RequestPhase::Ended {
-            let err = ReadSessionError::Aborted(AbortedError::new(
+            let err = ReadSessionError::Aborted(AbortedError::new_with_context(
                 "client closed",
                 inner.context.clone(),
             ));
@@ -563,8 +571,10 @@ impl ReadSessionCore {
     fn abort_now(&mut self) -> ReadSessionError {
         self.terminated = true;
         self.rx.close();
-        let err =
-            ReadSessionError::Aborted(AbortedError::new("client closed", self.context.clone()));
+        let err = ReadSessionError::Aborted(AbortedError::new_with_context(
+            "client closed",
+            self.context.clone(),
+        ));
         self.state.on_ended(Some(err.clone()));
         err
     }
@@ -615,8 +625,10 @@ impl ReadSessionCore {
 impl Drop for ReadSessionCore {
     fn drop(&mut self) {
         if self.shutdown.is_cancelled() {
-            self.state
-                .on_aborted(AbortedError::new("client closed", self.context.clone()));
+            self.state.on_aborted(AbortedError::new_with_context(
+                "client closed",
+                self.context.clone(),
+            ));
         } else {
             self.state.on_ended(None);
         }
@@ -896,8 +908,10 @@ impl ReadDriver {
     fn abort(&mut self) {
         self.active = None;
         debug!("aborting read session on client close");
-        self.state
-            .on_aborted(AbortedError::new("client closed", self.context.clone()));
+        self.state.on_aborted(AbortedError::new_with_context(
+            "client closed",
+            self.context.clone(),
+        ));
     }
 
     /// Enqueue a terminal event and stay parked until the consumer consumes it (closing `rx`) or
@@ -1092,7 +1106,7 @@ impl ReadDriver {
                     if let Some(active) = self.active.as_ref() {
                         active.stream.poison_connection();
                     }
-                    Err(ReadSessionError::Timeout(TimeoutError::new(
+                    Err(ReadSessionError::Timeout(TimeoutError::new_with_context(
                         "heartbeat timeout",
                         self.context.clone(),
                     )))
@@ -1200,11 +1214,12 @@ impl ReadDriver {
                         self.send_terminal_event(DriverEvent::CleanEnd).await;
                         return;
                     }
-                    let err = ReadSessionError::ConnectionLost(ConnectionLostError::new(
-                        "read stream ended cleanly without a stop condition",
-                        true,
-                        self.context.clone(),
-                    ));
+                    let err =
+                        ReadSessionError::ConnectionLost(ConnectionLostError::new_with_context(
+                            "read stream ended cleanly without a stop condition",
+                            true,
+                            self.context.clone(),
+                        ));
                     self.state.on_disconnected();
                     if self.retry_or_fail(err).await {
                         continue;
@@ -1298,7 +1313,7 @@ fn validate_read_batch_order(
         if let Some(prev_seq) = prev
             && record.seq_num <= prev_seq
         {
-            return Err(ReadSessionError::Protocol(ProtocolError::new(
+            return Err(ReadSessionError::Protocol(ProtocolError::new_with_context(
                 format!(
                     "read batch contained out-of-order or duplicate seq_num {} after {}",
                     record.seq_num, prev_seq
@@ -1576,7 +1591,7 @@ mod tests {
         let pending_cu = session.caught_up();
 
         tx.send(DriverEvent::Error(ReadSessionError::Timeout(
-            TimeoutError::new(
+            TimeoutError::new_with_context(
                 "heartbeat timeout",
                 ErrorContext::default().into_read_only(),
             ),

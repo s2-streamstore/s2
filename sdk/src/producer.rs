@@ -307,13 +307,16 @@ impl ProducerShared {
             .or_else(|| self.session_lifecycle.terminal_err())
             .or_else(|| {
                 (has_unacked_work && self.abort.is_cancelled()).then(|| {
-                    AppendSessionError::Aborted(AbortedError::new(
+                    AppendSessionError::Aborted(AbortedError::new_with_context(
                         self.abort_reason(),
                         self.context.clone(),
                     ))
                 })
             });
-        AppendSessionError::SessionClosed(SessionClosedError::new(failure, self.context.clone()))
+        AppendSessionError::SessionClosed(SessionClosedError::new_with_context(
+            failure,
+            self.context.clone(),
+        ))
     }
 }
 
@@ -543,7 +546,7 @@ impl Producer {
                     false,
                     "producer closed cleanly before accepted flush target was acked"
                 );
-                Err(AppendSessionError::Aborted(AbortedError::new(
+                Err(AppendSessionError::Aborted(AbortedError::new_with_context(
                     "producer closed before flush completed",
                     self.shared.context.clone(),
                 )))
@@ -766,7 +769,7 @@ impl ProducerTask {
         } else if has_unsubmitted && self.shared.abort.is_cancelled() {
             self.shared
                 .lifecycle
-                .set_terminal_err(AppendSessionError::Aborted(AbortedError::new(
+                .set_terminal_err(AppendSessionError::Aborted(AbortedError::new_with_context(
                     self.shared.abort_reason(),
                     self.shared.context.clone(),
                 )));
@@ -807,7 +810,7 @@ impl ProducerTask {
             self.shared.lifecycle.mark_closing();
         }
 
-        let unsent_err = AppendSessionError::SessionClosed(SessionClosedError::new(
+        let unsent_err = AppendSessionError::SessionClosed(SessionClosedError::new_with_context(
             final_result.as_ref().err().cloned(),
             self.shared.context.clone(),
         ));
@@ -1048,7 +1051,7 @@ impl ProducerTask {
                     self.shared.abort.is_cancelled(),
                     "owned session closed cleanly without abort while terminating producer"
                 );
-                AppendSessionError::Aborted(AbortedError::new(
+                AppendSessionError::Aborted(AbortedError::new_with_context(
                     self.shared.abort_reason(),
                     self.shared.context.clone(),
                 ))
@@ -1067,8 +1070,10 @@ impl ProducerTask {
     }
 
     async fn abort(mut self, reason: &'static str) {
-        let aborted =
-            AppendSessionError::Aborted(AbortedError::new(reason, self.shared.context.clone()));
+        let aborted = AppendSessionError::Aborted(AbortedError::new_with_context(
+            reason,
+            self.shared.context.clone(),
+        ));
         let queued_cmds = {
             let _gate = self.shared.gate.lock().unwrap();
             let queued = drain_queued_commands(&mut self.cmd_rx);

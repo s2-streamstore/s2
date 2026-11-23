@@ -46,11 +46,9 @@ impl FinishOnDrop {
 impl Drop for FinishOnDrop {
     fn drop(&mut self) {
         if !self.lifecycle.is_closed() {
-            self.lifecycle
-                .finish(Err(AppendSessionError::Aborted(AbortedError::new(
-                    self.msg,
-                    self.context.clone(),
-                ))));
+            self.lifecycle.finish(Err(AppendSessionError::Aborted(
+                AbortedError::new_with_context(self.msg, self.context.clone()),
+            )));
         }
     }
 }
@@ -99,7 +97,10 @@ impl<T> SubmitTicket<T> {
 
     fn closed_err(&self) -> AppendSessionError {
         self.lifecycle.terminal_err().unwrap_or_else(|| {
-            AppendSessionError::Aborted(AbortedError::new(self.dropped_msg, self.context.clone()))
+            AppendSessionError::Aborted(AbortedError::new_with_context(
+                self.dropped_msg,
+                self.context.clone(),
+            ))
         })
     }
 

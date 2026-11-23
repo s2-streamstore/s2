@@ -788,11 +788,29 @@ fn build_https_connector_with_roots(
         .wrap_connector(connector))
 }
 
-fn resolve_rustls_crypto_provider(
-    provider: Option<Arc<rustls::crypto::CryptoProvider>>,
+#[cfg(feature = "rustls-aws-lc-rs")]
+fn feature_default_rustls_crypto_provider() -> Option<Arc<rustls::crypto::CryptoProvider>> {
+    Some(Arc::new(rustls::crypto::aws_lc_rs::default_provider()))
+}
+
+#[cfg(all(not(feature = "rustls-aws-lc-rs"), feature = "rustls-ring"))]
+fn feature_default_rustls_crypto_provider() -> Option<Arc<rustls::crypto::CryptoProvider>> {
+    Some(Arc::new(rustls::crypto::ring::default_provider()))
+}
+
+#[cfg(all(not(feature = "rustls-aws-lc-rs"), not(feature = "rustls-ring")))]
+fn feature_default_rustls_crypto_provider() -> Option<Arc<rustls::crypto::CryptoProvider>> {
+    None
+}
+
+fn resolve_rustls_crypto_provider_with(
+    explicit: Option<Arc<rustls::crypto::CryptoProvider>>,
+    process_default: Option<Arc<rustls::crypto::CryptoProvider>>,
+    feature_default: Option<Arc<rustls::crypto::CryptoProvider>>,
 ) -> Result<Arc<rustls::crypto::CryptoProvider>, std::io::Error> {
-    provider
-        .or_else(|| rustls::crypto::CryptoProvider::get_default().cloned())
+    explicit
+        .or(process_default)
+        .or(feature_default)
         .ok_or_else(|| {
             std::io::Error::other(
                 "no rustls crypto provider configured; configure \
@@ -801,6 +819,16 @@ fn resolve_rustls_crypto_provider(
                  rustls::crypto::CryptoProvider::install_default()",
             )
         })
+}
+
+fn resolve_rustls_crypto_provider(
+    provider: Option<Arc<rustls::crypto::CryptoProvider>>,
+) -> Result<Arc<rustls::crypto::CryptoProvider>, std::io::Error> {
+    resolve_rustls_crypto_provider_with(
+        provider,
+        rustls::crypto::CryptoProvider::get_default().cloned(),
+        feature_default_rustls_crypto_provider(),
+    )
 }
 
 #[derive(Debug)]
@@ -2480,5 +2508,55 @@ mod tests {
             collect_bounded_body(over_stream, 8, None).await,
             Err(CollectBodyError::TooLarge)
         ));
+    }
+
+    #[test]
+    fn resolve_rustls_crypto_provider_errors_when_all_sources_missing() {
+        let err = resolve_rustls_crypto_provider_with(None, None, None).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("no rustls crypto provider configured"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            crate::types::S2Config::new("test-token")
+                .rustls_crypto_provider
+                .is_none()
+        );
+    }
+
+    #[cfg(any(feature = "rustls-aws-lc-rs", feature = "rustls-ring"))]
+    #[test]
+    fn resolve_rustls_crypto_provider_precedence_order() {
+        let explicit = test_rustls_crypto_provider();
+        let process = test_rustls_crypto_provider();
+        let feature = test_rustls_crypto_provider();
+
+        // 1. Explicit S2Config provider wins over process default and feature fallback.
+        let chosen = resolve_rustls_crypto_provider_with(
+            Some(explicit.clone()),
+            Some(process.clone()),
+            Some(feature.clone()),
+        )
+        .unwrap();
+        assert!(Arc::ptr_eq(&chosen, &explicit));
+
+        // 2. Process-global default wins over compile-time feature fallback.
+        let chosen =
+            resolve_rustls_crypto_provider_with(None, Some(process.clone()), Some(feature.clone()))
+                .unwrap();
+        assert!(Arc::ptr_eq(&chosen, &process));
+
+        // 3. Compile-time feature fallback is used when neither explicit nor process default is
+        //    set.
+        let chosen =
+            resolve_rustls_crypto_provider_with(None, None, Some(feature.clone())).unwrap();
+        assert!(Arc::ptr_eq(&chosen, &feature));
+
+        // S2Config::new leaves the explicit provider unset so process defaults are honored, while
+        // still resolving cleanly via the compile-time feature fallback.
+        let config = crate::types::S2Config::new("test-token");
+        assert!(config.rustls_crypto_provider.is_none());
+        assert!(resolve_rustls_crypto_provider(config.rustls_crypto_provider).is_ok());
     }
 }

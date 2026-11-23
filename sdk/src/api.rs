@@ -388,7 +388,7 @@ impl BaseClient {
         let access_token = tokio::select! {
             biased;
             _ = shutdown.cancelled() => {
-                return Err(AbortedError::new("client closed", scope.context(attempts)).into());
+                return Err(AbortedError::new_with_context("client closed", scope.context(attempts)).into());
             }
             res = self.authorize::<E>(&mut request) => res?,
         };
@@ -498,7 +498,7 @@ impl<'a> UnaryCall<'a> {
 
     async fn send_raw_inner<E: TransportError>(self) -> Result<(UnaryResponse, u32), E> {
         if self.client.is_closed() {
-            return Err(ClientClosedError::new(self.scope.context(1)).into());
+            return Err(ClientClosedError::new_with_context(self.scope.context(1)).into());
         }
 
         // Compress the unary request body once before the retry loop so retries clone O(1)
@@ -594,9 +594,11 @@ impl<'a> UnaryCall<'a> {
                     _ = tokio::time::sleep(delay) => false,
                 };
                 if aborted {
-                    return Err(
-                        AbortedError::new("client closed", self.scope.context(attempts)).into(),
-                    );
+                    return Err(AbortedError::new_with_context(
+                        "client closed",
+                        self.scope.context(attempts),
+                    )
+                    .into());
                 }
             } else {
                 debug!(
@@ -631,7 +633,7 @@ impl<'a> UnaryCall<'a> {
         let scope = self.scope;
         let (response, attempts) = self.send_raw::<E>().await?;
         let decoded = T::decode(response.into_bytes()).map_err(|e| {
-            E::from(ProtocolError::new(
+            E::from(ProtocolError::new_with_context(
                 format!("protobuf decode: {e}"),
                 scope.context(attempts),
             ))
@@ -865,7 +867,7 @@ impl BasinClient {
                                 stream_poison.poison();
                             }
                             let decoded = msg.try_into_proto().map_err(|e| {
-                                E::from(ProtocolError::new(
+                                E::from(ProtocolError::new_with_context(
                                     format!("protobuf decode: {e}"),
                                     ctx.clone(),
                                 ))
@@ -887,7 +889,7 @@ impl BasinClient {
                             Err::<(), E>(error)?;
                         }
                         Ok(None) => break,
-                        Err(err) => Err(E::from(ProtocolError::new(
+                        Err(err) => Err(E::from(ProtocolError::new_with_context(
                             format!("s2s frame decode: {err}"),
                             ctx.clone(),
                         )))?,
@@ -895,7 +897,7 @@ impl BasinClient {
                 }
             }
             if !buffer.is_empty() {
-                Err(E::from(ConnectionLostError::new(
+                Err(E::from(ConnectionLostError::new_with_context(
                     format!(
                         "truncated s2s frame at end of stream ({} bytes remaining)",
                         buffer.len()
@@ -924,7 +926,7 @@ impl BasinClient {
     {
         let ctx = ErrorContext::stream(op, self.name.as_ref(), name.as_ref(), false);
         if self.base.is_closed() {
-            return Err(ClientClosedError::new(ctx).into());
+            return Err(ClientClosedError::new_with_context(ctx).into());
         }
         let request = self
             .post(stream_records_path(name))
@@ -948,7 +950,7 @@ impl BasinClient {
     ) -> Result<Streaming<ReadBatch, ReadSessionError>, ReadSessionError> {
         let ctx = ErrorContext::stream(op, self.name.as_ref(), name.as_ref(), true);
         if self.base.is_closed() {
-            return Err(ClientClosedError::new(ctx).into());
+            return Err(ClientClosedError::new_with_context(ctx).into());
         }
         let request = self
             .get(stream_records_path(name))
