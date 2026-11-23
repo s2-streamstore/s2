@@ -10,23 +10,11 @@ use s2_sdk::types::{
 use serde_json::{Value, json};
 
 pub fn format_unit(unit: &MetricUnit) -> &str {
-    match unit {
-        MetricUnit::Bytes => "bytes",
-        MetricUnit::Operations => "operations",
-        MetricUnit::Usd => "usd",
-        MetricUnit::Unknown(name) => name,
-        _ => "unknown",
-    }
+    unit.as_str()
 }
 
 fn format_interval(interval: &TimeseriesInterval) -> &str {
-    match interval {
-        TimeseriesInterval::Minute => "minute",
-        TimeseriesInterval::Hour => "hour",
-        TimeseriesInterval::Day => "day",
-        TimeseriesInterval::Unknown(name) => name,
-        _ => "unknown",
-    }
+    interval.as_str()
 }
 
 /// `2h 5m` for a time in the past, by its two largest units, and `None` for one that is not (a

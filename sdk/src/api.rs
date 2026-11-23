@@ -1051,7 +1051,13 @@ mod tests {
     use hyper_util::client::legacy::connect::HttpConnector;
 
     use super::*;
-    use crate::error::{AppendError, RequestError, ServerError};
+    #[cfg(any(
+        feature = "_hidden",
+        feature = "rustls-aws-lc-rs",
+        feature = "rustls-ring"
+    ))]
+    use crate::error::RequestError;
+    use crate::error::{AppendError, ServerError};
 
     #[cfg(feature = "_hidden")]
     #[derive(Default)]

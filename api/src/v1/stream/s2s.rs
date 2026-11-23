@@ -205,6 +205,9 @@ impl CompressedData {
             }
             CompressionAlgorithm::Zstd => {
                 let mut decoder = zstd::stream::Decoder::new(&self.payload[..])?;
+                // 16 MiB max window covers standard streaming zstd encoders (e.g. 8 MiB default
+                // windowLog=23) while bounding decoder memory well below libzstd's 128 MiB default.
+                decoder.window_log_max(24)?;
                 read_to_end_limited(&mut decoder, initial_capacity)
             }
         }

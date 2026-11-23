@@ -412,6 +412,10 @@ fn spec_vectors_numbers() {
                     let input = ReadInput::new().with_start(ReadStart::Timestamp(v));
                     assert_eq!(input.start(), Some(ReadStart::Timestamp(v)), "{label}");
                 }),
+                "read.start.tail_offset" => check_u64(&|v| {
+                    let input = ReadInput::new().with_start(ReadStart::TailOffset(v));
+                    assert_eq!(input.start(), Some(ReadStart::TailOffset(v)), "{label}");
+                }),
                 "read.stop.count" => check_u64(&|v| {
                     assert_eq!(ReadInput::new().with_count(v).count(), Some(v), "{label}");
                 }),

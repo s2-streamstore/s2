@@ -397,7 +397,7 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
     )?);
     let token_source = Some(credential.source());
     let target = environment::Target::detect(&cli_config);
-    let s2 = S2::new(sdk_config.clone()).map_err(|e| {
+    let s2 = S2::new(sdk_config).map_err(|e| {
         if let Some(source) = token_source
             && !error::is_valid_access_token(credential.access_token())
         {
@@ -935,10 +935,11 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
                 stream_config = stream_config.with_storage_class(storage_class);
             }
 
-            let s2 = S2::new(sdk_config.clone().with_retry(
-                RetryConfig::new().with_append_retry_policy(AppendRetryPolicy::NoSideEffects),
-            ))
-            .map_err(|e| CliError::SdkInit(e.into()))?;
+            let s2 = s2
+                .with_retry(
+                    RetryConfig::new().with_append_retry_policy(AppendRetryPolicy::NoSideEffects),
+                )
+                .map_err(|e| CliError::SdkInit(e.into()))?;
 
             let basin = s2.basin(basin_name);
             basin
@@ -1128,7 +1129,10 @@ async fn write_record(
                         format!("new fencing token \"{fencing_token}\"")
                     }
                     Some(SdkCommand::Trim { trim_point }) => format!("trim to {trim_point}"),
-                    _ => "unknown command".to_string(),
+                    _ => format!(
+                        "unknown command \"{}\"",
+                        String::from_utf8_lossy(&record.headers[0].value)
+                    ),
                 };
                 eprintln!(
                     "{} // {}",

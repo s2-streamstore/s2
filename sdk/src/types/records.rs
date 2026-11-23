@@ -21,7 +21,11 @@ impl FencingToken {
         Self(value)
     }
 
-    fn validate_len(len: usize) -> Result<(), ValidationError> {
+    pub(crate) fn validate(&self) -> Result<(), ValidationError> {
+        Self::validate_len(self.0.len())
+    }
+
+    pub(crate) fn validate_len(len: usize) -> Result<(), ValidationError> {
         if len > MAX_FENCING_TOKEN_LENGTH {
             return Err(ValidationError(format!(
                 "fencing token exceeds {MAX_FENCING_TOKEN_LENGTH} bytes in length",

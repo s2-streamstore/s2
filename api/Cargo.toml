@@ -18,7 +18,7 @@ include = [
 
 [features]
 axum = ["dep:axum", "s2-common/axum"]
-utoipa = ["dep:utoipa"]
+utoipa = ["dep:utoipa", "s2-common/utoipa"]
 codegen = ["dep:prost-build"]
 
 [dependencies]

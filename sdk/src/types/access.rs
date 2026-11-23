@@ -73,8 +73,8 @@ impl ListAccessTokensInput {
 
     pub(crate) fn into_api(self) -> api::access::ListAccessTokensRequest {
         api::access::ListAccessTokensRequest {
-            prefix: Some(self.prefix),
-            start_after: Some(self.start_after),
+            prefix: (!self.prefix.is_empty()).then_some(self.prefix),
+            start_after: (!self.start_after.is_empty()).then_some(self.start_after),
             limit: self.limit,
         }
     }

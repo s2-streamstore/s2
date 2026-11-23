@@ -94,7 +94,11 @@ macro_rules! impl_validated_str {
             type Error = $crate::ValidationError;
 
             fn try_from(value: String) -> Result<Self, Self::Error> {
-                Self::try_from_compact(::compact_str::CompactString::from(value))
+                Self::validate_str(&value)?;
+                Ok(Self(
+                    ::compact_str::CompactString::from(value),
+                    ::std::marker::PhantomData,
+                ))
             }
         }
 
@@ -181,7 +185,8 @@ macro_rules! impl_validated_str {
             type Error = $crate::ValidationError;
 
             fn try_from(value: String) -> Result<Self, Self::Error> {
-                Self::try_from_compact(::compact_str::CompactString::from(value))
+                Self::validate_str(&value)?;
+                Ok(Self(::compact_str::CompactString::from(value)))
             }
         }
 

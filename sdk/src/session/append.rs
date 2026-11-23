@@ -407,6 +407,7 @@ impl AppendSessionCore {
             if self.lifecycle.is_closing_or_closed() || self.abort.is_cancelled() {
                 return Err(self.session_closed_err_on_submit());
             }
+            self.unacked_batches.fetch_add(1, Ordering::Release);
             if self
                 .cmd_tx
                 .send(Command::Submit {
@@ -417,9 +418,9 @@ impl AppendSessionCore {
                 })
                 .is_err()
             {
+                self.unacked_batches.fetch_sub(1, Ordering::Release);
                 return Err(self.session_closed_err_on_submit());
             }
-            self.unacked_batches.fetch_add(1, Ordering::Release);
         }
         Ok(BatchSubmitTicket(SubmitTicket::new(
             ack_rx,
@@ -530,6 +531,11 @@ impl AppendSession {
         input: impl Into<AppendInput>,
     ) -> Result<BatchSubmitTicket, AppendSessionError> {
         let input = input.into();
+        if let Some(token) = input.fencing_token() {
+            token
+                .validate()
+                .map_err(|e| self.core.context.format_validation(e))?;
+        }
         let bytes = input.metered_bytes();
         let permit = self.reserve(bytes).await?;
         permit.submit(input)
@@ -665,6 +671,11 @@ impl BatchSubmitPermit {
         input: impl Into<AppendInput>,
     ) -> Result<BatchSubmitTicket, AppendSessionError> {
         let input = input.into();
+        if let Some(token) = input.fencing_token() {
+            token
+                .validate()
+                .map_err(|e| self.core.context.format_validation(e))?;
+        }
         let metered = input.metered_bytes();
         if metered > self.reserved_bytes {
             return Err(AppendSessionError::Validation(
@@ -1940,8 +1951,12 @@ fn arm_timer(
     start: Instant,
     ack_timeout: Duration,
 ) {
-    ack_timer.reset(start + ack_timeout);
-    *timer_kind = Some(kind);
+    if let Some(deadline) = start.checked_add(ack_timeout) {
+        ack_timer.reset(deadline);
+        *timer_kind = Some(kind);
+    } else {
+        *timer_kind = None;
+    }
 }
 
 fn refresh_oldest_timer(

@@ -24,9 +24,17 @@ impl RetryBackoff {
     /// Compute the base delay for `retry_index` (`T3`: `min(min_base_delay * 2^n,
     /// max_base_delay)`).
     fn base_delay_for(&self, retry_index: u32) -> Duration {
-        self.min_base_delay
-            .saturating_mul(2u32.saturating_pow(retry_index))
-            .min(self.max_base_delay)
+        if self.min_base_delay.is_zero() || self.min_base_delay >= self.max_base_delay {
+            return self.min_base_delay.min(self.max_base_delay);
+        }
+        let mut delay = self.min_base_delay;
+        for _ in 0..retry_index {
+            delay = delay.saturating_mul(2);
+            if delay >= self.max_base_delay {
+                return self.max_base_delay;
+            }
+        }
+        delay
     }
 
     /// Return the next exponential-backoff delay ignoring `max_retries` (`T3`, `T5b`).
@@ -123,5 +131,16 @@ mod tests {
             let after_reset = backoff.next_unbounded();
             assert!(after_reset >= min && after_reset <= min * 2);
         }
+    }
+
+    #[test]
+    fn base_delay_reaches_max_past_32_retries() {
+        let config = RetryConfig::new()
+            .with_min_base_delay(Duration::from_nanos(10))
+            .with_max_base_delay(Duration::from_secs(60));
+        let backoff = RetryBackoff::from_config(&config);
+        // 10ns * 2^32 = ~42.95s < 60s; retry 33 must double past 2^32 and hit 60s cap.
+        assert_eq!(backoff.base_delay_for(33), Duration::from_secs(60));
+        assert_eq!(backoff.base_delay_for(u32::MAX), Duration::from_secs(60));
     }
 }

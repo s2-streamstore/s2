@@ -2230,15 +2230,14 @@ pub(crate) fn classify_http_error<E: TransportError>(
                 return ProtocolError::new_with_context(detail, context).into();
             }
             let refused = source_err::<h2::Error>(&hyper_err)
-                .is_some_and(|e| e.reason() == Some(h2::Reason::REFUSED_STREAM));
+                .is_some_and(|e| e.is_reset() && e.reason() == Some(h2::Reason::REFUSED_STREAM));
             ConnectionLostError::new_with_context(detail, refused, context).into()
         }
         client::HttpError::RequestBuild(message) => {
-            ProtocolError::new_with_context(format!("request build: {message}"), context).into()
+            ProtocolError::new_definite(format!("request build: {message}"), context).into()
         }
         client::HttpError::RequestCompression(message) => {
-            ProtocolError::new_with_context(format!("request compression: {message}"), context)
-                .into()
+            ProtocolError::new_definite(format!("request compression: {message}"), context).into()
         }
         client::HttpError::ResponseCompression(message) => {
             ProtocolError::new_with_context(format!("response compression: {message}"), context)
@@ -2414,5 +2413,19 @@ mod tests {
         );
         assert!(classified.is_retryable());
         server_task.abort();
+    }
+
+    #[test]
+    fn pre_send_request_build_and_compression_errors_are_definite() {
+        let ctx = ErrorContext::stream("append", "b", "s", false);
+        for err in [
+            client::HttpError::RequestBuild("bad header".into()),
+            client::HttpError::RequestCompression("zstd failed".into()),
+        ] {
+            let classified = classify_http_error::<AppendError>(err, ctx.clone());
+            assert!(matches!(classified, AppendError::Protocol(_)));
+            assert!(classified.has_no_side_effects());
+            assert!(!classified.is_retryable());
+        }
     }
 }

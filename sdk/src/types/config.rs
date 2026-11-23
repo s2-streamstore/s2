@@ -267,6 +267,15 @@ fn is_valid_dns_name(host: &str) -> bool {
     if dns.is_empty() || dns.len() > 253 {
         return false;
     }
+    // RFC 1123 / WHATWG URL: a DNS name cannot end with an all-numeric label (which rejects
+    // invalid IPv4 literals like `127.0.0.999` and trailing-dot IPv4s like `127.0.0.1.`).
+    if dns
+        .rsplit('.')
+        .next()
+        .is_some_and(|tld| !tld.is_empty() && tld.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return false;
+    }
     dns.split('.').all(|label| {
         let bytes = label.as_bytes();
         !bytes.is_empty()

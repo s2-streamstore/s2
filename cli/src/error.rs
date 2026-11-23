@@ -248,20 +248,29 @@ impl std::fmt::Display for TokenSource {
     }
 }
 
+fn root_server_error(mut err: &SdkError) -> Option<&ServerError> {
+    loop {
+        if let Some(server) = err.server_error() {
+            return Some(server);
+        }
+        err = err.failure().or_else(|| err.final_attempt_error())?;
+    }
+}
+
 fn is_auth_error(err: &SdkError) -> bool {
-    err.server_error()
+    root_server_error(err)
         .and_then(ServerError::known_code)
         .is_some_and(ErrorCode::is_auth_error)
 }
 
 fn is_network_policy_denied(err: &SdkError) -> bool {
-    err.server_error()
+    root_server_error(err)
         .and_then(ServerError::known_code)
         .is_some_and(|code| matches!(code, ErrorCode::NetworkPolicyDenied))
 }
 
 fn is_not_implemented(err: &SdkError) -> bool {
-    err.server_error()
+    root_server_error(err)
         .and_then(ServerError::known_code)
         .is_some_and(|code| matches!(code, ErrorCode::NotImplemented))
 }
@@ -430,5 +439,40 @@ mod tests {
             1,
             "{rendered}"
         );
+    }
+
+    #[test]
+    fn wrapped_session_and_indefinite_errors_still_classify_server_codes() {
+        use s2_sdk::error::{IndefiniteAppendError, SessionClosedError, StatusCode};
+
+        let auth_server =
+            ServerError::new(StatusCode::UNAUTHORIZED, "invalid token").with_code("authn");
+        let wrapped_auth = S2Error::SessionClosed(SessionClosedError::new(Some(
+            S2Error::IndefiniteAppend(IndefiniteAppendError::new(S2Error::Server(auth_server))),
+        )));
+        assert!(matches!(
+            CliError::Operation(OpKind::Append, wrapped_auth)
+                .with_token_source(Some(TokenSource::Environment)),
+            CliError::UnauthorizedAccessToken(OpKind::Append, _, TokenSource::Environment)
+        ));
+
+        let np_server =
+            ServerError::new(StatusCode::FORBIDDEN, "denied").with_code("network_policy_denied");
+        let wrapped_np =
+            S2Error::SessionClosed(SessionClosedError::new(Some(S2Error::Server(np_server))));
+        assert!(matches!(
+            CliError::Operation(OpKind::Append, wrapped_np)
+                .with_token_source(Some(TokenSource::Environment)),
+            CliError::NetworkPolicyDenied(OpKind::Append, _)
+        ));
+
+        let ni_server = ServerError::new(StatusCode::NOT_IMPLEMENTED, "unsupported")
+            .with_code("not_implemented");
+        let wrapped_ni =
+            S2Error::SessionClosed(SessionClosedError::new(Some(S2Error::Server(ni_server))));
+        assert!(matches!(
+            CliError::Operation(OpKind::Read, wrapped_ni).with_target(Target::Local),
+            CliError::NotImplemented(OpKind::Read, _)
+        ));
     }
 }

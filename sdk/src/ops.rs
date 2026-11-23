@@ -602,7 +602,7 @@ impl S2 {
         set: BasinMetricSet,
     ) -> Result<Vec<Metric>, RequestError> {
         let req = set.into_api();
-        let url = self.uri(format!("v1/metrics/{basin}"));
+        let url = self.uri(format!("v1/metrics/{}", urlencoding::encode(&basin)));
         let response: api::metrics::MetricSetResponse = self
             .base
             .unary(
@@ -623,7 +623,8 @@ impl S2 {
     ) -> Result<Vec<Metric>, RequestError> {
         let req = set.into_api();
         let url = self.uri(format!(
-            "v1/metrics/{basin}/{}",
+            "v1/metrics/{}/{}",
+            urlencoding::encode(&basin),
             urlencoding::encode(&stream)
         ));
         let response: api::metrics::MetricSetResponse = self
@@ -964,6 +965,11 @@ impl S2Stream {
         use prost::Message as _;
 
         let scope = self.client.stream_scope("append", &self.name, false);
+        if let Some(token) = input.fencing_token() {
+            token
+                .validate()
+                .map_err(|e| scope.context(1).format_validation(e))?;
+        }
         let expected_records = input.records().len() as u64;
         let proto_input = input.into_proto();
         let req = self

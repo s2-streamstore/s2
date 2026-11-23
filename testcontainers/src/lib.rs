@@ -203,19 +203,24 @@ mod tests {
 
         let client = s2.client().unwrap();
         let basin_name = "test-basin".parse::<BasinName>().unwrap();
-        client
+        let basin_out = client
             .ensure_basin(EnsureBasinInput::new(basin_name.clone()))
             .await
             .unwrap();
+        assert!(matches!(
+            basin_out,
+            s2_sdk::types::EnsureOutput::Created(info) if info.name == basin_name
+        ));
 
         let basin = client.basin(basin_name.clone());
         let stream_name = "test-stream".parse::<StreamName>().unwrap();
-        basin
+        let stream_out = basin
             .ensure_stream(EnsureStreamInput::new(stream_name.clone()))
             .await
             .unwrap();
-
-        assert_eq!(basin_name.as_ref(), "test-basin");
-        assert_eq!(stream_name.as_ref(), "test-stream");
+        assert!(matches!(
+            stream_out,
+            s2_sdk::types::EnsureOutput::Created(info) if info.name == stream_name
+        ));
     }
 }

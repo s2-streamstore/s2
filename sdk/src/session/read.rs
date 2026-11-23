@@ -476,7 +476,8 @@ pub struct ReadSessionState {
 impl fmt::Debug for ReadSessionState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let inner = self.inner.lock().unwrap();
-        let caught_up = !self.shutdown.is_cancelled() && inner.catch_up.is_caught_up();
+        let aborted_before_close = self.shutdown.is_cancelled() && inner.closed.is_none();
+        let caught_up = !aborted_before_close && inner.catch_up.is_caught_up();
         f.debug_struct("ReadSessionState")
             .field("next_seq_num", &inner.next_seq_num)
             .field("last_observed_tail", &inner.last_observed_tail)
@@ -505,6 +506,7 @@ impl ReadSessionState {
     /// An unclamped `ReadStart::SeqNum` start is known immediately; any other start returns `None`
     /// until resolved by the first server response. Updated before each record (or batch) is
     /// handed to the caller, and advances on heartbeats. Retained after iteration ends.
+    #[must_use]
     pub fn next_seq_num(&self) -> Option<u64> {
         self.inner.lock().unwrap().next_seq_num
     }
@@ -513,6 +515,7 @@ impl ReadSessionState {
     ///
     /// Never moves backward, persists across retries and handovers, and is retained after
     /// iteration ends.
+    #[must_use]
     pub fn last_observed_tail(&self) -> Option<StreamPosition> {
         self.inner.lock().unwrap().last_observed_tail
     }
@@ -521,8 +524,11 @@ impl ReadSessionState {
     /// tail equal to [`next_seq_num`](Self::next_seq_num).
     ///
     /// Returns `false` while reconnecting or once iteration has ended.
+    #[must_use]
     pub fn is_caught_up(&self) -> bool {
-        !self.shutdown.is_cancelled() && self.inner.lock().unwrap().catch_up.is_caught_up()
+        let inner = self.inner.lock().unwrap();
+        let aborted_before_close = self.shutdown.is_cancelled() && inner.closed.is_none();
+        !aborted_before_close && inner.catch_up.is_caught_up()
     }
 
     /// Return a future that resolves to the tail position once the session is caught up.
@@ -813,22 +819,26 @@ impl ReadSession {
     }
 
     /// Return a cloneable handle to this session's concurrent progress state.
+    #[must_use]
     pub fn state(&self) -> ReadSessionState {
         self.core.state.clone()
     }
 
     /// Return the sequence number of the next record this session will deliver.
+    #[must_use]
     pub fn next_seq_num(&self) -> Option<u64> {
         self.core.state.next_seq_num()
     }
 
     /// Return the latest stream tail reported by the server.
+    #[must_use]
     pub fn last_observed_tail(&self) -> Option<StreamPosition> {
         self.core.state.last_observed_tail()
     }
 
     /// Return whether all records through the active request's latest reported tail have been
     /// delivered.
+    #[must_use]
     pub fn is_caught_up(&self) -> bool {
         self.core.state.is_caught_up()
     }
@@ -923,22 +933,26 @@ impl ReadBatchSession {
     }
 
     /// Return a cloneable handle to this session's concurrent progress state.
+    #[must_use]
     pub fn state(&self) -> ReadSessionState {
         self.core.state.clone()
     }
 
     /// Return the sequence number of the next record this session will deliver.
+    #[must_use]
     pub fn next_seq_num(&self) -> Option<u64> {
         self.core.state.next_seq_num()
     }
 
     /// Return the latest stream tail reported by the server.
+    #[must_use]
     pub fn last_observed_tail(&self) -> Option<StreamPosition> {
         self.core.state.last_observed_tail()
     }
 
     /// Return whether all records through the active request's latest reported tail have been
     /// delivered.
+    #[must_use]
     pub fn is_caught_up(&self) -> bool {
         self.core.state.is_caught_up()
     }

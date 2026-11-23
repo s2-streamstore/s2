@@ -271,6 +271,7 @@ struct ProducerShared {
     cmd_tx: mpsc::UnboundedSender<Command>,
     permits: AppendPermits,
     max_batch_bytes: usize,
+    fencing_token_len: usize,
     unacked_records: AtomicUsize,
     acked_through_id: AtomicU64,
     lifecycle: Arc<SessionLifecycle>,
@@ -365,6 +366,7 @@ impl Producer {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let permits = AppendPermits::new(None, config.max_unacked_bytes);
         let max_batch_bytes = config.max_batch_bytes;
+        let fencing_token_len = config.fencing_token.as_ref().map_or(0, |t| t.len());
         let gate = StdMutex::new(ProducerGate {
             match_seq: MatchSeqState::from_option(config.match_seq_num),
             last_accepted_id: 0,
@@ -387,6 +389,7 @@ impl Producer {
             cmd_tx,
             permits,
             max_batch_bytes,
+            fencing_token_len,
             unacked_records: AtomicUsize::new(0),
             acked_through_id: AtomicU64::new(0),
             lifecycle,
@@ -436,6 +439,8 @@ impl Producer {
         record: impl Into<AppendRecord>,
     ) -> Result<RecordSubmitTicket, AppendSessionError> {
         let record = record.into();
+        FencingToken::validate_len(self.shared.fencing_token_len)
+            .map_err(|e| self.shared.context.format_validation(e))?;
         let bytes = record.metered_bytes();
         validate_record_size(bytes, self.shared.max_batch_bytes)
             .map_err(|e| self.shared.context.format_validation(e))?;
@@ -668,6 +673,8 @@ impl RecordSubmitPermit {
         record: impl Into<AppendRecord>,
     ) -> Result<RecordSubmitTicket, AppendSessionError> {
         let record = record.into();
+        FencingToken::validate_len(self.shared.fencing_token_len)
+            .map_err(|e| self.shared.context.format_validation(e))?;
         let metered = record.metered_bytes();
         if metered > self.reserved_bytes {
             return Err(AppendSessionError::Validation(
@@ -697,6 +704,7 @@ impl RecordSubmitPermit {
                 .claim_next()
                 .map_err(|e| self.shared.context.format_validation(e))?;
             let acceptance_id = gate.last_accepted_id + 1;
+            self.shared.unacked_records.fetch_add(1, Ordering::Release);
             if self
                 .shared
                 .cmd_tx
@@ -710,10 +718,10 @@ impl RecordSubmitPermit {
                 })
                 .is_err()
             {
+                self.shared.unacked_records.fetch_sub(1, Ordering::Release);
                 return Err(self.shared.session_closed_err(has_unacked_work));
             }
             gate.last_accepted_id = acceptance_id;
-            self.shared.unacked_records.fetch_add(1, Ordering::Release);
         }
 
         Ok(RecordSubmitTicket(SubmitTicket::new(

@@ -530,6 +530,19 @@ fn stream_view(config: s2_api::v1::config::StreamConfig) -> Result<Value, CliErr
     Ok(serde_json::to_value(StreamConfigView::from(config))?)
 }
 
+fn take_unknown_resource_set<E, P>(
+    field: &mut Option<MaybeKnown<s2_api::v1::access::ResourceSet<E, P>>>,
+) -> Option<String> {
+    if matches!(field, Some(MaybeKnown::Unknown(_))) {
+        match field.take() {
+            Some(MaybeKnown::Unknown(kind)) => Some(kind),
+            _ => unreachable!("checked Unknown above"),
+        }
+    } else {
+        None
+    }
+}
+
 fn access_token_view(info: ApiAccessTokenInfo) -> Result<Value, CliError> {
     let ApiAccessTokenInfo {
         // Identity, not configuration.
@@ -539,7 +552,11 @@ fn access_token_view(info: ApiAccessTokenInfo) -> Result<Value, CliError> {
         mut scope,
         network_policy,
     } = info;
-    // Operations this version does not recognize cannot be canonicalized, only named.
+    // Operations and resource matchers this version does not recognize cannot be canonicalized,
+    // only named.
+    let unknown_basins = take_unknown_resource_set(&mut scope.basins);
+    let unknown_streams = take_unknown_resource_set(&mut scope.streams);
+    let unknown_access_tokens = take_unknown_resource_set(&mut scope.access_tokens);
     let (known_ops, unknown_ops): (Vec<_>, Vec<_>) = scope
         .ops
         .take()
@@ -549,6 +566,15 @@ fn access_token_view(info: ApiAccessTokenInfo) -> Result<Value, CliError> {
     scope.ops = Some(known_ops);
     let scope: s2_common::access::AccessTokenScope = scope.try_into()?;
     let mut scope = AccessTokenScopeView::from(scope);
+    if let Some(kind) = unknown_basins {
+        scope.basins = kind;
+    }
+    if let Some(kind) = unknown_streams {
+        scope.streams = kind;
+    }
+    if let Some(kind) = unknown_access_tokens {
+        scope.access_tokens = kind;
+    }
     scope.ops.extend(unknown_ops.into_iter().map(wire_name));
     scope.ops.sort();
 
@@ -972,6 +998,29 @@ mod tests {
         assert_eq!(left["expires_at"], json!("never"));
         assert_eq!(left["network_policy"], json!("none"));
         assert!(left.get("id").is_none());
+    }
+
+    #[test]
+    fn access_token_views_preserve_unknown_resource_matchers() {
+        let info = serde_json::from_value(json!({
+            "id": "future-token",
+            "expires_at": null,
+            "auto_prefix_streams": false,
+            "scope": {
+                "basins": {"regex": "^prod-.*"},
+                "streams": {"glob": "events/*"},
+                "access_tokens": {"tag": "ci"},
+                "op_groups": {},
+                "ops": ["read"]
+            }
+        }))
+        .expect("access token with unknown matchers deserializes");
+
+        let view =
+            access_token_view(info).expect("view renders without failing on unknown matchers");
+        assert_eq!(view["scope"]["basins"], json!("regex"));
+        assert_eq!(view["scope"]["streams"], json!("glob"));
+        assert_eq!(view["scope"]["access_tokens"], json!("tag"));
     }
 
     #[test]

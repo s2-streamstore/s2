@@ -606,3 +606,38 @@ fn page_next_start_after_cursors_and_deleted_items() {
         None
     );
 }
+
+#[test]
+fn endpoint_host_rejects_invalid_ipv4_and_trailing_dot_ipv4_placeholder() {
+    assert!(AccountEndpoint::new("127.0.0.999").is_err());
+    assert!(BasinEndpoint::new("127.0.0.999").is_err());
+    assert!(BasinEndpoint::new("https://{basin}.127.0.0.1.").is_err());
+    assert!(AccountEndpoint::new("127.0.0.1.").is_err());
+    // Valid DNS names with trailing dot or numeric non-TLD labels remain accepted.
+    assert!(AccountEndpoint::new("a.s2.dev.").is_ok());
+    assert!(BasinEndpoint::new("https://{basin}.123.example.com").is_ok());
+}
+
+#[test]
+fn list_inputs_omit_empty_prefix_and_start_after_on_wire() {
+    let b = ListBasinsInput::new().into_api();
+    assert!(b.prefix.is_none() && b.start_after.is_none());
+
+    let s = ListStreamsInput::new().into_api();
+    assert!(s.prefix.is_none() && s.start_after.is_none());
+
+    let t = ListAccessTokensInput::new().into_api();
+    assert!(t.prefix.is_none() && t.start_after.is_none());
+
+    let n = ListNetworkPoliciesInput::new().into_api();
+    assert!(n.prefix.is_none() && n.start_after.is_none());
+}
+
+#[test]
+fn server_oversized_fencing_token_rejected_when_reused_for_writes() {
+    let oversized = FencingToken::from_server("x".repeat(40));
+    assert!(oversized.validate().is_err());
+    let rec = AppendRecord::new("payload").unwrap();
+    let cfg = crate::batching::BatcherConfig::new().with_fencing_token(oversized);
+    assert!(crate::batching::batch_iter([rec], cfg).is_err());
+}

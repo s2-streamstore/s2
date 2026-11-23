@@ -2088,6 +2088,7 @@ async fn spec_a8c_explicit_abort_append_session_and_producer() {
         .expect("Producer::abort() after clean close() must be a no-op");
 }
 
+// spec: r1 A10, A10a, A10b, A10c
 #[tokio::test]
 async fn producer_and_append_session_progress_accessors() {
     use std::sync::atomic::AtomicBool;

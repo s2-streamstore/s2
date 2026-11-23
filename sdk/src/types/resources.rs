@@ -833,8 +833,8 @@ impl ListBasinsInput {
 
     pub(crate) fn into_api(self) -> api::basin::ListBasinsRequest {
         api::basin::ListBasinsRequest {
-            prefix: Some(self.prefix),
-            start_after: Some(self.start_after),
+            prefix: (!self.prefix.is_empty()).then_some(self.prefix),
+            start_after: (!self.start_after.is_empty()).then_some(self.start_after),
             limit: self.limit,
         }
     }
@@ -1504,8 +1504,8 @@ impl ListStreamsInput {
 
     pub(crate) fn into_api(self) -> api::stream::ListStreamsRequest {
         api::stream::ListStreamsRequest {
-            prefix: Some(self.prefix),
-            start_after: Some(self.start_after),
+            prefix: (!self.prefix.is_empty()).then_some(self.prefix),
+            start_after: (!self.start_after.is_empty()).then_some(self.start_after),
             limit: self.limit,
         }
     }

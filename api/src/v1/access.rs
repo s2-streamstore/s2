@@ -221,7 +221,7 @@ pub struct IssueAccessTokenRequest {
     pub id: AccessTokenId,
     /// Expiration time in RFC 3339 format.
     /// If not set, the expiration will be set to that of the requestor's token.
-    #[serde(default)]
+    #[serde(default, with = "super::rfc3339::option")]
     #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>, format = DateTime))]
     pub expires_at: Option<Timestamp>,
     /// Namespace streams based on the configured stream-level scope, which must be a prefix.
@@ -547,5 +547,32 @@ mod tests {
             internal.scope.access_tokens,
             s2_common::access::ResourceSet::None
         ));
+    }
+
+    #[test]
+    fn issue_access_token_expires_at_enforces_rfc3339() {
+        let valid = serde_json::json!({
+            "id": "test-token",
+            "expires_at": "2030-01-01T00:00:00Z",
+            "scope": {}
+        });
+        let parsed: IssueAccessTokenRequest = serde_json::from_value(valid).unwrap();
+        assert!(parsed.expires_at.is_some());
+
+        for bad in [
+            "-000001-01-01T00:00:00Z",
+            "+010000-01-01T00:00:00Z",
+            "2030-01-01T00:00:00Z[UTC]",
+        ] {
+            let payload = serde_json::json!({
+                "id": "test-token",
+                "expires_at": bad,
+                "scope": {}
+            });
+            assert!(
+                serde_json::from_value::<IssueAccessTokenRequest>(payload).is_err(),
+                "expected RFC 3339 rejection for {bad}"
+            );
+        }
     }
 }

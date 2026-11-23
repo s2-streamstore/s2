@@ -297,7 +297,7 @@ impl From<sdk::types::EncryptionAlgorithm> for EncryptionAlgorithm {
             sdk::types::EncryptionAlgorithm::Aegis256 => Self::Aegis256,
             sdk::types::EncryptionAlgorithm::Aes256Gcm => Self::Aes256Gcm,
             sdk::types::EncryptionAlgorithm::Unknown(name) => Self::Unknown(name),
-            other => Self::Unknown(format!("{other:?}")),
+            other => Self::Unknown(other.as_str().to_owned()),
         }
     }
 }
@@ -449,7 +449,7 @@ impl From<sdk::types::TimestampingMode> for TimestampingMode {
             sdk::types::TimestampingMode::ClientRequire => TimestampingMode::ClientRequire,
             sdk::types::TimestampingMode::Arrival => TimestampingMode::Arrival,
             sdk::types::TimestampingMode::Unknown(name) => TimestampingMode::Unknown(name),
-            other => TimestampingMode::Unknown(format!("{other:?}")),
+            other => TimestampingMode::Unknown(other.as_str().to_owned()),
         }
     }
 }
@@ -1172,7 +1172,7 @@ impl From<sdk::types::Operation> for Operation {
             sdk::types::Operation::GetNetworkPolicy => Operation::GetNetworkPolicy,
             sdk::types::Operation::DeleteNetworkPolicy => Operation::DeleteNetworkPolicy,
             sdk::types::Operation::Unknown(name) => Operation::Unknown(name),
-            other => Operation::Unknown(format!("{other:?}")),
+            other => Operation::Unknown(other.as_str().to_owned()),
         }
     }
 }

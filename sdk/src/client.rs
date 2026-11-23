@@ -1093,7 +1093,7 @@ impl PooledConnection {
         match &self.conn {
             ConnectionState::Ready(sender) => !sender.is_closed(),
             ConnectionState::Connecting(rx) => match &*rx.borrow() {
-                DialOutcome::Pending => true,
+                DialOutcome::Pending => rx.has_changed().is_ok(),
                 DialOutcome::Ready(sender) => !sender.is_closed(),
                 DialOutcome::Failed(_) | DialOutcome::Aborted => false,
             },
@@ -1291,6 +1291,22 @@ where
         let shutdown = self.shutdown.clone();
 
         tokio::spawn(async move {
+            struct RemoveOnDrop<C: Connect> {
+                pool: Weak<HostPool<C>>,
+                id: ConnectionId,
+            }
+            impl<C: Connect> Drop for RemoveOnDrop<C> {
+                fn drop(&mut self) {
+                    if let Some(pool) = self.pool.upgrade() {
+                        pool.remove(self.id);
+                    }
+                }
+            }
+            let _remove_guard = RemoveOnDrop {
+                pool: weak_pool.clone(),
+                id,
+            };
+
             let (sender, conn) = match dial_http2(
                 connector,
                 origin_uri,
@@ -1303,9 +1319,6 @@ where
                 Ok(pair) => pair,
                 Err(DialError::Aborted) => {
                     let _ = tx.send(DialOutcome::Aborted);
-                    if let Some(pool) = weak_pool.upgrade() {
-                        pool.remove(id);
-                    }
                     return;
                 }
                 Err(DialError::Connect(msg)) => {
@@ -1316,9 +1329,6 @@ where
                         "HTTP/2 dial failed"
                     );
                     let _ = tx.send(DialOutcome::Failed(Arc::new(msg)));
-                    if let Some(pool) = weak_pool.upgrade() {
-                        pool.remove(id);
-                    }
                     return;
                 }
             };
@@ -1347,10 +1357,6 @@ where
                         );
                     }
                 }
-            }
-
-            if let Some(pool) = weak_pool.upgrade() {
-                pool.remove(id);
             }
         });
     }
@@ -1674,25 +1680,34 @@ where
     /// `connection_timeout`, completely independent of `request_timeout`.
     /// Phase 2 (`T7b`): once the connection is dialed, a single `deadline` bounds `sender.ready()`,
     /// request headers/response headers, and unary body collection.
-    /// If a reused idle connection closed right before `ready()`, transparently evict it and
-    /// dial once so the caller sees no spurious error.
+    /// If any reused idle connections closed right before `ready()`, transparently evict them and
+    /// dial a fresh connection so the caller sees no spurious error.
     async fn checkout_ready(
         &self,
         origin: &str,
         fallback_uri: &Uri,
         request_timeout: Option<Duration>,
     ) -> Result<CheckedOutSender, HttpError> {
-        for attempt in 0..2 {
+        loop {
+            if self.shutdown.is_cancelled() {
+                return Err(HttpError::Closed);
+            }
             let (pool, checkout) = self.checkout_for_origin(origin, fallback_uri)?;
             let (id, mut sender, permit, reused) = match checkout {
                 Checkout::Ready { id, sender, permit } => (id, sender, permit, true),
                 Checkout::Connecting { id, mut rx, permit } => {
-                    let sender = wait_for_dial(&mut rx, &self.shutdown).await?;
+                    let sender = match wait_for_dial(&mut rx, &self.shutdown).await {
+                        Ok(sender) => sender,
+                        Err(err) => {
+                            pool.remove(id);
+                            return Err(err);
+                        }
+                    };
                     (id, sender, permit, false)
                 }
             };
 
-            let deadline = request_timeout.map(|d| Instant::now() + d);
+            let deadline = request_timeout.and_then(|d| Instant::now().checked_add(d));
             let ready_res = match deadline {
                 Some(dl) => match timeout_at(dl, sender.ready()).await {
                     Ok(res) => res,
@@ -1719,7 +1734,7 @@ where
                 Err(err) => {
                     pool.remove(id);
                     drop(permit);
-                    if reused && attempt == 0 {
+                    if reused {
                         tracing::debug!(
                             origin = %origin,
                             connection = ?id,
@@ -1732,7 +1747,6 @@ where
                 }
             }
         }
-        unreachable!("at most two checkout attempts")
     }
 
     async fn send_with<T, F, Fut>(&self, request: Request, run: F) -> Result<T, HttpError>
@@ -1943,6 +1957,7 @@ mod tests {
         dials: Arc<AtomicUsize>,
         active_connections: Arc<AtomicUsize>,
         conn_closed: Arc<Notify>,
+        server_handles: Arc<Mutex<Vec<tokio::task::AbortHandle>>>,
         dial_delay: Duration,
         stall_error_body: bool,
     }
@@ -1953,8 +1968,15 @@ mod tests {
                 dials: Arc::new(AtomicUsize::new(0)),
                 active_connections: Arc::new(AtomicUsize::new(0)),
                 conn_closed: Arc::new(Notify::new()),
+                server_handles: Arc::new(Mutex::new(Vec::new())),
                 dial_delay: Duration::ZERO,
                 stall_error_body: false,
+            }
+        }
+
+        fn abort_servers(&self) {
+            for handle in self.server_handles.lock().unwrap().drain(..) {
+                handle.abort();
             }
         }
 
@@ -1995,6 +2017,7 @@ mod tests {
             let dials = self.dials.clone();
             let active_connections = self.active_connections.clone();
             let conn_closed = self.conn_closed.clone();
+            let server_handles = self.server_handles.clone();
             let dial_delay = self.dial_delay;
             let stall_error_body = self.stall_error_body;
             Box::pin(async move {
@@ -2003,11 +2026,12 @@ mod tests {
                     tokio::time::sleep(dial_delay).await;
                 }
                 let (client_io, server_io) = tokio::io::duplex(64 * 1024);
-                tokio::spawn(async move {
+                let task = tokio::spawn(async move {
                     let Ok(mut conn) = h2::server::handshake(server_io).await else {
                         return;
                     };
                     active_connections.fetch_add(1, Ordering::SeqCst);
+                    conn_closed.notify_waiters();
                     let _guard = ActiveConnGuard {
                         active: active_connections,
                         closed: conn_closed,
@@ -2051,6 +2075,7 @@ mod tests {
                         }
                     }
                 });
+                server_handles.lock().unwrap().push(task.abort_handle());
                 Ok(TokioIo::new(client_io))
             })
         }
@@ -2637,5 +2662,59 @@ mod tests {
             .with_connection_receive_window(64 * MIB)
             .unwrap();
         assert_eq!(effective_receive_windows(cfg), (4 * MIB, 64 * MIB));
+    }
+
+    #[test]
+    fn connecting_entry_is_not_live_after_dial_sender_dropped() {
+        let (tx, rx) = watch::channel(DialOutcome::Pending);
+        let (pooled, _permit) =
+            PooledConnection::new_connecting(ConnectionId::next(), 10, rx, Arc::new(Notify::new()));
+        assert!(pooled.is_live());
+        drop(tx);
+        assert!(!pooled.is_live());
+    }
+
+    #[tokio::test]
+    async fn large_request_timeout_does_not_panic_and_evicts_multiple_stale_connections() {
+        // 1. `Duration::MAX` request_timeout must not panic on `Instant::now() + d`.
+        let connector = DuplexH2Connector::new();
+        let pool = test_pool_with(connector.clone(), Http2Config::new());
+        let req = RequestBuilder::get("http://localhost:8080/test".parse().unwrap())
+            .timeout(Duration::MAX)
+            .build()
+            .unwrap();
+        let resp = pool.execute_unary(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        pool.close();
+
+        // 2. When multiple idle pooled connections die on the server side, the pool evicts all of
+        //    them and dials a fresh healthy connection for the next request.
+        let connector = DuplexH2Connector::new();
+        let pool = test_pool_with(
+            connector.clone(),
+            Http2Config::new().with_max_concurrent_requests(1).unwrap(),
+        );
+
+        let (id1, p1) = checkout_permit(&pool, TEST_ORIGIN).await;
+        let (id2, p2) = checkout_permit(&pool, TEST_ORIGIN).await;
+        assert_ne!(id1, id2);
+        drop(p1);
+        drop(p2);
+        assert_eq!(host_connection_count(&pool, TEST_ORIGIN), 2);
+        connector.wait_active_connections(2).await;
+
+        connector.abort_servers();
+        connector.wait_active_connections(0).await;
+        while host_connection_count(&pool, TEST_ORIGIN) > 0 {
+            tokio::task::yield_now().await;
+        }
+
+        let req = RequestBuilder::get("http://localhost:8080/test".parse().unwrap())
+            .build()
+            .unwrap();
+        let resp = pool.execute_unary(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(connector.dials.load(Ordering::SeqCst), 3);
+        pool.close();
     }
 }

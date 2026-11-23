@@ -488,7 +488,7 @@ pub fn bench_write(
                             ack_latencies.push(latency);
                             total_bytes += record_size as u64;
                             total_records += 1;
-                            next_seq_num = ack.seq_num + 1;
+                            next_seq_num = next_seq_num.max(ack.seq_num + 1);
 
                             if last_yield.elapsed() >= Duration::from_millis(100) {
                                 last_yield = Instant::now();

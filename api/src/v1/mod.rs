@@ -8,6 +8,55 @@ pub mod metrics;
 pub mod network_policy;
 pub mod stream;
 
+pub(crate) mod rfc3339 {
+    use jiff::Timestamp;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer, de, ser};
+
+    const RFC3339_MIN: Timestamp = Timestamp::constant(-62_167_219_200, 0);
+
+    fn parse_rfc3339(s: &str) -> Result<Timestamp, String> {
+        // RFC 3339 requires a 4-digit non-negative year (`0000`–`9999`) with no Temporal
+        // `[TimeZone]` annotation suffix.
+        if s.len() < 20 || !s.as_bytes()[..4].iter().all(u8::is_ascii_digit) || s.contains('[') {
+            return Err(format!("invalid RFC 3339 timestamp: `{s}`"));
+        }
+        let ts: Timestamp = s
+            .parse()
+            .map_err(|e| format!("invalid RFC 3339 timestamp: {e}"))?;
+        if ts < RFC3339_MIN {
+            return Err(format!("timestamp `{s}` is outside RFC 3339 year range"));
+        }
+        Ok(ts)
+    }
+
+    pub(crate) mod option {
+        use super::*;
+
+        pub fn serialize<S>(value: &Option<Timestamp>, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            if let Some(ts) = value
+                && *ts < RFC3339_MIN
+            {
+                return Err(ser::Error::custom(format!(
+                    "timestamp `{ts}` is outside RFC 3339 year range"
+                )));
+            }
+            value.serialize(serializer)
+        }
+
+        pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Timestamp>, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            let opt = Option::<String>::deserialize(deserializer)?;
+            opt.map(|s| parse_rfc3339(&s).map_err(de::Error::custom))
+                .transpose()
+        }
+    }
+}
+
 pub use maybe_known::MaybeKnown;
 use s2_common::{
     access::AccessTokenId, basin::BasinName, resources::RequestToken, stream::StreamName,

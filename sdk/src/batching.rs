@@ -292,6 +292,9 @@ pub fn try_batch_iter<R, E>(
 where
     R: Into<AppendRecord>,
 {
+    if let Some(ref token) = config.fencing_token {
+        token.validate()?;
+    }
     let iter = records.into_iter();
     let initial_cap = iter.size_hint().0.min(config.max_batch_records);
     let mut inputs = Vec::new();
@@ -695,6 +698,11 @@ impl BatcherCore {
     ) -> Poll<Option<Result<AppendInput, TryBatchError<E>>>> {
         if self.done {
             return Poll::Ready(None);
+        }
+        if let Some(ref token) = self.config.fencing_token
+            && let Err(err) = token.validate()
+        {
+            return self.fail(TryBatchError::Validation(err));
         }
 
         // Seed from a previously overflowed record before polling the input again.

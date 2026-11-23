@@ -48,11 +48,15 @@ HTTP/2 connection pool:
 
 * Use [`S2::from_env`] (reads `S2_ACCESS_TOKEN` and optional `S2_ACCOUNT_ENDPOINT` /
   `S2_BASIN_ENDPOINT`) or [`S2::new`] with [`S2Config`] to create a client.
+* Use `with_retry` on [`S2::with_retry`], [`S2Basin::with_retry`], or [`S2Stream::with_retry`] to
+  derive a handle with an overridden [`RetryConfig`](types::RetryConfig) while sharing the parent
+  client's HTTP/2 connection pool and [`S2::close`] lifecycle.
 * Call [`S2::close`] to abort active sessions and in-flight requests and close pooled connections
   immediately. Dropping [`S2`] without calling `close()` keeps the underlying pool alive until all
   derived handles and sessions are dropped.
-* Paginated listings return a [`ListStream`](types::ListStream) (`Unpin` + `Stream` with an
-  inherent `.next().await` method).
+* Single-page listings (`list_*`) return a [`Page`](types::Page) with a typed `next_start_after()`
+  cursor helper; full listings (`list_all_*`) return a lazy [`ListStream`](types::ListStream)
+  (`Unpin` + `Stream` with an inherent `.next().await` method).
 
 ## Appending Records
 
@@ -64,13 +68,19 @@ Choose the append surface that matches your workload:
   that batches individual [`AppendRecord`](types::AppendRecord)s according to
   [`ProducerConfig`](producer::ProducerConfig) (linger, batch size/count limits, backpressure,
   fencing token, and auto-incrementing `match_seq_num`). Call [`Producer::flush`](producer::Producer::flush)
-  to wait for previously accepted records, and [`Producer::close`](producer::Producer::close)
-  before dropping so buffered batches are flushed cleanly.
+  to wait for previously accepted records, observe live queue depth and progress via
+  [`unacked_bytes`](producer::Producer::unacked_bytes),
+  [`unacked_records`](producer::Producer::unacked_records), and
+  [`acked_records`](producer::Producer::acked_records), and call
+  [`Producer::close`](producer::Producer::close) before dropping so buffered batches are flushed
+  cleanly.
 * **Pre-batched pipelining**: [`S2Stream::append_session`] returns an
   [`AppendSession`](append_session::AppendSession) for submitting pre-formed
   [`AppendInput`](types::AppendInput)s with backpressure ([`reserve`](append_session::AppendSession::reserve)
-  / [`submit`](append_session::AppendSession::submit)). Standalone batching helpers live in
-  [`batching`] ([`Batcher`](batching::Batcher), [`TryBatcher`](batching::TryBatcher),
+  / [`submit`](append_session::AppendSession::submit)) and live depth accessors
+  ([`unacked_bytes`](append_session::AppendSession::unacked_bytes),
+  [`unacked_batches`](append_session::AppendSession::unacked_batches)). Standalone batching helpers
+  live in [`batching`] ([`Batcher`](batching::Batcher), [`TryBatcher`](batching::TryBatcher),
   [`batch_iter`](batching::batch_iter), and [`try_batch_iter`](batching::try_batch_iter)).
 
 ## Reading Records
@@ -144,7 +154,10 @@ store). Optional features:
      example, a FIPS-validated provider).
   3. Compile-time feature fallback (`rustls-aws-lc-rs`, then `rustls-ring`).
 
-  Plaintext `http://` endpoints do not require a TLS provider.
+  Plaintext `http://` endpoints do not require a TLS provider. When building with
+  `default-features = false`, enable at least one root-store feature (`rustls-native-roots` or
+  `rustls-webpki-roots`) for HTTPS endpoints, plus a crypto provider (via feature,
+  `CryptoProvider::install_default()`, or [`S2Config::with_rustls_crypto_provider`]).
 
 # Integration tests with s2-lite
 

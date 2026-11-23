@@ -74,3 +74,7 @@ tokio-shared-rt = "0.1"
 # `doc-scrape-examples` requires *any* one example to specify the option.
 name = "create_basin"
 doc-scrape-examples = true
+
+[[test]]
+name = "conformance"
+required-features = ["_hidden"]

@@ -41,6 +41,8 @@ jobs:
               - 'cli/src/cli.rs'
               - 'cli/src/main.rs'
               - 'lite/src/init.rs'
+              - 'resource-spec/**'
+              - 'common/**'
               - 'cli/schema.json'
 
   cli-schema-drift:
