@@ -57,6 +57,17 @@ This documentation is generated using
 so you will be able to see snippets from examples right here in the
 documentation.
 
+# TLS features
+
+By default, `s2-sdk` enables `rustls-aws-lc-rs` and `rustls-native-roots` (using the host OS trust
+store). Optional features:
+
+* `rustls-ring`: use `ring` instead of `aws-lc-rs` (with `default-features = false`).
+* `rustls-webpki-roots`: bundle Mozilla's root CA certificates (`webpki-roots`) for minimal
+  containers (such as `FROM scratch` or distroless) without system CA bundles. When both
+  `rustls-native-roots` and `rustls-webpki-roots` are enabled, the SDK tries native roots first and
+  falls back to `webpki-roots` if no native roots are available.
+
 # Integration tests with s2-lite
 
 Use [`s2-testcontainers`](https://docs.rs/s2-testcontainers/latest/s2_testcontainers/)

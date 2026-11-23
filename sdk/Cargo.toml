@@ -12,13 +12,20 @@ categories = ["api-bindings", "database"]
 
 [package.metadata.docs.rs]
 cargo-args = ["-Zunstable-options", "-Zrustdoc-scrape-examples"]
-features = ["rustls-aws-lc-rs", "rustls-ring"]
+features = [
+    "rustls-aws-lc-rs",
+    "rustls-native-roots",
+    "rustls-ring",
+    "rustls-webpki-roots",
+]
 
 [features]
-default = ["rustls-aws-lc-rs"]
+default = ["rustls-aws-lc-rs", "rustls-native-roots"]
 _hidden = []
 rustls-aws-lc-rs = ["hyper-rustls/aws-lc-rs", "rustls/aws-lc-rs"]
+rustls-native-roots = ["hyper-rustls/native-tokio"]
 rustls-ring = ["hyper-rustls/ring", "rustls/ring"]
+rustls-webpki-roots = ["hyper-rustls/webpki-tokio"]
 
 [dependencies]
 async-stream = { workspace = true }
@@ -33,7 +40,7 @@ http = { workspace = true }
 http-body = "1"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "http2"] }
-hyper-rustls = { version = "0.27", default-features = false, features = ["http2", "native-tokio", "tls12"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["http2", "tls12"] }
 hyper-util = { version = "0.1.21", features = ["client-legacy", "tokio"] }
 jiff = { workspace = true }
 pin-project-lite = "0.2"

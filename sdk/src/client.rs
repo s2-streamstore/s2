@@ -720,8 +720,8 @@ pub(crate) fn default_connector(
     }
     let rustls_crypto_provider = resolve_rustls_crypto_provider(rustls_crypto_provider)?;
 
-    let builder = if insecure_skip_cert_verification {
-        HttpsConnectorBuilder::new().with_tls_config(
+    if insecure_skip_cert_verification {
+        let builder = HttpsConnectorBuilder::new().with_tls_config(
             rustls::ClientConfig::builder_with_provider(rustls_crypto_provider.clone())
                 .with_safe_default_protocol_versions()
                 .map_err(std::io::Error::other)?
@@ -730,11 +730,58 @@ pub(crate) fn default_connector(
                     rustls_crypto_provider,
                 }))
                 .with_no_client_auth(),
-        )
-    } else {
-        HttpsConnectorBuilder::new().with_provider_and_native_roots(rustls_crypto_provider)?
+        );
+        return Ok(builder
+            .https_or_http()
+            .enable_http2()
+            .wrap_connector(connector));
+    }
+
+    build_https_connector_with_roots(rustls_crypto_provider, connector)
+}
+
+fn build_https_connector_with_roots(
+    rustls_crypto_provider: Arc<rustls::crypto::CryptoProvider>,
+    connector: HttpConnector,
+) -> Result<HttpsConnector<HttpConnector>, std::io::Error> {
+    #[cfg(all(feature = "rustls-native-roots", feature = "rustls-webpki-roots"))]
+    let builder = match HttpsConnectorBuilder::new()
+        .with_provider_and_native_roots(rustls_crypto_provider.clone())
+    {
+        Ok(builder) => builder,
+        Err(native_err) => {
+            tracing::debug!(
+                error = %native_err,
+                "native root certificates unavailable; falling back to webpki-roots"
+            );
+            HttpsConnectorBuilder::new()
+                .with_provider_and_webpki_roots(rustls_crypto_provider)
+                .map_err(std::io::Error::other)?
+        }
     };
 
+    #[cfg(all(feature = "rustls-native-roots", not(feature = "rustls-webpki-roots")))]
+    let builder =
+        HttpsConnectorBuilder::new().with_provider_and_native_roots(rustls_crypto_provider)?;
+
+    #[cfg(all(not(feature = "rustls-native-roots"), feature = "rustls-webpki-roots"))]
+    let builder = HttpsConnectorBuilder::new()
+        .with_provider_and_webpki_roots(rustls_crypto_provider)
+        .map_err(std::io::Error::other)?;
+
+    #[cfg(all(
+        not(feature = "rustls-native-roots"),
+        not(feature = "rustls-webpki-roots")
+    ))]
+    {
+        let _ = (rustls_crypto_provider, connector);
+        return Err(std::io::Error::other(
+            "no TLS root certificates configured; enable the `rustls-native-roots` or \
+             `rustls-webpki-roots` feature on `s2-sdk`",
+        ));
+    }
+
+    #[cfg(any(feature = "rustls-native-roots", feature = "rustls-webpki-roots"))]
     Ok(builder
         .https_or_http()
         .enable_http2()
@@ -2049,6 +2096,33 @@ mod tests {
     fn default_connector_accepts_explicit_crypto_provider_for_insecure_tls() {
         let connector = default_connector(None, true, Some(test_rustls_crypto_provider()));
         assert!(connector.is_ok());
+    }
+
+    #[cfg(all(
+        any(feature = "rustls-aws-lc-rs", feature = "rustls-ring"),
+        any(feature = "rustls-native-roots", feature = "rustls-webpki-roots"),
+    ))]
+    #[test]
+    fn default_connector_builds_verified_tls_connector() {
+        let connector = default_connector(None, false, Some(test_rustls_crypto_provider()));
+        assert!(connector.is_ok());
+    }
+
+    #[cfg(all(
+        any(feature = "rustls-aws-lc-rs", feature = "rustls-ring"),
+        not(feature = "rustls-native-roots"),
+        not(feature = "rustls-webpki-roots"),
+    ))]
+    #[test]
+    fn default_connector_errors_without_any_root_store_feature() {
+        let err = default_connector(None, false, Some(test_rustls_crypto_provider()))
+            .err()
+            .unwrap();
+        assert!(
+            err.to_string()
+                .contains("no TLS root certificates configured"),
+            "unexpected error: {err}"
+        );
     }
 
     #[cfg(any(feature = "rustls-aws-lc-rs", feature = "rustls-ring"))]
