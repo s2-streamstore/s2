@@ -572,9 +572,12 @@ impl RetryConfig {
 /// Overrides for the HTTP/2 transport used by pooled connections.
 ///
 /// Unset knobs keep the SDK defaults: 50 concurrent requests per connection and
-/// Hyper's receive windows (2 MiB per stream, 5 MiB per connection). Receive
-/// windows bound unconsumed server-to-client DATA only; they do not affect
-/// append throughput, which is governed by the server's receive windows.
+/// adaptive HTTP/2 flow-control windowing (starting at 64 KiB and scaling up to
+/// 16 MiB via BDP estimation). Setting either receive window disables adaptive
+/// windowing and uses fixed windows (defaulting the unset window to Hyper's
+/// 2 MiB per-stream / 5 MiB per-connection size). Receive windows bound
+/// unconsumed server-to-client DATA only; they do not affect append throughput,
+/// which is governed by the server's receive windows.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Http2Config {
     pub(crate) max_concurrent_requests: Option<usize>,

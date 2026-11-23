@@ -1364,9 +1364,16 @@ async fn dial_http2<C: Connect>(
         builder
             .timer(TokioTimer::new())
             .keep_alive_interval(KEEP_ALIVE_INTERVAL)
-            .keep_alive_timeout(KEEP_ALIVE_TIMEOUT)
-            .initial_stream_window_size(http2_config.stream_receive_window)
-            .initial_connection_window_size(http2_config.connection_receive_window);
+            .keep_alive_timeout(KEEP_ALIVE_TIMEOUT);
+        if http2_config.stream_receive_window.is_none()
+            && http2_config.connection_receive_window.is_none()
+        {
+            builder.adaptive_window(true);
+        } else {
+            builder
+                .initial_stream_window_size(http2_config.stream_receive_window)
+                .initial_connection_window_size(http2_config.connection_receive_window);
+        }
         builder
             .handshake(io)
             .await
