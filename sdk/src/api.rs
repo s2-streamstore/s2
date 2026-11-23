@@ -26,7 +26,7 @@ use s2_common::{encryption::S2_ENCRYPTION_KEY_HEADER, resources::PROVISION_RESUL
 use secrecy::ExposeSecret;
 use serde::de::DeserializeOwned;
 use tokio_util::codec::Decoder;
-use tracing::debug;
+use tracing::{Instrument, debug, debug_span};
 
 use crate::{
     client::{self, CancellationToken, StreamingResponse, UnaryResponse},
@@ -487,6 +487,16 @@ impl<'a> UnaryCall<'a> {
     }
 
     async fn send_raw<E: TransportError>(self) -> Result<(UnaryResponse, u32), E> {
+        let span = debug_span!(
+            "unary",
+            op = self.scope.operation,
+            basin = self.scope.basin,
+            stream = self.scope.stream,
+        );
+        self.send_raw_inner::<E>().instrument(span).await
+    }
+
+    async fn send_raw_inner<E: TransportError>(self) -> Result<(UnaryResponse, u32), E> {
         if self.client.is_closed() {
             return Err(ClientClosedError::new(self.scope.context(1)).into());
         }

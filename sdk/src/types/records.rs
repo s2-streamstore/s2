@@ -182,6 +182,7 @@ impl From<api::stream::proto::Header> for Header {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[must_use]
 /// A record to append.
 pub struct AppendRecord {
     body: Bytes,
@@ -421,6 +422,7 @@ pub enum Command {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
+#[must_use]
 /// Command record for signaling operations to the service.
 ///
 /// See [here](https://s2.dev/docs/rest/records/overview#command-records) for more information.
@@ -490,6 +492,7 @@ impl From<CommandRecord> for AppendRecord {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
+#[must_use]
 /// Input for [`append`](crate::S2Stream::append),
 /// [`append_with_stream_config`](crate::S2Stream::append_with_stream_config), and
 /// [`AppendSession::submit`](crate::append_session::AppendSession::submit).
@@ -648,6 +651,7 @@ pub enum ReadStart {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[must_use]
 /// Input for [`read`](crate::S2Stream::read), [`read_session`](crate::S2Stream::read_session),
 /// and [`read_batch_session`](crate::S2Stream::read_batch_session) operations.
 pub struct ReadInput {

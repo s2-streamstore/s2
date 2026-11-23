@@ -51,6 +51,7 @@ pub enum ReadSessionRetryPolicy {
 
 /// Configuration for a continuous read session.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[must_use]
 pub struct ReadSessionConfig {
     retry_policy: ReadSessionRetryPolicy,
 }
@@ -111,6 +112,7 @@ impl Future for CaughtUpFuture {
 /// Resolves to the stream tail position when the session is caught up, or fails with the session's
 /// terminal error (or [`SessionClosedError`] if the session closes cleanly before catching up).
 #[derive(Clone)]
+#[must_use = "futures do nothing unless `.await`ed or polled"]
 pub struct CaughtUp(CaughtUpFuture);
 
 impl fmt::Debug for CaughtUp {
@@ -572,6 +574,7 @@ impl Drop for ReadSessionCore {
 ///
 /// Yields individual [`SequencedRecord`]s in sequence-number order. Dropping the session closes it
 /// immediately. Use [`state`](Self::state) to observe progress concurrently from other tasks.
+#[must_use = "sessions do nothing unless polled"]
 pub struct ReadSession {
     core: ReadSessionCore,
     current_batch: VecDeque<SequencedRecord>,
@@ -675,6 +678,7 @@ impl Stream for ReadSession {
 ///
 /// Delivers each server batch whole, skips empty heartbeat frames while updating session state,
 /// and follows all read-session rules per batch. Dropping the session closes it immediately.
+#[must_use = "sessions do nothing unless polled"]
 pub struct ReadBatchSession {
     core: ReadSessionCore,
 }

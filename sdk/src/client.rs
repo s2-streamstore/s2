@@ -1484,6 +1484,14 @@ pub(crate) struct Pool<C> {
     reaper: OnceLock<AbortOnDropHandle<()>>,
 }
 
+impl<C> Drop for Pool<C> {
+    fn drop(&mut self) {
+        // Cancel any in-flight dials or live connection tasks if the last client/handle is
+        // dropped without calling `S2::close()`.
+        self.shutdown.cancel();
+    }
+}
+
 impl<C> Pool<C>
 where
     C: Connect,
@@ -2393,6 +2401,77 @@ mod tests {
             assert_eq!(connector.dials.load(Ordering::SeqCst), 2);
             pool.close();
         }
+    }
+
+    #[tokio::test]
+    async fn dropping_pool_cancels_in_flight_dial() {
+        #[derive(Clone)]
+        struct HangingDialConnector {
+            started: Arc<Notify>,
+            dropped: Arc<Notify>,
+        }
+
+        struct DropSignal(Arc<Notify>);
+        impl Drop for DropSignal {
+            fn drop(&mut self) {
+                self.0.notify_one();
+            }
+        }
+
+        impl tower_service::Service<Uri> for HangingDialConnector {
+            type Response = TokioIo<DuplexStream>;
+            type Error = std::io::Error;
+            type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+            fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+                Poll::Ready(Ok(()))
+            }
+
+            fn call(&mut self, _uri: Uri) -> Self::Future {
+                let started = self.started.clone();
+                let dropped = self.dropped.clone();
+                Box::pin(async move {
+                    let _guard = DropSignal(dropped);
+                    started.notify_one();
+                    std::future::pending().await
+                })
+            }
+        }
+
+        let started = Arc::new(Notify::new());
+        let dropped = Arc::new(Notify::new());
+        let connector = HangingDialConnector {
+            started: started.clone(),
+            dropped: dropped.clone(),
+        };
+        let pool = Pool::new(
+            connector,
+            Duration::from_secs(30),
+            Http2Config::new(),
+            CancellationToken::new(),
+        );
+        let req = RequestBuilder::get("http://localhost:8080/ok".parse().unwrap())
+            .build()
+            .unwrap();
+        {
+            let req_fut = pool.execute_unary(req);
+            tokio::pin!(req_fut);
+
+            tokio::select! {
+                _ = &mut req_fut => unreachable!("hanging dial should not finish"),
+                _ = started.notified() => {}
+            }
+        }
+
+        // Drop the pool without calling `close()`.
+        let dropped_fut = dropped.notified();
+        tokio::pin!(dropped_fut);
+        dropped_fut.as_mut().enable();
+        drop(pool);
+
+        timeout(Duration::from_secs(1), dropped_fut)
+            .await
+            .expect("in-flight dial should be cancelled immediately when Pool drops");
     }
 
     #[test]

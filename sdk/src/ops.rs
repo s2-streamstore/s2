@@ -159,6 +159,7 @@ impl S2 {
     }
 
     /// Get an [`S2Basin`].
+    #[must_use]
     pub fn basin(&self, name: BasinName) -> S2Basin {
         S2Basin {
             client: BasinClient::init(name, self.config.clone(), self.base.clone()),
@@ -634,6 +635,7 @@ impl S2Basin {
     }
 
     /// Get an [`S2Stream`].
+    #[must_use]
     pub fn stream(&self, name: StreamName) -> S2Stream {
         S2Stream {
             client: self.client.clone(),
@@ -822,6 +824,7 @@ impl S2Stream {
     }
 
     /// Set the encryption key for this stream handle.
+    #[must_use]
     pub fn with_encryption_key(self, encryption: EncryptionKey) -> Self {
         Self {
             encryption: Some(encryption.to_header_value()),

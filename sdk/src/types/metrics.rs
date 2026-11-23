@@ -47,6 +47,7 @@ impl From<MaybeKnown<api::metrics::TimeseriesInterval>> for TimeseriesInterval {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use]
 /// Time range for metrics queries.
 pub struct TimeRange {
     start_secs: u32,
@@ -91,6 +92,7 @@ impl TimeRange {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[must_use]
 /// Time range and accumulation interval for metrics queries.
 pub struct TimeRangeAndInterval {
     range: TimeRange,

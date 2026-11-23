@@ -42,6 +42,7 @@ impl<T> Page<T> {
 ///
 /// Implements [`futures_core::Stream`] and provides an inherent [`next`](Self::next) method for
 /// iterating without importing `StreamExt`.
+#[must_use = "streams do nothing unless polled"]
 pub struct ListStream<T>(Pin<Box<dyn Send + Stream<Item = Result<T, RequestError>>>>);
 
 impl<T> ListStream<T> {
@@ -239,6 +240,7 @@ impl From<TimestampingMode> for MaybeKnown<api::config::TimestampingMode> {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
+#[must_use]
 /// Configuration for timestamping behavior.
 pub struct TimestampingConfig {
     /// Timestamping mode for appends that influences how timestamps are handled.
@@ -293,6 +295,7 @@ impl From<TimestampingConfig> for api::config::TimestampingConfig {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[must_use]
 /// Configuration for automatically deleting a stream when it becomes empty.
 pub struct DeleteOnEmptyConfig {
     min_age_secs: u64,
@@ -361,11 +364,13 @@ pub struct StreamConfig {
 
 impl StreamConfig {
     /// Create a new [`StreamConfig`] with default settings.
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Set the storage class for the stream.
+    #[must_use]
     pub fn with_storage_class(self, storage_class: impl Into<String>) -> Self {
         Self {
             storage_class: Some(storage_class.into()),
@@ -374,6 +379,7 @@ impl StreamConfig {
     }
 
     /// Set the retention policy for records in the stream.
+    #[must_use]
     pub fn with_retention_policy(self, retention_policy: RetentionPolicy) -> Self {
         Self {
             retention_policy: Some(retention_policy),
@@ -382,6 +388,7 @@ impl StreamConfig {
     }
 
     /// Set the configuration for timestamping behavior.
+    #[must_use]
     pub fn with_timestamping(self, timestamping: TimestampingConfig) -> Self {
         Self {
             timestamping: Some(timestamping),
@@ -390,6 +397,7 @@ impl StreamConfig {
     }
 
     /// Set the configuration for automatically deleting the stream when it becomes empty.
+    #[must_use]
     pub fn with_delete_on_empty(self, delete_on_empty: DeleteOnEmptyConfig) -> Self {
         Self {
             delete_on_empty: Some(delete_on_empty),
@@ -442,11 +450,13 @@ pub struct BasinConfig {
 
 impl BasinConfig {
     /// Create a new [`BasinConfig`] with default settings.
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Set the default configuration for all streams in the basin.
+    #[must_use]
     pub fn with_default_stream_config(self, config: StreamConfig) -> Self {
         Self {
             default_stream_config: Some(config),
@@ -455,6 +465,7 @@ impl BasinConfig {
     }
 
     /// Set the encryption algorithm to apply to newly created streams in the basin.
+    #[must_use]
     pub fn with_stream_cipher(self, stream_cipher: EncryptionAlgorithm) -> Self {
         Self {
             stream_cipher: Some(stream_cipher),
@@ -464,6 +475,7 @@ impl BasinConfig {
 
     /// Set whether to create stream on append if it doesn't exist using default stream
     /// configuration.
+    #[must_use]
     pub fn with_create_stream_on_append(self, create_stream_on_append: bool) -> Self {
         Self {
             create_stream_on_append,
@@ -472,6 +484,7 @@ impl BasinConfig {
     }
 
     /// Set whether to create stream on read if it doesn't exist using default stream configuration.
+    #[must_use]
     pub fn with_create_stream_on_read(self, create_stream_on_read: bool) -> Self {
         Self {
             create_stream_on_read,
@@ -504,6 +517,7 @@ impl From<BasinConfig> for api::config::BasinConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
+#[must_use]
 /// Input for [`create_basin`](crate::S2::create_basin) operation.
 pub struct CreateBasinInput {
     /// Basin name.
@@ -557,6 +571,7 @@ impl From<CreateBasinInput> for api::basin::CreateBasinRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
+#[must_use]
 /// Input for [`ensure_basin`](crate::S2::ensure_basin) operation.
 pub struct EnsureBasinInput {
     /// Basin name.
@@ -651,6 +666,7 @@ impl<T> EnsureOutput<T> {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
+#[must_use]
 /// Input for [`list_basins`](crate::S2::list_basins) operation.
 pub struct ListBasinsInput {
     /// Filter basins whose names begin with this value.
@@ -708,6 +724,7 @@ impl From<ListBasinsInput> for api::basin::ListBasinsRequest {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
+#[must_use]
 /// Input for [`list_all_basins`](crate::S2::list_all_basins) operation.
 pub struct ListAllBasinsInput {
     /// Filter basins whose names begin with this value.
@@ -779,6 +796,7 @@ impl From<api::basin::BasinInfo> for BasinInfo {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[must_use]
 /// Reconfiguration for [`TimestampingConfig`].
 pub struct TimestampingReconfiguration {
     mode: Reconfigure<TimestampingMode>,
@@ -844,6 +862,7 @@ impl From<TimestampingReconfiguration> for api::config::TimestampingReconfigurat
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[must_use]
 /// Reconfiguration for [`DeleteOnEmptyConfig`].
 pub struct DeleteOnEmptyReconfiguration {
     min_age_secs: Reconfigure<u64>,
@@ -888,6 +907,7 @@ impl From<DeleteOnEmptyReconfiguration> for api::config::DeleteOnEmptyReconfigur
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[must_use]
 /// Reconfiguration for [`StreamConfig`].
 pub struct StreamReconfiguration {
     storage_class: Reconfigure<String>,
@@ -999,6 +1019,7 @@ impl From<StreamReconfiguration> for api::config::StreamReconfiguration {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[must_use]
 /// Reconfiguration for [`BasinConfig`].
 pub struct BasinReconfiguration {
     default_stream_config: Reconfigure<StreamReconfiguration>,
@@ -1186,6 +1207,7 @@ impl From<api::location::LocationInfo> for LocationInfo {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
+#[must_use]
 /// Input for [`list_streams`](crate::S2Basin::list_streams) operation.
 pub struct ListStreamsInput {
     /// Filter streams whose names begin with this value.
@@ -1243,6 +1265,7 @@ impl From<ListStreamsInput> for api::stream::ListStreamsRequest {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
+#[must_use]
 /// Input for [`list_all_streams`](crate::S2Basin::list_all_streams) operation.
 pub struct ListAllStreamsInput {
     /// Filter streams whose names begin with this value.
@@ -1315,6 +1338,7 @@ impl From<api::stream::StreamInfo> for StreamInfo {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
+#[must_use]
 /// Input for [`create_stream`](crate::S2Basin::create_stream) operation.
 pub struct CreateStreamInput {
     /// Stream name.
@@ -1351,6 +1375,7 @@ impl From<CreateStreamInput> for api::stream::CreateStreamRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
+#[must_use]
 /// Input for [`ensure_stream`](crate::S2Basin::ensure_stream) operation.
 pub struct EnsureStreamInput {
     /// Stream name.

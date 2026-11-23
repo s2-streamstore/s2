@@ -123,6 +123,7 @@ impl MatchSeqState {
 
 /// Configuration for [`Batcher`], [`TryBatcher`], and [`batch_iter`].
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[must_use]
 pub struct BatcherConfig {
     linger: Duration,
     max_batch_records: usize,
@@ -295,6 +296,7 @@ pin_project! {
     /// Respects `linger`, `max_batch_records`, and `max_batch_bytes`, attaches optional
     /// `fencing_token` and auto-incrementing `match_seq_num`, and applies backpressure by not
     /// polling the input stream while a completed batch awaits consumption.
+    #[must_use = "streams do nothing unless polled"]
     pub struct Batcher<S> {
         #[pin]
         records: S,
@@ -347,6 +349,7 @@ pin_project! {
     ///
     /// If the input stream yields an error, any partial batch is dropped and the stream terminates
     /// immediately with [`TryBatchError::Input`].
+    #[must_use = "streams do nothing unless polled"]
     pub struct TryBatcher<S> {
         #[pin]
         records: S,

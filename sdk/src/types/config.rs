@@ -333,6 +333,7 @@ impl fmt::Display for BasinEndpoint {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[must_use]
 /// Endpoints for the S2 environment.
 pub struct S2Endpoints {
     pub(crate) scheme: Scheme,
@@ -483,6 +484,7 @@ pub enum AppendRetryPolicy {
 ///     jitter = rand[0, base_delay]
 ///     delay  = base_delay + jitter
 /// ```
+#[must_use]
 pub struct RetryConfig {
     pub(crate) max_attempts: NonZeroU32,
     pub(crate) min_base_delay: Duration,
@@ -576,6 +578,7 @@ impl RetryConfig {
 /// Receive windows bound unconsumed server-to-client DATA only; they do not
 /// affect append throughput, which is governed by the server's receive windows.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[must_use]
 pub struct Http2Config {
     pub(crate) max_concurrent_requests: Option<usize>,
     pub(crate) stream_receive_window: Option<u32>,
@@ -686,6 +689,7 @@ impl Http2Config {
 }
 
 #[derive(Clone)]
+#[must_use]
 /// Configuration for [`S2`](crate::S2).
 pub struct S2Config {
     pub(crate) access_token: AccessToken,

@@ -81,6 +81,7 @@ impl RecordAck {
 
 /// Configuration for a [`Producer`].
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[must_use]
 pub struct ProducerConfig {
     max_unacked_bytes: u32,
     linger: Duration,
@@ -287,6 +288,7 @@ impl ProducerShared {
 /// Handles batching of records into [`AppendInput`]s automatically based on [`ProducerConfig`],
 /// and owns an internal append session. Opening a producer sends no request until the first batch
 /// is ready.
+#[must_use = "producers do nothing unless records are submitted"]
 pub struct Producer {
     shared: Arc<ProducerShared>,
 }
@@ -527,6 +529,7 @@ impl Drop for Producer {
 }
 
 /// A permit to submit a record after reserving capacity.
+#[must_use = "a permit reserves producer capacity; call `.submit(...)` to enqueue the record"]
 pub struct RecordSubmitPermit {
     append_permit: AppendPermit,
     reserved_bytes: u32,

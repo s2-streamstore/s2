@@ -60,6 +60,7 @@ impl Future for BatchSubmitTicket {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[must_use]
 /// Configuration for an [`AppendSession`].
 pub struct AppendSessionConfig {
     max_unacked_bytes: u32,
@@ -417,6 +418,7 @@ impl Drop for AppendSessionCore {
 ///
 /// Supports pipelining multiple [`AppendInput`]s while preserving submission order. Opening a
 /// session sends no request until the first batch is submitted.
+#[must_use = "append sessions do nothing unless batches are submitted"]
 pub struct AppendSession {
     core: Arc<AppendSessionCore>,
     permits: AppendPermits,
@@ -544,6 +546,7 @@ impl Drop for AppendSession {
 }
 
 /// A permit to submit a batch after reserving capacity.
+#[must_use = "a permit reserves session capacity; call `.submit(...)` to send the batch"]
 pub struct BatchSubmitPermit {
     append_permit: AppendPermit,
     reserved_bytes: u32,

@@ -73,22 +73,22 @@ pub enum CliError {
     ))]
     BenchVerification(String),
 
-    #[error("{}: {}", .0, .1)]
+    #[error("{0}")]
     #[diagnostic(help("{}", HELP))]
     Operation(OpKind, #[source] SdkError),
 
-    #[error("{}: {}", .0, .1)]
+    #[error("{0}")]
     #[diagnostic(help(
         "Verify the token loaded from {2} is valid and has permission for this operation, then retry.\n{}",
         .2.recovery_command()
     ))]
     UnauthorizedAccessToken(OpKind, #[source] SdkError, TokenSource),
 
-    #[error("{}: {}", .0, .1)]
+    #[error("{0}")]
     #[diagnostic(help("{}", LITE_HELP))]
     NotImplemented(OpKind, #[source] SdkError),
 
-    #[error("{}: {}", .0, .1)]
+    #[error("{0}")]
     #[diagnostic(help(
         "The access token is bound to a network policy that does not permit requests from this \
          network. Retry from a permitted network, or use a token without that restriction."
@@ -413,5 +413,22 @@ mod tests {
                 assert!(!help.contains("access-token set"), "{help}");
             }
         }
+    }
+
+    #[test]
+    fn operation_error_report_does_not_duplicate_sdk_error() {
+        let sdk_error = S2Error::Validation(s2_sdk::types::ValidationError(
+            "stream_not_found: stream 'my-stream' does not exist".into(),
+        ));
+        let rendered = format!(
+            "{:?}",
+            miette::Report::new(CliError::Operation(OpKind::Read, sdk_error))
+        );
+        assert_eq!(rendered.matches("Failed to read").count(), 1, "{rendered}");
+        assert_eq!(
+            rendered.matches("stream_not_found").count(),
+            1,
+            "{rendered}"
+        );
     }
 }

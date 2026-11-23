@@ -14,6 +14,7 @@ use super::validate_rfc3339_timestamp;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
+#[must_use]
 /// Input for [`list_access_tokens`](crate::S2::list_access_tokens) operation.
 pub struct ListAccessTokensInput {
     /// Filter access tokens whose IDs begin with this value.
@@ -71,6 +72,7 @@ impl From<ListAccessTokensInput> for api::access::ListAccessTokensRequest {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
+#[must_use]
 /// Input for [`list_all_access_tokens`](crate::S2::list_all_access_tokens) operation.
 pub struct ListAllAccessTokensInput {
     /// Filter access tokens whose IDs begin with this value.
@@ -246,6 +248,7 @@ impl From<api::access::ReadWritePermissions> for ReadWritePermissions {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
+#[must_use]
 /// Permissions at the operation group level.
 ///
 /// See [`AccessTokenScope::op_group_perms`].
@@ -471,6 +474,7 @@ map_operations! {
 /// final set must not be empty.
 ///
 /// See [`IssueAccessTokenInput::scope`].
+#[must_use]
 pub struct AccessTokenScopeInput {
     basins: Option<BasinMatcher>,
     streams: Option<StreamMatcher>,
@@ -668,6 +672,7 @@ impl From<AccessTokenScopeInput> for api::access::AccessTokenScope {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[must_use]
 /// Input for [`issue_access_token`](crate::S2::issue_access_token).
 pub struct IssueAccessTokenInput {
     id: AccessTokenId,

@@ -6,6 +6,7 @@ use s2_common::network_policy::{
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
+#[must_use]
 /// Input for [`list_network_policies`](crate::S2::list_network_policies) operation.
 pub struct ListNetworkPoliciesInput {
     /// Filter network policies whose slugs begin with this value.
@@ -63,6 +64,7 @@ impl From<ListNetworkPoliciesInput> for api::network_policy::ListNetworkPolicies
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
+#[must_use]
 /// Input for [`list_all_network_policies`](crate::S2::list_all_network_policies) operation.
 pub struct ListAllNetworkPoliciesInput {
     /// Filter network policies whose slugs begin with this value.
@@ -191,6 +193,7 @@ impl From<PrivateNetPolicy> for MaybeKnown<api::network_policy::PrivateNetPolicy
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
+#[must_use]
 /// Restriction a network policy applies to the tokens bound to it: a [`PublicNetPolicy`] for the
 /// public path, a [`PrivateNetPolicy`] for private networks, or both. A path without one is
 /// closed.
