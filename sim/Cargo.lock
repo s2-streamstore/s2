@@ -447,9 +447,9 @@ dependencies = [
 
 [[package]]
 name = "aws-sdk-sts"
-version = "1.127.0"
+version = "1.128.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "35d50661cd8816b7f23a652391c5b6f3645fce499e62e8fc5b3ed4145c5248f7"
+checksum = "29c357588cdf8c9ae96c0d9930fff757f9b678d06b8f68d8e37a1278fe034912"
 dependencies = [
  "arc-swap",
  "aws-credential-types",
@@ -3796,7 +3796,7 @@ dependencies = [
 [[package]]
 name = "s2-verification"
 version = "0.4.0"
-source = "git+https://github.com/s2-streamstore/s2-verification?rev=9532112e2ba9eb0ab9a39d5646528a04ed42f182#9532112e2ba9eb0ab9a39d5646528a04ed42f182"
+source = "git+https://github.com/s2-streamstore/s2-verification?rev=d269b4e0ee22e129a4e92d041c6c977110e3dcf3#d269b4e0ee22e129a4e92d041c6c977110e3dcf3"
 dependencies = [
  "antithesis_sdk",
  "clap",
