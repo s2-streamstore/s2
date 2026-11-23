@@ -8,7 +8,6 @@ use super::MaybeKnown;
 
 #[rustfmt::skip]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "kebab-case")]
 pub enum RetentionPolicy {
     /// Age in seconds for automatic trimming of records older than this threshold.
@@ -16,6 +15,58 @@ pub enum RetentionPolicy {
     Age(u64),
     /// Retain records unless explicitly trimmed.
     Infinite(InfiniteRetention)
+}
+
+#[cfg(feature = "utoipa")]
+impl utoipa::PartialSchema for RetentionPolicy {
+    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
+        use utoipa::openapi::{KnownFormat, Object, OneOf, Ref, SchemaFormat, Type};
+
+        let age_desc = "Age in seconds for automatic trimming of records older than this threshold.\nThis must be set to a value greater than 0 seconds.";
+        let infinite_desc = "Retain records unless explicitly trimmed.";
+        OneOf::builder()
+            .item(
+                Object::builder()
+                    .description(Some(age_desc))
+                    .property(
+                        "age",
+                        Object::builder()
+                            .schema_type(Type::Integer)
+                            .format(Some(SchemaFormat::KnownFormat(KnownFormat::Int64)))
+                            .description(Some(age_desc))
+                            .minimum(Some(1)),
+                    )
+                    .required("age"),
+            )
+            .item(
+                Object::builder()
+                    .description(Some(infinite_desc))
+                    .property(
+                        "infinite",
+                        Ref::builder()
+                            .ref_location_from_schema_name("InfiniteRetention")
+                            .description(Some(infinite_desc)),
+                    )
+                    .required("infinite"),
+            )
+            .into()
+    }
+}
+
+#[cfg(feature = "utoipa")]
+impl utoipa::ToSchema for RetentionPolicy {
+    fn schemas(
+        schemas: &mut Vec<(
+            String,
+            utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>,
+        )>,
+    ) {
+        schemas.push((
+            <InfiniteRetention as utoipa::ToSchema>::name().into(),
+            <InfiniteRetention as utoipa::PartialSchema>::schema(),
+        ));
+        <InfiniteRetention as utoipa::ToSchema>::schemas(schemas);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
