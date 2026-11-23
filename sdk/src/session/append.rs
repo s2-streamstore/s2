@@ -932,15 +932,21 @@ struct AttemptBodyStream {
     rx: mpsc::Receiver<OutboundBatch>,
     current: Option<OutboundBatch>,
     gate: Arc<StdMutex<AttemptSendGate>>,
+    write_progress_tx: watch::Sender<Instant>,
     aborted: bool,
 }
 
 impl AttemptBodyStream {
-    fn new(rx: mpsc::Receiver<OutboundBatch>, gate: Arc<StdMutex<AttemptSendGate>>) -> Self {
+    fn new(
+        rx: mpsc::Receiver<OutboundBatch>,
+        gate: Arc<StdMutex<AttemptSendGate>>,
+        write_progress_tx: watch::Sender<Instant>,
+    ) -> Self {
         Self {
             rx,
             current: None,
             gate,
+            write_progress_tx,
             aborted: false,
         }
     }
@@ -968,6 +974,8 @@ impl Stream for AttemptBodyStream {
             let chunk = active.next_chunk();
             if active.remaining.is_empty() {
                 this.current = None;
+            } else {
+                this.write_progress_tx.send_replace(Instant::now());
             }
             return Poll::Ready(Some(Ok(chunk)));
         }
@@ -993,6 +1001,7 @@ impl Stream for AttemptBodyStream {
                 }
                 let chunk = batch.next_chunk();
                 if !batch.remaining.is_empty() {
+                    this.write_progress_tx.send_replace(Instant::now());
                     this.current = Some(batch);
                 }
                 Poll::Ready(Some(Ok(chunk)))
@@ -1003,6 +1012,8 @@ impl Stream for AttemptBodyStream {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TimerKind {
+    /// Waiting for forward HTTP/2 write progress while uploading the oldest unacked batch.
+    WriteStall,
     /// Waiting for the oldest sent batch to be acknowledged (`T7c`).
     Ack,
     /// Request body was dropped by hyper while waiting for a response error or EOF.
@@ -1380,7 +1391,8 @@ impl AppendSessionTask {
 
         let send_gate = AttemptSendGate::new();
         let (input_tx, input_rx) = mpsc::channel::<OutboundBatch>(1);
-        let body_stream = AttemptBodyStream::new(input_rx, send_gate.clone());
+        let (write_progress_tx, mut write_progress_rx) = watch::channel(Instant::now());
+        let body_stream = AttemptBodyStream::new(input_rx, send_gate.clone(), write_progress_tx);
 
         let connect_fut =
             self.client
@@ -1418,6 +1430,7 @@ impl AppendSessionTask {
             (!self.state.inflight_appends.is_empty()).then(Instant::now);
         let mut ack_timer = pin!(tokio::time::sleep(Duration::ZERO));
         let mut timer_kind: Option<TimerKind> = None;
+        let mut write_progress_open = true;
 
         loop {
             if self.state.is_close_complete() {
@@ -1434,14 +1447,17 @@ impl AppendSessionTask {
                 return AttemptResult::IdleEnded;
             }
 
-            // Check if the oldest unacked batch already finished sending its last byte (e.g. while
-            // pipelined behind an earlier batch), and arm the T7c timer immediately if so.
+            // Advance the oldest unacked batch's timer: arm `TimerKind::Ack` once its last byte
+            // has been handed to hyper (`T7c`), or arm `TimerKind::WriteStall` while waiting for
+            // forward HTTP/2 send capacity so a peer withholding WINDOW_UPDATE cannot hang forever.
             refresh_oldest_timer(
                 &mut self.state,
                 became_oldest_at,
                 ack_timeout,
                 ack_timer.as_mut(),
                 &mut timer_kind,
+                input_tx.is_some(),
+                &mut write_progress_rx,
             );
 
             // If the request body was dropped by hyper while batches remain unacked (not an
@@ -1463,12 +1479,13 @@ impl AppendSessionTask {
             let can_send_more = input_tx.is_some()
                 && !draining_for_reconnect
                 && send_cursor < self.state.inflight_appends.len();
-            let wait_oldest_last_byte = timer_kind.is_none()
-                && self
-                    .state
-                    .inflight_appends
-                    .front()
-                    .is_some_and(|f| f.attempt_last_byte_rx.is_some());
+            let wait_oldest_last_byte =
+                !matches!(timer_kind, Some(TimerKind::Ack | TimerKind::BodyClosed))
+                    && self
+                        .state
+                        .inflight_appends
+                        .front()
+                        .is_some_and(|f| f.attempt_last_byte_rx.is_some());
 
             let mut drop_input_tx = false;
 
@@ -1616,6 +1633,10 @@ impl AppendSessionTask {
                         return AttemptResult::IdleEnded;
                     }
                     let err = match timer_kind.expect("timer_kind is Some") {
+                        TimerKind::WriteStall => AppendSessionError::Timeout(TimeoutError::new(
+                            "append write timed out",
+                            self.context.clone(),
+                        )),
                         TimerKind::Ack => AppendSessionError::Timeout(TimeoutError::new(
                             "append acknowledgement timed out",
                             self.context.clone(),
@@ -1647,17 +1668,45 @@ impl AppendSessionTask {
                 }, if wait_oldest_last_byte => {
                     if let Some(front) = self.state.inflight_appends.front_mut() {
                         front.attempt_last_byte_rx = None;
-                        let start = match sent_at {
-                            Ok(sent_at) => became_oldest_at.map_or(sent_at, |b| b.max(sent_at)),
-                            Err(_) => Instant::now(),
-                        };
-                        arm_timer(
-                            ack_timer.as_mut(),
-                            &mut timer_kind,
-                            TimerKind::Ack,
-                            start,
-                            ack_timeout,
-                        );
+                        match sent_at {
+                            Ok(sent_at) => {
+                                let start = became_oldest_at.map_or(sent_at, |b| b.max(sent_at));
+                                arm_timer(
+                                    ack_timer.as_mut(),
+                                    &mut timer_kind,
+                                    TimerKind::Ack,
+                                    start,
+                                    ack_timeout,
+                                );
+                            }
+                            Err(_) => {
+                                arm_timer(
+                                    ack_timer.as_mut(),
+                                    &mut timer_kind,
+                                    TimerKind::BodyClosed,
+                                    Instant::now(),
+                                    ack_timeout,
+                                );
+                            }
+                        }
+                    }
+                }
+
+                changed = write_progress_rx.changed(), if write_progress_open && timer_kind == Some(TimerKind::WriteStall) => {
+                    match changed {
+                        Ok(()) => {
+                            let progress_at = *write_progress_rx.borrow_and_update();
+                            arm_timer(
+                                ack_timer.as_mut(),
+                                &mut timer_kind,
+                                TimerKind::WriteStall,
+                                progress_at,
+                                ack_timeout,
+                            );
+                        }
+                        Err(_) => {
+                            write_progress_open = false;
+                        }
                     }
                 }
 
@@ -1686,6 +1735,9 @@ impl AppendSessionTask {
                             // terminal server error or EOF (`T10`, `A6a`). The next iteration arms
                             // `TimerKind::BodyClosed` if batches remain unacked.
                             drop_input_tx = true;
+                            if timer_kind == Some(TimerKind::WriteStall) {
+                                timer_kind = None;
+                            }
                         }
                     }
                 }
@@ -1757,33 +1809,48 @@ fn refresh_oldest_timer(
     ack_timeout: Duration,
     ack_timer: Pin<&mut Sleep>,
     timer_kind: &mut Option<TimerKind>,
+    input_tx_open: bool,
+    write_progress_rx: &mut watch::Receiver<Instant>,
 ) {
-    if timer_kind.is_some() {
+    if matches!(timer_kind, Some(TimerKind::Ack | TimerKind::BodyClosed)) {
         return;
     }
     let Some(front) = state.inflight_appends.front_mut() else {
         return;
     };
-    let Some(rx) = front.attempt_last_byte_rx.as_mut() else {
-        return;
-    };
-    match rx.try_recv() {
-        Ok(sent_at) => {
-            front.attempt_last_byte_rx = None;
-            let start = became_oldest_at.map_or(sent_at, |b| b.max(sent_at));
-            arm_timer(ack_timer, timer_kind, TimerKind::Ack, start, ack_timeout);
+    let has_last_byte_rx = front.attempt_last_byte_rx.is_some();
+    if let Some(rx) = front.attempt_last_byte_rx.as_mut() {
+        match rx.try_recv() {
+            Ok(sent_at) => {
+                front.attempt_last_byte_rx = None;
+                let start = became_oldest_at.map_or(sent_at, |b| b.max(sent_at));
+                arm_timer(ack_timer, timer_kind, TimerKind::Ack, start, ack_timeout);
+                return;
+            }
+            Err(oneshot::error::TryRecvError::Empty) => {}
+            Err(oneshot::error::TryRecvError::Closed) => {
+                front.attempt_last_byte_rx = None;
+                arm_timer(
+                    ack_timer,
+                    timer_kind,
+                    TimerKind::BodyClosed,
+                    Instant::now(),
+                    ack_timeout,
+                );
+                return;
+            }
         }
-        Err(oneshot::error::TryRecvError::Empty) => {}
-        Err(oneshot::error::TryRecvError::Closed) => {
-            front.attempt_last_byte_rx = None;
-            arm_timer(
-                ack_timer,
-                timer_kind,
-                TimerKind::Ack,
-                Instant::now(),
-                ack_timeout,
-            );
-        }
+    }
+    if timer_kind.is_none() && (input_tx_open || has_last_byte_rx) {
+        let _ = write_progress_rx.borrow_and_update();
+        let start = became_oldest_at.unwrap_or_else(Instant::now);
+        arm_timer(
+            ack_timer,
+            timer_kind,
+            TimerKind::WriteStall,
+            start,
+            ack_timeout,
+        );
     }
 }
 

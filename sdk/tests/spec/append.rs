@@ -1499,6 +1499,228 @@ async fn spec_t7c_oldest_batch_ack_timeout() {
     assert!(!err.has_no_side_effects());
 }
 
+// spec: r1 T7c
+#[tokio::test]
+async fn spec_t7c_stalled_append_write_times_out_and_slow_progressing_upload_succeeds() {
+    let (basin_name, stream_name) = test_basin_and_stream();
+    // 256 KiB payload exceeds h2's default 64 KiB initial stream receive window so the peer must
+    // grant WINDOW_UPDATEs for upload to finish.
+    let large_batch = || {
+        AppendInput::new(
+            AppendRecordBatch::try_from_iter([AppendRecord::new(vec![b'x'; 256 * 1024]).unwrap()])
+                .unwrap(),
+        )
+    };
+
+    // 1. Peer accepts 200 OK headers and stops granting HTTP/2 send capacity mid-batch (while
+    //    keeping the connection and stream open). Attempt 1 must time out, retire the wedged
+    //    connection, and retry cleanly on a fresh connection.
+    let seen_conns = Arc::new(Mutex::new(Vec::<usize>::new()));
+    let attempt_ctr = Arc::new(AtomicUsize::new(0));
+    let stall_server = MockH2Server::start({
+        let seen_conns = seen_conns.clone();
+        let attempt_ctr = attempt_ctr.clone();
+        move |conn_id, req, mut respond| {
+            let seen_conns = seen_conns.clone();
+            let attempt_ctr = attempt_ctr.clone();
+            async move {
+                seen_conns.lock().unwrap().push(conn_id);
+                let attempt = attempt_ctr.fetch_add(1, Ordering::SeqCst);
+                let resp = Response::builder()
+                    .status(200)
+                    .header("content-type", "s2s/proto")
+                    .body(())
+                    .unwrap();
+                let Ok(mut send) = respond.send_response(resp, false) else {
+                    return;
+                };
+                let mut body = req.into_body();
+                if attempt == 0 {
+                    // Hold `_body` and `_send` open without calling release_capacity so h2's
+                    // 64 KiB initial stream window stalls the 256 KiB upload indefinitely.
+                    let _keep_alive = (body, send);
+                    std::future::pending::<()>().await;
+                } else {
+                    let mut buf = BytesMut::new();
+                    let _ = read_one_s2s_frame(&mut body, &mut buf, true).await;
+                    let _ = send.send_data(
+                        encode_s2s_regular_frame(&proto_append_ack(0, 1), false),
+                        true,
+                    );
+                }
+            }
+        }
+    })
+    .await;
+
+    let ep = stall_server.endpoint_url();
+    let s2 = S2::new(
+        S2Config::new("test-token")
+            .with_endpoints(
+                S2Endpoints::new(
+                    AccountEndpoint::new(&ep).unwrap(),
+                    BasinEndpoint::new(&ep).unwrap(),
+                )
+                .unwrap(),
+            )
+            .with_request_timeout(Duration::from_millis(150))
+            .unwrap()
+            .with_retry(
+                RetryConfig::new()
+                    .with_max_attempts(2)
+                    .unwrap()
+                    .with_min_base_delay(Duration::from_millis(10))
+                    .with_max_base_delay(Duration::from_millis(10))
+                    .with_append_retry_policy(AppendRetryPolicy::All),
+            ),
+    )
+    .unwrap();
+    let session = s2
+        .basin(basin_name.clone())
+        .stream(stream_name.clone())
+        .append_session(AppendSessionConfig::new())
+        .unwrap();
+    let ticket = session.submit(large_batch()).await.unwrap();
+    let ack = tokio::time::timeout(Duration::from_secs(3), ticket)
+        .await
+        .expect("stalled append write must time out and recover")
+        .expect("retry on fresh connection must succeed");
+    assert_eq!(ack.end.seq_num, 1);
+    session.close().await.unwrap();
+    let conns = seen_conns.lock().unwrap().clone();
+    assert_eq!(conns.len(), 2, "{conns:?}");
+    assert_ne!(
+        conns[0], conns[1],
+        "stalled write timeout must retire the wedged HTTP/2 connection"
+    );
+
+    // 2. With max_attempts = 1, a stalled write must fail the ticket and close() with TimeoutError
+    //    instead of hanging forever.
+    let permanent_stall = MockH2Server::start(|_conn_id, req, mut respond| async move {
+        let resp = Response::builder()
+            .status(200)
+            .header("content-type", "s2s/proto")
+            .body(())
+            .unwrap();
+        let Ok(send) = respond.send_response(resp, false) else {
+            return;
+        };
+        let _keep_alive = (req.into_body(), send);
+        std::future::pending::<()>().await;
+    })
+    .await;
+    let ep = permanent_stall.endpoint_url();
+    let s2_no_retry = S2::new(
+        S2Config::new("test-token")
+            .with_endpoints(
+                S2Endpoints::new(
+                    AccountEndpoint::new(&ep).unwrap(),
+                    BasinEndpoint::new(&ep).unwrap(),
+                )
+                .unwrap(),
+            )
+            .with_request_timeout(Duration::from_millis(120))
+            .unwrap()
+            .with_retry(no_retry_config()),
+    )
+    .unwrap();
+    let session = s2_no_retry
+        .basin(basin_name.clone())
+        .stream(stream_name.clone())
+        .append_session(AppendSessionConfig::new())
+        .unwrap();
+    let ticket = session.submit(large_batch()).await.unwrap();
+    let err = tokio::time::timeout(Duration::from_secs(3), ticket)
+        .await
+        .expect("stalled write must not hang ticket")
+        .unwrap_err();
+    assert!(
+        matches!(&err, AppendSessionError::Timeout(t) if t.message.contains("append write timed out")),
+        "{err:?}"
+    );
+    let close_err = tokio::time::timeout(Duration::from_secs(1), session.close())
+        .await
+        .expect("stalled write must not hang close()")
+        .unwrap_err();
+    assert!(
+        matches!(&close_err, AppendSessionError::Timeout(t) if t.message.contains("append write timed out")),
+        "{close_err:?}"
+    );
+
+    // 3. Slow upload that keeps making forward chunk progress over > 2x request_timeout must NOT
+    //    falsely time out, and the T7c ack timer must still start only after the last byte.
+    let slow_batch = AppendInput::new(
+        AppendRecordBatch::try_from_iter([AppendRecord::new(vec![b'y'; 512 * 1024]).unwrap()])
+            .unwrap(),
+    );
+    let slow_server = MockH2Server::start(|_conn_id, req, mut respond| async move {
+        let resp = Response::builder()
+            .status(200)
+            .header("content-type", "s2s/proto")
+            .body(())
+            .unwrap();
+        let Ok(mut send) = respond.send_response(resp, false) else {
+            return;
+        };
+        let mut body = req.into_body();
+        let mut buf = BytesMut::new();
+        let mut released_pending = 0usize;
+        let mut decoder = s2_api::v1::stream::s2s::FrameDecoder;
+        loop {
+            if let Ok(Some(_)) = tokio_util::codec::Decoder::decode(&mut decoder, &mut buf) {
+                break;
+            }
+            let Some(Ok(chunk)) = body.data().await else {
+                return;
+            };
+            buf.extend_from_slice(&chunk);
+            released_pending += chunk.len();
+            // Drip WINDOW_UPDATEs in >=32 KiB steps every 40 ms so the 512 KiB upload takes
+            // ~600 ms (> 2x the 250 ms request_timeout) while continuously advancing.
+            if released_pending >= 32 * 1024 {
+                tokio::time::sleep(Duration::from_millis(40)).await;
+                let _ = body.flow_control().release_capacity(released_pending);
+                released_pending = 0;
+            }
+        }
+        // After draining the final 64 KiB (~80 ms after client's last byte), wait another 40 ms
+        // (~120 ms < 250 ms ack timeout, while total elapsed since submit is > 600 ms).
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        let _ = send.send_data(
+            encode_s2s_regular_frame(&proto_append_ack(0, 1), false),
+            true,
+        );
+    })
+    .await;
+    let ep = slow_server.endpoint_url();
+    let s2_slow = S2::new(
+        S2Config::new("test-token")
+            .with_endpoints(
+                S2Endpoints::new(
+                    AccountEndpoint::new(&ep).unwrap(),
+                    BasinEndpoint::new(&ep).unwrap(),
+                )
+                .unwrap(),
+            )
+            .with_request_timeout(Duration::from_millis(250))
+            .unwrap()
+            .with_retry(no_retry_config()),
+    )
+    .unwrap();
+    let session = s2_slow
+        .basin(basin_name)
+        .stream(stream_name)
+        .append_session(AppendSessionConfig::new())
+        .unwrap();
+    let ticket = session.submit(slow_batch).await.unwrap();
+    let ack = tokio::time::timeout(Duration::from_secs(3), ticket)
+        .await
+        .expect("slow progressing upload must complete")
+        .expect("slow progressing upload must not falsely time out");
+    assert_eq!(ack.end.seq_num, 1);
+    session.close().await.unwrap();
+}
+
 // spec: r1 T6b
 #[tokio::test]
 async fn spec_t6b_append_session_server_draining_resend_and_exhaustion() {
