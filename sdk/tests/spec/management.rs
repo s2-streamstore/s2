@@ -465,3 +465,151 @@ async fn spec_m4_delete_idempotency_and_error_discrimination() {
         Err(RequestError::Server(ref e)) if e.code.as_deref() == Some("network_policy_in_use")
     ));
 }
+
+// spec: r1 C12, M7
+#[tokio::test]
+async fn spec_c12_m7_list_all_after_client_close() {
+    // 1. Lazy iterators created before or after `S2::close()` fail with `ClientClosedError` on
+    //    first iteration without issuing any HTTP request, then terminate cleanly.
+    let unused_server = MockH2Server::from_responses([]).await;
+    let s2 = unused_server.client(no_retry_config());
+    let (basin_name, _) = test_basin_and_stream();
+
+    let mut basins_before = s2.list_all_basins(ListAllBasinsInput::new());
+    let mut streams_before = s2
+        .basin(basin_name)
+        .list_all_streams(ListAllStreamsInput::new());
+
+    s2.close();
+
+    let err = basins_before
+        .next()
+        .await
+        .expect("must yield ClientClosedError")
+        .unwrap_err();
+    assert!(matches!(err, RequestError::ClientClosed(_)), "{err:?}");
+    assert!(err.has_no_side_effects());
+    assert!(!err.is_retryable());
+    assert!(
+        basins_before.next().await.is_none(),
+        "M7: stream terminates after failed page"
+    );
+
+    let err = streams_before
+        .next()
+        .await
+        .expect("must yield ClientClosedError")
+        .unwrap_err();
+    assert!(matches!(err, RequestError::ClientClosed(_)), "{err:?}");
+    assert!(streams_before.next().await.is_none());
+
+    let mut basins_after = s2.list_all_basins(ListAllBasinsInput::new());
+    let err = basins_after
+        .next()
+        .await
+        .expect("must yield ClientClosedError")
+        .unwrap_err();
+    assert!(matches!(err, RequestError::ClientClosed(_)), "{err:?}");
+    assert!(basins_after.next().await.is_none());
+    assert_eq!(
+        unused_server.request_count(),
+        0,
+        "C12/M7: closed client must send zero page requests"
+    );
+
+    // 2. Closing `S2` between pages yields all items from page 1, then fails page 2 with
+    //    `ClientClosedError` without sending a second HTTP request.
+    let page2_entered = Arc::new(tokio::sync::Notify::new());
+    let paged_server = MockH2Server::start({
+        let page2_entered = page2_entered.clone();
+        move |_conn_id, req, respond| {
+            let page2_entered = page2_entered.clone();
+            async move {
+                let params = query_pairs(req.uri());
+                let _ = drain_body(&mut req.into_body()).await;
+                let sa = params.get("start_after").cloned().filter(|s| !s.is_empty());
+                match sa.as_deref() {
+                    None => send_json(
+                        respond,
+                        200,
+                        r#"{
+                            "basins": [
+                                {"name":"basin-0001","created_at":"2026-01-01T00:00:00Z"},
+                                {"name":"basin-0002","created_at":"2026-01-01T00:00:00Z"}
+                            ],
+                            "has_more": true
+                        }"#,
+                    ),
+                    Some(_) => {
+                        page2_entered.notify_one();
+                        let _keep = respond;
+                        std::future::pending::<()>().await;
+                    }
+                }
+            }
+        }
+    })
+    .await;
+
+    let s2_between = paged_server.client(no_retry_config());
+    let mut between = s2_between.list_all_basins(ListAllBasinsInput::new());
+    assert_eq!(
+        between.next().await.unwrap().unwrap().name.as_ref(),
+        "basin-0001"
+    );
+    assert_eq!(
+        between.next().await.unwrap().unwrap().name.as_ref(),
+        "basin-0002"
+    );
+    assert_eq!(paged_server.request_count(), 1);
+
+    s2_between.close();
+
+    let err = between
+        .next()
+        .await
+        .expect("page 2 after close must yield ClientClosedError")
+        .unwrap_err();
+    assert!(matches!(err, RequestError::ClientClosed(_)), "{err:?}");
+    assert!(err.has_no_side_effects());
+    assert!(!err.is_retryable());
+    assert!(between.next().await.is_none());
+    assert_eq!(
+        paged_server.request_count(),
+        1,
+        "C12/M7: page 2 must not be sent after client close"
+    );
+
+    // 3. Closing `S2` while page 2 is already in flight fails that fetch with `AbortedError`.
+    let s2_inflight = paged_server.client(no_retry_config());
+    let mut inflight = s2_inflight.list_all_basins(ListAllBasinsInput::new());
+    assert_eq!(
+        inflight.next().await.unwrap().unwrap().name.as_ref(),
+        "basin-0001"
+    );
+    assert_eq!(
+        inflight.next().await.unwrap().unwrap().name.as_ref(),
+        "basin-0002"
+    );
+
+    let next_fut = tokio::spawn(async move {
+        let first = inflight.next().await;
+        let second = inflight.next().await;
+        (first, second)
+    });
+    tokio::time::timeout(Duration::from_secs(2), page2_entered.notified())
+        .await
+        .expect("page 2 request must reach server");
+    s2_inflight.close();
+
+    let (first, second) = tokio::time::timeout(Duration::from_secs(2), next_fut)
+        .await
+        .expect("in-flight page 2 must abort promptly")
+        .unwrap();
+    let err = first
+        .expect("in-flight page 2 must yield AbortedError")
+        .unwrap_err();
+    assert!(matches!(err, RequestError::Aborted(_)), "{err:?}");
+    assert!(!err.is_retryable());
+    assert!(second.is_none(), "M7: stream terminates after aborted page");
+}

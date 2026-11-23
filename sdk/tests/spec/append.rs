@@ -1776,3 +1776,303 @@ async fn session_abort_try_ack_fused_and_validation_context() {
         AppendSessionError::Aborted(_) | AppendSessionError::SessionClosed(_)
     ));
 }
+
+// spec: r1 A4c, A6a, A8c, E6
+#[tokio::test]
+async fn spec_a8c_explicit_abort_append_session_and_producer() {
+    // 1. AppendSession::abort() when idle closes cleanly without sending any request, and
+    //    subsequent submit()/reserve() fail with SessionClosedError { failure: None }.
+    let idle_server = auto_ack_s2s_server().await;
+    let idle_stream = idle_server.stream(no_retry_config());
+    let idle_session = idle_stream
+        .append_session(AppendSessionConfig::new())
+        .unwrap();
+    idle_session.abort();
+    idle_session
+        .close()
+        .await
+        .expect("A8c: aborting an idle AppendSession must close cleanly");
+    assert_eq!(idle_server.request_count(), 0);
+    let err = idle_session
+        .submit(sample_append_input())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, AppendSessionError::SessionClosed(ref c) if c.failure().is_none()),
+        "A4c/E6: {err:?}"
+    );
+    let err = idle_session.reserve(16).await.err().unwrap();
+    assert!(
+        matches!(err, AppendSessionError::SessionClosed(ref c) if c.failure().is_none()),
+        "A4c/E6: {err:?}"
+    );
+
+    // 2. AppendSession::abort() when active with sent batches (A, B) + unsent batch (C blocked by
+    //    65 KiB HTTP/2 initial stream window) + waiting reserve():
+    //    - A & B -> AbortedError ("append session aborted", indefinite, non-retryable)
+    //    - C -> SessionClosedError { failure: Some(Aborted) } (definite)
+    //    - waiting reserve() and subsequent submit() -> SessionClosedError { failure: Some(Aborted)
+    //      }
+    //    - close() -> AbortedError, repeated abort() is a no-op
+    let ab_sent = Arc::new(tokio::sync::Notify::new());
+    let active_server = MockH2Server::start({
+        let ab_sent = ab_sent.clone();
+        move |_conn_id, req, respond| {
+            let ab_sent = ab_sent.clone();
+            async move {
+                let Some(s2s) = S2sResponder::open(respond) else {
+                    return;
+                };
+                let mut body = req.into_body();
+                let _ = read_exact_h2_bytes(&mut body, 50 * 1024).await;
+                ab_sent.notify_one();
+                let _keep = (body, s2s);
+                std::future::pending::<()>().await;
+            }
+        }
+    })
+    .await;
+    let session = active_server
+        .stream(no_retry_config())
+        .append_session(
+            AppendSessionConfig::new()
+                .with_max_unacked_batches(3)
+                .unwrap(),
+        )
+        .unwrap();
+    let ta = session.submit(sized_append_input(40 * 1024)).await.unwrap();
+    let tb = session.submit(sized_append_input(40 * 1024)).await.unwrap();
+    let tc = session.submit(sized_append_input(1024)).await.unwrap();
+    ab_sent.notified().await;
+
+    let mut waiting_reserve = Box::pin(session.reserve(16));
+    assert!(futures_util::poll!(waiting_reserve.as_mut()).is_pending());
+
+    session.abort();
+
+    let reserve_err = tokio::time::timeout(Duration::from_secs(1), waiting_reserve)
+        .await
+        .expect("A4c/A8c: waiting reserve must wake immediately on abort")
+        .err()
+        .unwrap();
+    assert!(
+        matches!(
+            reserve_err,
+            AppendSessionError::SessionClosed(ref c)
+                if matches!(c.failure(), Some(AppendSessionError::Aborted(_)))
+        ),
+        "waiting reserve: {reserve_err:?}"
+    );
+    assert!(reserve_err.has_no_side_effects());
+
+    let ea = ta.await.unwrap_err();
+    let eb = tb.await.unwrap_err();
+    let ec = tc.await.unwrap_err();
+    let eclose = session.close().await.unwrap_err();
+    assert!(matches!(ea, AppendSessionError::Aborted(_)), "A: {ea:?}");
+    assert!(matches!(eb, AppendSessionError::Aborted(_)), "B: {eb:?}");
+    assert!(!ea.is_retryable() && !ea.has_no_side_effects());
+    assert!(
+        ea.to_string().contains("append session aborted") && !ea.to_string().contains("dropped"),
+        "expected explicit abort message, got: {ea}"
+    );
+    assert!(
+        matches!(
+            ec,
+            AppendSessionError::SessionClosed(ref c)
+                if matches!(c.failure(), Some(AppendSessionError::Aborted(_)))
+        ),
+        "C (unsent): {ec:?}"
+    );
+    assert!(ec.has_no_side_effects());
+    assert!(
+        matches!(eclose, AppendSessionError::Aborted(_)),
+        "close: {eclose:?}"
+    );
+    let post_submit = session.submit(sample_append_input()).await.unwrap_err();
+    assert!(
+        matches!(
+            post_submit,
+            AppendSessionError::SessionClosed(ref c)
+                if matches!(c.failure(), Some(AppendSessionError::Aborted(_)))
+        ),
+        "post-abort submit: {post_submit:?}"
+    );
+    session.abort();
+    assert!(matches!(
+        session.close().await.unwrap_err(),
+        AppendSessionError::Aborted(_)
+    ));
+
+    // 3. AppendSession::abort() after a clean close() is a no-op.
+    let closed_session = idle_stream
+        .append_session(AppendSessionConfig::new())
+        .unwrap();
+    let ack = submit_and_ack(&closed_session, sample_append_input()).await;
+    assert_eq!(ack.end.seq_num, 1);
+    closed_session.close().await.unwrap();
+    closed_session.abort();
+    closed_session
+        .close()
+        .await
+        .expect("abort() after clean close() must be a no-op");
+
+    // 4. Producer::abort() when idle closes cleanly without sending any request.
+    let prod_idle_server = auto_ack_s2s_server().await;
+    let prod_idle_stream = prod_idle_server.stream(no_retry_config());
+    let idle_prod = prod_idle_stream.producer(ProducerConfig::new()).unwrap();
+    idle_prod.abort();
+    idle_prod
+        .close()
+        .await
+        .expect("A8c: aborting an idle Producer must close cleanly");
+    assert_eq!(prod_idle_server.request_count(), 0);
+    let err = idle_prod
+        .submit(AppendRecord::new("after-idle-abort").unwrap())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, AppendSessionError::SessionClosed(ref c) if c.failure().is_none()),
+        "A4c/E6: {err:?}"
+    );
+
+    // 5. Producer::abort() with only a lingering partial batch (owned session still idle): close()
+    //    -> AbortedError ("producer aborted"), lingering ticket & subsequent submit() ->
+    //    SessionClosedError { failure: Some(Aborted) }.
+    let partial_prod = prod_idle_stream
+        .producer(ProducerConfig::new().with_linger(Duration::from_secs(60)))
+        .unwrap();
+    let lingering = partial_prod
+        .submit(AppendRecord::new("lingering").unwrap())
+        .await
+        .unwrap();
+    partial_prod.abort();
+    let close_err = partial_prod.close().await.unwrap_err();
+    assert!(matches!(close_err, AppendSessionError::Aborted(_)));
+    assert!(
+        close_err.to_string().contains("producer aborted")
+            && !close_err.to_string().contains("dropped"),
+        "expected explicit producer abort message, got: {close_err}"
+    );
+    let linger_err = lingering.await.unwrap_err();
+    assert!(
+        matches!(
+            linger_err,
+            AppendSessionError::SessionClosed(ref c)
+                if matches!(c.failure(), Some(AppendSessionError::Aborted(_)))
+        ),
+        "lingering ticket: {linger_err:?}"
+    );
+    let post_err = partial_prod
+        .submit(AppendRecord::new("after").unwrap())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            post_err,
+            AppendSessionError::SessionClosed(ref c)
+                if matches!(c.failure(), Some(AppendSessionError::Aborted(_)))
+        ),
+        "post-abort producer submit: {post_err:?}"
+    );
+    assert_eq!(prod_idle_server.request_count(), 0);
+
+    // 6. Producer::abort() with an in-flight batch (received on server, ack held) + a lingering
+    //    partial batch + a waiting reserve():
+    //    - in-flight record -> AbortedError
+    //    - lingering record -> SessionClosedError { failure: Some(Aborted) }
+    //    - waiting reserve() & subsequent submit() -> SessionClosedError { failure: Some(Aborted) }
+    //    - close() -> AbortedError
+    let batch1_seen = Arc::new(tokio::sync::Notify::new());
+    let prod_gate = Arc::new(tokio::sync::Notify::new());
+    let prod_server = gated_ack_s2s_server(prod_gate, Some(batch1_seen.clone())).await;
+    let prod = Arc::new(
+        prod_server
+            .stream(no_retry_config())
+            .producer(
+                ProducerConfig::new()
+                    .with_max_unacked_bytes(1024 * 1024)
+                    .unwrap()
+                    .with_max_batch_bytes(1024 * 1024)
+                    .unwrap()
+                    .with_linger(Duration::from_secs(60)),
+            )
+            .unwrap(),
+    );
+    let t_inflight = prod
+        .submit(AppendRecord::new(vec![b'a'; 400 * 1024]).unwrap())
+        .await
+        .unwrap();
+    let flush_task = tokio::spawn({
+        let prod = prod.clone();
+        async move { prod.flush().await }
+    });
+    batch1_seen.notified().await;
+
+    let t_partial = prod
+        .submit(AppendRecord::new(vec![b'b'; 400 * 1024]).unwrap())
+        .await
+        .unwrap();
+    let mut prod_waiting_reserve = Box::pin(prod.reserve(400 * 1024));
+    assert!(futures_util::poll!(prod_waiting_reserve.as_mut()).is_pending());
+
+    prod.abort();
+
+    let wait_err = tokio::time::timeout(Duration::from_secs(1), prod_waiting_reserve)
+        .await
+        .expect("A4c/A8c: waiting producer reserve must wake immediately on abort")
+        .err()
+        .unwrap();
+    assert!(
+        matches!(
+            wait_err,
+            AppendSessionError::SessionClosed(ref c)
+                if matches!(c.failure(), Some(AppendSessionError::Aborted(_)))
+        ),
+        "waiting producer reserve: {wait_err:?}"
+    );
+
+    let inflight_err = t_inflight.await.unwrap_err();
+    let partial_err = t_partial.await.unwrap_err();
+    let flush_err = flush_task.await.unwrap().unwrap_err();
+    let close_err = prod.close().await.unwrap_err();
+    assert!(
+        matches!(inflight_err, AppendSessionError::Aborted(_)),
+        "in-flight record: {inflight_err:?}"
+    );
+    assert!(
+        inflight_err.to_string().contains("producer aborted")
+            && !inflight_err.to_string().contains("dropped"),
+        "expected explicit producer abort message, got: {inflight_err}"
+    );
+    assert!(
+        matches!(
+            partial_err,
+            AppendSessionError::SessionClosed(ref c)
+                if matches!(c.failure(), Some(AppendSessionError::Aborted(_)))
+        ),
+        "lingering partial record: {partial_err:?}"
+    );
+    assert!(
+        matches!(flush_err, AppendSessionError::Aborted(_)),
+        "flush: {flush_err:?}"
+    );
+    assert!(
+        matches!(close_err, AppendSessionError::Aborted(_)),
+        "close: {close_err:?}"
+    );
+
+    // 7. Producer::abort() after clean close() is a no-op.
+    let closed_prod = prod_idle_stream.producer(ProducerConfig::new()).unwrap();
+    let t_ok = closed_prod
+        .submit(AppendRecord::new("ok").unwrap())
+        .await
+        .unwrap();
+    closed_prod.close().await.unwrap();
+    assert_eq!(t_ok.await.unwrap().seq_num, 0);
+    closed_prod.abort();
+    closed_prod
+        .close()
+        .await
+        .expect("Producer::abort() after clean close() must be a no-op");
+}

@@ -5,7 +5,7 @@ use std::{
     pin::{Pin, pin},
     sync::{
         Arc, Mutex as StdMutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     task::{Context, Poll},
     time::Duration,
@@ -280,7 +280,9 @@ pub(crate) struct AppendSessionCore {
     client_shutdown: CancellationToken,
     /// Child token of `client_shutdown`; cancelled on either client close or session drop/abort.
     abort: CancellationToken,
+    explicit_abort: Arc<AtomicBool>,
     unacked_batches: Arc<AtomicUsize>,
+    explicit_abort_msg: &'static str,
     dropped_abort_msg: &'static str,
     context: ErrorContext,
 }
@@ -291,6 +293,7 @@ impl AppendSessionCore {
         stream: StreamName,
         headers: StreamHeaders,
         op: &'static str,
+        explicit_abort_msg: &'static str,
         dropped_abort_msg: &'static str,
     ) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
@@ -298,6 +301,7 @@ impl AppendSessionCore {
         let lifecycle = Arc::new(SessionLifecycle::new());
         let client_shutdown = client.shutdown_token();
         let abort = client_shutdown.child_token();
+        let explicit_abort = Arc::new(AtomicBool::new(false));
         let unacked_batches = Arc::new(AtomicUsize::new(0));
         let basin = client.name.clone();
         let compression = client.config().compression.into_api();
@@ -313,6 +317,8 @@ impl AppendSessionCore {
             lifecycle: lifecycle.clone(),
             client_shutdown: client_shutdown.clone(),
             abort: abort.clone(),
+            explicit_abort: explicit_abort.clone(),
+            explicit_abort_msg,
             dropped_abort_msg,
             context: context.clone(),
             state: SessionState {
@@ -334,7 +340,9 @@ impl AppendSessionCore {
             lifecycle,
             client_shutdown,
             abort,
+            explicit_abort,
             unacked_batches,
+            explicit_abort_msg,
             dropped_abort_msg,
             context,
         }
@@ -351,7 +359,12 @@ impl AppendSessionCore {
     fn session_closed_err_on_submit(&self) -> AppendSessionError {
         let failure = self.lifecycle.terminal_err().or_else(|| {
             if self.unacked_batches.load(Ordering::Acquire) > 0 && self.abort.is_cancelled() {
-                let reason = abort_reason_msg(&self.client_shutdown, self.dropped_abort_msg);
+                let reason = abort_reason_msg(
+                    &self.client_shutdown,
+                    &self.explicit_abort,
+                    self.explicit_abort_msg,
+                    self.dropped_abort_msg,
+                );
                 Some(AppendSessionError::Aborted(AbortedError::new(
                     reason,
                     self.context.clone(),
@@ -423,7 +436,14 @@ impl AppendSessionCore {
         self.lifecycle.wait_closed().await
     }
 
-    pub(crate) fn abort(&self) {
+    pub(crate) fn abort_explicit(&self) {
+        if !self.lifecycle.is_closed() {
+            self.explicit_abort.store(true, Ordering::Release);
+            self.abort.cancel();
+        }
+    }
+
+    pub(crate) fn abort_dropped(&self) {
         if !self.lifecycle.is_closed() {
             self.abort.cancel();
         }
@@ -432,7 +452,7 @@ impl AppendSessionCore {
 
 impl Drop for AppendSessionCore {
     fn drop(&mut self) {
-        self.abort();
+        self.abort_dropped();
     }
 }
 
@@ -478,6 +498,7 @@ impl AppendSession {
             stream,
             headers,
             "append_session",
+            "append session aborted",
             "append session dropped without calling close",
         ));
         Self { core, permits }
@@ -577,13 +598,13 @@ impl AppendSession {
     /// [`AbortedError`], and unsent batches fail with [`SessionClosedError`]. Calling `abort()`
     /// after the session has already closed is a no-op.
     pub fn abort(&self) {
-        self.core.abort();
+        self.core.abort_explicit();
     }
 }
 
 impl Drop for AppendSession {
     fn drop(&mut self) {
-        self.core.abort();
+        self.core.abort_dropped();
     }
 }
 
@@ -1111,6 +1132,8 @@ struct AppendSessionTask {
     lifecycle: Arc<SessionLifecycle>,
     client_shutdown: CancellationToken,
     abort: CancellationToken,
+    explicit_abort: Arc<AtomicBool>,
+    explicit_abort_msg: &'static str,
     dropped_abort_msg: &'static str,
     context: ErrorContext,
     state: SessionState,
@@ -1118,7 +1141,12 @@ struct AppendSessionTask {
 
 impl AppendSessionTask {
     fn abort_reason_msg(&self) -> &'static str {
-        abort_reason_msg(&self.client_shutdown, self.dropped_abort_msg)
+        abort_reason_msg(
+            &self.client_shutdown,
+            &self.explicit_abort,
+            self.explicit_abort_msg,
+            self.dropped_abort_msg,
+        )
     }
 
     fn check_abort(&self) -> Option<&'static str> {
@@ -1842,10 +1870,14 @@ impl AppendSessionTask {
 
 fn abort_reason_msg(
     client_shutdown: &CancellationToken,
+    explicit_abort: &AtomicBool,
+    explicit_abort_msg: &'static str,
     dropped_abort_msg: &'static str,
 ) -> &'static str {
     if client_shutdown.is_cancelled() {
         "client closed"
+    } else if explicit_abort.load(Ordering::Acquire) {
+        explicit_abort_msg
     } else {
         dropped_abort_msg
     }

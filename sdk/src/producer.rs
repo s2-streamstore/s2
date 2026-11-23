@@ -9,7 +9,7 @@ use std::{
     pin::Pin,
     sync::{
         Arc, Mutex as StdMutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     task::{Context, Poll},
     time::Duration,
@@ -39,6 +39,7 @@ use crate::{
     },
 };
 
+const EXPLICIT_ABORT_MSG: &str = "producer aborted";
 const DROPPED_ABORT_MSG: &str = "producer dropped without calling close";
 
 type RecordAckTx = oneshot::Sender<Result<RecordAck, AppendSessionError>>;
@@ -274,8 +275,9 @@ struct ProducerShared {
     lifecycle: Arc<SessionLifecycle>,
     session_lifecycle: Arc<SessionLifecycle>,
     client_shutdown: CancellationToken,
-    /// Child token of `client_shutdown`; cancelled on either client close or producer drop.
+    /// Child token of `client_shutdown`; cancelled on either client close or producer drop/abort.
     abort: CancellationToken,
+    explicit_abort: AtomicBool,
     flush_partial_notify: Notify,
     context: ErrorContext,
 }
@@ -291,6 +293,8 @@ impl ProducerShared {
     fn abort_reason(&self) -> &'static str {
         if self.client_shutdown.is_cancelled() {
             "client closed"
+        } else if self.explicit_abort.load(Ordering::Acquire) {
+            EXPLICIT_ABORT_MSG
         } else {
             DROPPED_ABORT_MSG
         }
@@ -359,6 +363,7 @@ impl Producer {
             stream.clone(),
             headers,
             "producer",
+            EXPLICIT_ABORT_MSG,
             DROPPED_ABORT_MSG,
         );
         let session_lifecycle = session.lifecycle().clone();
@@ -375,6 +380,7 @@ impl Producer {
             session_lifecycle,
             client_shutdown,
             abort,
+            explicit_abort: AtomicBool::new(false),
             flush_partial_notify: Notify::new(),
             context,
         });
@@ -572,6 +578,7 @@ impl Producer {
     /// closed is a no-op.
     pub fn abort(&self) {
         if !self.shared.lifecycle.is_closed() {
+            self.shared.explicit_abort.store(true, Ordering::Release);
             self.shared.abort.cancel();
         }
     }
@@ -579,7 +586,9 @@ impl Producer {
 
 impl Drop for Producer {
     fn drop(&mut self) {
-        self.abort();
+        if !self.shared.lifecycle.is_closed() {
+            self.shared.abort.cancel();
+        }
     }
 }
 
@@ -1090,7 +1099,11 @@ impl ProducerTask {
 
         // Abort the owned append session immediately (A3b, A8c) and forward its exact outcomes
         // (A6d).
-        self.session.abort();
+        if self.shared.explicit_abort.load(Ordering::Acquire) {
+            self.session.abort_explicit();
+        } else {
+            self.session.abort_dropped();
+        }
         self.drain_pending_batch_acks().await;
         let session_res = self.session.close().await;
 
