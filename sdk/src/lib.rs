@@ -39,6 +39,75 @@ Revision 1 (Draft).
 See [`S2`] for account-level operations, [`S2Basin`] for basin-level operations,
 and [`S2Stream`] for stream-level operations.
 
+# Architecture & Core Concepts
+
+## Client Handles & Lifecycle
+
+[`S2`], [`S2Basin`], and [`S2Stream`] are lightweight, cheaply cloneable handles backed by a shared
+HTTP/2 connection pool:
+
+* Use [`S2::from_env`] (reads `S2_ACCESS_TOKEN` and optional `S2_ACCOUNT_ENDPOINT` /
+  `S2_BASIN_ENDPOINT`) or [`S2::new`] with [`S2Config`](types::S2Config) to create a client.
+* Call [`S2::close`] to abort active sessions and in-flight requests and close pooled connections
+  immediately. Dropping [`S2`] without calling `close()` keeps the underlying pool alive until all
+  derived handles and sessions are dropped.
+* Paginated listings return a [`ListStream`](types::ListStream) (`Unpin` + `Stream` with an
+  inherent `.next().await` method).
+
+## Appending Records
+
+Choose the append surface that matches your workload:
+
+* **Unary**: [`S2Stream::append`] (or [`S2Stream::append_with_stream_config`] when creating a
+  stream on append) sends a single [`AppendInput`](types::AppendInput) batch.
+* **High-throughput producer**: [`S2Stream::producer`] returns a [`Producer`](producer::Producer)
+  that batches individual [`AppendRecord`](types::AppendRecord)s according to
+  [`ProducerConfig`](producer::ProducerConfig) (linger, batch size/count limits, backpressure,
+  fencing token, and auto-incrementing `match_seq_num`). Call [`Producer::flush`](producer::Producer::flush)
+  to wait for previously accepted records, and [`Producer::close`](producer::Producer::close)
+  before dropping so buffered batches are flushed cleanly.
+* **Pre-batched pipelining**: [`S2Stream::append_session`] returns an
+  [`AppendSession`](append_session::AppendSession) for submitting pre-formed
+  [`AppendInput`](types::AppendInput)s with backpressure ([`reserve`](append_session::AppendSession::reserve)
+  / [`submit`](append_session::AppendSession::submit)). Standalone batching helpers live in
+  [`batching`] ([`Batcher`](batching::Batcher), [`TryBatcher`](batching::TryBatcher), and
+  [`batch_iter`](batching::batch_iter)).
+
+## Reading Records
+
+* **Unary**: [`S2Stream::read`] fetches a single [`ReadBatch`](types::ReadBatch) configured via
+  [`ReadInput`](types::ReadInput) (`start` as [`ReadStart`](types::ReadStart), `clamp`, `count`,
+  `bytes`, `until`, `wait`, `stream_config`).
+* **Continuous sessions**: [`S2Stream::read_session`] yields individual
+  [`SequencedRecord`](types::SequencedRecord)s via [`ReadSession`](read_session::ReadSession), and
+  [`S2Stream::read_batch_session`] yields server batches via
+  [`ReadBatchSession`](read_session::ReadBatchSession). Both open synchronously, expose an
+  inherent `.next().await` method (as well as [`futures_core::Stream`]), reconnect automatically
+  according to [`ReadSessionConfig`](read_session::ReadSessionConfig), and provide
+  [`ReadSessionState`](read_session::ReadSessionState) / [`caught_up`](read_session::ReadSession::caught_up)
+  for concurrent progress observation.
+
+## Error Handling
+
+Every operation returns the narrowest flat error enum for its surface:
+
+* [`RequestError`](error::RequestError) — account, basin, stream-management, and metrics ops
+* [`ReadError`](error::ReadError) / [`ReadSessionError`](error::ReadSessionError) — unary and streaming reads
+* [`AppendError`](error::AppendError) / [`AppendSessionError`](error::AppendSessionError) — unary appends, append sessions, and producers
+
+Every operation error converts into [`S2Error`](error::S2Error) and provides
+[`is_retryable`](error::S2Error::is_retryable),
+[`has_no_side_effects`](error::S2Error::has_no_side_effects), and
+[`server_error`](error::S2Error::server_error) (for inspecting HTTP status and
+[`ErrorCode`](error::ErrorCode)).
+
+## Reconfiguration
+
+[`BasinReconfiguration`](types::BasinReconfiguration) and
+[`StreamReconfiguration`](types::StreamReconfiguration) represent every optional field as
+[`Reconfigure<T>`](types::Reconfigure) (`Unchanged`, `Set(T)`, or `Reset`), with `with_*` and
+`reset_*` builders so omitted fields are never accidentally cleared.
+
 # Examples
 
 We have curated a bunch of examples in the

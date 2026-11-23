@@ -58,6 +58,30 @@ the [S2 SDK Specification](https://github.com/s2-streamstore/s2-specs/blob/main/
    }
    ```
 
+## Overview
+
+- **Handles & lifecycle**: `S2` -> `S2Basin` -> `S2Stream` are cheaply cloneable handles sharing a pooled HTTP/2 transport. Use `S2::from_env()` (reads `S2_ACCESS_TOKEN`, plus optional `S2_ACCOUNT_ENDPOINT` / `S2_BASIN_ENDPOINT`) or `S2::new(S2Config::new(...))`, and call `s2.close()` to tear down active sessions and connections immediately.
+- **Appending**: Use `stream.append(...)` for unary batches, `stream.producer(ProducerConfig::new())?` for automatic record batching with linger/backpressure (`submit`, `flush`, `close`), or `stream.append_session(AppendSessionConfig::new())?` for pre-batched pipelining (with standalone `batching::{Batcher, TryBatcher, batch_iter}`).
+- **Reading**: Use `stream.read(ReadInput::new())` for unary reads, or `stream.read_session(ReadInput::new(), ReadSessionConfig::new())?` (`SequencedRecord`s) / `stream.read_batch_session(...)` (`ReadBatch`es) for continuous streaming with automatic reconnect and `.caught_up()` / `.state()` progress tracking.
+- **Errors**: Each operation returns its narrow error enum (`RequestError`, `ReadError`, `AppendError`, `AppendSessionError`, `ReadSessionError`), all convertible into `S2Error`, with `.is_retryable()`, `.has_no_side_effects()`, and `.server_error()`.
+- **Reconfiguration**: `BasinReconfiguration` and `StreamReconfiguration` use `Reconfigure<T>` (`Unchanged` / `Set` / `Reset`) with `with_*` and `reset_*` builders.
+
+## TLS Features
+
+By default, `s2-sdk` enables `rustls-aws-lc-rs` and `rustls-native-roots` (host OS trust store).
+
+- `rustls-ring`: use `ring` instead of `aws-lc-rs` (`default-features = false, features = ["rustls-ring", "rustls-native-roots"]`).
+- `rustls-webpki-roots`: bundle Mozilla's root CA certificates for minimal containers (`FROM scratch`, distroless) without system CA bundles. When enabled alongside `rustls-native-roots`, native roots are tried first with automatic fallback to `webpki-roots`.
+
+## Upgrading to Revision 1
+
+Notable breaking changes when upgrading from pre-Revision 1 releases:
+
+- **Errors**: Replaced monolithic `S2Error` variants with 5 flat operation error enums (`RequestError`, `ReadError`, `AppendError`, `AppendSessionError`, `ReadSessionError`) plus catch-all `S2Error` wrapping canonical leaf error structs. Constructors (`S2::new`, `S2::from_env`) return `ValidationError`.
+- **Reading**: Renamed `ReadFrom` to `ReadStart`; flattened `ReadInput` (`with_start`, `with_clamp`, `with_count`, `with_bytes`, `with_until`, `with_wait`, `with_stream_config`); moved `ReadSessionConfig` / `ReadSessionRetryPolicy` to `s2_sdk::read_session`; made `read_session()` / `read_batch_session()` synchronous (`read_session()` now yields individual `SequencedRecord`s) with inherent `.next().await` and `ReadSessionState`.
+- **Appending & batching**: Replaced `BatchLimits` / `AppendRecordBatches` / `AppendInputs` with `BatcherConfig`, `Batcher<S>`, `TryBatcher<S>`, `batching::batch_iter`, and flattened `ProducerConfig`. `AppendSession` and `Producer` open lazily, `close(&self)` is idempotent, and unary `stream_config` moved to `S2Stream::append_with_stream_config`.
+- **Management & types**: Replaced `Maybe` with `Reconfigure<T>` + `reset_*` helpers; replaced `Streaming<T>` with concrete `ListStream<T>`; dropped zero-option `*Input` wrappers; migrated timestamps from `time::OffsetDateTime` to `jiff::Timestamp`; removed `compact_str::CompactString` from public APIs.
+
 ## Examples
 
 The [`examples`](./examples) directory in this repository contains a variety of
