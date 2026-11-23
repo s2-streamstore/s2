@@ -29,8 +29,8 @@ use crate::{
         EnsureStreamInput, IssueAccessTokenInput, ListAccessTokensInput, ListAllAccessTokensInput,
         ListAllBasinsInput, ListAllNetworkPoliciesInput, ListAllStreamsInput, ListBasinsInput,
         ListNetworkPoliciesInput, ListStream, ListStreamsInput, LocationInfo, LocationName, Metric,
-        NetworkPolicyInfo, NetworkPolicySelector, Page, ReadBatch, ReadInput, S2Config,
-        StreamConfig, StreamInfo, StreamMetricSet, StreamName, StreamPosition,
+        NetworkPolicyInfo, NetworkPolicySelector, Page, ReadBatch, ReadInput, RetryConfig,
+        S2Config, StreamConfig, StreamInfo, StreamMetricSet, StreamName, StreamPosition,
         StreamReconfiguration, request_token,
     },
 };
@@ -145,6 +145,20 @@ impl S2 {
 
     fn uri(&self, path: impl AsRef<str>) -> Uri {
         client::uri_with_path(&self.base_url, path)
+    }
+
+    /// Return a copy of this client using a different [`RetryConfig`] while sharing the same
+    /// underlying connection pool and [`close`](Self::close) lifecycle.
+    ///
+    /// Handles and sessions subsequently opened from the returned client inherit `retry`; sibling
+    /// handles and already-opened sessions keep their own retry settings.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ValidationError`] if `retry.min_base_delay() > retry.max_base_delay()`.
+    pub fn with_retry(self, retry: RetryConfig) -> Result<Self, ValidationError> {
+        let base = self.base.with_retry(retry)?;
+        Ok(Self { base, ..self })
     }
 
     /// Close the client, aborting all active sessions and in-flight requests and terminating all
@@ -647,6 +661,20 @@ impl S2Basin {
         &self.client.name
     }
 
+    /// Return a copy of this basin handle using a different [`RetryConfig`] while sharing the same
+    /// underlying connection pool and [`S2::close`] lifecycle.
+    ///
+    /// Stream handles and sessions subsequently opened from the returned handle inherit `retry`;
+    /// sibling handles and already-opened sessions keep their own retry settings.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ValidationError`] if `retry.min_base_delay() > retry.max_base_delay()`.
+    pub fn with_retry(self, retry: RetryConfig) -> Result<Self, ValidationError> {
+        let client = self.client.with_retry(retry)?;
+        Ok(Self { client })
+    }
+
     /// Get an [`S2Stream`].
     #[must_use]
     pub fn stream(&self, name: StreamName) -> S2Stream {
@@ -850,6 +878,20 @@ impl S2Stream {
         }
     }
 
+    /// Return a copy of this stream handle using a different [`RetryConfig`] while sharing the same
+    /// underlying connection pool and [`S2::close`] lifecycle.
+    ///
+    /// Operations and sessions subsequently opened from the returned handle use `retry`; sibling
+    /// handles and already-opened sessions keep their own retry settings.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ValidationError`] if `retry.min_base_delay() > retry.max_base_delay()`.
+    pub fn with_retry(self, retry: RetryConfig) -> Result<Self, ValidationError> {
+        let client = self.client.with_retry(retry)?;
+        Ok(Self { client, ..self })
+    }
+
     fn headers(&self, stream_config: Option<&StreamConfig>) -> StreamHeaders {
         StreamHeaders {
             encryption: self.encryption.clone(),
@@ -943,7 +985,7 @@ impl S2Stream {
         let (ack, attempts): (api::stream::proto::AppendAck, u32) = self
             .client
             .unary(req, scope)
-            .append_retry_policy(self.client.config().retry.append_retry_policy)
+            .append_retry_policy(self.client.base().retry_config().append_retry_policy)
             .send_proto::<_, AppendError>()
             .await?;
         Ok(AppendAck::try_from_proto(

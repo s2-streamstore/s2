@@ -9,7 +9,7 @@ use std::{
     pin::Pin,
     sync::{
         Arc, Mutex as StdMutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     task::{Context, Poll},
     time::Duration,
@@ -271,6 +271,7 @@ struct ProducerShared {
     cmd_tx: mpsc::UnboundedSender<Command>,
     permits: AppendPermits,
     max_batch_bytes: usize,
+    unacked_records: AtomicUsize,
     acked_through_id: AtomicU64,
     lifecycle: Arc<SessionLifecycle>,
     session_lifecycle: Arc<SessionLifecycle>,
@@ -337,6 +338,14 @@ impl fmt::Debug for Producer {
             .field("stream", &self.shared.stream)
             .field("max_batch_bytes", &self.shared.max_batch_bytes)
             .field("unacked_bytes", &self.shared.permits.in_flight_bytes())
+            .field(
+                "unacked_records",
+                &self.shared.unacked_records.load(Ordering::Relaxed),
+            )
+            .field(
+                "acked_records",
+                &self.shared.acked_through_id.load(Ordering::Relaxed),
+            )
             .field("closing_or_closed", &self.shared.is_closing_or_closed())
             .finish_non_exhaustive()
     }
@@ -378,6 +387,7 @@ impl Producer {
             cmd_tx,
             permits,
             max_batch_bytes,
+            unacked_records: AtomicUsize::new(0),
             acked_through_id: AtomicU64::new(0),
             lifecycle,
             session_lifecycle,
@@ -478,6 +488,31 @@ impl Producer {
             reserved_bytes: bytes,
             shared: self.shared.clone(),
         })
+    }
+
+    /// Return the number of metered bytes currently reserved or awaiting acknowledgement.
+    ///
+    /// Includes bytes held by outstanding [`RecordSubmitPermit`]s as well as accepted records
+    /// buffered in the current partial batch or in flight on the underlying session. Returns to `0`
+    /// once all permits and records have settled.
+    #[must_use]
+    pub fn unacked_bytes(&self) -> usize {
+        self.shared.permits.in_flight_bytes()
+    }
+
+    /// Return the number of accepted records currently awaiting an outcome.
+    ///
+    /// Incremented when a record is accepted and decremented whenever its batch settles
+    /// (acknowledged, failed, or aborted), returning to `0` once all accepted records have settled.
+    #[must_use]
+    pub fn unacked_records(&self) -> usize {
+        self.shared.unacked_records.load(Ordering::Acquire)
+    }
+
+    /// Return the cumulative number of records durably acknowledged by this producer.
+    #[must_use]
+    pub fn acked_records(&self) -> u64 {
+        self.shared.acked_through_id.load(Ordering::Acquire)
     }
 
     /// Flush all records accepted before this call and wait for them to become durable.
@@ -678,6 +713,7 @@ impl RecordSubmitPermit {
                 return Err(self.shared.session_closed_err(has_unacked_work));
             }
             gate.last_accepted_id = acceptance_id;
+            self.shared.unacked_records.fetch_add(1, Ordering::Release);
         }
 
         Ok(RecordSubmitTicket(SubmitTicket::new(
@@ -778,23 +814,38 @@ impl ProducerTask {
         }
     }
 
-    fn record_batch_acked(&mut self, batch_max_id: u64) {
+    fn settle_batch_ack(
+        &mut self,
+        batch_ack: Result<AppendAck, AppendSessionError>,
+        batch_max_id: u64,
+        ack_txs: Vec<RecordAckTx>,
+        batch_permit: AppendPermit,
+    ) {
+        let count = ack_txs.len();
+        let ok = batch_ack.is_ok();
+        // Release permit and update progress counters BEFORE waking tickets/flushes so callers
+        // checking `unacked_bytes()` / `unacked_records()` / `acked_records()` immediately after
+        // `ticket.await` or `flush().await` observe settled counts without racing.
+        drop(batch_permit);
         self.shared
-            .acked_through_id
-            .store(batch_max_id, Ordering::Release);
-        resolve_satisfied_flushes(&mut self.pending_flushes, batch_max_id);
+            .unacked_records
+            .fetch_sub(count, Ordering::Release);
+        if ok {
+            self.shared
+                .acked_through_id
+                .store(batch_max_id, Ordering::Release);
+        }
+        dispatch_acks(batch_ack, ack_txs);
+        if ok {
+            resolve_satisfied_flushes(&mut self.pending_flushes, batch_max_id);
+        }
     }
 
     async fn drain_pending_batch_acks(&mut self) {
         while let Some((batch_ack, batch_max_id, ack_txs, batch_permit)) =
             self.pending_batch_acks.next().await
         {
-            let ok = batch_ack.is_ok();
-            dispatch_acks(batch_ack, ack_txs);
-            drop(batch_permit);
-            if ok {
-                self.record_batch_acked(batch_max_id);
-            }
+            self.settle_batch_ack(batch_ack, batch_max_id, ack_txs, batch_permit);
         }
     }
 
@@ -815,14 +866,25 @@ impl ProducerTask {
             self.shared.context.clone(),
         ));
 
-        if let Some(unsubmitted) = unsubmitted {
-            for ack_tx in unsubmitted.ack_txs {
+        if let Some(UnsubmittedBatch { ack_txs, _permit }) = unsubmitted {
+            let count = ack_txs.len();
+            drop(_permit);
+            self.shared
+                .unacked_records
+                .fetch_sub(count, Ordering::Release);
+            for ack_tx in ack_txs {
                 let _ = ack_tx.send(Err(unsent_err.clone()));
             }
         }
 
-        for ack_tx in self.partial_batch.drain_acks() {
-            let _ = ack_tx.send(Err(unsent_err.clone()));
+        let partial_acks = self.partial_batch.drain_acks();
+        if !partial_acks.is_empty() {
+            self.shared
+                .unacked_records
+                .fetch_sub(partial_acks.len(), Ordering::Release);
+            for ack_tx in partial_acks {
+                let _ = ack_tx.send(Err(unsent_err.clone()));
+            }
         }
 
         let acked = self.shared.acked_through_id.load(Ordering::Acquire);
@@ -837,7 +899,9 @@ impl ProducerTask {
 
         for cmd in queued_cmds {
             match cmd {
-                Command::Submit { ack_tx, .. } => {
+                Command::Submit { ack_tx, permit, .. } => {
+                    drop(permit);
+                    self.shared.unacked_records.fetch_sub(1, Ordering::Release);
                     let _ = ack_tx.send(Err(unsent_err.clone()));
                 }
                 Command::Flush { target_id, done_tx } => {
@@ -852,6 +916,7 @@ impl ProducerTask {
             }
         }
 
+        debug_assert_eq!(self.shared.unacked_records.load(Ordering::Acquire), 0);
         self.shared.lifecycle.finish(final_result);
     }
 
@@ -889,14 +954,11 @@ impl ProducerTask {
                         // Publish terminal error and close acceptance gate BEFORE dropping
                         // `batch_permit` and unblocking waiting `reserve()` callers (`A4c`, `A9`).
                         self.publish_closing_from_session(false);
-                        dispatch_acks(batch_ack, ack_txs);
-                        drop(batch_permit);
+                        self.settle_batch_ack(batch_ack, batch_max_id, ack_txs, batch_permit);
                         self.terminate(None).await;
                         return;
                     }
-                    dispatch_acks(batch_ack, ack_txs);
-                    drop(batch_permit);
-                    self.record_batch_acked(batch_max_id);
+                    self.settle_batch_ack(batch_ack, batch_max_id, ack_txs, batch_permit);
                     if self.should_flush_for_backpressure() {
                         debug!("flushing partial batch early for backpressure waiter");
                         if let Err(unsubmitted) = self.try_cut_and_submit() {

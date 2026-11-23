@@ -2087,3 +2087,223 @@ async fn spec_a8c_explicit_abort_append_session_and_producer() {
         .await
         .expect("Producer::abort() after clean close() must be a no-op");
 }
+
+#[tokio::test]
+async fn producer_and_append_session_progress_accessors() {
+    use std::sync::atomic::AtomicBool;
+
+    use s2_api::v1::stream::{proto::AppendInput as ProtoAppendInput, s2s::SessionMessage};
+
+    // 1. Producer: submit -> flush -> single ack -> terminal failure -> abort.
+    let fail_next = Arc::new(AtomicBool::new(false));
+    let hold_acks = Arc::new(AtomicBool::new(false));
+    let hold_gate = Arc::new(tokio::sync::Notify::new());
+    let seen_frame = Arc::new(tokio::sync::Notify::new());
+    let server = MockH2Server::start({
+        let fail_next = fail_next.clone();
+        let hold_acks = hold_acks.clone();
+        let hold_gate = hold_gate.clone();
+        let seen_frame = seen_frame.clone();
+        move |_conn_id, req, respond| {
+            let fail_next = fail_next.clone();
+            let hold_acks = hold_acks.clone();
+            let hold_gate = hold_gate.clone();
+            let seen_frame = seen_frame.clone();
+            async move {
+                let mut body = req.into_body();
+                let mut buf = BytesMut::new();
+                let Some(mut s2s) = S2sResponder::open(respond) else {
+                    return;
+                };
+                let mut next_seq = 0u64;
+                while let Some(msg) = read_one_s2s_frame(&mut body, &mut buf, true).await {
+                    let count = match msg {
+                        SessionMessage::Regular(r) => r
+                            .try_into_proto::<ProtoAppendInput>()
+                            .expect("valid append input")
+                            .records
+                            .len() as u64,
+                        SessionMessage::Terminal(_) => break,
+                    };
+                    seen_frame.notify_waiters();
+                    if hold_acks.load(Ordering::SeqCst) {
+                        hold_gate.notified().await;
+                    }
+                    if fail_next.load(Ordering::SeqCst) {
+                        s2s.send_terminal(
+                            412,
+                            r#"{"code":"fencing_token_mismatch","expected_fencing_token":"other"}"#
+                                .as_bytes(),
+                        );
+                        return;
+                    }
+                    let start = next_seq;
+                    next_seq += count;
+                    s2s.send_ack(start, next_seq, false, false);
+                }
+            }
+        }
+    })
+    .await;
+
+    let stream = server.stream(no_retry_config());
+    let prod = stream
+        .producer(ProducerConfig::new().with_linger(Duration::from_secs(10)))
+        .unwrap();
+    assert_eq!(prod.unacked_bytes(), 0);
+    assert_eq!(prod.unacked_records(), 0);
+    assert_eq!(prod.acked_records(), 0);
+
+    let r1 = AppendRecord::new("alpha").unwrap();
+    let r2 = AppendRecord::new("beta-2").unwrap();
+    let expected_bytes = r1.metered_bytes() + r2.metered_bytes();
+
+    let t1 = prod.submit(r1).await.unwrap();
+    let t2 = prod.submit(r2).await.unwrap();
+    assert_eq!(prod.unacked_bytes(), expected_bytes);
+    assert_eq!(prod.unacked_records(), 2);
+    assert_eq!(prod.acked_records(), 0);
+
+    prod.flush().await.unwrap();
+    assert_eq!(prod.unacked_bytes(), 0);
+    assert_eq!(prod.unacked_records(), 0);
+    assert_eq!(prod.acked_records(), 2);
+    assert_eq!(t1.await.unwrap().seq_num, 0);
+    assert_eq!(t2.await.unwrap().seq_num, 1);
+
+    // Single record acked via flush/ticket updates counters before ticket resolves.
+    let r3 = AppendRecord::new("gamma").unwrap();
+    let t3 = prod.submit(r3).await.unwrap();
+    assert_eq!(prod.unacked_records(), 1);
+    let flush_fut = prod.flush();
+    let ack3 = t3.await.unwrap();
+    assert_eq!(ack3.seq_num, 2);
+    assert_eq!(prod.unacked_bytes(), 0);
+    assert_eq!(prod.unacked_records(), 0);
+    assert_eq!(prod.acked_records(), 3);
+    flush_fut.await.unwrap();
+
+    // Terminal failure settles unacked_bytes and unacked_records back to 0 without advancing
+    // acked_records.
+    fail_next.store(true, Ordering::SeqCst);
+    let t_fail1 = prod
+        .submit(AppendRecord::new("fail-1").unwrap())
+        .await
+        .unwrap();
+    let t_fail2 = prod
+        .submit(AppendRecord::new("fail-2").unwrap())
+        .await
+        .unwrap();
+    assert_eq!(prod.unacked_records(), 2);
+    assert!(prod.flush().await.is_err());
+    assert!(t_fail1.await.is_err());
+    assert!(t_fail2.await.is_err());
+    assert!(prod.close().await.is_err());
+    assert_eq!(prod.unacked_bytes(), 0);
+    assert_eq!(prod.unacked_records(), 0);
+    assert_eq!(prod.acked_records(), 3);
+
+    // Abort on Producer with both in-flight and lingering records drops counters to 0.
+    fail_next.store(false, Ordering::SeqCst);
+    hold_acks.store(true, Ordering::SeqCst);
+    let prod2 = stream
+        .producer(ProducerConfig::new().with_linger(Duration::from_secs(10)))
+        .unwrap();
+    let ta1 = prod2
+        .submit(AppendRecord::new("inflight").unwrap())
+        .await
+        .unwrap();
+    let _flush_task = tokio::spawn({
+        // Flush first record so it is in flight on the session.
+        let seen = seen_frame.clone();
+        async move { seen.notified().await }
+    });
+    let flush_wait = prod2.flush();
+    tokio::pin!(flush_wait);
+    let mut flushed_sent = false;
+    tokio::select! {
+        _ = &mut flush_wait => { flushed_sent = true; }
+        _ = seen_frame.notified() => {}
+    }
+    assert!(!flushed_sent);
+    let ta2 = prod2
+        .submit(AppendRecord::new("lingering").unwrap())
+        .await
+        .unwrap();
+    assert_eq!(prod2.unacked_records(), 2);
+    assert!(prod2.unacked_bytes() > 0);
+    prod2.abort();
+    assert!(prod2.close().await.is_err());
+    assert!(ta1.await.is_err());
+    assert!(ta2.await.is_err());
+    assert_eq!(prod2.unacked_bytes(), 0);
+    assert_eq!(prod2.unacked_records(), 0);
+    assert_eq!(prod2.acked_records(), 0);
+    hold_gate.notify_waiters();
+
+    // 2. AppendSession: submit -> ack -> terminal failure -> abort.
+    hold_acks.store(true, Ordering::SeqCst);
+    let sess = stream.append_session(AppendSessionConfig::new()).unwrap();
+    assert_eq!(sess.unacked_bytes(), 0);
+    assert_eq!(sess.unacked_batches(), 0);
+
+    let b1 = AppendInput::new(
+        AppendRecordBatch::try_from_iter([AppendRecord::new("batch-1").unwrap()]).unwrap(),
+    );
+    let b2 = AppendInput::new(
+        AppendRecordBatch::try_from_iter([AppendRecord::new("batch-2-longer").unwrap()]).unwrap(),
+    );
+    let b1_bytes = b1.metered_bytes();
+    let b2_bytes = b2.metered_bytes();
+
+    let st1 = sess.submit(b1).await.unwrap();
+    let st2 = sess.submit(b2).await.unwrap();
+    assert_eq!(sess.unacked_batches(), 2);
+    assert_eq!(sess.unacked_bytes(), b1_bytes + b2_bytes);
+
+    // Release ack for batch 1 only, then batch 2.
+    hold_acks.store(false, Ordering::SeqCst);
+    hold_gate.notify_waiters();
+    let _ = st1.await.unwrap();
+    let _ = st2.await.unwrap();
+    assert_eq!(sess.unacked_batches(), 0);
+    assert_eq!(sess.unacked_bytes(), 0);
+
+    // Terminal failure on AppendSession settles counters to 0.
+    fail_next.store(true, Ordering::SeqCst);
+    let sf1 = sess
+        .submit(AppendRecord::new("sess-fail-1").unwrap())
+        .await
+        .unwrap();
+    let sf2 = sess
+        .submit(AppendRecord::new("sess-fail-2").unwrap())
+        .await
+        .unwrap();
+    assert!(sess.close().await.is_err());
+    assert!(sf1.await.is_err());
+    assert!(sf2.await.is_err());
+    assert_eq!(sess.unacked_batches(), 0);
+    assert_eq!(sess.unacked_bytes(), 0);
+
+    // Abort on AppendSession settles counters to 0.
+    fail_next.store(false, Ordering::SeqCst);
+    hold_acks.store(true, Ordering::SeqCst);
+    let sess2 = stream.append_session(AppendSessionConfig::new()).unwrap();
+    let sa1 = sess2
+        .submit(AppendRecord::new("sess-abort-1").unwrap())
+        .await
+        .unwrap();
+    let sa2 = sess2
+        .submit(AppendRecord::new("sess-abort-2").unwrap())
+        .await
+        .unwrap();
+    assert_eq!(sess2.unacked_batches(), 2);
+    assert!(sess2.unacked_bytes() > 0);
+    sess2.abort();
+    assert!(sess2.close().await.is_err());
+    assert!(sa1.await.is_err());
+    assert!(sa2.await.is_err());
+    assert_eq!(sess2.unacked_batches(), 0);
+    assert_eq!(sess2.unacked_bytes(), 0);
+    hold_gate.notify_waiters();
+}

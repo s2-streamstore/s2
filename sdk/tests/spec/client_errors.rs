@@ -2153,3 +2153,278 @@ fn public_error_fixture_constructors_preserve_predicates_and_upcasts() {
     let s2_read_closed: S2Error = ReadSessionError::from(read_closed).into();
     assert!(s2_read_closed.failure().unwrap().has_no_side_effects());
 }
+
+#[tokio::test]
+async fn with_retry_overrides_pool_sharing_and_validation() {
+    use s2_api::v1::stream::proto::AppendAck as ProtoAppendAck;
+
+    let (basin_name, stream_name) = test_basin_and_stream();
+
+    // 1. Validation: min_base_delay > max_base_delay fails with ValidationError on S2, S2Basin, and
+    //    S2Stream.
+    let bad_retry = RetryConfig::new()
+        .with_min_base_delay(Duration::from_millis(50))
+        .with_max_base_delay(Duration::from_millis(10));
+    let dummy_server = MockH2Server::from_responses([CannedResponse::new(200, "{}")]).await;
+    let dummy_s2 = dummy_server.client(no_retry_config());
+    let dummy_basin = dummy_s2.basin(basin_name.clone());
+    let dummy_stream = dummy_basin.stream(stream_name.clone());
+    assert!(dummy_s2.clone().with_retry(bad_retry).is_err());
+    assert!(dummy_basin.clone().with_retry(bad_retry).is_err());
+    assert!(dummy_stream.with_retry(bad_retry).is_err());
+
+    // 2. Unary op + backoff + sibling isolation + single shared HTTP/2 connection pool.
+    let tail_calls = Arc::new(AtomicUsize::new(0));
+    let append_calls = Arc::new(AtomicUsize::new(0));
+    let read_sess_calls = Arc::new(AtomicUsize::new(0));
+    let append_sess_calls = Arc::new(AtomicUsize::new(0));
+    let hold_read_gate = Arc::new(tokio::sync::Notify::new());
+    let server = MockH2Server::start({
+        let tail_calls = tail_calls.clone();
+        let append_calls = append_calls.clone();
+        let read_sess_calls = read_sess_calls.clone();
+        let append_sess_calls = append_sess_calls.clone();
+        let hold_read_gate = hold_read_gate.clone();
+        move |_conn_id, req, mut respond| {
+            let tail_calls = tail_calls.clone();
+            let append_calls = append_calls.clone();
+            let read_sess_calls = read_sess_calls.clone();
+            let append_sess_calls = append_sess_calls.clone();
+            let hold_read_gate = hold_read_gate.clone();
+            async move {
+                let path = req.uri().path().to_owned();
+                let is_s2s = req
+                    .headers()
+                    .get("content-type")
+                    .and_then(|v| v.to_str().ok())
+                    .is_some_and(|v| v.starts_with("s2s/"));
+                let method = req.method().clone();
+                if path.ends_with("/tail") {
+                    let _ = drain_body(&mut req.into_body()).await;
+                    let n = tail_calls.fetch_add(1, Ordering::SeqCst);
+                    // Fail attempts 0, 1, and 3; succeed on 2 and 4+.
+                    if matches!(n, 0 | 1 | 3) {
+                        send_json(
+                            respond,
+                            503,
+                            r#"{"code":"unavailable","message":"retry me"}"#,
+                        );
+                    } else {
+                        send_json(respond, 200, r#"{"tail":{"seq_num":7,"timestamp":1000}}"#);
+                    }
+                    return;
+                }
+                if method == http::Method::POST && !is_s2s {
+                    // Unary append: drain request body so it is classified as sent (indefinite),
+                    // then fail attempts 0 and 2 with 503 and succeed on 1 and 3.
+                    let _ = drain_body(&mut req.into_body()).await;
+                    let n = append_calls.fetch_add(1, Ordering::SeqCst);
+                    if n == 0 || n == 2 {
+                        send_json(
+                            respond,
+                            503,
+                            r#"{"code":"unavailable","message":"indefinite"}"#,
+                        );
+                    } else {
+                        let ack = ProtoAppendAck {
+                            start: Some(ProtoStreamPosition {
+                                seq_num: 0,
+                                timestamp: 1000,
+                            }),
+                            end: Some(ProtoStreamPosition {
+                                seq_num: 1,
+                                timestamp: 1000,
+                            }),
+                            tail: Some(ProtoStreamPosition {
+                                seq_num: 1,
+                                timestamp: 1000,
+                            }),
+                        }
+                        .encode_to_vec();
+                        let resp = http::Response::builder()
+                            .status(200)
+                            .header("content-type", "application/protobuf")
+                            .body(())
+                            .unwrap();
+                        if let Ok(mut s) = respond.send_response(resp, false) {
+                            let _ = s.send_data(Bytes::from(ack), true);
+                        }
+                    }
+                    return;
+                }
+                if method == http::Method::POST && is_s2s {
+                    // AppendSession / Producer: fail first request for each pair with 503, succeed
+                    // on the next.
+                    let n = append_sess_calls.fetch_add(1, Ordering::SeqCst);
+                    if n.is_multiple_of(2) {
+                        send_json(
+                            respond,
+                            503,
+                            r#"{"code":"unavailable","message":"retry session"}"#,
+                        );
+                    } else if let Some(mut s2s) = S2sResponder::open(respond) {
+                        let mut body = req.into_body();
+                        let mut buf = BytesMut::new();
+                        if read_one_s2s_frame(&mut body, &mut buf, true)
+                            .await
+                            .is_some()
+                        {
+                            s2s.send_ack(0, 1, false, true);
+                        }
+                    }
+                    return;
+                }
+                if method == http::Method::GET && is_s2s {
+                    let n = read_sess_calls.fetch_add(1, Ordering::SeqCst);
+                    if n == 0 {
+                        send_json(
+                            respond,
+                            503,
+                            r#"{"code":"unavailable","message":"retry read"}"#,
+                        );
+                    } else if n == 1 {
+                        if let Some(mut s2s) = S2sResponder::open(respond) {
+                            s2s.send_regular(&proto_read_batch(0, 1), false, true);
+                        }
+                    } else if let Some(mut s2s) = S2sResponder::open(respond) {
+                        // Hold open at seq 0 until test triggers client.close() (C12 check).
+                        s2s.send_regular(&proto_heartbeat(0), false, false);
+                        hold_read_gate.notified().await;
+                    }
+                }
+            }
+        }
+    })
+    .await;
+
+    // Base S2 has max_attempts = 1 and AppendRetryPolicy::NoSideEffects.
+    let base_retry = RetryConfig::new()
+        .with_max_attempts(1)
+        .unwrap()
+        .with_min_base_delay(Duration::from_millis(1))
+        .with_max_base_delay(Duration::from_millis(1))
+        .with_append_retry_policy(AppendRetryPolicy::NoSideEffects);
+    let base_s2 = server.client(base_retry);
+    let patient_retry = RetryConfig::new()
+        .with_max_attempts(3)
+        .unwrap()
+        .with_min_base_delay(Duration::from_millis(15))
+        .with_max_base_delay(Duration::from_millis(15))
+        .with_append_retry_policy(AppendRetryPolicy::All);
+
+    // Derived S2 with patient retries succeeds on check_tail after two 503s (with >= 30ms backoff).
+    let patient_s2 = base_s2.clone().with_retry(patient_retry).unwrap();
+    let t0 = std::time::Instant::now();
+    let tail = patient_s2
+        .basin(basin_name.clone())
+        .stream(stream_name.clone())
+        .check_tail()
+        .await
+        .unwrap();
+    assert_eq!(tail.seq_num, 7);
+    assert!(
+        t0.elapsed() >= Duration::from_millis(25),
+        "expected backoff delay from overridden min_base_delay=15ms, got {:?}",
+        t0.elapsed()
+    );
+
+    // Sibling original base_s2 still has max_attempts=1 and fails on attempt 1 (call #3 -> 503).
+    assert!(
+        base_s2
+            .basin(basin_name.clone())
+            .stream(stream_name.clone())
+            .check_tail()
+            .await
+            .is_err()
+    );
+
+    // 3. Unary append() honors overridden append_retry_policy on S2Stream::with_retry.
+    let base_stream = base_s2
+        .basin(basin_name.clone())
+        .stream(stream_name.clone());
+    let no_side_effects_3 = RetryConfig::new()
+        .with_max_attempts(3)
+        .unwrap()
+        .with_min_base_delay(Duration::from_millis(1))
+        .with_max_base_delay(Duration::from_millis(1))
+        .with_append_retry_policy(AppendRetryPolicy::NoSideEffects);
+    let all_3 = no_side_effects_3.with_append_retry_policy(AppendRetryPolicy::All);
+    // Call #0 -> 503 (body sent = indefinite): NoSideEffects must NOT retry.
+    let nse_stream = base_stream.clone().with_retry(no_side_effects_3).unwrap();
+    assert!(
+        nse_stream
+            .append(AppendRecord::new("a").unwrap())
+            .await
+            .is_err()
+    );
+    assert_eq!(append_calls.load(Ordering::SeqCst), 1);
+    // Call #1 succeeds? Wait: call #1 is success, call #2 -> 503 then call #3 succeeds.
+    // Let's consume call #1 with base_stream, then verify all_3 retries call #2 -> #3.
+    base_stream
+        .append(AppendRecord::new("b").unwrap())
+        .await
+        .unwrap();
+    let all_stream = base_stream.clone().with_retry(all_3).unwrap();
+    all_stream
+        .append(AppendRecord::new("c").unwrap())
+        .await
+        .unwrap();
+    assert_eq!(append_calls.load(Ordering::SeqCst), 4);
+
+    // 4. AppendSession & Producer inherit S2Basin::with_retry.
+    let patient_basin = base_s2.basin(basin_name.clone()).with_retry(all_3).unwrap();
+    let sess = patient_basin
+        .stream(stream_name.clone())
+        .append_session(AppendSessionConfig::new())
+        .unwrap();
+    let st = sess.submit(AppendRecord::new("s").unwrap()).await.unwrap();
+    assert_eq!(st.await.unwrap().end.seq_num, 1);
+    sess.close().await.unwrap();
+
+    let prod = patient_basin
+        .stream(stream_name.clone())
+        .producer(ProducerConfig::new().with_linger(Duration::ZERO))
+        .unwrap();
+    let pt = prod.submit(AppendRecord::new("p").unwrap()).await.unwrap();
+    assert_eq!(pt.await.unwrap().seq_num, 0);
+    prod.close().await.unwrap();
+
+    // 5. ReadSession inherits S2Stream::with_retry.
+    let mut rs = all_stream
+        .read_session(
+            ReadInput::new()
+                .with_start(ReadStart::SeqNum(0))
+                .with_count(1),
+            ReadSessionConfig::default(),
+        )
+        .unwrap();
+    assert_eq!(rs.next().await.unwrap().unwrap().seq_num, 0);
+    assert!(rs.next().await.is_none());
+
+    // 6. All requests across base & derived handles shared the single pooled HTTP/2 connection!
+    assert_eq!(
+        server.connection_count(),
+        1,
+        "derived with_retry handles must share the underlying HTTP/2 connection pool"
+    );
+
+    // 7. Closing base_s2 immediately closes/aborts derived handles and their active sessions (C12).
+    let mut live_rs = all_stream
+        .read_session(
+            ReadInput::new().with_start(ReadStart::SeqNum(0)),
+            ReadSessionConfig::default(),
+        )
+        .unwrap();
+    live_rs.caught_up().await.unwrap();
+    base_s2.close();
+    let abort_err = live_rs.next().await.unwrap().unwrap_err();
+    assert!(
+        matches!(abort_err, ReadSessionError::Aborted(_)),
+        "expected AbortedError on derived session after base S2::close(), got {abort_err:?}"
+    );
+    assert!(matches!(
+        all_stream.check_tail().await,
+        Err(ReadError::ClientClosed(_))
+    ));
+    hold_read_gate.notify_waiters();
+}

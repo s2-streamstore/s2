@@ -9,7 +9,7 @@ use s2_common::{
     stream::{StreamName, StreamNamePrefix},
 };
 
-use super::validate_rfc3339_timestamp;
+use super::{Page, validate_rfc3339_timestamp};
 use crate::error::ValidationError;
 
 /// Input for [`list_access_tokens`](crate::S2::list_access_tokens) operation.
@@ -59,7 +59,7 @@ impl ListAccessTokensInput {
         }
     }
 
-    /// Set the limit on number of access tokens to return in a page.
+    /// Set the limit on number of access tokens to return in a page (default and maximum: 1000).
     pub fn with_limit(self, limit: usize) -> Self {
         Self {
             limit: Some(limit),
@@ -142,6 +142,19 @@ pub struct AccessTokenInfo {
     pub scope: AccessTokenScope,
     /// Network policy the token is restricted by, if any.
     pub network_policy: Option<NetworkPolicyRef>,
+}
+
+impl Page<AccessTokenInfo> {
+    /// Return the `start_after` cursor for fetching the next page, if more pages remain.
+    ///
+    /// Returns `None` when [`has_more`](Self::has_more) is `false` or [`values`](Self::values) is
+    /// empty.
+    #[must_use]
+    pub fn next_start_after(&self) -> Option<AccessTokenIdStartAfter> {
+        self.has_more
+            .then(|| self.values.last().map(|info| info.id.clone().into()))
+            .flatten()
+    }
 }
 
 impl AccessTokenInfo {

@@ -45,6 +45,34 @@ impl<T> Page<T> {
     }
 }
 
+impl Page<BasinInfo> {
+    /// Return the `start_after` cursor for fetching the next page, if more pages remain.
+    ///
+    /// Call this on the unfiltered page before skipping deleting items (`deleted_at.is_some()`), so
+    /// pagination still advances past pages consisting entirely of deleting basins. Returns `None`
+    /// when [`has_more`](Self::has_more) is `false` or [`values`](Self::values) is empty.
+    #[must_use]
+    pub fn next_start_after(&self) -> Option<BasinNameStartAfter> {
+        self.has_more
+            .then(|| self.values.last().map(|info| info.name.clone().into()))
+            .flatten()
+    }
+}
+
+impl Page<StreamInfo> {
+    /// Return the `start_after` cursor for fetching the next page, if more pages remain.
+    ///
+    /// Call this on the unfiltered page before skipping deleting items (`deleted_at.is_some()`), so
+    /// pagination still advances past pages consisting entirely of deleting streams. Returns `None`
+    /// when [`has_more`](Self::has_more) is `false` or [`values`](Self::values) is empty.
+    #[must_use]
+    pub fn next_start_after(&self) -> Option<StreamNameStartAfter> {
+        self.has_more
+            .then(|| self.values.last().map(|info| info.name.clone().into()))
+            .flatten()
+    }
+}
+
 /// Paginated stream of values returned by `list_all_*` operations.
 ///
 /// Implements [`futures_core::Stream`] and provides an inherent [`next`](Self::next) method for
@@ -791,7 +819,7 @@ impl ListBasinsInput {
         }
     }
 
-    /// Set the limit on number of basins to return in a page.
+    /// Set the limit on number of basins to return in a page (default and maximum: 1000).
     pub fn with_limit(self, limit: usize) -> Self {
         Self {
             limit: Some(limit),
@@ -1462,7 +1490,7 @@ impl ListStreamsInput {
         }
     }
 
-    /// Set the limit on number of streams to return in a page.
+    /// Set the limit on number of streams to return in a page (default and maximum: 1000).
     pub fn with_limit(self, limit: usize) -> Self {
         Self {
             limit: Some(limit),

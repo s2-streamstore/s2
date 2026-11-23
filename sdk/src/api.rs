@@ -127,12 +127,14 @@ struct BaseClientInner {
     #[cfg(feature = "_hidden")]
     access_token_provider: Option<Arc<dyn crate::types::AccessTokenProvider>>,
     request_timeout: Duration,
-    retry: RetryConfig,
     compression: Compression,
 }
 
 #[derive(Clone)]
-pub(crate) struct BaseClient(Arc<BaseClientInner>);
+pub(crate) struct BaseClient {
+    inner: Arc<BaseClientInner>,
+    retry: RetryConfig,
+}
 
 impl std::fmt::Debug for BaseClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -250,15 +252,17 @@ impl BaseClient {
             config.http2,
             shutdown.clone(),
         );
-        Self(Arc::new(BaseClientInner {
-            client: Arc::new(pool),
-            shutdown,
-            default_headers,
-            access_token_provider,
-            request_timeout: config.request_timeout,
+        Self {
+            inner: Arc::new(BaseClientInner {
+                client: Arc::new(pool),
+                shutdown,
+                default_headers,
+                access_token_provider,
+                request_timeout: config.request_timeout,
+                compression: config.compression,
+            }),
             retry: config.retry,
-            compression: config.compression,
-        }))
+        }
     }
 
     #[cfg(not(feature = "_hidden"))]
@@ -275,33 +279,40 @@ impl BaseClient {
             config.http2,
             shutdown.clone(),
         );
-        Self(Arc::new(BaseClientInner {
-            client: Arc::new(pool),
-            shutdown,
-            default_headers,
-            request_timeout: config.request_timeout,
+        Self {
+            inner: Arc::new(BaseClientInner {
+                client: Arc::new(pool),
+                shutdown,
+                default_headers,
+                request_timeout: config.request_timeout,
+                compression: config.compression,
+            }),
             retry: config.retry,
-            compression: config.compression,
-        }))
+        }
+    }
+
+    pub(crate) fn with_retry(self, retry: RetryConfig) -> Result<Self, ValidationError> {
+        retry.validate()?;
+        Ok(Self { retry, ..self })
     }
 
     pub(crate) fn close(&self) {
-        self.0.shutdown.cancel();
-        self.0.client.close();
+        self.inner.shutdown.cancel();
+        self.inner.client.close();
     }
 
     pub(crate) fn is_closed(&self) -> bool {
-        self.0.shutdown.is_cancelled()
+        self.inner.shutdown.is_cancelled()
     }
 
     pub(crate) fn shutdown_token(&self) -> CancellationToken {
-        self.0.shutdown.clone()
+        self.inner.shutdown.clone()
     }
 
     pub(crate) fn refreshes_tokens(&self) -> bool {
         #[cfg(feature = "_hidden")]
         {
-            self.0.access_token_provider.is_some()
+            self.inner.access_token_provider.is_some()
         }
         #[cfg(not(feature = "_hidden"))]
         {
@@ -310,44 +321,44 @@ impl BaseClient {
     }
 
     pub(crate) fn request_timeout(&self) -> Duration {
-        self.0.request_timeout
+        self.inner.request_timeout
     }
 
     pub(crate) fn retry_config(&self) -> RetryConfig {
-        self.0.retry
+        self.retry
     }
 
     pub(crate) fn get(&self, uri: Uri) -> client::RequestBuilder {
         client::RequestBuilder::get(uri)
-            .timeout(self.0.request_timeout)
-            .headers(&self.0.default_headers)
+            .timeout(self.inner.request_timeout)
+            .headers(&self.inner.default_headers)
     }
 
     pub(crate) fn post(&self, uri: Uri) -> client::RequestBuilder {
         client::RequestBuilder::post(uri)
-            .timeout(self.0.request_timeout)
-            .headers(&self.0.default_headers)
-            .compression(self.0.compression)
+            .timeout(self.inner.request_timeout)
+            .headers(&self.inner.default_headers)
+            .compression(self.inner.compression)
     }
 
     pub(crate) fn patch(&self, uri: Uri) -> client::RequestBuilder {
         client::RequestBuilder::patch(uri)
-            .timeout(self.0.request_timeout)
-            .headers(&self.0.default_headers)
-            .compression(self.0.compression)
+            .timeout(self.inner.request_timeout)
+            .headers(&self.inner.default_headers)
+            .compression(self.inner.compression)
     }
 
     pub(crate) fn put(&self, uri: Uri) -> client::RequestBuilder {
         client::RequestBuilder::put(uri)
-            .timeout(self.0.request_timeout)
-            .headers(&self.0.default_headers)
-            .compression(self.0.compression)
+            .timeout(self.inner.request_timeout)
+            .headers(&self.inner.default_headers)
+            .compression(self.inner.compression)
     }
 
     pub(crate) fn delete(&self, uri: Uri) -> client::RequestBuilder {
         client::RequestBuilder::delete(uri)
-            .timeout(self.0.request_timeout)
-            .headers(&self.0.default_headers)
+            .timeout(self.inner.request_timeout)
+            .headers(&self.inner.default_headers)
     }
 
     pub(crate) fn unary<'a>(
@@ -370,7 +381,7 @@ impl BaseClient {
     ) -> Result<(StreamingResponse, Option<String>), E> {
         let access_token = self.authorize::<E>(&mut request).await?;
         let response = self
-            .0
+            .inner
             .client
             .init_streaming(request)
             .await
@@ -393,7 +404,7 @@ impl BaseClient {
             res = self.authorize::<E>(&mut request) => res?,
         };
         let response = self
-            .0
+            .inner
             .client
             .execute_unary(request)
             .await
@@ -406,7 +417,7 @@ impl BaseClient {
         _request: &mut client::Request,
     ) -> Result<Option<String>, E> {
         #[cfg(feature = "_hidden")]
-        if let Some(provider) = self.0.access_token_provider.as_ref() {
+        if let Some(provider) = self.inner.access_token_provider.as_ref() {
             let access_token = provider
                 .access_token()
                 .await
@@ -422,7 +433,7 @@ impl BaseClient {
     fn invalidate_access_token(&self, _access_token: Option<&str>) {
         #[cfg(feature = "_hidden")]
         if let (Some(provider), Some(access_token)) =
-            (self.0.access_token_provider.as_ref(), _access_token)
+            (self.inner.access_token_provider.as_ref(), _access_token)
         {
             provider.invalidate_access_token(access_token);
         }
@@ -752,6 +763,11 @@ impl BasinClient {
 
     pub(crate) fn base(&self) -> &BaseClient {
         &self.base
+    }
+
+    pub(crate) fn with_retry(self, retry: RetryConfig) -> Result<Self, ValidationError> {
+        let base = self.base.with_retry(retry)?;
+        Ok(Self { base, ..self })
     }
 
     pub(crate) fn config(&self) -> &S2Config {
@@ -1087,15 +1103,17 @@ mod tests {
         retry: RetryConfig,
     ) -> BaseClient {
         let (default_headers, access_token_provider) = BaseClient::prepare(config).unwrap();
-        BaseClient(Arc::new(BaseClientInner {
-            client: executor,
-            shutdown: CancellationToken::new(),
-            default_headers,
-            access_token_provider,
-            request_timeout: config.request_timeout,
+        BaseClient {
+            inner: Arc::new(BaseClientInner {
+                client: executor,
+                shutdown: CancellationToken::new(),
+                default_headers,
+                access_token_provider,
+                request_timeout: config.request_timeout,
+                compression: config.compression,
+            }),
             retry,
-            compression: config.compression,
-        }))
+        }
     }
 
     #[cfg(feature = "_hidden")]
@@ -1438,15 +1456,17 @@ mod tests {
             .with_max_base_delay(Duration::ZERO)
             .with_max_attempts(2)
             .unwrap();
-        let client = BaseClient(Arc::new(BaseClientInner {
-            client: executor.clone(),
-            shutdown: CancellationToken::new(),
-            default_headers: HeaderMap::new(),
-            access_token_provider: Some(provider.clone()),
-            request_timeout: Duration::from_secs(1),
+        let client = BaseClient {
+            inner: Arc::new(BaseClientInner {
+                client: executor.clone(),
+                shutdown: CancellationToken::new(),
+                default_headers: HeaderMap::new(),
+                access_token_provider: Some(provider.clone()),
+                request_timeout: Duration::from_secs(1),
+                compression: Compression::None,
+            }),
             retry,
-            compression: Compression::None,
-        }));
+        };
         let request = client
             .get("http://example.test/v1/basins".parse().unwrap())
             .build();

@@ -5,6 +5,8 @@ use s2_common::network_policy::{
     NetworkPolicySlugStartAfter, VpcEndpointId,
 };
 
+use super::Page;
+
 /// Input for [`list_network_policies`](crate::S2::list_network_policies) operation.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[must_use]
@@ -52,7 +54,7 @@ impl ListNetworkPoliciesInput {
         }
     }
 
-    /// Set the limit on number of network policies to return in a page.
+    /// Set the limit on number of network policies to return in a page (default and maximum: 1000).
     pub fn with_limit(self, limit: usize) -> Self {
         Self {
             limit: Some(limit),
@@ -317,6 +319,19 @@ pub struct NetworkPolicyInfo {
     pub created_at: Timestamp,
     /// The restriction.
     pub policy: NetworkPolicy,
+}
+
+impl Page<NetworkPolicyInfo> {
+    /// Return the `start_after` cursor for fetching the next page, if more pages remain.
+    ///
+    /// Returns `None` when [`has_more`](Self::has_more) is `false` or [`values`](Self::values) is
+    /// empty.
+    #[must_use]
+    pub fn next_start_after(&self) -> Option<NetworkPolicySlugStartAfter> {
+        self.has_more
+            .then(|| self.values.last().map(|info| info.id.slug().clone().into()))
+            .flatten()
+    }
 }
 
 impl NetworkPolicyInfo {

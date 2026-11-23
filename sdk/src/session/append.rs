@@ -580,6 +580,24 @@ impl AppendSession {
         Ok(())
     }
 
+    /// Return the number of metered bytes currently reserved or awaiting acknowledgement.
+    ///
+    /// Includes bytes held by outstanding [`BatchSubmitPermit`]s as well as submitted batches that
+    /// have not yet settled. Returns to `0` once all permits and batches have settled.
+    #[must_use]
+    pub fn unacked_bytes(&self) -> usize {
+        self.permits.in_flight_bytes()
+    }
+
+    /// Return the number of submitted batches currently awaiting an outcome.
+    ///
+    /// Incremented when a batch is accepted and decremented whenever it settles (acknowledged,
+    /// failed, or aborted), returning to `0` once all submitted batches have settled.
+    #[must_use]
+    pub fn unacked_batches(&self) -> usize {
+        self.core.unacked_batches.load(Ordering::Acquire)
+    }
+
     /// Close the session and wait for all accepted batches to reach an outcome.
     ///
     /// Calling `close()` stops accepting new submissions immediately and waits until all
@@ -1342,10 +1360,13 @@ impl AppendSessionTask {
             self.context.clone(),
         ));
         for cmd in queued {
-            if let Command::Submit { ack_tx, .. } = cmd {
+            if let Command::Submit { ack_tx, permit, .. } = cmd {
+                drop(permit);
+                self.state.unacked_batches.fetch_sub(1, Ordering::Release);
                 let _ = ack_tx.send(Err(closed_err.clone()));
             }
         }
+        debug_assert_eq!(self.state.unacked_batches.load(Ordering::Acquire), 0);
         self.lifecycle.finish(Ok(()));
     }
 
@@ -1381,6 +1402,7 @@ impl AppendSessionTask {
 
         if !has_pending_work {
             // A8c: aborting an idle append session loses nothing, so the close is clean.
+            debug_assert_eq!(self.state.unacked_batches.load(Ordering::Acquire), 0);
             self.lifecycle.finish(Ok(()));
             return;
         }
@@ -1391,20 +1413,31 @@ impl AppendSessionTask {
         ));
 
         for append in self.state.inflight_appends.drain(..) {
-            let outcome = if append.sent_ever {
+            let InflightAppend {
+                ack_tx,
+                _permit,
+                sent_ever,
+                ..
+            } = append;
+            let outcome = if sent_ever {
                 aborted.clone()
             } else {
                 unsent.clone()
             };
-            let _ = append.ack_tx.send(Err(outcome));
+            drop(_permit);
+            self.state.unacked_batches.fetch_sub(1, Ordering::Release);
+            let _ = ack_tx.send(Err(outcome));
         }
 
         for cmd in queued {
-            if let Command::Submit { ack_tx, .. } = cmd {
+            if let Command::Submit { ack_tx, permit, .. } = cmd {
+                drop(permit);
+                self.state.unacked_batches.fetch_sub(1, Ordering::Release);
                 let _ = ack_tx.send(Err(unsent.clone()));
             }
         }
 
+        debug_assert_eq!(self.state.unacked_batches.load(Ordering::Acquire), 0);
         self.lifecycle.finish(Err(aborted));
     }
 
@@ -1461,17 +1494,26 @@ impl AppendSessionTask {
             } else {
                 final_err.clone()
             };
-            let _ = append
-                .ack_tx
-                .send(Err(base.with_prior_uncertainty(append.prior_uncertainty)));
+            let InflightAppend {
+                ack_tx,
+                _permit,
+                prior_uncertainty,
+                ..
+            } = append;
+            drop(_permit);
+            self.state.unacked_batches.fetch_sub(1, Ordering::Release);
+            let _ = ack_tx.send(Err(base.with_prior_uncertainty(prior_uncertainty)));
         }
 
         for cmd in queued {
-            if let Command::Submit { ack_tx, .. } = cmd {
+            if let Command::Submit { ack_tx, permit, .. } = cmd {
+                drop(permit);
+                self.state.unacked_batches.fetch_sub(1, Ordering::Release);
                 let _ = ack_tx.send(Err(closed_err.clone()));
             }
         }
 
+        debug_assert_eq!(self.state.unacked_batches.load(Ordering::Acquire), 0);
         self.lifecycle.finish(Err(session_failure));
     }
 
@@ -2029,14 +2071,20 @@ fn process_proto_ack(
         ));
     }
 
-    let corresponding_append = state
+    let InflightAppend {
+        ack_tx, _permit, ..
+    } = state
         .inflight_appends
         .pop_front()
         .expect("inflight front was checked above");
+    // Release capacity and decrement unacked_batches BEFORE waking the ticket so callers checking
+    // `unacked_bytes()` / `unacked_batches()` immediately after `ticket.await` observe settled
+    // counts without racing.
+    drop(_permit);
     state.unacked_batches.fetch_sub(1, Ordering::Release);
     state.prev_ack_end = Some(ack.end);
 
-    let _ = corresponding_append.ack_tx.send(Ok(ack));
+    let _ = ack_tx.send(Ok(ack));
 
     Ok(())
 }

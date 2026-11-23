@@ -501,3 +501,108 @@ fn error_helpers_debug_and_conversions() {
         Some(AppendSessionError::Protocol(_))
     ));
 }
+
+#[test]
+fn page_next_start_after_cursors_and_deleted_items() {
+    let ts = Timestamp::from_second(1_700_000_000).unwrap();
+
+    // Page<BasinInfo>: advances past deleting last item when has_more = true.
+    let basin_a: BasinName = "basin-aaaa".parse().unwrap();
+    let basin_b: BasinName = "basin-bbbb".parse().unwrap();
+    let basin_page = Page::new(
+        vec![
+            BasinInfo::new(basin_a.clone(), ts),
+            BasinInfo::new(basin_b.clone(), ts).with_deleted_at(ts),
+        ],
+        true,
+    );
+    assert_eq!(
+        basin_page.next_start_after(),
+        Some(BasinNameStartAfter::from(basin_b.clone()))
+    );
+    assert_eq!(
+        Page::new(vec![BasinInfo::new(basin_a, ts)], false).next_start_after(),
+        None
+    );
+    assert_eq!(
+        Page::<BasinInfo>::new(vec![], true).next_start_after(),
+        None
+    );
+
+    // Page<StreamInfo>: advances past deleting last item when has_more = true.
+    let stream_a: StreamName = "stream-a".parse().unwrap();
+    let stream_b: StreamName = "stream-b".parse().unwrap();
+    let stream_page = Page::new(
+        vec![
+            StreamInfo::new(stream_a.clone(), ts),
+            StreamInfo::new(stream_b.clone(), ts).with_deleted_at(ts),
+        ],
+        true,
+    );
+    assert_eq!(
+        stream_page.next_start_after(),
+        Some(StreamNameStartAfter::from(stream_b))
+    );
+    assert_eq!(
+        Page::new(vec![StreamInfo::new(stream_a, ts)], false).next_start_after(),
+        None
+    );
+    assert_eq!(
+        Page::<StreamInfo>::new(vec![], true).next_start_after(),
+        None
+    );
+
+    // Page<AccessTokenInfo>
+    let tok_a: AccessTokenId = "tok-a".parse().unwrap();
+    let tok_b: AccessTokenId = "tok-b".parse().unwrap();
+    let tok_page = Page::new(
+        vec![
+            AccessTokenInfo::new(tok_a.clone(), AccessTokenScope::default()),
+            AccessTokenInfo::new(tok_b.clone(), AccessTokenScope::default()),
+        ],
+        true,
+    );
+    assert_eq!(
+        tok_page.next_start_after(),
+        Some(AccessTokenIdStartAfter::from(tok_b))
+    );
+    assert_eq!(
+        Page::new(
+            vec![AccessTokenInfo::new(tok_a, AccessTokenScope::default())],
+            false
+        )
+        .next_start_after(),
+        None
+    );
+    assert_eq!(
+        Page::<AccessTokenInfo>::new(vec![], true).next_start_after(),
+        None
+    );
+
+    // Page<NetworkPolicyInfo>: uses the policy slug (not full `<slug>.<nonce>` ref).
+    let ref_a: NetworkPolicyRef = "policy-a.aaaaaaaa".parse().unwrap();
+    let ref_b: NetworkPolicyRef = "policy-b.bbbbbbbb".parse().unwrap();
+    let np_page = Page::new(
+        vec![
+            NetworkPolicyInfo::new(ref_a.clone(), ts, NetworkPolicy::new()),
+            NetworkPolicyInfo::new(ref_b.clone(), ts, NetworkPolicy::new()),
+        ],
+        true,
+    );
+    assert_eq!(
+        np_page.next_start_after(),
+        Some(NetworkPolicySlugStartAfter::from(ref_b.slug().clone()))
+    );
+    assert_eq!(
+        Page::new(
+            vec![NetworkPolicyInfo::new(ref_a, ts, NetworkPolicy::new())],
+            false
+        )
+        .next_start_after(),
+        None
+    );
+    assert_eq!(
+        Page::<NetworkPolicyInfo>::new(vec![], true).next_start_after(),
+        None
+    );
+}

@@ -736,6 +736,13 @@ impl RetryConfig {
             ..self
         }
     }
+
+    pub(crate) fn validate(&self) -> Result<(), ValidationError> {
+        if self.min_base_delay > self.max_base_delay {
+            return Err("min_base_delay must not exceed max_base_delay".into());
+        }
+        Ok(())
+    }
 }
 
 /// Overrides for the HTTP/2 transport used by pooled connections.
@@ -1001,10 +1008,7 @@ impl S2Config {
     }
 
     pub(crate) fn validate(&self) -> Result<(), ValidationError> {
-        if self.retry.min_base_delay > self.retry.max_base_delay {
-            return Err("min_base_delay must not exceed max_base_delay".into());
-        }
-        Ok(())
+        self.retry.validate()
     }
 
     #[cfg(feature = "_hidden")]
