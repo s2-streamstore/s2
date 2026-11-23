@@ -335,9 +335,10 @@ async fn read_limits(stream: &S2Stream) -> Result<(), Box<dyn std::error::Error>
         AppendRecord::new("dolor")?,
         AppendRecord::new("sit")?,
     ])?);
-    let r0_bytes = input.records[0].metered_bytes() as u64;
-    let r12_bytes = (input.records[1].metered_bytes() + input.records[2].metered_bytes()) as u64;
-    let total_bytes = input.records.metered_bytes() as u64;
+    let r0_bytes = input.records()[0].metered_bytes() as u64;
+    let r12_bytes =
+        (input.records()[1].metered_bytes() + input.records()[2].metered_bytes()) as u64;
+    let total_bytes = input.metered_bytes() as u64;
 
     let ack = stream.append(input).await?;
     assert_eq!(ack.start.seq_num, 0);
@@ -548,7 +549,7 @@ async fn read_timestamp_bounds(stream: &S2Stream) -> Result<(), Box<dyn std::err
         AppendRecord::new("dolor")?.with_timestamp(base + 2),
         AppendRecord::new("sit")?.with_timestamp(base + 3),
     ])?);
-    let bytes_for_one = (input.records[1].metered_bytes() + 5) as u64;
+    let bytes_for_one = (input.records()[1].metered_bytes() + 5) as u64;
 
     let ack = stream.append(input).await?;
     assert_eq!(ack.start.seq_num, 0);
@@ -949,14 +950,14 @@ async fn basin_default_and_auto_create_stream_config() -> Result<(), Box<dyn std
         .create_stream(CreateStreamInput::new(existing_stream.clone()))
         .await?;
     let inherited = basin.get_stream_config(existing_stream.clone()).await?;
-    assert_matches!(
-        inherited,
-        StreamConfig {
-            storage_class: Some(ref storage_class),
-            retention_policy: Some(RetentionPolicy::Age(7200)),
-            delete_on_empty: Some(ref delete_on_empty),
-            ..
-        } if storage_class == "standard" && delete_on_empty.min_age() == Duration::from_secs(600)
+    assert_eq!(inherited.storage_class(), Some("standard"));
+    assert_eq!(
+        inherited.retention_policy(),
+        Some(&RetentionPolicy::Age(7200))
+    );
+    assert_eq!(
+        inherited.delete_on_empty().map(|d| d.min_age()),
+        Some(Duration::from_secs(600))
     );
 
     let override_config = StreamConfig::new()
@@ -970,14 +971,11 @@ async fn basin_default_and_auto_create_stream_config() -> Result<(), Box<dyn std
         .append_with_stream_config(AppendRecord::new("hello")?, override_config.clone())
         .await?;
     let config = basin.get_stream_config(unary_stream).await?;
-    assert_matches!(
-        config,
-        StreamConfig {
-            storage_class: Some(ref storage_class),
-            retention_policy: Some(RetentionPolicy::Age(3600)),
-            delete_on_empty: Some(ref delete_on_empty),
-            ..
-        } if storage_class == "standard" && delete_on_empty.min_age() == Duration::from_secs(300)
+    assert_eq!(config.storage_class(), Some("standard"));
+    assert_eq!(config.retention_policy(), Some(&RetentionPolicy::Age(3600)));
+    assert_eq!(
+        config.delete_on_empty().map(|d| d.min_age()),
+        Some(Duration::from_secs(300))
     );
 
     // 3. Producer with_stream_config applies override when auto-creating a stream.
@@ -988,13 +986,10 @@ async fn basin_default_and_auto_create_stream_config() -> Result<(), Box<dyn std
     producer.submit(AppendRecord::new("hello")?).await?.await?;
     producer.close().await?;
     let config = basin.get_stream_config(session_stream).await?;
-    assert_matches!(
-        config,
-        StreamConfig {
-            retention_policy: Some(RetentionPolicy::Age(3600)),
-            delete_on_empty: Some(ref delete_on_empty),
-            ..
-        } if delete_on_empty.min_age() == Duration::from_secs(300)
+    assert_eq!(config.retention_policy(), Some(&RetentionPolicy::Age(3600)));
+    assert_eq!(
+        config.delete_on_empty().map(|d| d.min_age()),
+        Some(Duration::from_secs(300))
     );
 
     // 4. append_with_stream_config on an existing stream leaves its config unchanged.
@@ -1004,7 +999,7 @@ async fn basin_default_and_auto_create_stream_config() -> Result<(), Box<dyn std
         .await?;
     let after = basin.get_stream_config(existing_stream).await?;
     assert_eq!(after, inherited);
-    assert_ne!(after.retention_policy, Some(RetentionPolicy::Age(3600)));
+    assert_ne!(after.retention_policy(), Some(&RetentionPolicy::Age(3600)));
 
     // 5. read_session with_stream_config applies override when auto-creating a stream.
     let read_stream = unique_stream_name();
@@ -1025,7 +1020,7 @@ async fn basin_default_and_auto_create_stream_config() -> Result<(), Box<dyn std
     .await
     .expect("read session should connect and create stream")?;
     let config = basin.get_stream_config(read_stream).await?;
-    assert_eq!(config.retention_policy, Some(RetentionPolicy::Age(3600)));
+    assert_eq!(config.retention_policy(), Some(&RetentionPolicy::Age(3600)));
 
     s2.delete_basin(basin_name).await?;
     Ok(())

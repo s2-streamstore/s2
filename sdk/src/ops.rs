@@ -15,6 +15,7 @@ use crate::{
     client,
     error::{
         AppendError, ClientClosedError, ErrorCode, ErrorContext, OpScope, ReadError, RequestError,
+        ValidationError,
     },
     producer::{Producer, ProducerConfig},
     session::{
@@ -24,13 +25,13 @@ use crate::{
     types::{
         AccessTokenId, AccessTokenInfo, AccountMetricSet, AppendAck, AppendInput, BasinConfig,
         BasinInfo, BasinMetricSet, BasinName, BasinReconfiguration, CreateBasinInput,
-        CreateStreamInput, EncryptionKey, EnsureBasinInput, EnsureOutput, EnsureStreamInput,
-        IssueAccessTokenInput, ListAccessTokensInput, ListAllAccessTokensInput, ListAllBasinsInput,
-        ListAllNetworkPoliciesInput, ListAllStreamsInput, ListBasinsInput,
+        CreateNetworkPolicyInput, CreateStreamInput, EncryptionKey, EnsureBasinInput, EnsureOutput,
+        EnsureStreamInput, IssueAccessTokenInput, ListAccessTokensInput, ListAllAccessTokensInput,
+        ListAllBasinsInput, ListAllNetworkPoliciesInput, ListAllStreamsInput, ListBasinsInput,
         ListNetworkPoliciesInput, ListStream, ListStreamsInput, LocationInfo, LocationName, Metric,
-        NetworkPolicy, NetworkPolicyInfo, NetworkPolicySelector, NetworkPolicySlug, Page,
-        ReadBatch, ReadInput, S2Config, StreamConfig, StreamInfo, StreamMetricSet, StreamName,
-        StreamPosition, StreamReconfiguration, ValidationError, request_token,
+        NetworkPolicyInfo, NetworkPolicySelector, Page, ReadBatch, ReadInput, S2Config,
+        StreamConfig, StreamInfo, StreamMetricSet, StreamName, StreamPosition,
+        StreamReconfiguration, request_token,
     },
 };
 
@@ -39,7 +40,7 @@ fn init_error(err: ValidationError, op: &'static str) -> ValidationError {
 }
 
 fn encode_stream_config(config: &StreamConfig) -> HeaderValue {
-    api::config::StreamConfig::from(config.clone()).to_header_value()
+    config.clone().into_api().to_header_value()
 }
 
 fn paginate_list<Item, Cursor, Fetch, Fut, Advance, Keep>(
@@ -173,7 +174,7 @@ impl S2 {
         &self,
         input: ListBasinsInput,
     ) -> Result<Page<BasinInfo>, RequestError> {
-        let req: api::basin::ListBasinsRequest = input.into();
+        let req = input.into_api();
         let response: api::basin::ListBasinsResponse = self
             .base
             .unary(
@@ -182,30 +183,31 @@ impl S2 {
             )
             .send_json()
             .await?;
-        Ok(Page::from_api(response.basins, response.has_more))
+        Ok(Page::from_api(
+            response.basins,
+            response.has_more,
+            BasinInfo::from_api,
+        ))
     }
 
     /// List all basins, paginating automatically.
     pub fn list_all_basins(&self, input: ListAllBasinsInput) -> ListStream<BasinInfo> {
         let s2 = self.clone();
-        let include_deleted = input.include_deleted;
-        let initial = ListBasinsInput::new()
-            .with_prefix(input.prefix)
-            .with_start_after(input.start_after);
+        let (initial, include_deleted) = input.into_parts();
         paginate_list(
             initial,
             move |req| {
                 let s2 = s2.clone();
                 async move { s2.list_basins(req).await }
             },
-            |req, last| req.start_after = last.name.clone().into(),
+            |req, last| req.set_start_after(last.name.clone().into()),
             move |info| include_deleted || info.deleted_at.is_none(),
         )
     }
 
     /// Create a basin.
     pub async fn create_basin(&self, input: CreateBasinInput) -> Result<BasinInfo, RequestError> {
-        let req: api::basin::CreateBasinRequest = input.into();
+        let req = input.into_api();
         let basin_name = req.basin.clone();
         let info: api::basin::BasinInfo = self
             .base
@@ -219,7 +221,7 @@ impl S2 {
             )
             .send_json()
             .await?;
-        Ok(info.into())
+        Ok(BasinInfo::from_api(info))
     }
 
     /// Ensure a basin exists with the specified configuration.
@@ -248,7 +250,7 @@ impl S2 {
             .unary(req, OpScope::basin("ensure_basin", name.as_ref(), false))
             .send_ensure::<api::basin::BasinInfo>()
             .await?;
-        Ok(result.map(BasinInfo::from))
+        Ok(result.map(BasinInfo::from_api))
     }
 
     async fn get_basin_config_raw(
@@ -267,7 +269,9 @@ impl S2 {
 
     /// Get basin configuration.
     pub async fn get_basin_config(&self, name: BasinName) -> Result<BasinConfig, RequestError> {
-        Ok(self.get_basin_config_raw(name).await?.into())
+        Ok(BasinConfig::from_api(
+            self.get_basin_config_raw(name).await?,
+        ))
     }
 
     #[doc(hidden)]
@@ -299,7 +303,7 @@ impl S2 {
         name: BasinName,
         config: BasinReconfiguration,
     ) -> Result<BasinConfig, RequestError> {
-        let req: api::config::BasinReconfiguration = config.into();
+        let req = config.into_api();
         let url = self.uri(basin_path(&name));
         let config: api::config::BasinConfig = self
             .base
@@ -309,14 +313,14 @@ impl S2 {
             )
             .send_json()
             .await?;
-        Ok(config.into())
+        Ok(BasinConfig::from_api(config))
     }
 
     async fn list_access_tokens_raw(
         &self,
         input: ListAccessTokensInput,
     ) -> Result<api::access::ListAccessTokensResponse, RequestError> {
-        let req: api::access::ListAccessTokensRequest = input.into();
+        let req = input.into_api();
         self.base
             .unary(
                 self.base
@@ -337,7 +341,11 @@ impl S2 {
         input: ListAccessTokensInput,
     ) -> Result<Page<AccessTokenInfo>, RequestError> {
         let response = self.list_access_tokens_raw(input).await?;
-        Ok(Page::from_api(response.access_tokens, response.has_more))
+        Ok(Page::from_api(
+            response.access_tokens,
+            response.has_more,
+            AccessTokenInfo::from_api,
+        ))
     }
 
     #[doc(hidden)]
@@ -355,16 +363,14 @@ impl S2 {
         input: ListAllAccessTokensInput,
     ) -> ListStream<AccessTokenInfo> {
         let s2 = self.clone();
-        let initial = ListAccessTokensInput::new()
-            .with_prefix(input.prefix)
-            .with_start_after(input.start_after);
+        let initial = input.into_list_input();
         paginate_list(
             initial,
             move |req| {
                 let s2 = s2.clone();
                 async move { s2.list_access_tokens(req).await }
             },
-            |req, last| req.start_after = last.id.clone().into(),
+            |req, last| req.set_start_after(last.id.clone().into()),
             |_| true,
         )
     }
@@ -374,7 +380,7 @@ impl S2 {
         &self,
         input: IssueAccessTokenInput,
     ) -> Result<String, RequestError> {
-        let req: api::access::IssueAccessTokenRequest = input.into();
+        let req = input.into_api();
         let response: api::access::IssueAccessTokenResponse = self
             .base
             .unary(
@@ -412,7 +418,7 @@ impl S2 {
         &self,
         input: ListNetworkPoliciesInput,
     ) -> Result<Page<NetworkPolicyInfo>, RequestError> {
-        let req: api::network_policy::ListNetworkPoliciesRequest = input.into();
+        let req = input.into_api();
         let response: api::network_policy::ListNetworkPoliciesResponse = self
             .base
             .unary(
@@ -424,7 +430,11 @@ impl S2 {
             )
             .send_json()
             .await?;
-        Ok(Page::from_api(response.network_policies, response.has_more))
+        Ok(Page::from_api(
+            response.network_policies,
+            response.has_more,
+            NetworkPolicyInfo::from_api,
+        ))
     }
 
     /// List all network policies, paginating automatically.
@@ -433,16 +443,14 @@ impl S2 {
         input: ListAllNetworkPoliciesInput,
     ) -> ListStream<NetworkPolicyInfo> {
         let s2 = self.clone();
-        let initial = ListNetworkPoliciesInput::new()
-            .with_prefix(input.prefix)
-            .with_start_after(input.start_after);
+        let initial = input.into_list_input();
         paginate_list(
             initial,
             move |req| {
                 let s2 = s2.clone();
                 async move { s2.list_network_policies(req).await }
             },
-            |req, last| req.start_after = last.id.slug().clone().into(),
+            |req, last| req.set_start_after(last.id.slug().clone().into()),
             |_| true,
         )
     }
@@ -450,13 +458,9 @@ impl S2 {
     /// Create a network policy.
     pub async fn create_network_policy(
         &self,
-        slug: NetworkPolicySlug,
-        policy: NetworkPolicy,
+        input: CreateNetworkPolicyInput,
     ) -> Result<NetworkPolicyInfo, RequestError> {
-        let req = api::network_policy::CreateNetworkPolicyRequest {
-            slug,
-            policy: policy.into(),
-        };
+        let req = input.into_api();
         let response: api::network_policy::NetworkPolicyInfo = self
             .base
             .unary(
@@ -469,14 +473,18 @@ impl S2 {
             .definite_retries_only()
             .send_json()
             .await?;
-        Ok(response.into())
+        Ok(NetworkPolicyInfo::from_api(response))
     }
 
     /// Get a network policy by slug or full reference.
+    ///
+    /// Accepts a [`NetworkPolicySelector`], [`NetworkPolicySlug`](crate::types::NetworkPolicySlug),
+    /// or [`NetworkPolicyRef`](crate::types::NetworkPolicyRef).
     pub async fn get_network_policy(
         &self,
-        selector: NetworkPolicySelector,
+        selector: impl Into<NetworkPolicySelector>,
     ) -> Result<NetworkPolicyInfo, RequestError> {
+        let selector = selector.into();
         let url = self.uri(network_policy_path(&selector));
         let response: api::network_policy::NetworkPolicyInfo = self
             .base
@@ -486,17 +494,21 @@ impl S2 {
             )
             .send_json()
             .await?;
-        Ok(response.into())
+        Ok(NetworkPolicyInfo::from_api(response))
     }
 
     /// Delete a network policy by slug or full reference. It must not be bound to any access
     /// token.
     ///
+    /// Accepts a [`NetworkPolicySelector`], [`NetworkPolicySlug`](crate::types::NetworkPolicySlug),
+    /// or [`NetworkPolicyRef`](crate::types::NetworkPolicyRef).
+    ///
     /// Succeeds if the network policy does not exist.
     pub async fn delete_network_policy(
         &self,
-        selector: NetworkPolicySelector,
+        selector: impl Into<NetworkPolicySelector>,
     ) -> Result<(), RequestError> {
+        let selector = selector.into();
         let url = self.uri(network_policy_path(&selector));
         self.base
             .unary(
@@ -517,7 +529,7 @@ impl S2 {
             )
             .send_json()
             .await?;
-        Ok(response.into_iter().map(Into::into).collect())
+        Ok(response.into_iter().map(LocationInfo::from_api).collect())
     }
 
     /// Get the default location.
@@ -530,7 +542,7 @@ impl S2 {
             )
             .send_json()
             .await?;
-        Ok(response.into())
+        Ok(LocationInfo::from_api(response))
     }
 
     /// Set the default location.
@@ -549,7 +561,7 @@ impl S2 {
             )
             .send_json()
             .await?;
-        Ok(response.into())
+        Ok(LocationInfo::from_api(response))
     }
 
     /// Get account metrics.
@@ -557,7 +569,7 @@ impl S2 {
         &self,
         set: AccountMetricSet,
     ) -> Result<Vec<Metric>, RequestError> {
-        let req: api::metrics::AccountMetricSetRequest = set.into();
+        let req = set.into_api();
         let response: api::metrics::MetricSetResponse = self
             .base
             .unary(
@@ -566,7 +578,7 @@ impl S2 {
             )
             .send_json()
             .await?;
-        Ok(response.values.into_iter().map(Into::into).collect())
+        Ok(response.values.into_iter().map(Metric::from_api).collect())
     }
 
     /// Get basin metrics.
@@ -575,7 +587,7 @@ impl S2 {
         basin: BasinName,
         set: BasinMetricSet,
     ) -> Result<Vec<Metric>, RequestError> {
-        let req: api::metrics::BasinMetricSetRequest = set.into();
+        let req = set.into_api();
         let url = self.uri(format!("v1/metrics/{basin}"));
         let response: api::metrics::MetricSetResponse = self
             .base
@@ -585,7 +597,7 @@ impl S2 {
             )
             .send_json()
             .await?;
-        Ok(response.values.into_iter().map(Into::into).collect())
+        Ok(response.values.into_iter().map(Metric::from_api).collect())
     }
 
     /// Get stream metrics.
@@ -595,7 +607,7 @@ impl S2 {
         stream: StreamName,
         set: StreamMetricSet,
     ) -> Result<Vec<Metric>, RequestError> {
-        let req: api::metrics::StreamMetricSetRequest = set.into();
+        let req = set.into_api();
         let url = self.uri(format!(
             "v1/metrics/{basin}/{}",
             urlencoding::encode(&stream)
@@ -608,7 +620,7 @@ impl S2 {
             )
             .send_json()
             .await?;
-        Ok(response.values.into_iter().map(Into::into).collect())
+        Ok(response.values.into_iter().map(Metric::from_api).collect())
     }
 }
 
@@ -630,6 +642,7 @@ impl fmt::Debug for S2Basin {
 
 impl S2Basin {
     /// Return the name of this basin.
+    #[must_use]
     pub fn name(&self) -> &BasinName {
         &self.client.name
     }
@@ -651,7 +664,7 @@ impl S2Basin {
         &self,
         input: ListStreamsInput,
     ) -> Result<Page<StreamInfo>, RequestError> {
-        let req: api::stream::ListStreamsRequest = input.into();
+        let req = input.into_api();
         let response: api::stream::ListStreamsResponse = self
             .client
             .unary(
@@ -660,23 +673,24 @@ impl S2Basin {
             )
             .send_json()
             .await?;
-        Ok(Page::from_api(response.streams, response.has_more))
+        Ok(Page::from_api(
+            response.streams,
+            response.has_more,
+            StreamInfo::from_api,
+        ))
     }
 
     /// List all streams, paginating automatically.
     pub fn list_all_streams(&self, input: ListAllStreamsInput) -> ListStream<StreamInfo> {
         let basin = self.clone();
-        let include_deleted = input.include_deleted;
-        let initial = ListStreamsInput::new()
-            .with_prefix(input.prefix)
-            .with_start_after(input.start_after);
+        let (initial, include_deleted) = input.into_parts();
         paginate_list(
             initial,
             move |req| {
                 let basin = basin.clone();
                 async move { basin.list_streams(req).await }
             },
-            |req, last| req.start_after = last.name.clone().into(),
+            |req, last| req.set_start_after(last.name.clone().into()),
             move |info| include_deleted || info.deleted_at.is_none(),
         )
     }
@@ -686,7 +700,7 @@ impl S2Basin {
         &self,
         input: CreateStreamInput,
     ) -> Result<StreamInfo, RequestError> {
-        let req: api::stream::CreateStreamRequest = input.into();
+        let req = input.into_api();
         let stream_name = req.stream.clone();
         let info: api::stream::StreamInfo = self
             .client
@@ -701,7 +715,7 @@ impl S2Basin {
             )
             .send_json()
             .await?;
-        Ok(info.into())
+        Ok(StreamInfo::from_api(info))
     }
 
     /// Ensure a stream exists with the specified configuration.
@@ -730,7 +744,7 @@ impl S2Basin {
             .unary(req, self.client.stream_scope("ensure_stream", &name, false))
             .send_ensure::<api::stream::StreamInfo>()
             .await?;
-        Ok(result.map(StreamInfo::from))
+        Ok(result.map(StreamInfo::from_api))
     }
 
     async fn get_stream_config_raw(
@@ -748,7 +762,9 @@ impl S2Basin {
 
     /// Get stream configuration.
     pub async fn get_stream_config(&self, name: StreamName) -> Result<StreamConfig, RequestError> {
-        Ok(self.get_stream_config_raw(name).await?.into())
+        Ok(StreamConfig::from_api(
+            self.get_stream_config_raw(name).await?,
+        ))
     }
 
     #[doc(hidden)]
@@ -779,7 +795,7 @@ impl S2Basin {
         name: StreamName,
         config: StreamReconfiguration,
     ) -> Result<StreamConfig, RequestError> {
-        let req: api::config::StreamReconfiguration = config.into();
+        let req = config.into_api();
         let config: api::config::StreamConfig = self
             .client
             .unary(
@@ -788,7 +804,7 @@ impl S2Basin {
             )
             .send_json()
             .await?;
-        Ok(config.into())
+        Ok(StreamConfig::from_api(config))
     }
 }
 
@@ -814,12 +830,14 @@ impl fmt::Debug for S2Stream {
 
 impl S2Stream {
     /// Return the name of this stream.
+    #[must_use]
     pub fn name(&self) -> &StreamName {
         &self.name
     }
 
     /// Return the name of the basin containing this stream.
-    pub fn basin(&self) -> &BasinName {
+    #[must_use]
+    pub fn basin_name(&self) -> &BasinName {
         &self.client.name
     }
 
@@ -863,7 +881,7 @@ impl S2Stream {
             )
             .send_json_as::<_, ReadError>()
             .await?;
-        Ok(response.tail.into())
+        Ok(StreamPosition::from_api(response.tail))
     }
 
     /// Append records.
@@ -873,7 +891,10 @@ impl S2Stream {
     /// [`CommandRecord`](crate::types::CommandRecord).
     ///
     /// To supply a [`StreamConfig`] to apply if the stream is created on append, use
-    /// [`append_with_stream_config`](Self::append_with_stream_config).
+    /// [`append_with_stream_config`](Self::append_with_stream_config). (`stream_config` is kept
+    /// off [`AppendInput`] because [`AppendInput`] is also submitted to
+    /// [`AppendSession::submit`], where `stream_config` is configured once per session on
+    /// [`AppendSessionConfig`].)
     pub async fn append(&self, input: impl Into<AppendInput>) -> Result<AppendAck, AppendError> {
         self.append_inner(input.into(), None).await
     }
@@ -881,7 +902,9 @@ impl S2Stream {
     /// Append records, supplying a [`StreamConfig`] to apply if the stream is created on append.
     ///
     /// Unset fields inherit the basin's default stream configuration. Ignored if the stream
-    /// already exists.
+    /// already exists. For append sessions and producers, pass `stream_config` on
+    /// [`AppendSessionConfig::with_stream_config`] or [`ProducerConfig::with_stream_config`]
+    /// instead.
     pub async fn append_with_stream_config(
         &self,
         input: impl Into<AppendInput>,
@@ -899,8 +922,8 @@ impl S2Stream {
         use prost::Message as _;
 
         let scope = self.client.stream_scope("append", &self.name, false);
-        let expected_records = input.records.len() as u64;
-        let proto_input: api::stream::proto::AppendInput = input.into();
+        let expected_records = input.records().len() as u64;
+        let proto_input = input.into_proto();
         let req = self
             .client
             .post(stream_records_path(&self.name))
@@ -931,8 +954,10 @@ impl S2Stream {
     }
 
     /// Read records.
-    pub async fn read(&self, input: ReadInput) -> Result<ReadBatch, ReadError> {
-        let (start, end, stream_config) = input.into_api_parts();
+    ///
+    /// Accepts a [`ReadInput`] or a [`ReadStart`](crate::types::ReadStart).
+    pub async fn read(&self, input: impl Into<ReadInput>) -> Result<ReadBatch, ReadError> {
+        let (start, end, stream_config) = input.into().into_api_parts();
         let stream_config = stream_config.as_ref().map(encode_stream_config);
         let scope = self.client.stream_scope("read", &self.name, true);
         let mut builder = self
@@ -963,10 +988,18 @@ impl S2Stream {
             .unary(req, scope)
             .send_proto::<_, ReadError>()
             .await?;
-        Ok(batch.into())
+        Ok(ReadBatch::from_proto(batch))
     }
 
     /// Create an append session for submitting [`AppendInput`]s.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientClosedError`] if [`S2::close`] has already been called.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called outside the context of a Tokio runtime.
     pub fn append_session(
         &self,
         config: AppendSessionConfig,
@@ -981,6 +1014,14 @@ impl S2Stream {
     }
 
     /// Create a producer for submitting individual [`AppendRecord`](crate::types::AppendRecord)s.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientClosedError`] if [`S2::close`] has already been called.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called outside the context of a Tokio runtime.
     pub fn producer(&self, config: ProducerConfig) -> Result<Producer, ClientClosedError> {
         self.ensure_open("producer", false)?;
         Ok(Producer::new(
@@ -994,14 +1035,24 @@ impl S2Stream {
     /// Create a continuous read session yielding individual
     /// [`SequencedRecord`](crate::types::SequencedRecord)s.
     ///
+    /// Accepts a [`ReadInput`] or a [`ReadStart`](crate::types::ReadStart).
     /// Initiates the first request immediately without waiting for a response; request errors
     /// surface through iteration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientClosedError`] if [`S2::close`] has already been called.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called outside the context of a Tokio runtime.
     pub fn read_session(
         &self,
-        input: ReadInput,
+        input: impl Into<ReadInput>,
         config: ReadSessionConfig,
     ) -> Result<ReadSession, ClientClosedError> {
         self.ensure_open("read_session", true)?;
+        let input = input.into();
         let headers = self.headers(input.stream_config());
         Ok(ReadSession::open(
             self.client.clone(),
@@ -1014,14 +1065,24 @@ impl S2Stream {
 
     /// Create a continuous read session yielding whole non-empty [`ReadBatch`]es.
     ///
+    /// Accepts a [`ReadInput`] or a [`ReadStart`](crate::types::ReadStart).
     /// Initiates the first request immediately without waiting for a response; request errors
     /// surface through iteration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientClosedError`] if [`S2::close`] has already been called.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called outside the context of a Tokio runtime.
     pub fn read_batch_session(
         &self,
-        input: ReadInput,
+        input: impl Into<ReadInput>,
         config: ReadSessionConfig,
     ) -> Result<ReadBatchSession, ClientClosedError> {
         self.ensure_open("read_batch_session", true)?;
+        let input = input.into();
         let headers = self.headers(input.stream_config());
         Ok(ReadBatchSession::open(
             self.client.clone(),

@@ -64,13 +64,10 @@ async fn ensure_stream_lifecycle(basin: &SharedS2Basin) -> Result<(), RequestErr
     });
 
     let config = basin.get_stream_config(stream_name.clone()).await?;
-    assert_eq!(config.delete_on_empty, Some(delete_on_empty));
-    assert_matches!(
-        config.timestamping,
-        Some(TimestampingConfig {
-            mode: Some(TimestampingMode::ClientRequire),
-            ..
-        })
+    assert_eq!(config.delete_on_empty(), Some(delete_on_empty));
+    assert_eq!(
+        config.timestamping().and_then(|t| t.mode()),
+        Some(&TimestampingMode::ClientRequire)
     );
 
     let noop = basin
@@ -89,12 +86,9 @@ async fn ensure_stream_lifecycle(basin: &SharedS2Basin) -> Result<(), RequestErr
             .await?;
     assert_matches!(updated, EnsureOutput::Updated(_));
     let updated_config = basin.get_stream_config(stream_name.clone()).await?;
-    assert_matches!(
-        updated_config.timestamping,
-        Some(TimestampingConfig {
-            mode: Some(TimestampingMode::Arrival),
-            ..
-        })
+    assert_eq!(
+        updated_config.timestamping().and_then(|t| t.mode()),
+        Some(&TimestampingMode::Arrival)
     );
 
     basin.delete_stream(stream_name).await?;
@@ -217,19 +211,22 @@ async fn create_stream_configs(basin: &SharedS2Basin) -> Result<(), RequestError
         .create_stream(CreateStreamInput::new(s1.clone()).with_config(full))
         .await?;
     let retrieved = basin.get_stream_config(s1.clone()).await?;
-    assert_matches!(
-        retrieved,
-        StreamConfig {
-            storage_class: Some(ref storage_class),
-            retention_policy: Some(RetentionPolicy::Age(86400)),
-            timestamping: Some(TimestampingConfig {
-                mode: Some(TimestampingMode::ClientRequire),
-                uncapped: Some(true),
-                ..
-            }),
-            delete_on_empty: Some(ref delete_on_empty),
-            ..
-        } if storage_class == "standard" && delete_on_empty.min_age() == Duration::from_secs(3600)
+    assert_eq!(retrieved.storage_class(), Some("standard"));
+    assert_eq!(
+        retrieved.retention_policy(),
+        Some(&RetentionPolicy::Age(86400))
+    );
+    assert_eq!(
+        retrieved.timestamping().and_then(|t| t.mode()),
+        Some(&TimestampingMode::ClientRequire)
+    );
+    assert_eq!(
+        retrieved.timestamping().and_then(|t| t.uncapped()),
+        Some(true)
+    );
+    assert_eq!(
+        retrieved.delete_on_empty().map(|d| d.min_age()),
+        Some(Duration::from_secs(3600))
     );
     basin.delete_stream(s1).await?;
 
@@ -247,13 +244,13 @@ async fn create_stream_configs(basin: &SharedS2Basin) -> Result<(), RequestError
         )
         .await?;
     let retrieved = basin.get_stream_config(s2.clone()).await?;
-    assert_matches!(
-        retrieved.timestamping,
-        Some(TimestampingConfig {
-            mode: Some(TimestampingMode::Arrival),
-            uncapped: Some(false),
-            ..
-        })
+    assert_eq!(
+        retrieved.timestamping().and_then(|t| t.mode()),
+        Some(&TimestampingMode::Arrival)
+    );
+    assert_eq!(
+        retrieved.timestamping().and_then(|t| t.uncapped()),
+        Some(false)
     );
     basin.delete_stream(s2).await?;
 
@@ -266,8 +263,8 @@ async fn create_stream_configs(basin: &SharedS2Basin) -> Result<(), RequestError
         ))
         .await?;
     let retrieved = basin.get_stream_config(s3.clone()).await?;
-    if let Some(ts) = retrieved.timestamping {
-        assert_matches!(ts.mode, Some(TimestampingMode::ClientPrefer) | None);
+    if let Some(ts) = retrieved.timestamping() {
+        assert_matches!(ts.mode(), Some(TimestampingMode::ClientPrefer) | None);
     }
     basin.delete_stream(s3).await?;
 
@@ -283,7 +280,7 @@ async fn create_stream_configs(basin: &SharedS2Basin) -> Result<(), RequestError
         Ok(info) => {
             assert_eq!(info.name, s4);
             let retrieved = basin.get_stream_config(s4.clone()).await?;
-            assert_matches!(retrieved.storage_class.as_deref(), Some("express") | None);
+            assert_matches!(retrieved.storage_class(), Some("express") | None);
             basin.delete_stream(s4).await?;
         }
         Err(err) if is_free_tier_limitation(&err) => {}
@@ -301,7 +298,10 @@ async fn create_stream_configs(basin: &SharedS2Basin) -> Result<(), RequestError
         Ok(info) => {
             assert_eq!(info.name, s5);
             let retrieved = basin.get_stream_config(s5.clone()).await?;
-            assert_matches!(retrieved.retention_policy, Some(RetentionPolicy::Infinite));
+            assert_eq!(
+                retrieved.retention_policy(),
+                Some(&RetentionPolicy::Infinite)
+            );
             basin.delete_stream(s5).await?;
         }
         Err(err) if is_free_tier_limitation(&err) => {}
@@ -336,23 +336,28 @@ async fn reconfigure_stream_configs(basin: &SharedS2Basin) -> Result<(), Request
                 ),
         )
         .await?;
-    assert_matches!(config.storage_class.as_deref(), Some("standard"));
-    assert_matches!(config.retention_policy, Some(RetentionPolicy::Age(3600)));
+    assert_eq!(config.storage_class(), Some("standard"));
+    assert_eq!(config.retention_policy(), Some(&RetentionPolicy::Age(3600)));
     assert_eq!(
-        config.delete_on_empty.map(|d| d.min_age()),
+        config.delete_on_empty().map(|d| d.min_age()),
         Some(Duration::from_secs(3600))
     );
-    let ts = config.timestamping.expect("timestamping should be present");
-    assert_matches!(ts.mode, Some(TimestampingMode::ClientPrefer) | None);
-    assert_eq!(ts.uncapped, Some(true));
+    let ts = config
+        .timestamping()
+        .expect("timestamping should be present");
+    assert_matches!(ts.mode(), Some(TimestampingMode::ClientPrefer) | None);
+    assert_eq!(ts.uncapped(), Some(true));
 
     // Empty reconfiguration leaves existing config untouched.
     let _ = basin
         .reconfigure_stream(stream_name.clone(), StreamReconfiguration::new())
         .await?;
     let retrieved = basin.get_stream_config(stream_name.clone()).await?;
-    assert_matches!(retrieved.storage_class.as_deref(), Some("standard"));
-    assert_matches!(retrieved.retention_policy, Some(RetentionPolicy::Age(3600)));
+    assert_eq!(retrieved.storage_class(), Some("standard"));
+    assert_eq!(
+        retrieved.retention_policy(),
+        Some(&RetentionPolicy::Age(3600))
+    );
 
     // Partial update modifies only timestamping while preserving retention_policy.
     let partial = basin
@@ -365,14 +370,17 @@ async fn reconfigure_stream_configs(basin: &SharedS2Basin) -> Result<(), Request
             ),
         )
         .await?;
-    assert_matches!(partial.retention_policy, Some(RetentionPolicy::Age(3600)));
-    assert_matches!(
-        partial.timestamping,
-        Some(TimestampingConfig {
-            mode: Some(TimestampingMode::Arrival),
-            uncapped: Some(false),
-            ..
-        })
+    assert_eq!(
+        partial.retention_policy(),
+        Some(&RetentionPolicy::Age(3600))
+    );
+    assert_eq!(
+        partial.timestamping().and_then(|t| t.mode()),
+        Some(&TimestampingMode::Arrival)
+    );
+    assert_eq!(
+        partial.timestamping().and_then(|t| t.uncapped()),
+        Some(false)
     );
 
     // Switch mode to ClientRequire and disable delete_on_empty with min_age = 0.
@@ -388,16 +396,13 @@ async fn reconfigure_stream_configs(basin: &SharedS2Basin) -> Result<(), Request
                 ),
         )
         .await?;
-    assert_matches!(
-        updated.timestamping,
-        Some(TimestampingConfig {
-            mode: Some(TimestampingMode::ClientRequire),
-            ..
-        })
+    assert_eq!(
+        updated.timestamping().and_then(|t| t.mode()),
+        Some(&TimestampingMode::ClientRequire)
     );
     assert!(
-        updated.delete_on_empty.is_none()
-            || updated.delete_on_empty == Some(DeleteOnEmptyConfig::new())
+        updated.delete_on_empty().is_none()
+            || updated.delete_on_empty() == Some(DeleteOnEmptyConfig::new())
     );
 
     // Tier-gated reconfigurations: express and infinite retention.
@@ -408,7 +413,7 @@ async fn reconfigure_stream_configs(basin: &SharedS2Basin) -> Result<(), Request
         )
         .await
     {
-        Ok(cfg) => assert_matches!(cfg.storage_class.as_deref(), Some("express") | None),
+        Ok(cfg) => assert_matches!(cfg.storage_class(), Some("express") | None),
         Err(err) if is_free_tier_limitation(&err) => {}
         Err(err) => return Err(err),
     }
@@ -420,7 +425,7 @@ async fn reconfigure_stream_configs(basin: &SharedS2Basin) -> Result<(), Request
         )
         .await
     {
-        Ok(cfg) => assert_matches!(cfg.retention_policy, Some(RetentionPolicy::Infinite)),
+        Ok(cfg) => assert_eq!(cfg.retention_policy(), Some(&RetentionPolicy::Infinite)),
         Err(err) if is_free_tier_limitation(&err) => {}
         Err(err) => return Err(err),
     }

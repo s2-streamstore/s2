@@ -1,6 +1,6 @@
 //! Documentation examples for SDK Overview page.
 //!
-//! Run with: cargo run --example docs_overview
+//! Run with: cargo run -p s2-sdk --example docs_overview
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ANCHOR: create-client

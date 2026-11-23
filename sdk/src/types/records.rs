@@ -3,21 +3,17 @@ use std::{fmt, ops::Deref, str::FromStr, time::Duration};
 use bytes::Bytes;
 use rand::RngExt;
 use s2_api::v1 as api;
-use s2_common::{
-    ValidationError,
-    caps::RECORD_BATCH_MAX,
-    record::{MAX_FENCING_TOKEN_LENGTH, Metered, MeteredSize},
-};
+use s2_common::record::MAX_FENCING_TOKEN_LENGTH;
 
-use super::{StreamConfig, whole_seconds};
-use crate::error::{ErrorContext, ProtocolError};
+use super::{RECORD_BATCH_MAX, StreamConfig, whole_seconds};
+use crate::error::{ErrorContext, ProtocolError, ValidationError};
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 /// Token for fencing appends to a stream.
 ///
 /// **Note:** It must not exceed 36 bytes in length.
 ///
 /// See [`CommandRecord::fence`] and [`AppendInput::fencing_token`].
+#[derive(Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FencingToken(String);
 
 impl FencingToken {
@@ -35,6 +31,10 @@ impl FencingToken {
     }
 
     /// Generate a random alphanumeric fencing token of `n` bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ValidationError`] if `n` exceeds `36`.
     pub fn generate(n: usize) -> Result<Self, ValidationError> {
         Self::validate_len(n)?;
         Ok(Self(
@@ -99,9 +99,9 @@ impl Deref for FencingToken {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
 /// A position in a stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct StreamPosition {
     /// Sequence number assigned by the service.
     pub seq_num: u64,
@@ -114,8 +114,23 @@ impl StreamPosition {
     /// Construct a stream position.
     ///
     /// This is intended for building fixtures in downstream tests.
+    #[must_use]
     pub fn new(seq_num: u64, timestamp: u64) -> Self {
         Self { seq_num, timestamp }
+    }
+
+    pub(crate) fn from_proto(value: api::stream::proto::StreamPosition) -> Self {
+        Self {
+            seq_num: value.seq_num,
+            timestamp: value.timestamp,
+        }
+    }
+
+    pub(crate) fn from_api(value: api::stream::StreamPosition) -> Self {
+        Self {
+            seq_num: value.seq_num,
+            timestamp: value.timestamp,
+        }
     }
 }
 
@@ -125,27 +140,10 @@ impl fmt::Display for StreamPosition {
     }
 }
 
-impl From<api::stream::proto::StreamPosition> for StreamPosition {
-    fn from(value: api::stream::proto::StreamPosition) -> Self {
-        Self {
-            seq_num: value.seq_num,
-            timestamp: value.timestamp,
-        }
-    }
-}
-
-impl From<api::stream::StreamPosition> for StreamPosition {
-    fn from(value: api::stream::StreamPosition) -> Self {
-        Self {
-            seq_num: value.seq_num,
-            timestamp: value.timestamp,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 /// A name-value pair.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+#[must_use]
 pub struct Header {
     /// Name.
     pub name: Bytes,
@@ -161,10 +159,15 @@ impl Header {
             value: value.into(),
         }
     }
-}
 
-impl From<Header> for api::stream::proto::Header {
-    fn from(value: Header) -> Self {
+    pub(crate) fn into_proto(self) -> api::stream::proto::Header {
+        api::stream::proto::Header {
+            name: self.name,
+            value: self.value,
+        }
+    }
+
+    pub(crate) fn from_proto(value: api::stream::proto::Header) -> Self {
         Self {
             name: value.name,
             value: value.value,
@@ -172,18 +175,34 @@ impl From<Header> for api::stream::proto::Header {
     }
 }
 
-impl From<api::stream::proto::Header> for Header {
-    fn from(value: api::stream::proto::Header) -> Self {
-        Self {
-            name: value.name,
-            value: value.value,
-        }
-    }
+/// Metered byte size calculation.
+///
+/// Formula for a record:
+/// ```text
+/// 8 + 2 * len(headers) + sum(len(h.name) + len(h.value) for h in headers) + len(body)
+/// ```
+///
+/// Every record, batch, and input type also exposes an inherent `metered_bytes(&self) -> usize`
+/// method so callers do not need to import this trait for concrete types.
+pub trait MeteredBytes {
+    /// Returns the metered byte size.
+    #[must_use]
+    fn metered_bytes(&self) -> usize;
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[must_use]
+fn record_metered_bytes(headers: &[Header], body: &[u8]) -> usize {
+    let mut total = 8usize.saturating_add(headers.len().saturating_mul(2));
+    for h in headers {
+        total = total
+            .saturating_add(h.name.len())
+            .saturating_add(h.value.len());
+    }
+    total.saturating_add(body.len())
+}
+
 /// A record to append.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[must_use]
 pub struct AppendRecord {
     body: Bytes,
     headers: Vec<Header>,
@@ -204,6 +223,10 @@ impl AppendRecord {
     }
 
     /// Create a new [`AppendRecord`] with the given record body.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ValidationError`] if the record's metered size exceeds `1 MiB`.
     pub fn new(body: impl Into<Bytes>) -> Result<Self, ValidationError> {
         let record = Self {
             body: body.into(),
@@ -213,7 +236,35 @@ impl AppendRecord {
         record.validate()
     }
 
+    /// Return the body of this record.
+    #[must_use]
+    pub fn body(&self) -> &Bytes {
+        &self.body
+    }
+
+    /// Return the headers of this record.
+    #[must_use]
+    pub fn headers(&self) -> &[Header] {
+        &self.headers
+    }
+
+    /// Return the timestamp of this record, if set.
+    #[must_use]
+    pub fn timestamp(&self) -> Option<u64> {
+        self.timestamp
+    }
+
+    /// Return the metered byte size of this record.
+    #[must_use]
+    pub fn metered_bytes(&self) -> usize {
+        record_metered_bytes(&self.headers, &self.body)
+    }
+
     /// Set the headers for this record.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ValidationError`] if the resulting record's metered size exceeds `1 MiB`.
     pub fn with_headers(
         self,
         headers: impl IntoIterator<Item = Header>,
@@ -235,80 +286,46 @@ impl AppendRecord {
         }
     }
 
-    /// Get the body of this record.
-    pub fn body(&self) -> &Bytes {
-        &self.body
-    }
-
-    /// Get the headers of this record.
-    pub fn headers(&self) -> &[Header] {
-        &self.headers
-    }
-
-    /// Get the timestamp of this record.
-    pub fn timestamp(&self) -> Option<u64> {
-        self.timestamp
-    }
-}
-
-impl From<AppendRecord> for api::stream::proto::AppendRecord {
-    fn from(value: AppendRecord) -> Self {
-        Self {
-            timestamp: value.timestamp,
-            headers: value.headers.into_iter().map(Into::into).collect(),
-            body: value.body,
+    pub(crate) fn into_proto(self) -> api::stream::proto::AppendRecord {
+        api::stream::proto::AppendRecord {
+            timestamp: self.timestamp,
+            headers: self.headers.into_iter().map(Header::into_proto).collect(),
+            body: self.body,
         }
     }
 }
 
-/// Metered byte size calculation.
-///
-/// Formula for a record:
-/// ```text
-/// 8 + 2 * len(headers) + sum(len(h.name) + len(h.value) for h in headers) + len(body)
-/// ```
-pub trait MeteredBytes {
-    /// Returns the metered byte size.
-    fn metered_bytes(&self) -> usize;
-}
-
-macro_rules! metered_bytes_impl {
-    ($ty:ty) => {
-        impl MeteredBytes for $ty {
-            fn metered_bytes(&self) -> usize {
-                let mut total = 8usize.saturating_add(self.headers.len().saturating_mul(2));
-                for h in &self.headers {
-                    total = total
-                        .saturating_add(h.name.len())
-                        .saturating_add(h.value.len());
-                }
-                total.saturating_add(self.body.len())
-            }
-        }
-    };
-}
-
-metered_bytes_impl!(AppendRecord);
-
-impl MeteredSize for AppendRecord {
-    fn metered_size(&self) -> usize {
-        self.metered_bytes()
+impl MeteredBytes for AppendRecord {
+    fn metered_bytes(&self) -> usize {
+        Self::metered_bytes(self)
     }
 }
 
-#[derive(Debug, Clone)]
 /// A batch of records to append atomically.
 ///
-/// **Note:** It must contain at least `1` record and no more than `1000`.
-/// The total size of the batch must not exceed `1MiB` in metered bytes.
+/// Must contain at least `1` record and no more than `1000`, with a total metered size not
+/// exceeding `1 MiB`.
 ///
-/// See [`Batcher`](crate::batching::Batcher) for convenient and automatic batching of records
-/// that takes care of the abovementioned constraints.
-pub struct AppendRecordBatch(Metered<Vec<AppendRecord>>);
+/// See [`Batcher`](crate::batching::Batcher) for automatic batching of records that handles these
+/// constraints.
+#[derive(Clone)]
+#[must_use]
+pub struct AppendRecordBatch {
+    records: Vec<AppendRecord>,
+    metered_bytes: usize,
+}
+
+impl fmt::Debug for AppendRecordBatch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("AppendRecordBatch")
+            .field(&self.records)
+            .finish()
+    }
+}
 
 impl PartialEq for AppendRecordBatch {
     fn eq(&self, other: &Self) -> bool {
-        self.0[..] == other.0[..]
+        self.records == other.records
     }
 }
 
@@ -316,9 +333,11 @@ impl Eq for AppendRecordBatch {}
 
 impl From<AppendRecord> for AppendRecordBatch {
     fn from(record: AppendRecord) -> Self {
-        let mut batch = Metered::with_capacity(1);
-        batch.push(Metered::from(record));
-        Self(batch)
+        let metered_bytes = record.metered_bytes();
+        Self {
+            records: vec![record],
+            metered_bytes,
+        }
     }
 }
 
@@ -329,14 +348,22 @@ impl From<CommandRecord> for AppendRecordBatch {
 }
 
 impl AppendRecordBatch {
-    pub(crate) fn from_metered(records: Metered<Vec<AppendRecord>>) -> Self {
+    pub(crate) fn from_parts(records: Vec<AppendRecord>, metered_bytes: usize) -> Self {
         debug_assert!(!records.is_empty());
         debug_assert!(records.len() <= RECORD_BATCH_MAX.count);
-        debug_assert!(records.metered_size() <= RECORD_BATCH_MAX.bytes);
-        Self(records)
+        debug_assert!(metered_bytes <= RECORD_BATCH_MAX.bytes);
+        Self {
+            records,
+            metered_bytes,
+        }
     }
 
     /// Try to create an [`AppendRecordBatch`] from an iterator of records.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ValidationError`] if the iterator is empty, contains more than `1000` records,
+    /// or exceeds `1 MiB` in total metered bytes.
     pub fn try_from_iter<I, R>(iter: I) -> Result<Self, ValidationError>
     where
         I: IntoIterator<Item = R>,
@@ -344,15 +371,17 @@ impl AppendRecordBatch {
     {
         let iter = iter.into_iter();
         let cap = iter.size_hint().0.min(RECORD_BATCH_MAX.count);
-        let mut records = Metered::with_capacity(cap);
+        let mut records = Vec::with_capacity(cap);
+        let mut metered_bytes = 0usize;
 
         for record in iter {
-            records.push(Metered::from(record.into()));
+            let record = record.into();
+            metered_bytes = metered_bytes.saturating_add(record.metered_bytes());
+            records.push(record);
 
-            if records.metered_size() > RECORD_BATCH_MAX.bytes {
+            if metered_bytes > RECORD_BATCH_MAX.bytes {
                 return Err(ValidationError(format!(
-                    "batch size in metered bytes ({}) exceeds {}",
-                    records.metered_size(),
+                    "batch size in metered bytes ({metered_bytes}) exceeds {}",
                     RECORD_BATCH_MAX.bytes
                 )));
             }
@@ -369,7 +398,13 @@ impl AppendRecordBatch {
             return Err(ValidationError("batch is empty".into()));
         }
 
-        Ok(Self::from_metered(records))
+        Ok(Self::from_parts(records, metered_bytes))
+    }
+
+    /// Return the total metered byte size of this batch.
+    #[must_use]
+    pub fn metered_bytes(&self) -> usize {
+        self.metered_bytes
     }
 }
 
@@ -377,13 +412,13 @@ impl Deref for AppendRecordBatch {
     type Target = [AppendRecord];
 
     fn deref(&self) -> &Self::Target {
-        &self.0[..]
+        &self.records
     }
 }
 
 impl MeteredBytes for AppendRecordBatch {
     fn metered_bytes(&self) -> usize {
-        self.0.metered_size()
+        Self::metered_bytes(self)
     }
 }
 
@@ -392,7 +427,7 @@ impl IntoIterator for AppendRecordBatch {
     type IntoIter = std::vec::IntoIter<AppendRecord>;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.0.into_iter()
+        self.records.into_iter()
     }
 }
 
@@ -401,12 +436,12 @@ impl<'a> IntoIterator for &'a AppendRecordBatch {
     type IntoIter = std::slice::Iter<'a, AppendRecord>;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.0.iter()
+        self.records.iter()
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-/// Command to signal an operation.
+/// Command to signal an operation on a stream.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Command {
     /// Fence operation.
     Fence {
@@ -420,32 +455,34 @@ pub enum Command {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-#[must_use]
 /// Command record for signaling operations to the service.
 ///
 /// See [here](https://s2.dev/docs/rest/records/overview#command-records) for more information.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[must_use]
 pub struct CommandRecord {
-    /// Command to signal an operation.
-    pub command: Command,
-    /// Timestamp for this record.
-    pub timestamp: Option<u64>,
+    command: Command,
+    timestamp: Option<u64>,
 }
 
 impl CommandRecord {
     const FENCE: &[u8] = b"fence";
     const TRIM: &[u8] = b"trim";
 
+    /// Create a command record from a [`Command`].
+    pub fn new(command: Command) -> Self {
+        Self {
+            command,
+            timestamp: None,
+        }
+    }
+
     /// Create a fence command record with the given fencing token.
     ///
     /// Fencing is strongly consistent, and subsequent appends that specify a
     /// fencing token will fail if it does not match.
     pub fn fence(fencing_token: FencingToken) -> Self {
-        Self {
-            command: Command::Fence { fencing_token },
-            timestamp: None,
-        }
+        Self::new(Command::Fence { fencing_token })
     }
 
     /// Create a trim command record with the given trim point.
@@ -455,9 +492,28 @@ impl CommandRecord {
     /// Trimming is eventually consistent, and trimmed records may be visible
     /// for a brief period.
     pub fn trim(trim_point: u64) -> Self {
-        Self {
-            command: Command::Trim { trim_point },
-            timestamp: None,
+        Self::new(Command::Trim { trim_point })
+    }
+
+    /// Return the command carried by this record.
+    #[must_use]
+    pub fn command(&self) -> &Command {
+        &self.command
+    }
+
+    /// Return the timestamp of this record, if set.
+    #[must_use]
+    pub fn timestamp(&self) -> Option<u64> {
+        self.timestamp
+    }
+
+    /// Return the metered byte size of this command record.
+    #[must_use]
+    pub fn metered_bytes(&self) -> usize {
+        // 8 (record overhead) + 2 * 1 (one header) + 0 (empty header name) + header value + body
+        match &self.command {
+            Command::Fence { fencing_token } => 10 + Self::FENCE.len() + fencing_token.len(),
+            Command::Trim { .. } => 10 + Self::TRIM.len() + 8,
         }
     }
 
@@ -467,6 +523,18 @@ impl CommandRecord {
             timestamp: Some(timestamp),
             ..self
         }
+    }
+}
+
+impl From<Command> for CommandRecord {
+    fn from(command: Command) -> Self {
+        Self::new(command)
+    }
+}
+
+impl MeteredBytes for CommandRecord {
+    fn metered_bytes(&self) -> usize {
+        Self::metered_bytes(self)
     }
 }
 
@@ -490,34 +558,51 @@ impl From<CommandRecord> for AppendRecord {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-#[must_use]
 /// Input for [`append`](crate::S2Stream::append),
 /// [`append_with_stream_config`](crate::S2Stream::append_with_stream_config), and
 /// [`AppendSession::submit`](crate::append_session::AppendSession::submit).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[must_use]
 pub struct AppendInput {
-    /// Batch of records to append atomically.
-    pub records: AppendRecordBatch,
-    /// Expected sequence number for the first record in the batch.
-    ///
-    /// If unspecified, no matching is performed. If specified and mismatched, the append fails.
-    pub match_seq_num: Option<u64>,
-    /// Fencing token to match against the stream's current fencing token.
-    ///
-    /// If unspecified, no matching is performed. If specified and mismatched,
-    /// the append fails. A stream defaults to `""` as its fencing token.
-    pub fencing_token: Option<FencingToken>,
+    records: AppendRecordBatch,
+    match_seq_num: Option<u64>,
+    fencing_token: Option<FencingToken>,
 }
 
 impl AppendInput {
-    /// Create a new [`AppendInput`] with the given batch of records.
-    pub fn new(records: AppendRecordBatch) -> Self {
+    /// Create a new [`AppendInput`] with the given batch or record.
+    ///
+    /// Accepts an [`AppendRecordBatch`], [`AppendRecord`], or [`CommandRecord`].
+    pub fn new(records: impl Into<AppendRecordBatch>) -> Self {
         Self {
-            records,
+            records: records.into(),
             match_seq_num: None,
             fencing_token: None,
         }
+    }
+
+    /// Return the batch of records to append atomically.
+    #[must_use]
+    pub fn records(&self) -> &AppendRecordBatch {
+        &self.records
+    }
+
+    /// Return the expected sequence number for the first record in the batch, if set.
+    #[must_use]
+    pub fn match_seq_num(&self) -> Option<u64> {
+        self.match_seq_num
+    }
+
+    /// Return the fencing token to match against the stream's current fencing token, if set.
+    #[must_use]
+    pub fn fencing_token(&self) -> Option<&FencingToken> {
+        self.fencing_token.as_ref()
+    }
+
+    /// Return the total metered byte size of the records in this input.
+    #[must_use]
+    pub fn metered_bytes(&self) -> usize {
+        self.records.metered_bytes()
     }
 
     /// Set the expected sequence number for the first record in the batch.
@@ -535,6 +620,24 @@ impl AppendInput {
             ..self
         }
     }
+
+    pub(crate) fn into_proto(self) -> api::stream::proto::AppendInput {
+        api::stream::proto::AppendInput {
+            records: self
+                .records
+                .into_iter()
+                .map(AppendRecord::into_proto)
+                .collect(),
+            match_seq_num: self.match_seq_num,
+            fencing_token: self.fencing_token.map(|t| t.0),
+        }
+    }
+}
+
+impl MeteredBytes for AppendInput {
+    fn metered_bytes(&self) -> usize {
+        Self::metered_bytes(self)
+    }
 }
 
 impl From<AppendRecordBatch> for AppendInput {
@@ -545,29 +648,19 @@ impl From<AppendRecordBatch> for AppendInput {
 
 impl From<AppendRecord> for AppendInput {
     fn from(record: AppendRecord) -> Self {
-        Self::new(AppendRecordBatch::from(record))
+        Self::new(record)
     }
 }
 
 impl From<CommandRecord> for AppendInput {
     fn from(record: CommandRecord) -> Self {
-        Self::new(AppendRecordBatch::from(record))
+        Self::new(record)
     }
 }
 
-impl From<AppendInput> for api::stream::proto::AppendInput {
-    fn from(value: AppendInput) -> Self {
-        Self {
-            records: value.records.into_iter().map(Into::into).collect(),
-            match_seq_num: value.match_seq_num,
-            fencing_token: value.fencing_token.map(|t| t.0),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 /// Acknowledgement for an [`AppendInput`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct AppendAck {
     /// Sequence number and timestamp of the first record that was appended.
     pub start: StreamPosition,
@@ -588,6 +681,7 @@ impl AppendAck {
     /// Construct an append acknowledgement.
     ///
     /// This is intended for building fixtures in downstream tests.
+    #[must_use]
     pub fn new(start: StreamPosition, end: StreamPosition, tail: StreamPosition) -> Self {
         Self { start, end, tail }
     }
@@ -597,20 +691,15 @@ impl AppendAck {
         expected_records: u64,
         context: ErrorContext,
     ) -> Result<Self, ProtocolError> {
-        let start: StreamPosition = value
-            .start
-            .ok_or_else(|| {
-                ProtocolError::new("append ack missing start position", context.clone())
-            })?
-            .into();
-        let end: StreamPosition = value
-            .end
-            .ok_or_else(|| ProtocolError::new("append ack missing end position", context.clone()))?
-            .into();
-        let tail: StreamPosition = value
-            .tail
-            .ok_or_else(|| ProtocolError::new("append ack missing tail position", context.clone()))?
-            .into();
+        let start = StreamPosition::from_proto(value.start.ok_or_else(|| {
+            ProtocolError::new("append ack missing start position", context.clone())
+        })?);
+        let end = StreamPosition::from_proto(value.end.ok_or_else(|| {
+            ProtocolError::new("append ack missing end position", context.clone())
+        })?);
+        let tail = StreamPosition::from_proto(value.tail.ok_or_else(|| {
+            ProtocolError::new("append ack missing tail position", context.clone())
+        })?);
         let ack = Self { start, end, tail };
         ack.validate_record_count(expected_records, &context)?;
         Ok(ack)
@@ -639,8 +728,8 @@ impl AppendAck {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Starting position for reading from a stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ReadStart {
     /// Read from this sequence number.
     SeqNum(u64),
@@ -650,10 +739,10 @@ pub enum ReadStart {
     TailOffset(u64),
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-#[must_use]
 /// Input for [`read`](crate::S2Stream::read), [`read_session`](crate::S2Stream::read_session),
 /// and [`read_batch_session`](crate::S2Stream::read_batch_session) operations.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[must_use]
 pub struct ReadInput {
     start: Option<ReadStart>,
     clamp: bool,
@@ -677,36 +766,43 @@ impl ReadInput {
     }
 
     /// Return the starting position, if specified (otherwise begins at the tail).
+    #[must_use]
     pub fn start(&self) -> Option<ReadStart> {
         self.start
     }
 
     /// Return whether to start from the tail if the requested starting position is beyond it.
+    #[must_use]
     pub fn clamp(&self) -> bool {
         self.clamp
     }
 
     /// Return the limit on number of records, if set.
+    #[must_use]
     pub fn count(&self) -> Option<u64> {
         self.count
     }
 
     /// Return the limit on total metered bytes of records, if set.
+    #[must_use]
     pub fn bytes(&self) -> Option<u64> {
         self.bytes
     }
 
     /// Return the exclusive stop timestamp, if set.
+    #[must_use]
     pub fn until(&self) -> Option<u64> {
         self.until
     }
 
     /// Return the duration to wait for new records before stopping, if set.
+    #[must_use]
     pub fn wait(&self) -> Option<Duration> {
         self.wait_secs.map(|s| Duration::from_secs(u64::from(s)))
     }
 
     /// Return the stream configuration to apply if the stream is created on read, if set.
+    #[must_use]
     pub fn stream_config(&self) -> Option<&StreamConfig> {
         self.stream_config.as_ref()
     }
@@ -824,9 +920,9 @@ impl ReadInput {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 /// Record that is durably sequenced on a stream.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct SequencedRecord {
     /// Sequence number assigned to this record.
     pub seq_num: u64,
@@ -842,6 +938,7 @@ impl SequencedRecord {
     /// Construct a sequenced record.
     ///
     /// This is intended for building fixtures in downstream tests.
+    #[must_use]
     pub fn new(seq_num: u64, body: impl Into<Bytes>, headers: Vec<Header>, timestamp: u64) -> Self {
         Self {
             seq_num,
@@ -851,29 +948,65 @@ impl SequencedRecord {
         }
     }
 
-    /// Whether this is a command record.
+    /// Whether this is a command record (exactly one header with an empty name).
+    #[must_use]
     pub fn is_command_record(&self) -> bool {
-        self.headers.len() == 1 && *self.headers[0].name == *b""
+        self.headers.len() == 1 && self.headers[0].name.is_empty()
     }
-}
 
-impl From<api::stream::proto::SequencedRecord> for SequencedRecord {
-    fn from(value: api::stream::proto::SequencedRecord) -> Self {
+    /// Decode this record as a recognized [`Command`] (`fence` or `trim`), if applicable.
+    ///
+    /// Returns `None` for regular records, unrecognized future command types, or malformed
+    /// command payloads. Use [`is_command_record`](Self::is_command_record) to distinguish any
+    /// command record (including unrecognized future commands) from regular data records.
+    #[must_use]
+    pub fn command(&self) -> Option<Command> {
+        if !self.is_command_record() {
+            return None;
+        }
+        match self.headers[0].value.as_ref() {
+            CommandRecord::FENCE => {
+                let token = std::str::from_utf8(&self.body).ok()?;
+                Some(Command::Fence {
+                    fencing_token: FencingToken::from_server(token.to_owned()),
+                })
+            }
+            CommandRecord::TRIM => {
+                let bytes: [u8; 8] = self.body.as_ref().try_into().ok()?;
+                Some(Command::Trim {
+                    trim_point: u64::from_be_bytes(bytes),
+                })
+            }
+            _ => None,
+        }
+    }
+
+    /// Return the metered byte size of this record.
+    #[must_use]
+    pub fn metered_bytes(&self) -> usize {
+        record_metered_bytes(&self.headers, &self.body)
+    }
+
+    pub(crate) fn from_proto(value: api::stream::proto::SequencedRecord) -> Self {
         Self {
             seq_num: value.seq_num,
             body: value.body,
-            headers: value.headers.into_iter().map(Into::into).collect(),
+            headers: value.headers.into_iter().map(Header::from_proto).collect(),
             timestamp: value.timestamp,
         }
     }
 }
 
-metered_bytes_impl!(SequencedRecord);
+impl MeteredBytes for SequencedRecord {
+    fn metered_bytes(&self) -> usize {
+        Self::metered_bytes(self)
+    }
+}
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 /// Batch of records returned by [`read`](crate::S2Stream::read) or streamed by
 /// [`read_batch_session`](crate::S2Stream::read_batch_session).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ReadBatch {
     /// Records that are durably sequenced on the stream.
     ///
@@ -891,16 +1024,33 @@ impl ReadBatch {
     /// Construct a read batch.
     ///
     /// This is intended for building fixtures in downstream tests.
+    #[must_use]
     pub fn new(records: Vec<SequencedRecord>, tail: Option<StreamPosition>) -> Self {
         Self { records, tail }
     }
+
+    /// Return the sum of metered byte sizes across all records in this batch.
+    #[must_use]
+    pub fn metered_bytes(&self) -> usize {
+        self.records
+            .iter()
+            .fold(0usize, |acc, r| acc.saturating_add(r.metered_bytes()))
+    }
+
+    pub(crate) fn from_proto(batch: api::stream::proto::ReadBatch) -> Self {
+        Self {
+            records: batch
+                .records
+                .into_iter()
+                .map(SequencedRecord::from_proto)
+                .collect(),
+            tail: batch.tail.map(StreamPosition::from_proto),
+        }
+    }
 }
 
-impl From<api::stream::proto::ReadBatch> for ReadBatch {
-    fn from(batch: api::stream::proto::ReadBatch) -> Self {
-        Self {
-            records: batch.records.into_iter().map(Into::into).collect(),
-            tail: batch.tail.map(Into::into),
-        }
+impl MeteredBytes for ReadBatch {
+    fn metered_bytes(&self) -> usize {
+        Self::metered_bytes(self)
     }
 }

@@ -53,7 +53,7 @@ async fn spec_r2_r3_r4_unary_read_stop_options_empty_batch_416_and_check_tail() 
     })
     .await;
 
-    let key = EncryptionKey::new([0x11u8; 32]).unwrap();
+    let key = EncryptionKey::from_bytes(&[0x11u8; 32]).unwrap();
     let stream = server.stream(no_retry_config()).with_encryption_key(key);
 
     // R4 + C4: check_tail returns tail position and omits s2-encryption-key / s2-stream-config.

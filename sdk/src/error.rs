@@ -1,8 +1,10 @@
 //! Errors returned by the SDK.
 //!
-//! Every operation returns the narrowest error enum for its surface ([`RequestError`],
-//! [`ReadError`], [`AppendError`], [`AppendSessionError`], or [`ReadSessionError`]), and every
-//! operation error converts into the catch-all [`S2Error`] base type.
+//! Client construction (`S2::new`, `S2::from_env`) returns [`ValidationError`], and synchronous
+//! session openers (`append_session`, `producer`, `read_session`, `read_batch_session`) return
+//! [`ClientClosedError`]. Every other operation returns the narrowest error enum for its surface
+//! ([`RequestError`], [`ReadError`], [`AppendError`], [`AppendSessionError`], or
+//! [`ReadSessionError`]), and every operation error converts into the catch-all [`S2Error`].
 //!
 //! Every error exposes [`is_retryable`](S2Error::is_retryable) (whether repeating the operation may
 //! succeed) and [`has_no_side_effects`](S2Error::has_no_side_effects) (whether the failed attempt
@@ -13,6 +15,7 @@ use std::{fmt, sync::Arc};
 pub use http::StatusCode;
 pub use s2_api::v1::error::ErrorCode;
 use s2_api::v1::stream::{TailResponse, s2s::TerminalMessage};
+/// Input or configuration validation error.
 pub use s2_common::ValidationError;
 
 use crate::{
@@ -188,6 +191,33 @@ impl ErrorContext {
             write!(f, "{detail}")
         }
     }
+
+    pub(crate) fn format_validation(&self, detail: impl fmt::Display) -> ValidationError {
+        struct ContextDisplay<'a, D>(&'a ErrorContext, D);
+        impl<D: fmt::Display> fmt::Display for ContextDisplay<'_, D> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                self.0.format_with(f, &self.1)
+            }
+        }
+        ValidationError(ContextDisplay(self, detail).to_string())
+    }
+
+    fn debug_fields(&self, ds: &mut fmt::DebugStruct<'_, '_>) {
+        if let Some(inner) = self.0.as_deref() {
+            if let Some(op) = inner.operation {
+                ds.field("operation", &op);
+            }
+            if let Some(basin) = inner.basin.as_deref() {
+                ds.field("basin", &basin);
+            }
+            if let Some(stream) = inner.stream.as_deref() {
+                ds.field("stream", &stream);
+            }
+            if inner.attempts > 1 {
+                ds.field("attempts", &inner.attempts);
+            }
+        }
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -203,7 +233,7 @@ struct AppendConditionFailedBody {
 }
 
 /// An error returned by an S2 server (or any non-2xx HTTP response).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[non_exhaustive]
 pub struct ServerError {
     /// HTTP status returned by the server.
@@ -216,7 +246,38 @@ pub struct ServerError {
     pub(crate) context: ErrorContext,
 }
 
+impl fmt::Debug for ServerError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut ds = f.debug_struct("ServerError");
+        ds.field("status", &self.status)
+            .field("code", &self.code)
+            .field("message", &self.message);
+        self.context.debug_fields(&mut ds);
+        ds.finish()
+    }
+}
+
 impl ServerError {
+    /// Construct a [`ServerError`] with the given HTTP status and message.
+    ///
+    /// This is intended for building fixtures in downstream tests.
+    #[must_use]
+    pub fn new(status: StatusCode, message: impl Into<String>) -> Self {
+        Self {
+            status,
+            code: None,
+            message: message.into(),
+            context: ErrorContext::default(),
+        }
+    }
+
+    /// Attach a structured server error code to this error.
+    #[must_use]
+    pub fn with_code(mut self, code: impl Into<String>) -> Self {
+        self.code = Some(code.into());
+        self
+    }
+
     pub(crate) fn from_response(status: StatusCode, body: &[u8], context: ErrorContext) -> Self {
         if let Ok(parsed) = serde_json::from_slice::<ServerErrorBody>(body) {
             return Self {
@@ -267,6 +328,7 @@ impl ServerError {
     ///
     /// The raw [`code`](Self::code) remains available so callers can preserve and report codes
     /// introduced by newer servers or returned with unexpected statuses.
+    #[must_use]
     pub fn known_code(&self) -> Option<ErrorCode> {
         self.code
             .as_deref()
@@ -274,7 +336,15 @@ impl ServerError {
             .filter(|known| known.status() == self.status)
     }
 
+    /// Whether this server error has the given recognized [`ErrorCode`] (paired with its defined
+    /// HTTP status).
+    #[must_use]
+    pub fn has_error_code(&self, code: ErrorCode) -> bool {
+        self.known_code() == Some(code)
+    }
+
     /// Whether retrying the request may succeed.
+    #[must_use]
     pub fn is_retryable(&self) -> bool {
         if self.status == StatusCode::PRECONDITION_FAILED {
             return false;
@@ -294,6 +364,7 @@ impl ServerError {
     }
 
     /// Whether the failed attempt certainly had no side effects.
+    #[must_use]
     pub fn has_no_side_effects(&self) -> bool {
         self.context.is_read_only()
             || self.status == StatusCode::PRECONDITION_FAILED
@@ -303,15 +374,15 @@ impl ServerError {
     }
 
     pub(crate) fn is_authentication_error(&self) -> bool {
-        self.known_code() == Some(ErrorCode::Authn)
+        self.has_error_code(ErrorCode::Authn)
     }
 
     pub(crate) fn is_server_draining(&self) -> bool {
-        self.known_code() == Some(ErrorCode::ServerDraining)
+        self.has_error_code(ErrorCode::ServerDraining)
     }
 
     pub(crate) fn is_hot_server(&self) -> bool {
-        self.known_code() == Some(ErrorCode::HotServer)
+        self.has_error_code(ErrorCode::HotServer)
     }
 
     pub(crate) fn should_retire_connection(&self) -> bool {
@@ -351,34 +422,36 @@ impl std::error::Error for ServerError {}
 pub struct SeqNumMismatchError {
     /// The sequence number the stream will assign next.
     pub assignable_seq_num: u64,
-    /// Underlying HTTP `412` server error.
-    pub server: ServerError,
+    server: Box<ServerError>,
 }
 
 impl SeqNumMismatchError {
     pub(crate) fn new(assignable_seq_num: u64, server: ServerError) -> Self {
         Self {
             assignable_seq_num,
-            server,
+            server: Box::new(server),
         }
     }
 
     pub(crate) fn with_context(mut self, context: &ErrorContext) -> Self {
-        self.server = self.server.with_context(context);
+        *self.server = (*self.server).with_context(context);
         self
     }
 
-    /// Return the underlying [`ServerError`].
+    /// Return the underlying HTTP `412` [`ServerError`].
+    #[must_use]
     pub fn server_error(&self) -> &ServerError {
         &self.server
     }
 
     /// Whether retrying the request may succeed (always `false`).
+    #[must_use]
     pub fn is_retryable(&self) -> bool {
         false
     }
 
     /// Whether the failed attempt certainly had no side effects (always `true`).
+    #[must_use]
     pub fn has_no_side_effects(&self) -> bool {
         true
     }
@@ -405,34 +478,36 @@ impl std::error::Error for SeqNumMismatchError {}
 pub struct FencingTokenMismatchError {
     /// The stream's current fencing token.
     pub current_fencing_token: FencingToken,
-    /// Underlying HTTP `412` server error.
-    pub server: ServerError,
+    server: Box<ServerError>,
 }
 
 impl FencingTokenMismatchError {
     pub(crate) fn new(current_fencing_token: FencingToken, server: ServerError) -> Self {
         Self {
             current_fencing_token,
-            server,
+            server: Box::new(server),
         }
     }
 
     pub(crate) fn with_context(mut self, context: &ErrorContext) -> Self {
-        self.server = self.server.with_context(context);
+        *self.server = (*self.server).with_context(context);
         self
     }
 
-    /// Return the underlying [`ServerError`].
+    /// Return the underlying HTTP `412` [`ServerError`].
+    #[must_use]
     pub fn server_error(&self) -> &ServerError {
         &self.server
     }
 
     /// Whether retrying the request may succeed (always `false`).
+    #[must_use]
     pub fn is_retryable(&self) -> bool {
         false
     }
 
     /// Whether the failed attempt certainly had no side effects (always `true`).
+    #[must_use]
     pub fn has_no_side_effects(&self) -> bool {
         true
     }
@@ -458,34 +533,36 @@ impl std::error::Error for FencingTokenMismatchError {}
 pub struct ReadUnwrittenError {
     /// The stream's current tail position.
     pub tail: StreamPosition,
-    /// Underlying HTTP `416` server error.
-    pub server: ServerError,
+    server: Box<ServerError>,
 }
 
 impl ReadUnwrittenError {
     pub(crate) fn new(tail: StreamPosition, server: ServerError) -> Self {
         Self {
             tail,
-            server: server.into_read_only(),
+            server: Box::new(server.into_read_only()),
         }
     }
 
     pub(crate) fn with_context(mut self, context: &ErrorContext) -> Self {
-        self.server = self.server.with_context(context).into_read_only();
+        *self.server = (*self.server).with_context(context).into_read_only();
         self
     }
 
-    /// Return the underlying [`ServerError`].
+    /// Return the underlying HTTP `416` [`ServerError`].
+    #[must_use]
     pub fn server_error(&self) -> &ServerError {
         &self.server
     }
 
     /// Whether retrying the request may succeed (always `false`).
+    #[must_use]
     pub fn is_retryable(&self) -> bool {
         false
     }
 
     /// Whether the failed attempt certainly had no side effects (always `true`).
+    #[must_use]
     pub fn has_no_side_effects(&self) -> bool {
         true
     }
@@ -512,16 +589,29 @@ macro_rules! define_message_error {
             retryable_doc: $retryable_doc:literal,
             no_side_effects: |$self_ident:ident| $no_side_effects:expr,
             no_side_effects_doc: $no_side_effects_doc:literal,
+            debug_no_side_effects: $debug_nse:expr,
             $(into_read_only: $into_ro:ident,)?
         }
     ) => {
         $(#[$meta])*
-        #[derive(Debug, Clone)]
+        #[derive(Clone)]
         #[non_exhaustive]
         pub struct $name {
             #[doc = $field_doc]
             pub message: String,
             pub(crate) context: ErrorContext,
+        }
+
+        impl fmt::Debug for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                let mut ds = f.debug_struct(stringify!($name));
+                ds.field("message", &self.message);
+                if $debug_nse {
+                    ds.field("has_no_side_effects", &self.has_no_side_effects());
+                }
+                self.context.debug_fields(&mut ds);
+                ds.finish()
+            }
         }
 
         impl $name {
@@ -545,11 +635,13 @@ macro_rules! define_message_error {
             )?
 
             #[doc = $retryable_doc]
+            #[must_use]
             pub fn is_retryable(&self) -> bool {
                 $retryable
             }
 
             #[doc = $no_side_effects_doc]
+            #[must_use]
             pub fn has_no_side_effects(&self) -> bool {
                 let $self_ident = self;
                 $no_side_effects
@@ -576,17 +668,28 @@ define_message_error! {
         retryable_doc: "Whether retrying the request may succeed (always `true`).",
         no_side_effects: |_this| true,
         no_side_effects_doc: "Whether the failed attempt certainly had no side effects (always `true`).",
+        debug_no_side_effects: false,
     }
 }
 
 /// A request or connection broke, or a response ended prematurely.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[non_exhaustive]
 pub struct ConnectionLostError {
     /// Diagnostic detail describing the transport failure.
     pub message: String,
     pub(crate) no_side_effects: bool,
     pub(crate) context: ErrorContext,
+}
+
+impl fmt::Debug for ConnectionLostError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut ds = f.debug_struct("ConnectionLostError");
+        ds.field("message", &self.message)
+            .field("has_no_side_effects", &self.has_no_side_effects());
+        self.context.debug_fields(&mut ds);
+        ds.finish()
+    }
 }
 
 impl ConnectionLostError {
@@ -613,6 +716,7 @@ impl ConnectionLostError {
     }
 
     /// Whether retrying the request may succeed (always `true`).
+    #[must_use]
     pub fn is_retryable(&self) -> bool {
         true
     }
@@ -621,6 +725,7 @@ impl ConnectionLostError {
     ///
     /// True for read-only operations, when nothing unacked was sent before the connection broke,
     /// or when the server reported the stream unprocessed (such as HTTP/2 `REFUSED_STREAM`).
+    #[must_use]
     pub fn has_no_side_effects(&self) -> bool {
         self.no_side_effects || self.context.is_read_only()
     }
@@ -644,27 +749,94 @@ define_message_error! {
         retryable_doc: "Whether retrying the request may succeed (always `true`).",
         no_side_effects: |this| this.context.is_read_only(),
         no_side_effects_doc: "Whether the failed attempt certainly had no side effects.",
+        debug_no_side_effects: true,
         into_read_only: into_read_only,
     }
 }
 
-define_message_error! {
-    /// A successful response or session message could not be decoded or violated an SDK check.
-    pub struct ProtocolError {
-        field_doc: "Diagnostic detail describing the protocol failure.",
-        prefix: "protocol",
-        retryable: false,
-        retryable_doc: "Whether retrying the request may succeed (always `false`).",
-        no_side_effects: |this| this.context.is_read_only(),
-        no_side_effects_doc: "Whether the failed attempt certainly had no side effects.",
-        into_read_only: into_read_only,
+/// A successful response or session message could not be decoded or violated an SDK check.
+#[derive(Clone)]
+#[non_exhaustive]
+pub struct ProtocolError {
+    /// Diagnostic detail describing the protocol failure.
+    pub message: String,
+    pub(crate) no_side_effects: bool,
+    pub(crate) context: ErrorContext,
+}
+
+impl fmt::Debug for ProtocolError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut ds = f.debug_struct("ProtocolError");
+        ds.field("message", &self.message)
+            .field("has_no_side_effects", &self.has_no_side_effects());
+        self.context.debug_fields(&mut ds);
+        ds.finish()
     }
 }
+
+impl ProtocolError {
+    pub(crate) fn new(message: impl Into<String>, context: ErrorContext) -> Self {
+        Self {
+            message: message.into(),
+            no_side_effects: false,
+            context,
+        }
+    }
+
+    /// Construct a protocol error that occurred strictly before any bytes could be sent
+    /// (such as local frame encoding on `submit()`), guaranteeing no side effects (`Terms`/`E3`).
+    pub(crate) fn new_definite(message: impl Into<String>, context: ErrorContext) -> Self {
+        Self {
+            message: message.into(),
+            no_side_effects: true,
+            context,
+        }
+    }
+
+    pub(crate) fn with_context(mut self, context: &ErrorContext) -> Self {
+        self.context.merge_missing(context);
+        self
+    }
+
+    pub(crate) fn into_read_only(mut self) -> Self {
+        self.context.set_read_only();
+        self
+    }
+
+    /// Whether retrying the request may succeed (always `false`).
+    #[must_use]
+    pub fn is_retryable(&self) -> bool {
+        false
+    }
+
+    /// Whether the failed attempt certainly had no side effects.
+    #[must_use]
+    pub fn has_no_side_effects(&self) -> bool {
+        self.no_side_effects || self.context.is_read_only()
+    }
+}
+
+impl fmt::Display for ProtocolError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.context
+            .format_with(f, format_args!("protocol: {}", self.message))
+    }
+}
+
+impl std::error::Error for ProtocolError {}
 
 /// A call was made on a client after `close()`.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ClientClosedError {
     pub(crate) context: ErrorContext,
+}
+
+impl fmt::Debug for ClientClosedError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut ds = f.debug_struct("ClientClosedError");
+        self.context.debug_fields(&mut ds);
+        ds.finish()
+    }
 }
 
 impl ClientClosedError {
@@ -678,11 +850,13 @@ impl ClientClosedError {
     }
 
     /// Whether retrying the request may succeed (always `false`).
+    #[must_use]
     pub fn is_retryable(&self) -> bool {
         false
     }
 
     /// Whether the failed attempt certainly had no side effects (always `true`).
+    #[must_use]
     pub fn has_no_side_effects(&self) -> bool {
         true
     }
@@ -706,6 +880,7 @@ define_message_error! {
         retryable_doc: "Whether retrying the request may succeed (always `false`).",
         no_side_effects: |this| this.context.is_read_only(),
         no_side_effects_doc: "Whether the failed attempt certainly had no side effects.",
+        debug_no_side_effects: true,
         into_read_only: into_read_only,
     }
 }
@@ -725,11 +900,19 @@ impl<E> IndefiniteAppendError<E> {
     }
 
     /// Return the definite error returned by the final attempt.
+    #[must_use]
     pub fn final_attempt_error(&self) -> &E {
         &self.final_attempt_error
     }
 
+    /// Consume this wrapper and return the definite error returned by the final attempt.
+    #[must_use]
+    pub fn into_final_attempt_error(self) -> E {
+        *self.final_attempt_error
+    }
+
     /// Whether the append certainly had no side effects (always `false`).
+    #[must_use]
     pub fn has_no_side_effects(&self) -> bool {
         false
     }
@@ -746,6 +929,7 @@ macro_rules! impl_indefinite_is_retryable {
         $(
             impl IndefiniteAppendError<$ty> {
                 /// Whether retrying the underlying error may succeed.
+                #[must_use]
                 pub fn is_retryable(&self) -> bool {
                     self.final_attempt_error.is_retryable()
                 }
@@ -755,6 +939,24 @@ macro_rules! impl_indefinite_is_retryable {
 }
 
 impl_indefinite_is_retryable!(AppendError, AppendSessionError, S2Error);
+
+impl From<IndefiniteAppendError<AppendError>> for S2Error {
+    fn from(error: IndefiniteAppendError<AppendError>) -> Self {
+        Self::IndefiniteAppend(error.map(S2Error::from))
+    }
+}
+
+impl From<IndefiniteAppendError<AppendSessionError>> for S2Error {
+    fn from(error: IndefiniteAppendError<AppendSessionError>) -> Self {
+        Self::IndefiniteAppend(error.map(S2Error::from))
+    }
+}
+
+impl From<IndefiniteAppendError<AppendError>> for AppendSessionError {
+    fn from(error: IndefiniteAppendError<AppendError>) -> Self {
+        Self::IndefiniteAppend(error.map(AppendSessionError::from))
+    }
+}
 
 impl<E: fmt::Display> fmt::Display for IndefiniteAppendError<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -773,10 +975,19 @@ impl<E: std::error::Error + 'static> std::error::Error for IndefiniteAppendError
 }
 
 /// A session closed or began closing before handling the requested operation.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SessionClosedError<E> {
     failure: Option<Box<E>>,
     pub(crate) context: ErrorContext,
+}
+
+impl<E: fmt::Debug> fmt::Debug for SessionClosedError<E> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut ds = f.debug_struct("SessionClosedError");
+        ds.field("failure", &self.failure);
+        self.context.debug_fields(&mut ds);
+        ds.finish()
+    }
 }
 
 impl<E> SessionClosedError<E> {
@@ -788,16 +999,25 @@ impl<E> SessionClosedError<E> {
     }
 
     /// Return the session's failure, if it closed due to an error.
+    #[must_use]
     pub fn failure(&self) -> Option<&E> {
         self.failure.as_deref()
     }
 
+    /// Consume this wrapper and return the session's failure, if any.
+    #[must_use]
+    pub fn into_failure(self) -> Option<E> {
+        self.failure.map(|e| *e)
+    }
+
     /// Whether retrying the operation on this closed session may succeed (always `false`).
+    #[must_use]
     pub fn is_retryable(&self) -> bool {
         false
     }
 
     /// Whether the rejected call certainly had no side effects (always `true`).
+    #[must_use]
     pub fn has_no_side_effects(&self) -> bool {
         true
     }
@@ -807,6 +1027,18 @@ impl<E> SessionClosedError<E> {
             failure: self.failure.map(|e| Box::new(f(*e))),
             context: self.context,
         }
+    }
+}
+
+impl From<SessionClosedError<AppendSessionError>> for S2Error {
+    fn from(error: SessionClosedError<AppendSessionError>) -> Self {
+        Self::SessionClosed(error.map(S2Error::from))
+    }
+}
+
+impl From<SessionClosedError<ReadSessionError>> for S2Error {
+    fn from(error: SessionClosedError<ReadSessionError>) -> Self {
+        Self::SessionClosed(error.map(S2Error::from))
     }
 }
 
@@ -922,6 +1154,7 @@ pub enum S2Error {
 
 impl S2Error {
     /// Whether retrying the operation may succeed.
+    #[must_use]
     pub fn is_retryable(&self) -> bool {
         delegate_is_retryable!(
             self,
@@ -943,6 +1176,7 @@ impl S2Error {
     }
 
     /// Whether the failed attempt certainly had no side effects.
+    #[must_use]
     pub fn has_no_side_effects(&self) -> bool {
         delegate_has_no_side_effects!(
             self,
@@ -969,6 +1203,7 @@ impl S2Error {
     /// Wrapper errors ([`IndefiniteAppend`](Self::IndefiniteAppend) and
     /// [`SessionClosed`](Self::SessionClosed)) return `None`; inspect
     /// [`final_attempt_error`](Self::final_attempt_error) or [`failure`](Self::failure) instead.
+    #[must_use]
     pub fn server_error(&self) -> Option<&ServerError> {
         match self {
             Self::Server(e) => Some(e),
@@ -979,7 +1214,21 @@ impl S2Error {
         }
     }
 
+    /// Return the recognized server [`ErrorCode`] if this is a direct server error with a known
+    /// code paired with its defined HTTP status.
+    #[must_use]
+    pub fn known_code(&self) -> Option<ErrorCode> {
+        self.server_error().and_then(ServerError::known_code)
+    }
+
+    /// Whether this is a direct server error matching `code` (paired with its defined HTTP status).
+    #[must_use]
+    pub fn has_error_code(&self, code: ErrorCode) -> bool {
+        self.known_code() == Some(code)
+    }
+
     /// Return the final attempt's error if this is [`IndefiniteAppend`](Self::IndefiniteAppend).
+    #[must_use]
     pub fn final_attempt_error(&self) -> Option<&Self> {
         match self {
             Self::IndefiniteAppend(e) => Some(e.final_attempt_error()),
@@ -988,6 +1237,7 @@ impl S2Error {
     }
 
     /// Return the session failure if this is [`SessionClosed`](Self::SessionClosed).
+    #[must_use]
     pub fn failure(&self) -> Option<&Self> {
         match self {
             Self::SessionClosed(e) => e.failure(),
@@ -1021,7 +1271,7 @@ pub enum RequestError {
     /// A call was made on a closed client.
     #[error(transparent)]
     ClientClosed(#[from] ClientClosedError),
-    /// An in-flight request was aborted.
+    /// The in-flight request was aborted (for example by client `close()`).
     #[error(transparent)]
     Aborted(#[from] AbortedError),
     #[cfg(feature = "_hidden")]
@@ -1032,6 +1282,7 @@ pub enum RequestError {
 
 impl RequestError {
     /// Whether retrying the operation may succeed.
+    #[must_use]
     pub fn is_retryable(&self) -> bool {
         delegate_is_retryable!(
             self,
@@ -1048,6 +1299,7 @@ impl RequestError {
     }
 
     /// Whether the failed attempt certainly had no side effects.
+    #[must_use]
     pub fn has_no_side_effects(&self) -> bool {
         delegate_has_no_side_effects!(
             self,
@@ -1064,11 +1316,25 @@ impl RequestError {
     }
 
     /// Return the server error, if present.
+    #[must_use]
     pub fn server_error(&self) -> Option<&ServerError> {
         match self {
             Self::Server(e) => Some(e),
             _ => None,
         }
+    }
+
+    /// Return the recognized server [`ErrorCode`] if this is a server error with a known code
+    /// paired with its defined HTTP status.
+    #[must_use]
+    pub fn known_code(&self) -> Option<ErrorCode> {
+        self.server_error().and_then(ServerError::known_code)
+    }
+
+    /// Whether this is a server error matching `code` (paired with its defined HTTP status).
+    #[must_use]
+    pub fn has_error_code(&self, code: ErrorCode) -> bool {
+        self.known_code() == Some(code)
     }
 }
 
@@ -1106,7 +1372,7 @@ pub enum ReadError {
     /// A call was made on a closed client.
     #[error(transparent)]
     ClientClosed(#[from] ClientClosedError),
-    /// An in-flight read was aborted.
+    /// The in-flight read was aborted (for example by client `close()`).
     #[error(transparent)]
     Aborted(#[from] AbortedError),
     #[cfg(feature = "_hidden")]
@@ -1117,6 +1383,7 @@ pub enum ReadError {
 
 impl ReadError {
     /// Whether retrying the operation may succeed.
+    #[must_use]
     pub fn is_retryable(&self) -> bool {
         delegate_is_retryable!(
             self,
@@ -1134,17 +1401,32 @@ impl ReadError {
     }
 
     /// Whether the failed attempt certainly had no side effects (always `true` for reads).
+    #[must_use]
     pub fn has_no_side_effects(&self) -> bool {
         true
     }
 
     /// Return the underlying [`ServerError`], including for [`ReadUnwritten`](Self::ReadUnwritten).
+    #[must_use]
     pub fn server_error(&self) -> Option<&ServerError> {
         match self {
             Self::Server(e) => Some(e),
             Self::ReadUnwritten(e) => Some(&e.server),
             _ => None,
         }
+    }
+
+    /// Return the recognized server [`ErrorCode`] if this is a server error with a known code
+    /// paired with its defined HTTP status.
+    #[must_use]
+    pub fn known_code(&self) -> Option<ErrorCode> {
+        self.server_error().and_then(ServerError::known_code)
+    }
+
+    /// Whether this is a server error matching `code` (paired with its defined HTTP status).
+    #[must_use]
+    pub fn has_error_code(&self, code: ErrorCode) -> bool {
+        self.known_code() == Some(code)
     }
 }
 
@@ -1188,7 +1470,7 @@ pub enum AppendError {
     /// A call was made on a closed client.
     #[error(transparent)]
     ClientClosed(#[from] ClientClosedError),
-    /// An in-flight append was aborted.
+    /// The in-flight append was aborted (for example by client `close()`).
     #[error(transparent)]
     Aborted(#[from] AbortedError),
     #[cfg(feature = "_hidden")]
@@ -1199,6 +1481,7 @@ pub enum AppendError {
 
 impl AppendError {
     /// Whether retrying the operation may succeed.
+    #[must_use]
     pub fn is_retryable(&self) -> bool {
         delegate_is_retryable!(
             self,
@@ -1218,6 +1501,7 @@ impl AppendError {
     }
 
     /// Whether the failed attempt certainly had no side effects.
+    #[must_use]
     pub fn has_no_side_effects(&self) -> bool {
         delegate_has_no_side_effects!(
             self,
@@ -1240,6 +1524,7 @@ impl AppendError {
     ///
     /// Returns `None` for [`IndefiniteAppend`](Self::IndefiniteAppend); inspect
     /// [`final_attempt_error`](Self::final_attempt_error) instead.
+    #[must_use]
     pub fn server_error(&self) -> Option<&ServerError> {
         match self {
             Self::Server(e) => Some(e),
@@ -1249,7 +1534,21 @@ impl AppendError {
         }
     }
 
+    /// Return the recognized server [`ErrorCode`] if this is a direct server error with a known
+    /// code paired with its defined HTTP status.
+    #[must_use]
+    pub fn known_code(&self) -> Option<ErrorCode> {
+        self.server_error().and_then(ServerError::known_code)
+    }
+
+    /// Whether this is a direct server error matching `code` (paired with its defined HTTP status).
+    #[must_use]
+    pub fn has_error_code(&self, code: ErrorCode) -> bool {
+        self.known_code() == Some(code)
+    }
+
     /// Return the final attempt's error if this is [`IndefiniteAppend`](Self::IndefiniteAppend).
+    #[must_use]
     pub fn final_attempt_error(&self) -> Option<&Self> {
         match self {
             Self::IndefiniteAppend(e) => Some(e.final_attempt_error()),
@@ -1281,7 +1580,8 @@ pub enum AppendSessionError {
     /// The final attempt failed definitively, but an earlier attempt may have taken effect.
     #[error(transparent)]
     IndefiniteAppend(#[from] IndefiniteAppendError<Self>),
-    /// The session closed or began closing before handling the call.
+    /// The session closed or began closing before handling the call, or closed without sending
+    /// this batch (including batches queued behind a definite rejection).
     #[error(transparent)]
     SessionClosed(#[from] SessionClosedError<Self>),
     /// Input validation failed.
@@ -1302,7 +1602,7 @@ pub enum AppendSessionError {
     /// A call was made on a closed client.
     #[error(transparent)]
     ClientClosed(#[from] ClientClosedError),
-    /// The session was aborted (dropped or client closed).
+    /// The session was aborted (dropped, explicitly aborted, or client closed).
     #[error(transparent)]
     Aborted(#[from] AbortedError),
     #[cfg(feature = "_hidden")]
@@ -1313,6 +1613,7 @@ pub enum AppendSessionError {
 
 impl AppendSessionError {
     /// Whether retrying the operation may succeed.
+    #[must_use]
     pub fn is_retryable(&self) -> bool {
         delegate_is_retryable!(
             self,
@@ -1333,6 +1634,7 @@ impl AppendSessionError {
     }
 
     /// Whether the failed attempt certainly had no side effects.
+    #[must_use]
     pub fn has_no_side_effects(&self) -> bool {
         delegate_has_no_side_effects!(
             self,
@@ -1356,6 +1658,7 @@ impl AppendSessionError {
     ///
     /// Wrapper errors ([`IndefiniteAppend`](Self::IndefiniteAppend) and
     /// [`SessionClosed`](Self::SessionClosed)) return `None`.
+    #[must_use]
     pub fn server_error(&self) -> Option<&ServerError> {
         match self {
             Self::Server(e) => Some(e),
@@ -1365,7 +1668,21 @@ impl AppendSessionError {
         }
     }
 
+    /// Return the recognized server [`ErrorCode`] if this is a direct server error with a known
+    /// code paired with its defined HTTP status.
+    #[must_use]
+    pub fn known_code(&self) -> Option<ErrorCode> {
+        self.server_error().and_then(ServerError::known_code)
+    }
+
+    /// Whether this is a direct server error matching `code` (paired with its defined HTTP status).
+    #[must_use]
+    pub fn has_error_code(&self, code: ErrorCode) -> bool {
+        self.known_code() == Some(code)
+    }
+
     /// Return the final attempt's error if this is [`IndefiniteAppend`](Self::IndefiniteAppend).
+    #[must_use]
     pub fn final_attempt_error(&self) -> Option<&Self> {
         match self {
             Self::IndefiniteAppend(e) => Some(e.final_attempt_error()),
@@ -1374,6 +1691,7 @@ impl AppendSessionError {
     }
 
     /// Return the session failure if this is [`SessionClosed`](Self::SessionClosed).
+    #[must_use]
     pub fn failure(&self) -> Option<&Self> {
         match self {
             Self::SessionClosed(e) => e.failure(),
@@ -1420,7 +1738,8 @@ impl_error_upcast!(AppendSessionError => S2Error {
     mapped: [IndefiniteAppend, SessionClosed],
 });
 
-/// Errors returned by [`ReadSession`](crate::read_session::ReadSession) and its
+/// Errors returned by [`ReadSession`](crate::read_session::ReadSession),
+/// [`ReadBatchSession`](crate::read_session::ReadBatchSession), and their
 /// [`caught_up`](crate::read_session::ReadSession::caught_up) future.
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
@@ -1431,7 +1750,7 @@ pub enum ReadSessionError {
     /// The requested read position has not been written.
     #[error(transparent)]
     ReadUnwritten(#[from] ReadUnwrittenError),
-    /// The session closed before handling the call or catching up.
+    /// The session closed cleanly before catching up (surfaced by `caught_up()`).
     #[error(transparent)]
     SessionClosed(#[from] SessionClosedError<Self>),
     /// Input validation failed.
@@ -1463,6 +1782,7 @@ pub enum ReadSessionError {
 
 impl ReadSessionError {
     /// Whether retrying the operation may succeed.
+    #[must_use]
     pub fn is_retryable(&self) -> bool {
         delegate_is_retryable!(
             self,
@@ -1481,6 +1801,7 @@ impl ReadSessionError {
     }
 
     /// Whether the failed attempt certainly had no side effects (always `true` for reads).
+    #[must_use]
     pub fn has_no_side_effects(&self) -> bool {
         true
     }
@@ -1489,6 +1810,7 @@ impl ReadSessionError {
     ///
     /// Returns `None` for [`SessionClosed`](Self::SessionClosed); inspect
     /// [`failure`](Self::failure) instead.
+    #[must_use]
     pub fn server_error(&self) -> Option<&ServerError> {
         match self {
             Self::Server(e) => Some(e),
@@ -1497,7 +1819,21 @@ impl ReadSessionError {
         }
     }
 
+    /// Return the recognized server [`ErrorCode`] if this is a direct server error with a known
+    /// code paired with its defined HTTP status.
+    #[must_use]
+    pub fn known_code(&self) -> Option<ErrorCode> {
+        self.server_error().and_then(ServerError::known_code)
+    }
+
+    /// Whether this is a direct server error matching `code` (paired with its defined HTTP status).
+    #[must_use]
+    pub fn has_error_code(&self, code: ErrorCode) -> bool {
+        self.known_code() == Some(code)
+    }
+
     /// Return the session failure if this is [`SessionClosed`](Self::SessionClosed).
+    #[must_use]
     pub fn failure(&self) -> Option<&Self> {
         match self {
             Self::SessionClosed(e) => e.failure(),
@@ -1652,7 +1988,7 @@ where
         && let Ok(tail) = serde_json::from_slice::<TailResponse>(body)
     {
         let server = ServerError::from_response(status, body, context);
-        return ReadUnwrittenError::new(tail.tail.into(), server).into();
+        return ReadUnwrittenError::new(StreamPosition::from_api(tail.tail), server).into();
     }
     ServerError::from_response(status, body, context).into()
 }

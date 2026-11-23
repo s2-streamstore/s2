@@ -176,7 +176,7 @@ impl MockH2Server {
     }
 
     pub fn client_with(&self, configure: impl FnOnce(S2Config) -> S2Config) -> S2 {
-        let endpoints = S2Endpoints::for_endpoint(&self.endpoint_url()).expect("valid endpoints");
+        let endpoints = S2Endpoints::for_endpoint(self.endpoint_url()).expect("valid endpoints");
         let config = configure(S2Config::new("test-token").with_endpoints(endpoints));
         S2::new(config).expect("valid S2 client")
     }
@@ -237,7 +237,7 @@ impl StallingTlsServer {
     }
 
     pub fn client_with(&self, configure: impl FnOnce(S2Config) -> S2Config) -> S2 {
-        let endpoints = S2Endpoints::for_endpoint(&self.endpoint_url()).expect("valid endpoints");
+        let endpoints = S2Endpoints::for_endpoint(self.endpoint_url()).expect("valid endpoints");
         let config = configure(
             S2Config::new("test-token")
                 .with_endpoints(endpoints)

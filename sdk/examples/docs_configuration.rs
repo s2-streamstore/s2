@@ -1,6 +1,6 @@
 //! Documentation examples for Configuration page.
 //!
-//! Run with: cargo run --example docs_configuration
+//! Run with: cargo run -p s2-sdk --example docs_configuration
 
 use std::time::Duration;
 

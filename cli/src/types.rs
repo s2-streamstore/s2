@@ -235,27 +235,30 @@ pub fn resolve_stream_config(
         s2_common::config::TimestampingMode::Arrival => sdk::types::TimestampingMode::Arrival,
     };
 
-    let ts = config.timestamping;
-    let default_ts = basin_defaults.timestamping;
+    let ts = config.timestamping();
+    let default_ts = basin_defaults.timestamping();
 
     ResolvedStreamConfig {
-        storage_class: config.storage_class.or(basin_defaults.storage_class),
+        storage_class: config
+            .storage_class()
+            .or_else(|| basin_defaults.storage_class())
+            .map(str::to_owned),
         retention_policy: config
-            .retention_policy
-            .or(basin_defaults.retention_policy)
+            .retention_policy()
+            .or_else(|| basin_defaults.retention_policy())
+            .cloned()
             .unwrap_or(default_retention),
         timestamping_mode: ts
-            .as_ref()
-            .and_then(|t| t.mode.clone())
-            .or_else(|| default_ts.as_ref().and_then(|t| t.mode.clone()))
+            .and_then(|t| t.mode().cloned())
+            .or_else(|| default_ts.and_then(|t| t.mode().cloned()))
             .unwrap_or(default_timestamping_mode),
         timestamping_uncapped: ts
-            .and_then(|t| t.uncapped)
-            .or_else(|| default_ts.and_then(|t| t.uncapped))
+            .and_then(|t| t.uncapped())
+            .or_else(|| default_ts.and_then(|t| t.uncapped()))
             .unwrap_or(defaults.timestamping.uncapped),
         delete_on_empty_min_age: config
-            .delete_on_empty
-            .or(basin_defaults.delete_on_empty)
+            .delete_on_empty()
+            .or_else(|| basin_defaults.delete_on_empty())
             .map_or(defaults.delete_on_empty.min_age, |d| d.min_age()),
     }
 }
@@ -467,8 +470,8 @@ impl From<TimestampingConfig> for sdk::types::TimestampingConfig {
 impl From<sdk::types::TimestampingConfig> for TimestampingConfig {
     fn from(config: sdk::types::TimestampingConfig) -> Self {
         TimestampingConfig {
-            timestamping_mode: config.mode.map(Into::into),
-            timestamping_uncapped: config.uncapped,
+            timestamping_mode: config.mode().cloned().map(Into::into),
+            timestamping_uncapped: config.uncapped(),
         }
     }
 }
@@ -500,12 +503,13 @@ impl From<sdk::types::BasinConfig> for BasinConfig {
     fn from(config: sdk::types::BasinConfig) -> Self {
         BasinConfig {
             default_stream_config: config
-                .default_stream_config
+                .default_stream_config()
+                .cloned()
                 .map(Into::into)
                 .unwrap_or_default(),
-            stream_cipher: config.stream_cipher.map(Into::into),
-            create_stream_on_append: config.create_stream_on_append,
-            create_stream_on_read: config.create_stream_on_read,
+            stream_cipher: config.stream_cipher().cloned().map(Into::into),
+            create_stream_on_append: config.create_stream_on_append(),
+            create_stream_on_read: config.create_stream_on_read(),
         }
     }
 }
@@ -513,10 +517,10 @@ impl From<sdk::types::BasinConfig> for BasinConfig {
 impl From<sdk::types::StreamConfig> for StreamConfig {
     fn from(config: sdk::types::StreamConfig) -> Self {
         StreamConfig {
-            storage_class: config.storage_class,
-            retention_policy: config.retention_policy.map(Into::into),
-            timestamping: config.timestamping.map(Into::into),
-            delete_on_empty: config.delete_on_empty.map(Into::into),
+            storage_class: config.storage_class().map(str::to_owned),
+            retention_policy: config.retention_policy().cloned().map(Into::into),
+            timestamping: config.timestamping().cloned().map(Into::into),
+            delete_on_empty: config.delete_on_empty().map(Into::into),
         }
     }
 }
@@ -761,9 +765,9 @@ impl From<PermittedOperationGroups> for sdk::types::OperationGroupPermissions {
 impl From<sdk::types::OperationGroupPermissions> for PermittedOperationGroups {
     fn from(groups: sdk::types::OperationGroupPermissions) -> Self {
         PermittedOperationGroups {
-            account: groups.account.map(Into::into),
-            basin: groups.basin.map(Into::into),
-            stream: groups.stream.map(Into::into),
+            account: groups.account().map(Into::into),
+            basin: groups.basin().map(Into::into),
+            stream: groups.stream().map(Into::into),
         }
     }
 }
@@ -855,8 +859,8 @@ impl From<ReadWritePermissions> for sdk::types::ReadWritePermissions {
 impl From<sdk::types::ReadWritePermissions> for ReadWritePermissions {
     fn from(permissions: sdk::types::ReadWritePermissions) -> Self {
         ReadWritePermissions {
-            read: permissions.read,
-            write: permissions.write,
+            read: permissions.read(),
+            write: permissions.write(),
         }
     }
 }
@@ -971,7 +975,7 @@ impl From<sdk::types::PrivateNetPolicy> for PrivateNetPolicy {
     fn from(policy: sdk::types::PrivateNetPolicy) -> Self {
         match policy {
             sdk::types::PrivateNetPolicy::Aws(aws) => PrivateNetPolicy::Aws(AwsPrivateNetPolicy {
-                vpce_ids: aws.vpce_ids.iter().map(ToString::to_string).collect(),
+                vpce_ids: aws.vpce_ids().iter().map(ToString::to_string).collect(),
             }),
             sdk::types::PrivateNetPolicy::Unknown(name) => PrivateNetPolicy::Unknown(name),
             other => PrivateNetPolicy::Unknown(format!("{other:?}")),
@@ -987,8 +991,8 @@ pub struct AwsPrivateNetPolicy {
 impl From<sdk::types::NetworkPolicy> for NetworkPolicy {
     fn from(policy: sdk::types::NetworkPolicy) -> Self {
         NetworkPolicy {
-            public_net: policy.public_net.map(Into::into),
-            private_net: policy.private_net.map(Into::into),
+            public_net: policy.public_net().cloned().map(Into::into),
+            private_net: policy.private_net().cloned().map(Into::into),
         }
     }
 }
@@ -1047,11 +1051,14 @@ pub struct AccessTokenScope {
 impl From<sdk::types::AccessTokenScope> for AccessTokenScope {
     fn from(scope: sdk::types::AccessTokenScope) -> Self {
         AccessTokenScope {
-            basins: scope.basins.and_then(BasinMatcher::from_sdk),
-            streams: scope.streams.and_then(StreamMatcher::from_sdk),
-            access_tokens: scope.access_tokens.and_then(AccessTokenMatcher::from_sdk),
-            op_group_perms: scope.op_group_perms.map(Into::into),
-            ops: scope.ops.into_iter().map(Operation::from).collect(),
+            basins: scope.basins().cloned().and_then(BasinMatcher::from_sdk),
+            streams: scope.streams().cloned().and_then(StreamMatcher::from_sdk),
+            access_tokens: scope
+                .access_tokens()
+                .cloned()
+                .and_then(AccessTokenMatcher::from_sdk),
+            op_group_perms: scope.op_group_perms().map(Into::into),
+            ops: scope.ops().iter().cloned().map(Operation::from).collect(),
         }
     }
 }
@@ -1258,15 +1265,10 @@ mod tests {
     fn match_none_scope_matchers_render_as_no_access() {
         colored::control::set_override(false);
 
-        // On the wire, an empty exact name means "match no resources".
-        let scope: s2_api::v1::access::AccessTokenScope =
-            serde_json::from_value(serde_json::json!({
-                "basins": { "exact": "" },
-                "streams": { "exact": "" },
-                "access_tokens": { "exact": "" },
-            }))
-            .unwrap();
-        let scope = s2_sdk::types::AccessTokenScope::from(scope);
+        let scope = s2_sdk::types::AccessTokenScope::new()
+            .with_basins(s2_sdk::types::BasinMatcher::None)
+            .with_streams(s2_sdk::types::StreamMatcher::None)
+            .with_access_tokens(s2_sdk::types::AccessTokenMatcher::None);
         let info = AccessTokenInfo {
             id: "tok".to_owned(),
             expires_at: None,

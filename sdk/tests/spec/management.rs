@@ -4,15 +4,14 @@ use std::{
 };
 
 use futures_util::StreamExt as _;
-use s2_api::v1 as api;
 use s2_sdk::{
     error::{AppendError, RequestError},
     types::{
-        AccessTokenId, AccessTokenScopeInput, AppendRetryPolicy, BasinReconfiguration,
-        DeleteOnEmptyReconfiguration, EnsureBasinInput, EnsureOutput, EnsureStreamInput,
-        IssueAccessTokenInput, ListAllBasinsInput, ListAllStreamsInput, ListBasinsInput,
-        ListStreamsInput, NetworkPolicy, Operation, OperationGroupPermissions, PublicNetPolicy,
-        Reconfigure, RetentionPolicy, StreamReconfiguration, TimestampingMode,
+        AccessTokenId, AccessTokenScope, AppendRetryPolicy, BasinReconfiguration,
+        CreateNetworkPolicyInput, DeleteOnEmptyReconfiguration, EnsureBasinInput, EnsureOutput,
+        EnsureStreamInput, IssueAccessTokenInput, ListAllBasinsInput, ListAllStreamsInput,
+        ListBasinsInput, ListStreamsInput, NetworkPolicy, Operation, OperationGroupPermissions,
+        PublicNetPolicy, Reconfigure, RetentionPolicy, StreamReconfiguration, TimestampingMode,
         TimestampingReconfiguration,
     },
 };
@@ -97,69 +96,81 @@ async fn spec_m2_ensure_output_variants() {
 }
 
 // spec: r1 M3
-#[test]
-fn spec_m3_reconfiguration_three_states() {
+#[tokio::test]
+async fn spec_m3_reconfiguration_three_states() {
+    let bodies = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+    let server = MockH2Server::start({
+        let bodies = bodies.clone();
+        move |_conn_id, req, respond| {
+            let bodies = bodies.clone();
+            async move {
+                let raw = drain_body(&mut req.into_body()).await;
+                let parsed: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+                bodies.lock().unwrap().push(parsed);
+                send_json(respond, 200, "{}");
+            }
+        }
+    })
+    .await;
+
+    let (basin_name, stream_name) = test_basin_and_stream();
+    let s2 = server.client(no_retry_config());
+    let basin = s2.basin(basin_name.clone());
+
     // Unchanged (default): fields omitted in serialized JSON.
-    let unchanged: api::config::StreamReconfiguration = StreamReconfiguration::new().into();
-    assert_eq!(
-        serde_json::to_value(&unchanged).unwrap(),
-        serde_json::json!({})
-    );
+    basin
+        .reconfigure_stream(stream_name.clone(), StreamReconfiguration::new())
+        .await
+        .unwrap();
 
     // Set to a new value.
-    let updated: api::config::StreamReconfiguration = StreamReconfiguration::new()
-        .with_storage_class("express")
-        .with_retention_policy(RetentionPolicy::Infinite)
-        .with_timestamping(
-            TimestampingReconfiguration::new()
-                .with_mode(TimestampingMode::Arrival)
-                .with_uncapped(true),
+    basin
+        .reconfigure_stream(
+            stream_name.clone(),
+            StreamReconfiguration::new()
+                .with_storage_class("express")
+                .with_retention_policy(RetentionPolicy::Infinite)
+                .with_timestamping(
+                    TimestampingReconfiguration::new()
+                        .with_mode(TimestampingMode::Arrival)
+                        .with_uncapped(true),
+                )
+                .with_delete_on_empty(
+                    DeleteOnEmptyReconfiguration::new()
+                        .with_min_age(Duration::from_secs(60))
+                        .unwrap(),
+                ),
         )
-        .with_delete_on_empty(
-            DeleteOnEmptyReconfiguration::new()
-                .with_min_age(Duration::from_secs(60))
-                .unwrap(),
-        )
-        .into();
-    let updated_json = serde_json::to_value(&updated).unwrap();
-    assert_eq!(updated_json["storage_class"], "express");
-    assert_eq!(updated_json["timestamping"]["mode"], "arrival");
-    assert_eq!(updated_json["timestamping"]["uncapped"], true);
-    assert_eq!(updated_json["delete_on_empty"]["min_age_secs"], 60);
+        .await
+        .unwrap();
 
     // Reset to server default: serialized as explicit JSON null.
-    let reset: api::config::StreamReconfiguration = StreamReconfiguration::new()
-        .reset_storage_class()
-        .reset_retention_policy()
-        .reset_timestamping()
-        .reset_delete_on_empty()
-        .into();
-    assert_eq!(
-        serde_json::to_value(&reset).unwrap(),
-        serde_json::json!({
-            "storage_class": null,
-            "retention_policy": null,
-            "timestamping": null,
-            "delete_on_empty": null,
-        })
-    );
-
-    // Nested reset helpers and direct Maybe usage.
-    let nested_reset: api::config::StreamReconfiguration = StreamReconfiguration::new()
-        .with_timestamping(
-            TimestampingReconfiguration::new()
-                .reset_mode()
-                .reset_uncapped(),
+    basin
+        .reconfigure_stream(
+            stream_name.clone(),
+            StreamReconfiguration::new()
+                .reset_storage_class()
+                .reset_retention_policy()
+                .reset_timestamping()
+                .reset_delete_on_empty(),
         )
-        .with_delete_on_empty(DeleteOnEmptyReconfiguration::new().reset_min_age())
-        .into();
-    assert_eq!(
-        serde_json::to_value(&nested_reset).unwrap(),
-        serde_json::json!({
-            "timestamping": { "mode": null, "uncapped": null },
-            "delete_on_empty": { "min_age_secs": null },
-        })
-    );
+        .await
+        .unwrap();
+
+    // Nested reset helpers.
+    basin
+        .reconfigure_stream(
+            stream_name,
+            StreamReconfiguration::new()
+                .with_timestamping(
+                    TimestampingReconfiguration::new()
+                        .reset_mode()
+                        .reset_uncapped(),
+                )
+                .with_delete_on_empty(DeleteOnEmptyReconfiguration::new().reset_min_age()),
+        )
+        .await
+        .unwrap();
 
     let basin_reset = BasinReconfiguration::new()
         .reset_default_stream_config()
@@ -170,9 +181,33 @@ fn spec_m3_reconfiguration_three_states() {
     assert_eq!(basin_reset.stream_cipher(), Reconfigure::Reset);
     assert_eq!(basin_reset.create_stream_on_append(), Reconfigure::Reset);
     assert_eq!(basin_reset.create_stream_on_read(), Reconfigure::Reset);
-    let basin_api: api::config::BasinReconfiguration = basin_reset.into();
+    s2.reconfigure_basin(basin_name, basin_reset).await.unwrap();
+
+    let captured = bodies.lock().unwrap();
+    assert_eq!(captured.len(), 5);
+    assert_eq!(captured[0], serde_json::json!({}));
+    assert_eq!(captured[1]["storage_class"], "express");
+    assert_eq!(captured[1]["timestamping"]["mode"], "arrival");
+    assert_eq!(captured[1]["timestamping"]["uncapped"], true);
+    assert_eq!(captured[1]["delete_on_empty"]["min_age_secs"], 60);
     assert_eq!(
-        serde_json::to_value(&basin_api).unwrap(),
+        captured[2],
+        serde_json::json!({
+            "storage_class": null,
+            "retention_policy": null,
+            "timestamping": null,
+            "delete_on_empty": null,
+        })
+    );
+    assert_eq!(
+        captured[3],
+        serde_json::json!({
+            "timestamping": { "mode": null, "uncapped": null },
+            "delete_on_empty": { "min_age_secs": null },
+        })
+    );
+    assert_eq!(
+        captured[4],
         serde_json::json!({
             "default_stream_config": null,
             "stream_cipher": null,
@@ -190,14 +225,16 @@ async fn spec_t2d_definite_only_retries_for_token_and_network_policy() {
     let token_input = || {
         IssueAccessTokenInput::new(
             "tok-1".parse::<AccessTokenId>().unwrap(),
-            AccessTokenScopeInput::from_op_group_perms(OperationGroupPermissions::read_write_all()),
+            AccessTokenScope::from_op_group_perms(OperationGroupPermissions::read_write_all()),
         )
     };
-    let policy_slug = || "pol-1".parse().unwrap();
-    let policy = || {
-        NetworkPolicy::new().with_public_net(PublicNetPolicy::Cidrs(vec![
-            "192.0.2.0/24".parse().unwrap(),
-        ]))
+    let policy_input = || {
+        CreateNetworkPolicyInput::new(
+            "pol-1".parse().unwrap(),
+            NetworkPolicy::new().with_public_net(PublicNetPolicy::Cidrs(vec![
+                "192.0.2.0/24".parse().unwrap(),
+            ])),
+        )
     };
 
     // 1. issue_access_token does NOT retry indefinite 503 unavailable
@@ -236,7 +273,7 @@ async fn spec_t2d_definite_only_retries_for_token_and_network_policy() {
     .await;
     let err = server
         .client(fast_retry_3)
-        .create_network_policy(policy_slug(), policy())
+        .create_network_policy(policy_input())
         .await
         .expect_err("must not retry indefinite error");
     assert!(matches!(err, RequestError::Server(_)));
@@ -253,7 +290,7 @@ async fn spec_t2d_definite_only_retries_for_token_and_network_policy() {
     .await;
     let info = server
         .client(fast_retry_3)
-        .create_network_policy(policy_slug(), policy())
+        .create_network_policy(policy_input())
         .await
         .expect("must retry definite rate_limited");
     assert_eq!(info.id.slug().as_ref(), "pol-1");
@@ -325,7 +362,7 @@ async fn spec_m5_m6_m7_m8_issue_token_and_list_pagination() {
 
     // M5: issue_access_token returns secret.
     let token_id: AccessTokenId = "m5-test-token".parse().unwrap();
-    let scope = AccessTokenScopeInput::from_ops([Operation::ListBasins]);
+    let scope = AccessTokenScope::from_ops([Operation::ListBasins]);
     let secret = s2
         .issue_access_token(IssueAccessTokenInput::new(token_id, scope))
         .await

@@ -9,7 +9,6 @@ use futures_core::Stream;
 use jiff::Timestamp;
 use s2_api::v1::{self as api, MaybeKnown};
 use s2_common::{
-    ValidationError,
     basin::{BasinName, BasinNamePrefix, BasinNameStartAfter},
     location::LocationName,
     maybe::Maybe,
@@ -17,11 +16,11 @@ use s2_common::{
 };
 
 use super::whole_seconds;
-use crate::error::RequestError;
+use crate::error::{RequestError, ValidationError};
 
+/// A page of values.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-/// A page of values.
 pub struct Page<T> {
     /// Values in this page.
     pub values: Vec<T>,
@@ -30,9 +29,17 @@ pub struct Page<T> {
 }
 
 impl<T> Page<T> {
-    pub(crate) fn from_api<U: Into<T>>(values: Vec<U>, has_more: bool) -> Self {
+    /// Construct a page of values.
+    ///
+    /// This is intended for building fixtures in downstream tests.
+    #[must_use]
+    pub fn new(values: Vec<T>, has_more: bool) -> Self {
+        Self { values, has_more }
+    }
+
+    pub(crate) fn from_api<U>(values: Vec<U>, has_more: bool, map: impl FnMut(U) -> T) -> Self {
         Self {
-            values: values.into_iter().map(Into::into).collect(),
+            values: values.into_iter().map(map).collect(),
             has_more,
         }
     }
@@ -77,7 +84,7 @@ impl<T> Stream for ListStream<T> {
 }
 
 /// Desired change to an optional configuration field in a reconfiguration request.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum Reconfigure<T> {
     /// Leave the existing value unchanged.
     #[default]
@@ -90,6 +97,7 @@ pub enum Reconfigure<T> {
 
 impl<T> Reconfigure<T> {
     /// Convert from `&Reconfigure<T>` to `Reconfigure<&T>`.
+    #[must_use]
     pub fn as_ref(&self) -> Reconfigure<&T> {
         match self {
             Self::Unchanged => Reconfigure::Unchanged,
@@ -99,6 +107,7 @@ impl<T> Reconfigure<T> {
     }
 
     /// Map a `Reconfigure<T>` to `Reconfigure<U>` by applying a function to a `Set` value.
+    #[must_use]
     pub fn map<U>(self, f: impl FnOnce(T) -> U) -> Reconfigure<U> {
         match self {
             Self::Unchanged => Reconfigure::Unchanged,
@@ -116,9 +125,9 @@ impl<T> Reconfigure<T> {
     }
 }
 
+/// Encryption algorithm.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
-/// Encryption algorithm.
 pub enum EncryptionAlgorithm {
     /// AEGIS-256
     Aegis256,
@@ -128,32 +137,48 @@ pub enum EncryptionAlgorithm {
     Unknown(String),
 }
 
-impl From<MaybeKnown<api::config::EncryptionAlgorithm>> for EncryptionAlgorithm {
-    fn from(value: MaybeKnown<api::config::EncryptionAlgorithm>) -> Self {
+impl EncryptionAlgorithm {
+    /// Return the wire name of this encryption algorithm.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Aegis256 => "aegis-256",
+            Self::Aes256Gcm => "aes-256-gcm",
+            Self::Unknown(name) => name,
+        }
+    }
+
+    pub(crate) fn from_api(value: MaybeKnown<api::config::EncryptionAlgorithm>) -> Self {
         match value {
             MaybeKnown::Known(api::config::EncryptionAlgorithm::Aegis256) => Self::Aegis256,
             MaybeKnown::Known(api::config::EncryptionAlgorithm::Aes256Gcm) => Self::Aes256Gcm,
             MaybeKnown::Unknown(name) => Self::Unknown(name),
         }
     }
-}
 
-impl From<EncryptionAlgorithm> for MaybeKnown<api::config::EncryptionAlgorithm> {
-    fn from(value: EncryptionAlgorithm) -> Self {
-        match value {
-            EncryptionAlgorithm::Aegis256 => api::config::EncryptionAlgorithm::Aegis256.into(),
-            EncryptionAlgorithm::Aes256Gcm => api::config::EncryptionAlgorithm::Aes256Gcm.into(),
-            EncryptionAlgorithm::Unknown(name) => Self::Unknown(name),
+    pub(crate) fn into_api(self) -> MaybeKnown<api::config::EncryptionAlgorithm> {
+        match self {
+            Self::Aegis256 => api::config::EncryptionAlgorithm::Aegis256.into(),
+            Self::Aes256Gcm => api::config::EncryptionAlgorithm::Aes256Gcm.into(),
+            Self::Unknown(name) => MaybeKnown::Unknown(name),
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
+impl fmt::Display for EncryptionAlgorithm {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Retention policy for records in a stream.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum RetentionPolicy {
-    /// Age in seconds. Must be greater than `0`. Records older than this age are automatically
-    /// trimmed.
+    /// Age in seconds. Records older than this age are automatically trimmed.
+    ///
+    /// The server requires a value greater than `0`; validation of positivity is left to the
+    /// server.
     Age(u64),
     /// Records are retained indefinitely unless explicitly trimmed.
     Infinite,
@@ -164,45 +189,45 @@ pub enum RetentionPolicy {
 impl RetentionPolicy {
     /// Create an age-based retention policy from a whole-second [`Duration`].
     ///
+    /// The SDK checks whole-second precision and leaves positivity validation (`> 0`) to the
+    /// server.
+    ///
     /// # Errors
     ///
     /// Returns [`ValidationError`] if `age` has sub-second precision.
     pub fn age(age: Duration) -> Result<Self, ValidationError> {
         Ok(Self::Age(whole_seconds(age, "retention_age")?))
     }
-}
 
-impl From<MaybeKnown<api::config::RetentionPolicy>> for RetentionPolicy {
-    fn from(value: MaybeKnown<api::config::RetentionPolicy>) -> Self {
+    pub(crate) fn from_api(value: MaybeKnown<api::config::RetentionPolicy>) -> Self {
         let value = match value {
             MaybeKnown::Known(value) => value,
             MaybeKnown::Unknown(name) => return Self::Unknown(name),
         };
         match value {
-            api::config::RetentionPolicy::Age(secs) => RetentionPolicy::Age(secs),
-            api::config::RetentionPolicy::Infinite(_) => RetentionPolicy::Infinite,
+            api::config::RetentionPolicy::Age(secs) => Self::Age(secs),
+            api::config::RetentionPolicy::Infinite(_) => Self::Infinite,
         }
     }
-}
 
-impl From<RetentionPolicy> for MaybeKnown<api::config::RetentionPolicy> {
-    fn from(value: RetentionPolicy) -> Self {
-        let known = match value {
-            RetentionPolicy::Age(secs) => api::config::RetentionPolicy::Age(secs),
-            RetentionPolicy::Infinite => {
+    pub(crate) fn into_api(self) -> MaybeKnown<api::config::RetentionPolicy> {
+        let known = match self {
+            Self::Age(secs) => api::config::RetentionPolicy::Age(secs),
+            Self::Infinite => {
                 api::config::RetentionPolicy::Infinite(api::config::InfiniteRetention {})
             }
-            RetentionPolicy::Unknown(name) => return Self::Unknown(name),
+            Self::Unknown(name) => return MaybeKnown::Unknown(name),
         };
-        Self::Known(known)
+        MaybeKnown::Known(known)
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 /// Timestamping mode for appends that influences how timestamps are handled.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum TimestampingMode {
     /// Prefer client-specified timestamp if present otherwise use arrival time.
+    #[default]
     ClientPrefer,
     /// Require a client-specified timestamp and reject the append if it is missing.
     ClientRequire,
@@ -212,51 +237,75 @@ pub enum TimestampingMode {
     Unknown(String),
 }
 
-impl From<MaybeKnown<api::config::TimestampingMode>> for TimestampingMode {
-    fn from(value: MaybeKnown<api::config::TimestampingMode>) -> Self {
+impl TimestampingMode {
+    /// Return the wire name of this timestamping mode.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::ClientPrefer => "client-prefer",
+            Self::ClientRequire => "client-require",
+            Self::Arrival => "arrival",
+            Self::Unknown(name) => name,
+        }
+    }
+
+    pub(crate) fn from_api(value: MaybeKnown<api::config::TimestampingMode>) -> Self {
         let value = match value {
             MaybeKnown::Known(value) => value,
             MaybeKnown::Unknown(name) => return Self::Unknown(name),
         };
         match value {
-            api::config::TimestampingMode::ClientPrefer => TimestampingMode::ClientPrefer,
-            api::config::TimestampingMode::ClientRequire => TimestampingMode::ClientRequire,
-            api::config::TimestampingMode::Arrival => TimestampingMode::Arrival,
+            api::config::TimestampingMode::ClientPrefer => Self::ClientPrefer,
+            api::config::TimestampingMode::ClientRequire => Self::ClientRequire,
+            api::config::TimestampingMode::Arrival => Self::Arrival,
         }
     }
-}
 
-impl From<TimestampingMode> for MaybeKnown<api::config::TimestampingMode> {
-    fn from(value: TimestampingMode) -> Self {
-        let known = match value {
-            TimestampingMode::ClientPrefer => api::config::TimestampingMode::ClientPrefer,
-            TimestampingMode::ClientRequire => api::config::TimestampingMode::ClientRequire,
-            TimestampingMode::Arrival => api::config::TimestampingMode::Arrival,
-            TimestampingMode::Unknown(name) => return Self::Unknown(name),
+    pub(crate) fn into_api(self) -> MaybeKnown<api::config::TimestampingMode> {
+        let known = match self {
+            Self::ClientPrefer => api::config::TimestampingMode::ClientPrefer,
+            Self::ClientRequire => api::config::TimestampingMode::ClientRequire,
+            Self::Arrival => api::config::TimestampingMode::Arrival,
+            Self::Unknown(name) => return MaybeKnown::Unknown(name),
         };
-        Self::Known(known)
+        MaybeKnown::Known(known)
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-#[non_exhaustive]
-#[must_use]
+impl fmt::Display for TimestampingMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Configuration for timestamping behavior.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+#[must_use]
 pub struct TimestampingConfig {
-    /// Timestamping mode for appends that influences how timestamps are handled.
-    ///
-    /// Defaults to [`ClientPrefer`](TimestampingMode::ClientPrefer).
-    pub mode: Option<TimestampingMode>,
-    /// Whether client-specified timestamps are allowed to exceed the arrival time.
-    ///
-    /// Defaults to `false` (client timestamps are capped at the arrival time).
-    pub uncapped: Option<bool>,
+    mode: Option<TimestampingMode>,
+    uncapped: Option<bool>,
 }
 
 impl TimestampingConfig {
     /// Create a new [`TimestampingConfig`] with default settings.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Return the configured timestamping mode, if set.
+    ///
+    /// Server defaults to [`TimestampingMode::ClientPrefer`].
+    #[must_use]
+    pub fn mode(&self) -> Option<&TimestampingMode> {
+        self.mode.as_ref()
+    }
+
+    /// Return whether client-specified timestamps are allowed to exceed the arrival time, if set.
+    ///
+    /// Server defaults to `false`.
+    #[must_use]
+    pub fn uncapped(&self) -> Option<bool> {
+        self.uncapped
     }
 
     /// Set the timestamping mode for appends that influences how timestamps are handled.
@@ -274,29 +323,25 @@ impl TimestampingConfig {
             ..self
         }
     }
-}
 
-impl From<api::config::TimestampingConfig> for TimestampingConfig {
-    fn from(value: api::config::TimestampingConfig) -> Self {
+    pub(crate) fn from_api(value: api::config::TimestampingConfig) -> Self {
         Self {
-            mode: value.mode.map(Into::into),
+            mode: value.mode.map(TimestampingMode::from_api),
             uncapped: value.uncapped,
+        }
+    }
+
+    pub(crate) fn into_api(self) -> api::config::TimestampingConfig {
+        api::config::TimestampingConfig {
+            mode: self.mode.map(TimestampingMode::into_api),
+            uncapped: self.uncapped,
         }
     }
 }
 
-impl From<TimestampingConfig> for api::config::TimestampingConfig {
-    fn from(value: TimestampingConfig) -> Self {
-        Self {
-            mode: value.mode.map(Into::into),
-            uncapped: value.uncapped,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-#[must_use]
 /// Configuration for automatically deleting a stream when it becomes empty.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[must_use]
 pub struct DeleteOnEmptyConfig {
     min_age_secs: u64,
 }
@@ -310,6 +355,7 @@ impl DeleteOnEmptyConfig {
 
     /// Return the minimum age before an empty stream can be deleted (`Duration::ZERO` disables
     /// automatic deletion).
+    #[must_use]
     pub fn min_age(&self) -> Duration {
         Duration::from_secs(self.min_age_secs)
     }
@@ -324,42 +370,27 @@ impl DeleteOnEmptyConfig {
             min_age_secs: whole_seconds(min_age, "delete_on_empty.min_age")?,
         })
     }
-}
 
-impl From<api::config::DeleteOnEmptyConfig> for DeleteOnEmptyConfig {
-    fn from(value: api::config::DeleteOnEmptyConfig) -> Self {
+    pub(crate) fn from_api(value: api::config::DeleteOnEmptyConfig) -> Self {
         Self {
             min_age_secs: value.min_age_secs,
         }
     }
-}
 
-impl From<DeleteOnEmptyConfig> for api::config::DeleteOnEmptyConfig {
-    fn from(value: DeleteOnEmptyConfig) -> Self {
-        Self {
-            min_age_secs: value.min_age_secs,
+    pub(crate) fn into_api(self) -> api::config::DeleteOnEmptyConfig {
+        api::config::DeleteOnEmptyConfig {
+            min_age_secs: self.min_age_secs,
         }
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-#[non_exhaustive]
 /// Configuration for a stream.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct StreamConfig {
-    /// [Storage class](https://s2.dev/docs/storage-classes) for the stream.
-    pub storage_class: Option<String>,
-    /// Retention policy for records in the stream.
-    ///
-    /// Defaults to `7 days` of retention.
-    pub retention_policy: Option<RetentionPolicy>,
-    /// Configuration for timestamping behavior.
-    ///
-    /// See [`TimestampingConfig`] for defaults.
-    pub timestamping: Option<TimestampingConfig>,
-    /// Configuration for automatically deleting the stream when it becomes empty.
-    ///
-    /// See [`DeleteOnEmptyConfig`] for defaults.
-    pub delete_on_empty: Option<DeleteOnEmptyConfig>,
+    storage_class: Option<String>,
+    retention_policy: Option<RetentionPolicy>,
+    timestamping: Option<TimestampingConfig>,
+    delete_on_empty: Option<DeleteOnEmptyConfig>,
 }
 
 impl StreamConfig {
@@ -367,6 +398,32 @@ impl StreamConfig {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Return the [storage class](https://s2.dev/docs/storage-classes) for the stream, if set.
+    #[must_use]
+    pub fn storage_class(&self) -> Option<&str> {
+        self.storage_class.as_deref()
+    }
+
+    /// Return the retention policy for records in the stream, if set.
+    ///
+    /// Server defaults to `7 days`.
+    #[must_use]
+    pub fn retention_policy(&self) -> Option<&RetentionPolicy> {
+        self.retention_policy.as_ref()
+    }
+
+    /// Return the timestamping configuration, if set.
+    #[must_use]
+    pub fn timestamping(&self) -> Option<&TimestampingConfig> {
+        self.timestamping.as_ref()
+    }
+
+    /// Return the delete-on-empty configuration, if set.
+    #[must_use]
+    pub fn delete_on_empty(&self) -> Option<DeleteOnEmptyConfig> {
+        self.delete_on_empty
     }
 
     /// Set the storage class for the stream.
@@ -404,48 +461,33 @@ impl StreamConfig {
             ..self
         }
     }
-}
 
-impl From<api::config::StreamConfig> for StreamConfig {
-    fn from(value: api::config::StreamConfig) -> Self {
+    pub(crate) fn from_api(value: api::config::StreamConfig) -> Self {
         Self {
             storage_class: value.storage_class,
-            retention_policy: value.retention_policy.map(Into::into),
-            timestamping: value.timestamping.map(Into::into),
-            delete_on_empty: value.delete_on_empty.map(Into::into),
+            retention_policy: value.retention_policy.map(RetentionPolicy::from_api),
+            timestamping: value.timestamping.map(TimestampingConfig::from_api),
+            delete_on_empty: value.delete_on_empty.map(DeleteOnEmptyConfig::from_api),
+        }
+    }
+
+    pub(crate) fn into_api(self) -> api::config::StreamConfig {
+        api::config::StreamConfig {
+            storage_class: self.storage_class,
+            retention_policy: self.retention_policy.map(RetentionPolicy::into_api),
+            timestamping: self.timestamping.map(TimestampingConfig::into_api),
+            delete_on_empty: self.delete_on_empty.map(DeleteOnEmptyConfig::into_api),
         }
     }
 }
 
-impl From<StreamConfig> for api::config::StreamConfig {
-    fn from(value: StreamConfig) -> Self {
-        Self {
-            storage_class: value.storage_class,
-            retention_policy: value.retention_policy.map(Into::into),
-            timestamping: value.timestamping.map(Into::into),
-            delete_on_empty: value.delete_on_empty.map(Into::into),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-#[non_exhaustive]
 /// Configuration for a basin.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct BasinConfig {
-    /// Default configuration for all streams in the basin.
-    ///
-    /// See [`StreamConfig`] for defaults.
-    pub default_stream_config: Option<StreamConfig>,
-    /// Encryption algorithm to apply to newly created streams in the basin.
-    pub stream_cipher: Option<EncryptionAlgorithm>,
-    /// Whether to create stream on append if it doesn't exist using default stream configuration.
-    ///
-    /// Defaults to `false`.
-    pub create_stream_on_append: bool,
-    /// Whether to create stream on read if it doesn't exist using default stream configuration.
-    ///
-    /// Defaults to `false`.
-    pub create_stream_on_read: bool,
+    default_stream_config: Option<StreamConfig>,
+    stream_cipher: Option<EncryptionAlgorithm>,
+    create_stream_on_append: bool,
+    create_stream_on_read: bool,
 }
 
 impl BasinConfig {
@@ -453,6 +495,30 @@ impl BasinConfig {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Return the default configuration for streams in the basin, if set.
+    #[must_use]
+    pub fn default_stream_config(&self) -> Option<&StreamConfig> {
+        self.default_stream_config.as_ref()
+    }
+
+    /// Return the encryption algorithm applied to newly created streams in the basin, if set.
+    #[must_use]
+    pub fn stream_cipher(&self) -> Option<&EncryptionAlgorithm> {
+        self.stream_cipher.as_ref()
+    }
+
+    /// Return whether streams are automatically created on append.
+    #[must_use]
+    pub fn create_stream_on_append(&self) -> bool {
+        self.create_stream_on_append
+    }
+
+    /// Return whether streams are automatically created on read.
+    #[must_use]
+    pub fn create_stream_on_read(&self) -> bool {
+        self.create_stream_on_read
     }
 
     /// Set the default configuration for all streams in the basin.
@@ -491,45 +557,33 @@ impl BasinConfig {
             ..self
         }
     }
-}
 
-impl From<api::config::BasinConfig> for BasinConfig {
-    fn from(value: api::config::BasinConfig) -> Self {
+    pub(crate) fn from_api(value: api::config::BasinConfig) -> Self {
         Self {
-            default_stream_config: value.default_stream_config.map(Into::into),
-            stream_cipher: value.stream_cipher.map(Into::into),
+            default_stream_config: value.default_stream_config.map(StreamConfig::from_api),
+            stream_cipher: value.stream_cipher.map(EncryptionAlgorithm::from_api),
             create_stream_on_append: value.create_stream_on_append,
             create_stream_on_read: value.create_stream_on_read,
         }
     }
-}
 
-impl From<BasinConfig> for api::config::BasinConfig {
-    fn from(value: BasinConfig) -> Self {
-        Self {
-            default_stream_config: value.default_stream_config.map(Into::into),
-            stream_cipher: value.stream_cipher.map(Into::into),
-            create_stream_on_append: value.create_stream_on_append,
-            create_stream_on_read: value.create_stream_on_read,
+    pub(crate) fn into_api(self) -> api::config::BasinConfig {
+        api::config::BasinConfig {
+            default_stream_config: self.default_stream_config.map(StreamConfig::into_api),
+            stream_cipher: self.stream_cipher.map(EncryptionAlgorithm::into_api),
+            create_stream_on_append: self.create_stream_on_append,
+            create_stream_on_read: self.create_stream_on_read,
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-#[must_use]
 /// Input for [`create_basin`](crate::S2::create_basin) operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[must_use]
 pub struct CreateBasinInput {
-    /// Basin name.
-    pub name: BasinName,
-    /// Configuration for the basin.
-    ///
-    /// See [`BasinConfig`] for defaults.
-    pub config: Option<BasinConfig>,
-    /// Location of the basin.
-    ///
-    /// If omitted when creating, uses the default location for the account.
-    pub location: Option<LocationName>,
+    name: BasinName,
+    config: Option<BasinConfig>,
+    location: Option<LocationName>,
 }
 
 impl CreateBasinInput {
@@ -540,6 +594,24 @@ impl CreateBasinInput {
             config: None,
             location: None,
         }
+    }
+
+    /// Return the basin name.
+    #[must_use]
+    pub fn name(&self) -> &BasinName {
+        &self.name
+    }
+
+    /// Return the basin configuration, if set.
+    #[must_use]
+    pub fn config(&self) -> Option<&BasinConfig> {
+        self.config.as_ref()
+    }
+
+    /// Return the basin location, if set.
+    #[must_use]
+    pub fn location(&self) -> Option<&LocationName> {
+        self.location.as_ref()
     }
 
     /// Set the configuration for the basin.
@@ -557,35 +629,23 @@ impl CreateBasinInput {
             ..self
         }
     }
-}
 
-impl From<CreateBasinInput> for api::basin::CreateBasinRequest {
-    fn from(value: CreateBasinInput) -> Self {
-        Self {
-            basin: value.name,
-            config: value.config.map(Into::into),
-            location: value.location,
+    pub(crate) fn into_api(self) -> api::basin::CreateBasinRequest {
+        api::basin::CreateBasinRequest {
+            basin: self.name,
+            config: self.config.map(BasinConfig::into_api),
+            location: self.location,
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-#[must_use]
 /// Input for [`ensure_basin`](crate::S2::ensure_basin) operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[must_use]
 pub struct EnsureBasinInput {
-    /// Basin name.
-    pub name: BasinName,
-    /// Desired full configuration for the basin.
-    ///
-    /// Unlike [`reconfigure_basin`](crate::S2::reconfigure_basin), omitted fields are reset to
-    /// their server defaults when ensuring an existing basin.
-    pub config: Option<BasinConfig>,
-    /// Location of the basin.
-    ///
-    /// If omitted when creating, uses the default location for the account. Cannot be changed once
-    /// set.
-    pub location: Option<LocationName>,
+    name: BasinName,
+    config: Option<BasinConfig>,
+    location: Option<LocationName>,
 }
 
 impl EnsureBasinInput {
@@ -596,6 +656,24 @@ impl EnsureBasinInput {
             config: None,
             location: None,
         }
+    }
+
+    /// Return the basin name.
+    #[must_use]
+    pub fn name(&self) -> &BasinName {
+        &self.name
+    }
+
+    /// Return the desired full configuration for the basin, if set.
+    #[must_use]
+    pub fn config(&self) -> Option<&BasinConfig> {
+        self.config.as_ref()
+    }
+
+    /// Return the basin location, if set.
+    #[must_use]
+    pub fn location(&self) -> Option<&LocationName> {
+        self.location.as_ref()
     }
 
     /// Set the full desired configuration for the basin (omitted fields reset to defaults).
@@ -617,7 +695,7 @@ impl EnsureBasinInput {
     pub(crate) fn into_parts(self) -> (BasinName, Option<api::basin::EnsureBasinRequest>) {
         let request = if self.config.is_some() || self.location.is_some() {
             Some(api::basin::EnsureBasinRequest {
-                config: self.config.map(Into::into),
+                config: self.config.map(BasinConfig::into_api),
                 location: self.location,
             })
         } else {
@@ -627,9 +705,9 @@ impl EnsureBasinInput {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
 /// Output for `ensure` operations ([`ensure_basin`](crate::S2::ensure_basin),
 /// [`ensure_stream`](crate::S2Basin::ensure_stream)).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EnsureOutput<T> {
     /// Resource created.
     Created(T),
@@ -642,6 +720,7 @@ pub enum EnsureOutput<T> {
 impl<T> EnsureOutput<T> {
     /// Return a reference to the resource info regardless of whether it was created, updated, or
     /// unchanged.
+    #[must_use]
     pub fn inner(&self) -> &T {
         match self {
             Self::Created(info) | Self::Updated(info) | Self::Noop(info) => info,
@@ -649,6 +728,7 @@ impl<T> EnsureOutput<T> {
     }
 
     /// Consume this output and return the resource info.
+    #[must_use]
     pub fn into_inner(self) -> T {
         match self {
             Self::Created(info) | Self::Updated(info) | Self::Noop(info) => info,
@@ -664,29 +744,37 @@ impl<T> EnsureOutput<T> {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-#[non_exhaustive]
-#[must_use]
 /// Input for [`list_basins`](crate::S2::list_basins) operation.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[must_use]
 pub struct ListBasinsInput {
-    /// Filter basins whose names begin with this value.
-    ///
-    /// Defaults to `""`.
-    pub prefix: BasinNamePrefix,
-    /// Filter basins whose names are lexicographically greater than this value.
-    ///
-    /// Defaults to `""`.
-    pub start_after: BasinNameStartAfter,
-    /// Number of basins to return in a page. Will be clamped to a maximum of `1000`.
-    ///
-    /// Defaults to `1000`.
-    pub limit: Option<usize>,
+    prefix: BasinNamePrefix,
+    start_after: BasinNameStartAfter,
+    limit: Option<usize>,
 }
 
 impl ListBasinsInput {
     /// Create a new [`ListBasinsInput`] with default values.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Return the prefix filter.
+    #[must_use]
+    pub fn prefix(&self) -> &BasinNamePrefix {
+        &self.prefix
+    }
+
+    /// Return the pagination cursor (`start_after`).
+    #[must_use]
+    pub fn start_after(&self) -> &BasinNameStartAfter {
+        &self.start_after
+    }
+
+    /// Return the page size limit, if set.
+    #[must_use]
+    pub fn limit(&self) -> Option<usize> {
+        self.limit
     }
 
     /// Set the prefix used to filter basins whose names begin with this value.
@@ -710,41 +798,51 @@ impl ListBasinsInput {
             ..self
         }
     }
-}
 
-impl From<ListBasinsInput> for api::basin::ListBasinsRequest {
-    fn from(value: ListBasinsInput) -> Self {
-        Self {
-            prefix: Some(value.prefix),
-            start_after: Some(value.start_after),
-            limit: value.limit,
+    pub(crate) fn set_start_after(&mut self, start_after: BasinNameStartAfter) {
+        self.start_after = start_after;
+    }
+
+    pub(crate) fn into_api(self) -> api::basin::ListBasinsRequest {
+        api::basin::ListBasinsRequest {
+            prefix: Some(self.prefix),
+            start_after: Some(self.start_after),
+            limit: self.limit,
         }
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-#[non_exhaustive]
-#[must_use]
 /// Input for [`list_all_basins`](crate::S2::list_all_basins) operation.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[must_use]
 pub struct ListAllBasinsInput {
-    /// Filter basins whose names begin with this value.
-    ///
-    /// Defaults to `""`.
-    pub prefix: BasinNamePrefix,
-    /// Filter basins whose names are lexicographically greater than this value.
-    ///
-    /// Defaults to `""`.
-    pub start_after: BasinNameStartAfter,
-    /// Whether to include basins that are being deleted.
-    ///
-    /// Defaults to `false`.
-    pub include_deleted: bool,
+    prefix: BasinNamePrefix,
+    start_after: BasinNameStartAfter,
+    include_deleted: bool,
 }
 
 impl ListAllBasinsInput {
     /// Create a new [`ListAllBasinsInput`] with default values.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Return the prefix filter.
+    #[must_use]
+    pub fn prefix(&self) -> &BasinNamePrefix {
+        &self.prefix
+    }
+
+    /// Return the pagination cursor (`start_after`).
+    #[must_use]
+    pub fn start_after(&self) -> &BasinNameStartAfter {
+        &self.start_after
+    }
+
+    /// Return whether basins that are being deleted are included.
+    #[must_use]
+    pub fn include_deleted(&self) -> bool {
+        self.include_deleted
     }
 
     /// Set the prefix used to filter basins whose names begin with this value.
@@ -768,11 +866,20 @@ impl ListAllBasinsInput {
             ..self
         }
     }
+
+    pub(crate) fn into_parts(self) -> (ListBasinsInput, bool) {
+        (
+            ListBasinsInput::new()
+                .with_prefix(self.prefix)
+                .with_start_after(self.start_after),
+            self.include_deleted,
+        )
+    }
 }
 
+/// Basin information.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-/// Basin information.
 pub struct BasinInfo {
     /// Basin name.
     pub name: BasinName,
@@ -784,8 +891,35 @@ pub struct BasinInfo {
     pub deleted_at: Option<Timestamp>,
 }
 
-impl From<api::basin::BasinInfo> for BasinInfo {
-    fn from(value: api::basin::BasinInfo) -> Self {
+impl BasinInfo {
+    /// Construct a [`BasinInfo`].
+    ///
+    /// This is intended for building fixtures in downstream tests.
+    #[must_use]
+    pub fn new(name: BasinName, created_at: Timestamp) -> Self {
+        Self {
+            name,
+            location: None,
+            created_at,
+            deleted_at: None,
+        }
+    }
+
+    /// Set the basin location.
+    #[must_use]
+    pub fn with_location(mut self, location: LocationName) -> Self {
+        self.location = Some(location);
+        self
+    }
+
+    /// Set the deletion timestamp.
+    #[must_use]
+    pub fn with_deleted_at(mut self, deleted_at: Timestamp) -> Self {
+        self.deleted_at = Some(deleted_at);
+        self
+    }
+
+    pub(crate) fn from_api(value: api::basin::BasinInfo) -> Self {
         Self {
             name: value.name,
             location: value.location,
@@ -795,9 +929,9 @@ impl From<api::basin::BasinInfo> for BasinInfo {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-#[must_use]
 /// Reconfiguration for [`TimestampingConfig`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+#[must_use]
 pub struct TimestampingReconfiguration {
     mode: Reconfigure<TimestampingMode>,
     uncapped: Reconfigure<bool>,
@@ -810,11 +944,13 @@ impl TimestampingReconfiguration {
     }
 
     /// Return the configured change for [`mode`](TimestampingConfig::mode).
+    #[must_use]
     pub fn mode(&self) -> Reconfigure<&TimestampingMode> {
         self.mode.as_ref()
     }
 
     /// Return the configured change for [`uncapped`](TimestampingConfig::uncapped).
+    #[must_use]
     pub fn uncapped(&self) -> Reconfigure<bool> {
         self.uncapped
     }
@@ -850,20 +986,18 @@ impl TimestampingReconfiguration {
             ..self
         }
     }
-}
 
-impl From<TimestampingReconfiguration> for api::config::TimestampingReconfiguration {
-    fn from(value: TimestampingReconfiguration) -> Self {
-        Self {
-            mode: value.mode.map(Into::into).into_maybe(),
-            uncapped: value.uncapped.into_maybe(),
+    pub(crate) fn into_api(self) -> api::config::TimestampingReconfiguration {
+        api::config::TimestampingReconfiguration {
+            mode: self.mode.map(TimestampingMode::into_api).into_maybe(),
+            uncapped: self.uncapped.into_maybe(),
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-#[must_use]
 /// Reconfiguration for [`DeleteOnEmptyConfig`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[must_use]
 pub struct DeleteOnEmptyReconfiguration {
     min_age_secs: Reconfigure<u64>,
 }
@@ -875,6 +1009,7 @@ impl DeleteOnEmptyReconfiguration {
     }
 
     /// Return the configured change for [`min_age`](DeleteOnEmptyConfig::min_age).
+    #[must_use]
     pub fn min_age(&self) -> Reconfigure<Duration> {
         self.min_age_secs.map(Duration::from_secs)
     }
@@ -896,19 +1031,17 @@ impl DeleteOnEmptyReconfiguration {
             min_age_secs: Reconfigure::Reset,
         }
     }
-}
 
-impl From<DeleteOnEmptyReconfiguration> for api::config::DeleteOnEmptyReconfiguration {
-    fn from(value: DeleteOnEmptyReconfiguration) -> Self {
-        Self {
-            min_age_secs: value.min_age_secs.into_maybe(),
+    pub(crate) fn into_api(self) -> api::config::DeleteOnEmptyReconfiguration {
+        api::config::DeleteOnEmptyReconfiguration {
+            min_age_secs: self.min_age_secs.into_maybe(),
         }
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-#[must_use]
 /// Reconfiguration for [`StreamConfig`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+#[must_use]
 pub struct StreamReconfiguration {
     storage_class: Reconfigure<String>,
     retention_policy: Reconfigure<RetentionPolicy>,
@@ -923,23 +1056,27 @@ impl StreamReconfiguration {
     }
 
     /// Return the configured change for [`storage_class`](StreamConfig::storage_class).
+    #[must_use]
     pub fn storage_class(&self) -> Reconfigure<&str> {
         self.storage_class.as_ref().map(String::as_str)
     }
 
     /// Return the configured change for [`retention_policy`](StreamConfig::retention_policy).
+    #[must_use]
     pub fn retention_policy(&self) -> Reconfigure<&RetentionPolicy> {
         self.retention_policy.as_ref()
     }
 
     /// Return the configured change for [`timestamping`](StreamConfig::timestamping).
+    #[must_use]
     pub fn timestamping(&self) -> Reconfigure<&TimestampingReconfiguration> {
         self.timestamping.as_ref()
     }
 
     /// Return the configured change for [`delete_on_empty`](StreamConfig::delete_on_empty).
-    pub fn delete_on_empty(&self) -> Reconfigure<&DeleteOnEmptyReconfiguration> {
-        self.delete_on_empty.as_ref()
+    #[must_use]
+    pub fn delete_on_empty(&self) -> Reconfigure<DeleteOnEmptyReconfiguration> {
+        self.delete_on_empty
     }
 
     /// Set the override for the existing [`storage_class`](StreamConfig::storage_class).
@@ -1005,22 +1142,29 @@ impl StreamReconfiguration {
             ..self
         }
     }
-}
 
-impl From<StreamReconfiguration> for api::config::StreamReconfiguration {
-    fn from(value: StreamReconfiguration) -> Self {
-        Self {
-            storage_class: value.storage_class.into_maybe(),
-            retention_policy: value.retention_policy.map(Into::into).into_maybe(),
-            timestamping: value.timestamping.map(Into::into).into_maybe(),
-            delete_on_empty: value.delete_on_empty.map(Into::into).into_maybe(),
+    pub(crate) fn into_api(self) -> api::config::StreamReconfiguration {
+        api::config::StreamReconfiguration {
+            storage_class: self.storage_class.into_maybe(),
+            retention_policy: self
+                .retention_policy
+                .map(RetentionPolicy::into_api)
+                .into_maybe(),
+            timestamping: self
+                .timestamping
+                .map(TimestampingReconfiguration::into_api)
+                .into_maybe(),
+            delete_on_empty: self
+                .delete_on_empty
+                .map(DeleteOnEmptyReconfiguration::into_api)
+                .into_maybe(),
         }
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-#[must_use]
 /// Reconfiguration for [`BasinConfig`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+#[must_use]
 pub struct BasinReconfiguration {
     default_stream_config: Reconfigure<StreamReconfiguration>,
     stream_cipher: Reconfigure<EncryptionAlgorithm>,
@@ -1036,23 +1180,27 @@ impl BasinReconfiguration {
 
     /// Return the configured change for
     /// [`default_stream_config`](BasinConfig::default_stream_config).
+    #[must_use]
     pub fn default_stream_config(&self) -> Reconfigure<&StreamReconfiguration> {
         self.default_stream_config.as_ref()
     }
 
     /// Return the configured change for [`stream_cipher`](BasinConfig::stream_cipher).
+    #[must_use]
     pub fn stream_cipher(&self) -> Reconfigure<&EncryptionAlgorithm> {
         self.stream_cipher.as_ref()
     }
 
     /// Return the configured change for
     /// [`create_stream_on_append`](BasinConfig::create_stream_on_append).
+    #[must_use]
     pub fn create_stream_on_append(&self) -> Reconfigure<bool> {
         self.create_stream_on_append
     }
 
     /// Return the configured change for
     /// [`create_stream_on_read`](BasinConfig::create_stream_on_read).
+    #[must_use]
     pub fn create_stream_on_read(&self) -> Reconfigure<bool> {
         self.create_stream_on_read
     }
@@ -1124,24 +1272,28 @@ impl BasinReconfiguration {
             ..self
         }
     }
-}
 
-impl From<BasinReconfiguration> for api::config::BasinReconfiguration {
-    fn from(value: BasinReconfiguration) -> Self {
-        Self {
-            default_stream_config: value.default_stream_config.map(Into::into).into_maybe(),
-            stream_cipher: value.stream_cipher.map(Into::into).into_maybe(),
-            create_stream_on_append: value.create_stream_on_append.into_maybe(),
-            create_stream_on_read: value.create_stream_on_read.into_maybe(),
+    pub(crate) fn into_api(self) -> api::config::BasinReconfiguration {
+        api::config::BasinReconfiguration {
+            default_stream_config: self
+                .default_stream_config
+                .map(StreamReconfiguration::into_api)
+                .into_maybe(),
+            stream_cipher: self
+                .stream_cipher
+                .map(EncryptionAlgorithm::into_api)
+                .into_maybe(),
+            create_stream_on_append: self.create_stream_on_append.into_maybe(),
+            create_stream_on_read: self.create_stream_on_read.into_maybe(),
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 /// AWS PrivateLink details for a location.
 ///
 /// See [`PrivateNet`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct AwsPrivateNet {
     /// Endpoint service name, for creating a VPC endpoint.
     pub service_name: String,
@@ -1151,9 +1303,29 @@ pub struct AwsPrivateNet {
     pub private_dns_name: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
+impl AwsPrivateNet {
+    /// Construct an [`AwsPrivateNet`].
+    ///
+    /// This is intended for building fixtures in downstream tests.
+    #[must_use]
+    pub fn new(service_name: impl Into<String>) -> Self {
+        Self {
+            service_name: service_name.into(),
+            private_dns_name: None,
+        }
+    }
+
+    /// Set the private DNS name.
+    #[must_use]
+    pub fn with_private_dns_name(mut self, private_dns_name: impl Into<String>) -> Self {
+        self.private_dns_name = Some(private_dns_name.into());
+        self
+    }
+}
+
 /// How the account can reach a location over a private network. Exactly one kind applies.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum PrivateNet {
     /// AWS PrivateLink.
     Aws(AwsPrivateNet),
@@ -1161,8 +1333,8 @@ pub enum PrivateNet {
     Unknown(String),
 }
 
-impl From<MaybeKnown<api::location::PrivateNet>> for PrivateNet {
-    fn from(value: MaybeKnown<api::location::PrivateNet>) -> Self {
+impl PrivateNet {
+    pub(crate) fn from_api(value: MaybeKnown<api::location::PrivateNet>) -> Self {
         match value {
             MaybeKnown::Known(api::location::PrivateNet::Aws(aws)) => Self::Aws(AwsPrivateNet {
                 service_name: aws.service_name,
@@ -1173,9 +1345,9 @@ impl From<MaybeKnown<api::location::PrivateNet>> for PrivateNet {
     }
 }
 
+/// Location information.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-/// Location information.
 pub struct LocationInfo {
     /// Location name.
     pub name: LocationName,
@@ -1193,41 +1365,87 @@ pub struct LocationInfo {
     pub private_net: Option<PrivateNet>,
 }
 
-impl From<api::location::LocationInfo> for LocationInfo {
-    fn from(value: api::location::LocationInfo) -> Self {
+impl LocationInfo {
+    /// Construct a [`LocationInfo`].
+    ///
+    /// This is intended for building fixtures in downstream tests.
+    #[must_use]
+    pub fn new(name: LocationName, is_private: bool) -> Self {
+        Self {
+            name,
+            is_private,
+            storage_classes: None,
+            default_storage_class: None,
+            private_net: None,
+        }
+    }
+
+    /// Set the storage classes available in this location.
+    #[must_use]
+    pub fn with_storage_classes(
+        mut self,
+        storage_classes: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.storage_classes = Some(storage_classes.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// Set the default storage class for this location.
+    #[must_use]
+    pub fn with_default_storage_class(mut self, default_storage_class: impl Into<String>) -> Self {
+        self.default_storage_class = Some(default_storage_class.into());
+        self
+    }
+
+    /// Set the private networking details for this location.
+    #[must_use]
+    pub fn with_private_net(mut self, private_net: PrivateNet) -> Self {
+        self.private_net = Some(private_net);
+        self
+    }
+
+    pub(crate) fn from_api(value: api::location::LocationInfo) -> Self {
         Self {
             name: value.name,
             is_private: value.is_private,
             storage_classes: value.storage_classes,
             default_storage_class: value.default_storage_class,
-            private_net: value.private_net.map(Into::into),
+            private_net: value.private_net.map(PrivateNet::from_api),
         }
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-#[non_exhaustive]
-#[must_use]
 /// Input for [`list_streams`](crate::S2Basin::list_streams) operation.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[must_use]
 pub struct ListStreamsInput {
-    /// Filter streams whose names begin with this value.
-    ///
-    /// Defaults to `""`.
-    pub prefix: StreamNamePrefix,
-    /// Filter streams whose names are lexicographically greater than this value.
-    ///
-    /// Defaults to `""`.
-    pub start_after: StreamNameStartAfter,
-    /// Number of streams to return in a page. Will be clamped to a maximum of `1000`.
-    ///
-    /// Defaults to `1000`.
-    pub limit: Option<usize>,
+    prefix: StreamNamePrefix,
+    start_after: StreamNameStartAfter,
+    limit: Option<usize>,
 }
 
 impl ListStreamsInput {
     /// Create a new [`ListStreamsInput`] with default values.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Return the prefix filter.
+    #[must_use]
+    pub fn prefix(&self) -> &StreamNamePrefix {
+        &self.prefix
+    }
+
+    /// Return the pagination cursor (`start_after`).
+    #[must_use]
+    pub fn start_after(&self) -> &StreamNameStartAfter {
+        &self.start_after
+    }
+
+    /// Return the page size limit, if set.
+    #[must_use]
+    pub fn limit(&self) -> Option<usize> {
+        self.limit
     }
 
     /// Set the prefix used to filter streams whose names begin with this value.
@@ -1251,41 +1469,51 @@ impl ListStreamsInput {
             ..self
         }
     }
-}
 
-impl From<ListStreamsInput> for api::stream::ListStreamsRequest {
-    fn from(value: ListStreamsInput) -> Self {
-        Self {
-            prefix: Some(value.prefix),
-            start_after: Some(value.start_after),
-            limit: value.limit,
+    pub(crate) fn set_start_after(&mut self, start_after: StreamNameStartAfter) {
+        self.start_after = start_after;
+    }
+
+    pub(crate) fn into_api(self) -> api::stream::ListStreamsRequest {
+        api::stream::ListStreamsRequest {
+            prefix: Some(self.prefix),
+            start_after: Some(self.start_after),
+            limit: self.limit,
         }
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-#[non_exhaustive]
-#[must_use]
 /// Input for [`list_all_streams`](crate::S2Basin::list_all_streams) operation.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[must_use]
 pub struct ListAllStreamsInput {
-    /// Filter streams whose names begin with this value.
-    ///
-    /// Defaults to `""`.
-    pub prefix: StreamNamePrefix,
-    /// Filter streams whose names are lexicographically greater than this value.
-    ///
-    /// Defaults to `""`.
-    pub start_after: StreamNameStartAfter,
-    /// Whether to include streams that are being deleted.
-    ///
-    /// Defaults to `false`.
-    pub include_deleted: bool,
+    prefix: StreamNamePrefix,
+    start_after: StreamNameStartAfter,
+    include_deleted: bool,
 }
 
 impl ListAllStreamsInput {
     /// Create a new [`ListAllStreamsInput`] with default values.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Return the prefix filter.
+    #[must_use]
+    pub fn prefix(&self) -> &StreamNamePrefix {
+        &self.prefix
+    }
+
+    /// Return the pagination cursor (`start_after`).
+    #[must_use]
+    pub fn start_after(&self) -> &StreamNameStartAfter {
+        &self.start_after
+    }
+
+    /// Return whether streams that are being deleted are included.
+    #[must_use]
+    pub fn include_deleted(&self) -> bool {
+        self.include_deleted
     }
 
     /// Set the prefix used to filter streams whose names begin with this value.
@@ -1309,11 +1537,20 @@ impl ListAllStreamsInput {
             ..self
         }
     }
+
+    pub(crate) fn into_parts(self) -> (ListStreamsInput, bool) {
+        (
+            ListStreamsInput::new()
+                .with_prefix(self.prefix)
+                .with_start_after(self.start_after),
+            self.include_deleted,
+        )
+    }
 }
 
+/// Stream information.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-/// Stream information.
 pub struct StreamInfo {
     /// Stream name.
     pub name: StreamName,
@@ -1325,34 +1562,68 @@ pub struct StreamInfo {
     pub cipher: Option<EncryptionAlgorithm>,
 }
 
-impl From<api::stream::StreamInfo> for StreamInfo {
-    fn from(value: api::stream::StreamInfo) -> Self {
+impl StreamInfo {
+    /// Construct a [`StreamInfo`].
+    ///
+    /// This is intended for building fixtures in downstream tests.
+    #[must_use]
+    pub fn new(name: StreamName, created_at: Timestamp) -> Self {
+        Self {
+            name,
+            created_at,
+            deleted_at: None,
+            cipher: None,
+        }
+    }
+
+    /// Set the deletion timestamp.
+    #[must_use]
+    pub fn with_deleted_at(mut self, deleted_at: Timestamp) -> Self {
+        self.deleted_at = Some(deleted_at);
+        self
+    }
+
+    /// Set the stream encryption algorithm.
+    #[must_use]
+    pub fn with_cipher(mut self, cipher: EncryptionAlgorithm) -> Self {
+        self.cipher = Some(cipher);
+        self
+    }
+
+    pub(crate) fn from_api(value: api::stream::StreamInfo) -> Self {
         Self {
             name: value.name,
             created_at: value.created_at,
             deleted_at: value.deleted_at,
-            cipher: value.cipher.map(Into::into),
+            cipher: value.cipher.map(EncryptionAlgorithm::from_api),
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-#[must_use]
 /// Input for [`create_stream`](crate::S2Basin::create_stream) operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[must_use]
 pub struct CreateStreamInput {
-    /// Stream name.
-    pub name: StreamName,
-    /// Configuration for the stream.
-    ///
-    /// See [`StreamConfig`] for defaults.
-    pub config: Option<StreamConfig>,
+    name: StreamName,
+    config: Option<StreamConfig>,
 }
 
 impl CreateStreamInput {
     /// Create a new [`CreateStreamInput`] with the given stream name.
     pub fn new(name: StreamName) -> Self {
         Self { name, config: None }
+    }
+
+    /// Return the stream name.
+    #[must_use]
+    pub fn name(&self) -> &StreamName {
+        &self.name
+    }
+
+    /// Return the stream configuration, if set.
+    #[must_use]
+    pub fn config(&self) -> Option<&StreamConfig> {
+        self.config.as_ref()
     }
 
     /// Set the configuration for the stream.
@@ -1362,36 +1633,39 @@ impl CreateStreamInput {
             ..self
         }
     }
-}
 
-impl From<CreateStreamInput> for api::stream::CreateStreamRequest {
-    fn from(value: CreateStreamInput) -> Self {
-        Self {
-            stream: value.name,
-            config: value.config.map(Into::into),
+    pub(crate) fn into_api(self) -> api::stream::CreateStreamRequest {
+        api::stream::CreateStreamRequest {
+            stream: self.name,
+            config: self.config.map(StreamConfig::into_api),
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-#[must_use]
 /// Input for [`ensure_stream`](crate::S2Basin::ensure_stream) operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[must_use]
 pub struct EnsureStreamInput {
-    /// Stream name.
-    pub name: StreamName,
-    /// Desired full configuration for the stream.
-    ///
-    /// Unlike [`reconfigure_stream`](crate::S2Basin::reconfigure_stream), omitted fields are reset
-    /// to their defaults (inheriting the basin's default stream configuration) when ensuring an
-    /// existing stream.
-    pub config: Option<StreamConfig>,
+    name: StreamName,
+    config: Option<StreamConfig>,
 }
 
 impl EnsureStreamInput {
     /// Create a new [`EnsureStreamInput`] with the given stream name.
     pub fn new(name: StreamName) -> Self {
         Self { name, config: None }
+    }
+
+    /// Return the stream name.
+    #[must_use]
+    pub fn name(&self) -> &StreamName {
+        &self.name
+    }
+
+    /// Return the desired full configuration for the stream, if set.
+    #[must_use]
+    pub fn config(&self) -> Option<&StreamConfig> {
+        self.config.as_ref()
     }
 
     /// Set the full desired configuration for the stream (omitted fields reset to defaults).
@@ -1403,6 +1677,6 @@ impl EnsureStreamInput {
     }
 
     pub(crate) fn into_parts(self) -> (StreamName, Option<api::config::StreamConfig>) {
-        (self.name, self.config.map(Into::into))
+        (self.name, self.config.map(StreamConfig::into_api))
     }
 }

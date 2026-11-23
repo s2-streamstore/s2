@@ -27,7 +27,7 @@ use s2_sdk::{
     producer::{Producer, ProducerConfig},
     read_session::{ReadBatchSession, ReadSession, ReadSessionConfig, ReadSessionState},
     types::{
-        AccessTokenScopeInput, AppendInput, AppendRecord, AppendRecordBatch, AppendRetryPolicy,
+        AccessTokenScope, AppendInput, AppendRecord, AppendRecordBatch, AppendRetryPolicy,
         Compression, CreateBasinInput, CreateStreamInput, EncryptionKey, Header, Http2Config,
         IssueAccessTokenInput, ListBasinsInput, Operation, ReadInput, ReadStart, RetryConfig,
         S2Config, S2Endpoints,
@@ -282,7 +282,7 @@ async fn spec_e2_typed_412_416_extra_fields_and_fallbacks() {
         panic!("expected SeqNumMismatch, got {err:?}");
     };
     assert_eq!(e.assignable_seq_num, 7);
-    assert_eq!(e.server.status.as_u16(), 412);
+    assert_eq!(e.server_error().status.as_u16(), 412);
     assert!(!err.is_retryable());
     assert!(err.has_no_side_effects());
 
@@ -292,7 +292,7 @@ async fn spec_e2_typed_412_416_extra_fields_and_fallbacks() {
         panic!("expected FencingTokenMismatch, got {err:?}");
     };
     assert_eq!(&*e.current_fencing_token, "tok");
-    assert_eq!(e.server.status.as_u16(), 412);
+    assert_eq!(e.server_error().status.as_u16(), 412);
 
     // 3. 412 out-of-range u64 falls back to plain ServerError, still definite & non-retryable (E4e)
     let err = stream.append(sample_append_input()).await.unwrap_err();
@@ -310,7 +310,7 @@ async fn spec_e2_typed_412_416_extra_fields_and_fallbacks() {
     };
     assert_eq!(e.tail.seq_num, 9);
     assert_eq!(e.tail.timestamp, 1000);
-    assert_eq!(e.server.status.as_u16(), 416);
+    assert_eq!(e.server_error().status.as_u16(), 416);
 
     // 5. 416 malformed body falls back to plain ServerError, still definite on read
     let err = stream.read(ReadInput::new()).await.unwrap_err();
@@ -449,7 +449,7 @@ async fn spec_e2_e6_s2s_terminal_frames_end_to_end() {
         panic!("expected AppendSessionError::SeqNumMismatch, got {err:?}");
     };
     assert_eq!(e.assignable_seq_num, 12);
-    assert_eq!(e.server.status.as_u16(), 412);
+    assert_eq!(e.server_error().status.as_u16(), 412);
     assert!(!err.is_retryable());
     assert!(err.has_no_side_effects());
 
@@ -506,7 +506,7 @@ async fn spec_e2_e6_s2s_terminal_frames_end_to_end() {
     };
     assert_eq!(e.tail.seq_num, 5);
     assert_eq!(e.tail.timestamp, 1234);
-    assert_eq!(e.server.status.as_u16(), 416);
+    assert_eq!(e.server_error().status.as_u16(), 416);
     assert!(!read_err.is_retryable());
     assert!(read_err.has_no_side_effects());
 }
@@ -1409,7 +1409,7 @@ async fn spec_c13b_http2_keepalive_ping_timeout_maps_to_connection_lost_and_spil
         }
     });
 
-    let raw_endpoints = S2Endpoints::for_endpoint(&format!("http://{addr}")).unwrap();
+    let raw_endpoints = S2Endpoints::for_endpoint(format!("http://{addr}")).unwrap();
     let ping_client = S2::new(
         S2Config::new("test-token")
             .with_endpoints(raw_endpoints)
@@ -1698,7 +1698,7 @@ async fn spec_e4_e8_l1_l2_l3_logging_levels_secret_redaction_and_unobserved_erro
     const ISSUED_TOKEN: &str = "tok_SUPER_SECRET_ISSUED_TOKEN_43210";
     const SECRET_BODY: &str = "BODY_SUPER_SECRET_RECORD_PAYLOAD_55555";
 
-    let enc_key = EncryptionKey::new(RAW_ENC_KEY).unwrap();
+    let enc_key = EncryptionKey::from_bytes(RAW_ENC_KEY).unwrap();
     let enc_key_b64 = base64ct::Base64::encode_string(RAW_ENC_KEY);
 
     let (basin_name, stream_name) = test_basin_and_stream();
@@ -1725,7 +1725,7 @@ async fn spec_e4_e8_l1_l2_l3_logging_levels_secret_redaction_and_unobserved_erro
     })
     .await;
 
-    let endpoints = S2Endpoints::for_endpoint(&server.endpoint_url()).unwrap();
+    let endpoints = S2Endpoints::for_endpoint(server.endpoint_url()).unwrap();
     let config = S2Config::new(CLIENT_TOKEN)
         .with_endpoints(endpoints)
         .with_retry(fast_retry_config(2));
@@ -1762,7 +1762,7 @@ async fn spec_e4_e8_l1_l2_l3_logging_levels_secret_redaction_and_unobserved_erro
     let issued = s2
         .issue_access_token(IssueAccessTokenInput::new(
             "l3-tok".parse().unwrap(),
-            AccessTokenScopeInput::from_ops([Operation::ListBasins]),
+            AccessTokenScope::from_ops([Operation::ListBasins]),
         ))
         .await
         .unwrap();
@@ -1956,7 +1956,7 @@ async fn producer_client_close_during_cut_or_reserve_wait_reports_aborted() {
     //    SessionClosed(Some(Aborted)), never SessionClosed(None)!
     let s2 = server.client(no_retry_config());
     let stream = s2.basin(basin_name).stream(stream_name);
-    let max_unacked = 1024 * 1024u32;
+    let max_unacked = 1024 * 1024usize;
     let producer = stream
         .producer(
             ProducerConfig::new()

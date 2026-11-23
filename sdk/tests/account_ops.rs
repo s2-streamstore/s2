@@ -84,19 +84,16 @@ async fn basin_config_and_reconfigure() -> Result<(), Box<dyn std::error::Error>
         .await?;
 
     let retrieved = s2.get_basin_config(basin_name.clone()).await?;
-    assert_matches!(
-        retrieved,
-        BasinConfig {
-            default_stream_config: Some(StreamConfig {
-                storage_class: Some(ref storage_class),
-                delete_on_empty: Some(ref delete_on_empty),
-                ..
-            }),
-            create_stream_on_append: true,
-            create_stream_on_read: true,
-            ..
-        } if storage_class == "express" && delete_on_empty.min_age() == Duration::from_secs(60)
+    let default_cfg = retrieved
+        .default_stream_config()
+        .expect("default_stream_config should be present");
+    assert_eq!(default_cfg.storage_class(), Some("express"));
+    assert_eq!(
+        default_cfg.delete_on_empty().map(|d| d.min_age()),
+        Some(Duration::from_secs(60))
     );
+    assert!(retrieved.create_stream_on_append());
+    assert!(retrieved.create_stream_on_read());
 
     let updated = s2
         .reconfigure_basin(
@@ -108,17 +105,13 @@ async fn basin_config_and_reconfigure() -> Result<(), Box<dyn std::error::Error>
                 .with_create_stream_on_append(false),
         )
         .await?;
-    assert_matches!(
-        updated,
-        BasinConfig {
-            default_stream_config: Some(StreamConfig {
-                storage_class: Some(ref storage_class),
-                ..
-            }),
-            create_stream_on_append: false,
-            ..
-        } if storage_class == "standard"
+    assert_eq!(
+        updated
+            .default_stream_config()
+            .and_then(|c| c.storage_class()),
+        Some("standard")
     );
+    assert!(!updated.create_stream_on_append());
 
     s2.delete_basin(basin_name).await?;
 
@@ -141,7 +134,7 @@ async fn ensure_basin_lifecycle() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let config = s2.get_basin_config(basin_name.clone()).await?;
-    assert!(config.create_stream_on_read);
+    assert!(config.create_stream_on_read());
 
     let noop = s2
         .ensure_basin(EnsureBasinInput::new(basin_name.clone()).with_config(config.clone()))
@@ -159,7 +152,7 @@ async fn ensure_basin_lifecycle() -> Result<(), Box<dyn std::error::Error>> {
     assert!(
         !s2.get_basin_config(basin_name.clone())
             .await?
-            .create_stream_on_read
+            .create_stream_on_read()
     );
 
     s2.delete_basin(basin_name).await?;
@@ -225,12 +218,10 @@ async fn issue_list_and_revoke_access_token() -> Result<(), Box<dyn std::error::
         .issue_access_token(
             IssueAccessTokenInput::new(
                 token_id.clone(),
-                AccessTokenScopeInput::from_op_group_perms(
-                    OperationGroupPermissions::read_write_all(),
-                )
-                .with_streams(StreamMatcher::Prefix(
-                    "namespace".parse().expect("valid prefix"),
-                )),
+                AccessTokenScope::from_op_group_perms(OperationGroupPermissions::read_write_all())
+                    .with_streams(StreamMatcher::Prefix(
+                        "namespace".parse().expect("valid prefix"),
+                    )),
             )
             .with_expires_at(expires_at)?
             .with_auto_prefix_streams(true),
@@ -267,8 +258,7 @@ async fn list_access_tokens_with_prefix_and_limit() -> Result<(), Box<dyn std::e
     let token_id_2: AccessTokenId = format!("{prefix}-b").parse().expect("valid token id");
     let token_id_3: AccessTokenId = format!("{}-c", uuid()).parse().expect("valid token id");
 
-    let scope =
-        AccessTokenScopeInput::from_op_group_perms(OperationGroupPermissions::read_write_all());
+    let scope = AccessTokenScope::from_op_group_perms(OperationGroupPermissions::read_write_all());
     for id in [&token_id_1, &token_id_2, &token_id_3] {
         s2.issue_access_token(IssueAccessTokenInput::new(id.clone(), scope.clone()))
             .await?;
@@ -307,9 +297,7 @@ async fn issue_access_token_validation_errors() -> Result<(), Box<dyn std::error
         .issue_access_token(
             IssueAccessTokenInput::new(
                 token_id.clone(),
-                AccessTokenScopeInput::from_op_group_perms(
-                    OperationGroupPermissions::read_write_all(),
-                ),
+                AccessTokenScope::from_op_group_perms(OperationGroupPermissions::read_write_all()),
             )
             .with_auto_prefix_streams(true),
         )
@@ -320,8 +308,8 @@ async fn issue_access_token_validation_errors() -> Result<(), Box<dyn std::error
     });
 
     for scope in [
-        AccessTokenScopeInput::from_op_group_perms(OperationGroupPermissions::new()),
-        AccessTokenScopeInput::from_ops(vec![]),
+        AccessTokenScope::from_op_group_perms(OperationGroupPermissions::new()),
+        AccessTokenScope::from_ops(vec![]),
     ] {
         let err = s2
             .issue_access_token(IssueAccessTokenInput::new(token_id.clone(), scope))

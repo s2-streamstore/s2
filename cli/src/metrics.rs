@@ -315,17 +315,15 @@ mod tests {
     use super::*;
 
     fn series(name: &str, unit: &str, values: &[(u32, f64)]) -> AccumulationMetric {
-        let api = s2_api::v1::metrics::AccumulationMetric {
-            name: name.into(),
-            unit: s2_api::v1::MaybeKnown::Unknown(unit.into()),
-            interval: s2_api::v1::MaybeKnown::Known(s2_api::v1::metrics::TimeseriesInterval::Hour),
-            values: values.to_vec(),
-        };
-        let metric = s2_api::v1::metrics::Metric::Accumulation(api);
-        match Metric::from(s2_api::v1::MaybeKnown::Known(metric)) {
-            Metric::Accumulation(series) => series,
-            _ => unreachable!(),
-        }
+        AccumulationMetric::new(
+            name,
+            MetricUnit::Unknown(unit.into()),
+            TimeseriesInterval::Hour,
+            values
+                .iter()
+                .map(|&(secs, value)| (Timestamp::from_second(i64::from(secs)).unwrap(), value))
+                .collect(),
+        )
     }
 
     fn usd(name: &str, values: &[(u32, f64)]) -> Metric {
@@ -335,16 +333,13 @@ mod tests {
     }
 
     fn record(timestamp: u32, fields: &[(&str, &str)]) -> Metric {
-        let api = s2_api::v1::metrics::RecordMetric {
-            name: "last_use".into(),
-            timestamp,
-            fields: fields
+        Metric::Record(RecordMetric::new(
+            "last_use",
+            Timestamp::from_second(i64::from(timestamp)).unwrap(),
+            fields
                 .iter()
                 .map(|(name, value)| (name.to_string(), value.to_string()))
                 .collect(),
-        };
-        Metric::from(s2_api::v1::MaybeKnown::Known(
-            s2_api::v1::metrics::Metric::Record(api),
         ))
     }
 
@@ -501,15 +496,18 @@ mod tests {
         let appends: Vec<&AccumulationMetric> = appends.iter().collect();
         assert_eq!(render_sums(&appends), expected);
 
-        let api = s2_api::v1::metrics::GaugeMetric {
-            name: "storage".into(),
-            unit: s2_api::v1::MaybeKnown::Known(s2_api::v1::metrics::MetricUnit::Bytes),
-            values: (0..100).map(|i| (i * 60, f64::from(i))).collect(),
-        };
-        let gauge = s2_api::v1::metrics::Metric::Gauge(api);
-        let Metric::Gauge(gauge) = Metric::from(s2_api::v1::MaybeKnown::Known(gauge)) else {
-            unreachable!()
-        };
+        let gauge = GaugeMetric::new(
+            "storage",
+            MetricUnit::Bytes,
+            (0..100)
+                .map(|i| {
+                    (
+                        Timestamp::from_second(i64::from(i * 60)).unwrap(),
+                        f64::from(i),
+                    )
+                })
+                .collect(),
+        );
         let rendered = render_gauge(&gauge);
         let lines: Vec<&str> = rendered.lines().collect();
         assert_eq!(lines[0], "storage: 99 bytes at 1970-01-01T01:39:00Z");

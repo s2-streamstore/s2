@@ -15,8 +15,8 @@ use std::{
     time::Duration,
 };
 
+use futures_core::FusedFuture;
 use futures_util::{StreamExt, stream::FuturesOrdered};
-use s2_common::{caps::RECORD_BATCH_MAX, record::Metered};
 use tokio::sync::{Notify, mpsc, oneshot};
 use tracing::{Instrument, debug, debug_span};
 
@@ -27,15 +27,15 @@ use crate::{
         validate_max_batch_records, validate_record_size,
     },
     client::CancellationToken,
-    error::{AbortedError, AppendSessionError, ErrorContext, SessionClosedError},
+    error::{AbortedError, AppendSessionError, ErrorContext, SessionClosedError, ValidationError},
     session::{
         AppendPermit, AppendPermits, AppendSessionCore, BatchSubmitTicket, FinishOnDrop,
         SessionLifecycle, StreamHeaders, SubmitTicket, validate_max_unacked_bytes,
         validate_reserve_bytes,
     },
     types::{
-        AppendAck, AppendInput, AppendRecord, BasinName, FencingToken, MeteredBytes, ONE_MIB,
-        StreamConfig, StreamName, ValidationError,
+        AppendAck, AppendInput, AppendRecord, BasinName, FencingToken, ONE_MIB, RECORD_BATCH_MAX,
+        StreamConfig, StreamName,
     },
 };
 
@@ -45,6 +45,16 @@ type RecordAckTx = oneshot::Sender<Result<RecordAck, AppendSessionError>>;
 
 /// A [`Future`] that resolves to a [`RecordAck`] once the record is appended.
 pub struct RecordSubmitTicket(SubmitTicket<RecordAck>);
+
+impl RecordSubmitTicket {
+    /// Poll the ticket without blocking, returning `Some` once the record outcome is ready.
+    ///
+    /// Returns `None` if the record is still in flight or if the outcome was already consumed.
+    #[must_use]
+    pub fn try_ack(&mut self) -> Option<Result<RecordAck, AppendSessionError>> {
+        self.0.try_ack()
+    }
+}
 
 impl fmt::Debug for RecordSubmitTicket {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -60,8 +70,14 @@ impl Future for RecordSubmitTicket {
     }
 }
 
+impl FusedFuture for RecordSubmitTicket {
+    fn is_terminated(&self) -> bool {
+        self.0.is_terminated()
+    }
+}
+
 /// Acknowledgement for an appended record.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct RecordAck {
     /// Sequence number assigned to the record.
@@ -74,16 +90,17 @@ impl RecordAck {
     /// Construct an acknowledgement for an appended record.
     ///
     /// This is intended for building fixtures in downstream tests.
+    #[must_use]
     pub fn new(seq_num: u64, batch: AppendAck) -> Self {
         Self { seq_num, batch }
     }
 }
 
 /// Configuration for a [`Producer`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[must_use]
 pub struct ProducerConfig {
-    max_unacked_bytes: u32,
+    max_unacked_bytes: usize,
     linger: Duration,
     max_batch_records: usize,
     max_batch_bytes: usize,
@@ -113,46 +130,55 @@ impl ProducerConfig {
     }
 
     /// Return the limit on total metered bytes of unacknowledged [`AppendRecord`]s held in memory.
-    pub fn max_unacked_bytes(&self) -> u32 {
+    #[must_use]
+    pub fn max_unacked_bytes(&self) -> usize {
         self.max_unacked_bytes
     }
 
     /// Return the configured linger duration.
+    #[must_use]
     pub fn linger(&self) -> Duration {
         self.linger
     }
 
     /// Return the configured maximum records per batch.
+    #[must_use]
     pub fn max_batch_records(&self) -> usize {
         self.max_batch_records
     }
 
     /// Return the configured maximum metered bytes per batch.
+    #[must_use]
     pub fn max_batch_bytes(&self) -> usize {
         self.max_batch_bytes
     }
 
     /// Return the configured fencing token, if any.
+    #[must_use]
     pub fn fencing_token(&self) -> Option<&FencingToken> {
         self.fencing_token.as_ref()
     }
 
     /// Return the configured starting `match_seq_num`, if any.
+    #[must_use]
     pub fn match_seq_num(&self) -> Option<u64> {
         self.match_seq_num
     }
 
     /// Return the stream configuration to apply if the stream is created on append, if set.
+    #[must_use]
     pub fn stream_config(&self) -> Option<&StreamConfig> {
         self.stream_config.as_ref()
     }
 
     /// Set the limit on total metered bytes of unacknowledged [`AppendRecord`]s held in memory.
     ///
-    /// **Note:** It must be at least `1MiB`.
+    /// Defaults to `5 MiB`.
     ///
-    /// Defaults to `5MiB`.
-    pub fn with_max_unacked_bytes(self, max_unacked_bytes: u32) -> Result<Self, ValidationError> {
+    /// # Errors
+    ///
+    /// Returns [`ValidationError`] if `max_unacked_bytes` is less than `1 MiB`.
+    pub fn with_max_unacked_bytes(self, max_unacked_bytes: usize) -> Result<Self, ValidationError> {
         let max_unacked_bytes = validate_max_unacked_bytes(max_unacked_bytes)?;
         Ok(Self {
             max_unacked_bytes,
@@ -169,9 +195,11 @@ impl ProducerConfig {
 
     /// Set the maximum number of records per batch.
     ///
-    /// **Note:** Must be between `1` and `1000`.
-    ///
     /// Defaults to `1000`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ValidationError`] if `max_batch_records` is outside `1..=1000`.
     pub fn with_max_batch_records(self, max_batch_records: usize) -> Result<Self, ValidationError> {
         let max_batch_records = validate_max_batch_records(max_batch_records)?;
         Ok(Self {
@@ -182,9 +210,11 @@ impl ProducerConfig {
 
     /// Set the maximum metered bytes per batch.
     ///
-    /// **Note:** Must be between `8` bytes and `1MiB`.
+    /// Defaults to `1 MiB`.
     ///
-    /// Defaults to `1MiB`.
+    /// # Errors
+    ///
+    /// Returns [`ValidationError`] if `max_batch_bytes` is outside `8..=1_048_576`.
     pub fn with_max_batch_bytes(self, max_batch_bytes: usize) -> Result<Self, ValidationError> {
         let max_batch_bytes = validate_max_batch_bytes(max_batch_bytes)?;
         Ok(Self {
@@ -377,20 +407,27 @@ impl Producer {
     ///
     /// Use [`flush`](Self::flush) to establish a non-terminal durability boundary, and call
     /// [`close`](Self::close) when finished to flush remaining records and release resources.
+    ///
+    /// # Cancel safety
+    ///
+    /// This method is cancel safe while waiting for capacity. Dropping the future before it
+    /// resolves accepts nothing and releases any partially acquired reservation.
     pub async fn submit(
         &self,
         record: impl Into<AppendRecord>,
     ) -> Result<RecordSubmitTicket, AppendSessionError> {
         let record = record.into();
         let bytes = record.metered_bytes();
-        validate_record_size(bytes, self.shared.max_batch_bytes)?;
+        validate_record_size(bytes, self.shared.max_batch_bytes)
+            .map_err(|e| self.shared.context.format_validation(e))?;
         self.shared
             .gate
             .lock()
             .unwrap()
             .match_seq
-            .check_available()?;
-        let permit = self.reserve(bytes as u32).await?;
+            .check_available()
+            .map_err(|e| self.shared.context.format_validation(e))?;
+        let permit = self.reserve(bytes).await?;
         permit.submit(record)
     }
 
@@ -409,8 +446,8 @@ impl Producer {
     /// # Cancel safety
     ///
     /// This method is cancel safe. Dropping the future before completion accepts nothing.
-    pub async fn reserve(&self, bytes: u32) -> Result<RecordSubmitPermit, AppendSessionError> {
-        validate_reserve_bytes(bytes, self.shared.max_batch_bytes as u32)?;
+    pub async fn reserve(&self, bytes: usize) -> Result<RecordSubmitPermit, AppendSessionError> {
+        validate_reserve_bytes(bytes, self.shared.max_batch_bytes, &self.shared.context)?;
 
         self.check_open_for_reserve().await?;
 
@@ -440,6 +477,11 @@ impl Producer {
     /// every record accepted before `flush()` began has been acknowledged, or fails with the
     /// session's failure if any covered record fails. A failure affecting only later records, or
     /// closing the producer, does not fail `flush()` once covered records succeed.
+    ///
+    /// # Cancel safety
+    ///
+    /// Dropping a `flush()` future cancels only the wait; the flush request remains submitted and
+    /// accepted records continue draining in the background.
     pub async fn flush(&self) -> Result<(), AppendSessionError> {
         let flush_state = {
             // Hold gate across reading `last_accepted_id` and enqueueing `Command::Flush` so the
@@ -506,9 +548,12 @@ impl Producer {
     /// Close the producer, immediately submitting any partial batch and waiting for all accepted
     /// records to reach an outcome.
     ///
-    /// Repeated or concurrent calls to `close()` return the same result. Dropping a `close()`
-    /// future cancels only the wait; dropping the [`Producer`] aborts it and its owned append
-    /// session.
+    /// Repeated or concurrent calls to `close()` return the same result.
+    ///
+    /// # Cancel safety
+    ///
+    /// Dropping a `close()` future cancels only the wait; the producer continues closing in the
+    /// background. Dropping the [`Producer`] itself aborts it and its owned append session.
     pub async fn close(&self) -> Result<(), AppendSessionError> {
         {
             let _gate = self.shared.gate.lock().unwrap();
@@ -518,13 +563,23 @@ impl Producer {
         }
         self.shared.lifecycle.wait_closed().await
     }
+
+    /// Immediately abort the producer and its owned append session without waiting for buffered
+    /// or in-flight records.
+    ///
+    /// Equivalent to dropping the producer early while keeping the handle alive (for example, when
+    /// the handle is shared behind an `Arc`). Calling `abort()` after the producer has already
+    /// closed is a no-op.
+    pub fn abort(&self) {
+        if !self.shared.lifecycle.is_closed() {
+            self.shared.abort.cancel();
+        }
+    }
 }
 
 impl Drop for Producer {
     fn drop(&mut self) {
-        if !self.shared.lifecycle.is_closed() {
-            self.shared.abort.cancel();
-        }
+        self.abort();
     }
 }
 
@@ -532,7 +587,7 @@ impl Drop for Producer {
 #[must_use = "a permit reserves producer capacity; call `.submit(...)` to enqueue the record"]
 pub struct RecordSubmitPermit {
     append_permit: AppendPermit,
-    reserved_bytes: u32,
+    reserved_bytes: usize,
     shared: Arc<ProducerShared>,
 }
 
@@ -545,9 +600,17 @@ impl fmt::Debug for RecordSubmitPermit {
 }
 
 impl RecordSubmitPermit {
+    /// Return the number of metered bytes reserved by this permit.
+    #[must_use]
+    pub fn reserved_bytes(&self) -> usize {
+        self.reserved_bytes
+    }
+
     /// Submit the record using this permit.
     ///
-    /// Accepts an [`AppendRecord`] or [`CommandRecord`](crate::types::CommandRecord).
+    /// Accepts an [`AppendRecord`] or [`CommandRecord`](crate::types::CommandRecord). Any excess
+    /// reserved capacity above the record's actual metered byte size is released immediately so
+    /// waiting callers can proceed.
     ///
     /// Fails with [`ValidationError`] (releasing the reservation and leaving the producer open) if
     /// the record's metered size exceeds the reserved bytes or if advancing `match_seq_num` would
@@ -559,32 +622,40 @@ impl RecordSubmitPermit {
     ) -> Result<RecordSubmitTicket, AppendSessionError> {
         let record = record.into();
         let metered = record.metered_bytes();
-        if metered > self.reserved_bytes as usize {
-            return Err(AppendSessionError::Validation(ValidationError(format!(
-                "record size in metered bytes ({metered}) exceeds reserved capacity ({})",
-                self.reserved_bytes
-            ))));
+        if metered > self.reserved_bytes {
+            return Err(AppendSessionError::Validation(
+                self.shared.context.format_validation(format!(
+                    "record size in metered bytes ({metered}) exceeds reserved capacity ({})",
+                    self.reserved_bytes
+                )),
+            ));
         }
 
         // Release any unused over-reserved capacity immediately (`A4a`).
-        self.append_permit.shrink(metered as u32);
+        self.append_permit.shrink(metered);
 
         let (ack_tx, ack_rx) = oneshot::channel();
         {
             let mut gate = self.shared.gate.lock().unwrap();
-            gate.match_seq.check_available()?;
+            gate.match_seq
+                .check_available()
+                .map_err(|e| self.shared.context.format_validation(e))?;
             let has_unacked_work =
                 gate.last_accepted_id > self.shared.acked_through_id.load(Ordering::Acquire);
             if self.shared.is_closing_or_closed() || self.shared.abort.is_cancelled() {
                 return Err(self.shared.session_closed_err(has_unacked_work));
             }
-            let match_seq_num = gate.match_seq.claim_next()?;
+            let match_seq_num = gate
+                .match_seq
+                .claim_next()
+                .map_err(|e| self.shared.context.format_validation(e))?;
             let acceptance_id = gate.last_accepted_id + 1;
             if self
                 .shared
                 .cmd_tx
                 .send(Command::Submit {
                     record,
+                    record_bytes: metered,
                     acceptance_id,
                     match_seq_num,
                     ack_tx,
@@ -840,19 +911,21 @@ impl ProducerTask {
                     match cmd {
                         Some(Command::Submit {
                             record,
+                            record_bytes,
                             acceptance_id,
                             match_seq_num,
                             ack_tx,
                             permit,
                         }) => {
-                            let record = Metered::from(record);
-                            if !self.partial_batch.is_empty() && self.partial_batch.would_overflow(&record)
+                            if !self.partial_batch.is_empty()
+                                && self.partial_batch.would_overflow(record_bytes)
                                 && let Err(unsubmitted) = self.try_cut_and_submit()
                             {
                                 // Put current record into partial_batch so terminate settles
                                 // `unsubmitted` first, then this record, in order.
                                 self.partial_batch.push(
                                     record,
+                                    record_bytes,
                                     acceptance_id,
                                     match_seq_num,
                                     ack_tx,
@@ -865,6 +938,7 @@ impl ProducerTask {
                             let was_empty = self.partial_batch.is_empty();
                             self.partial_batch.push(
                                 record,
+                                record_bytes,
                                 acceptance_id,
                                 match_seq_num,
                                 ack_tx,
@@ -1073,19 +1147,20 @@ impl PartialBatch {
         self.acc.is_full()
     }
 
-    fn would_overflow(&self, record: &Metered<AppendRecord>) -> bool {
-        self.acc.would_overflow(record)
+    fn would_overflow(&self, record_bytes: usize) -> bool {
+        self.acc.would_overflow(record_bytes)
     }
 
     fn push(
         &mut self,
-        record: Metered<AppendRecord>,
+        record: AppendRecord,
+        record_bytes: usize,
         acceptance_id: u64,
         match_seq_num: Option<u64>,
         ack_tx: RecordAckTx,
         permit: AppendPermit,
     ) {
-        self.acc.push(record, match_seq_num);
+        self.acc.push(record, record_bytes, match_seq_num);
         self.max_acceptance_id = acceptance_id;
         match &mut self.permit {
             Some(existing) => existing.merge(permit),
@@ -1118,6 +1193,7 @@ impl PartialBatch {
 enum Command {
     Submit {
         record: AppendRecord,
+        record_bytes: usize,
         acceptance_id: u64,
         match_seq_num: Option<u64>,
         ack_tx: RecordAckTx,

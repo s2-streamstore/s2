@@ -1,7 +1,7 @@
 use s2_sdk::{
     S2,
     types::{
-        AccessTokenScopeInput, BasinMatcher, BasinName, IssueAccessTokenInput, Operation,
+        AccessTokenScope, BasinMatcher, BasinName, IssueAccessTokenInput, Operation,
         OperationGroupPermissions, ReadWritePermissions, StreamMatcher,
     },
 };
@@ -16,7 +16,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let input = IssueAccessTokenInput::new(
         "ro-token".parse()?,
-        AccessTokenScopeInput::from_op_group_perms(
+        AccessTokenScope::from_op_group_perms(
             OperationGroupPermissions::new().with_account(ReadWritePermissions::read_only()),
         )
         .with_ops([Operation::CreateStream])

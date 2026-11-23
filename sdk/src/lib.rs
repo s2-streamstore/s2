@@ -47,7 +47,7 @@ and [`S2Stream`] for stream-level operations.
 HTTP/2 connection pool:
 
 * Use [`S2::from_env`] (reads `S2_ACCESS_TOKEN` and optional `S2_ACCOUNT_ENDPOINT` /
-  `S2_BASIN_ENDPOINT`) or [`S2::new`] with [`S2Config`](types::S2Config) to create a client.
+  `S2_BASIN_ENDPOINT`) or [`S2::new`] with [`S2Config`] to create a client.
 * Call [`S2::close`] to abort active sessions and in-flight requests and close pooled connections
   immediately. Dropping [`S2`] without calling `close()` keeps the underlying pool alive until all
   derived handles and sessions are dropped.
@@ -70,14 +70,13 @@ Choose the append surface that matches your workload:
   [`AppendSession`](append_session::AppendSession) for submitting pre-formed
   [`AppendInput`](types::AppendInput)s with backpressure ([`reserve`](append_session::AppendSession::reserve)
   / [`submit`](append_session::AppendSession::submit)). Standalone batching helpers live in
-  [`batching`] ([`Batcher`](batching::Batcher), [`TryBatcher`](batching::TryBatcher), and
-  [`batch_iter`](batching::batch_iter)).
+  [`batching`] ([`Batcher`](batching::Batcher), [`TryBatcher`](batching::TryBatcher),
+  [`batch_iter`](batching::batch_iter), and [`try_batch_iter`](batching::try_batch_iter)).
 
 ## Reading Records
 
 * **Unary**: [`S2Stream::read`] fetches a single [`ReadBatch`](types::ReadBatch) configured via
-  [`ReadInput`](types::ReadInput) (`start` as [`ReadStart`](types::ReadStart), `clamp`, `count`,
-  `bytes`, `until`, `wait`, `stream_config`).
+  [`ReadInput`](types::ReadInput) (or a [`ReadStart`](types::ReadStart) directly).
 * **Continuous sessions**: [`S2Stream::read_session`] yields individual
   [`SequencedRecord`](types::SequencedRecord)s via [`ReadSession`](read_session::ReadSession), and
   [`S2Stream::read_batch_session`] yields server batches via
@@ -85,7 +84,8 @@ Choose the append surface that matches your workload:
   inherent `.next().await` method (as well as [`futures_core::Stream`]), reconnect automatically
   according to [`ReadSessionConfig`](read_session::ReadSessionConfig), and provide
   [`ReadSessionState`](read_session::ReadSessionState) / [`caught_up`](read_session::ReadSession::caught_up)
-  for concurrent progress observation.
+  for concurrent progress observation. (Note: [`caught_up`](read_session::ReadSession::caught_up)
+  only observes session progress and does not drive reading; always poll `.next()` concurrently.)
 
 ## Error Handling
 
@@ -95,11 +95,11 @@ Every operation returns the narrowest flat error enum for its surface:
 * [`ReadError`](error::ReadError) / [`ReadSessionError`](error::ReadSessionError) — unary and streaming reads
 * [`AppendError`](error::AppendError) / [`AppendSessionError`](error::AppendSessionError) — unary appends, append sessions, and producers
 
-Every operation error converts into [`S2Error`](error::S2Error) and provides
-[`is_retryable`](error::S2Error::is_retryable),
-[`has_no_side_effects`](error::S2Error::has_no_side_effects), and
-[`server_error`](error::S2Error::server_error) (for inspecting HTTP status and
-[`ErrorCode`](error::ErrorCode)).
+Every operation error converts into [`S2Error`] and provides
+[`is_retryable`](S2Error::is_retryable),
+[`has_no_side_effects`](S2Error::has_no_side_effects),
+[`server_error`](S2Error::server_error), [`known_code`](S2Error::known_code), and
+[`has_error_code`](S2Error::has_error_code).
 
 ## Reconfiguration
 
@@ -131,11 +131,16 @@ documentation.
 By default, `s2-sdk` enables `rustls-aws-lc-rs` and `rustls-native-roots` (using the host OS trust
 store). Optional features:
 
-* `rustls-ring`: use `ring` instead of `aws-lc-rs` (with `default-features = false`).
+* `rustls-ring`: use `ring` instead of `aws-lc-rs`
+  (`default-features = false, features = ["rustls-ring", "rustls-native-roots"]`).
 * `rustls-webpki-roots`: bundle Mozilla's root CA certificates (`webpki-roots`) for minimal
   containers (such as `FROM scratch` or distroless) without system CA bundles. When both
   `rustls-native-roots` and `rustls-webpki-roots` are enabled, the SDK tries native roots first and
   falls back to `webpki-roots` if no native roots are available.
+* If Cargo feature unification enables both `rustls-aws-lc-rs` and `rustls-ring`, select one
+  explicitly on [`S2Config`] with `with_rustls_aws_lc_rs_crypto_provider()`,
+  `with_rustls_ring_crypto_provider()`, or [`S2Config::with_rustls_crypto_provider`]. Plaintext
+  `http://` endpoints do not require a TLS provider.
 
 # Integration tests with s2-lite
 
@@ -147,9 +152,9 @@ for the canonical setup.
 
 # Feedback
 
-We use [Github Issues](https://github.com/s2-streamstore/s2/issues)
+We use [GitHub Issues](https://github.com/s2-streamstore/s2/issues)
 to track feature requests and issues with the SDK. If you wish to provide
-feedback, report a bug or request a feature, feel free to open a Github
+feedback, report a bug or request a feature, feel free to open a GitHub
 issue.
 
 # Quick Links
@@ -180,7 +185,9 @@ pub mod producer;
 mod retry;
 pub mod types;
 
+pub use error::S2Error;
 pub use ops::{S2, S2Basin, S2Stream};
+pub use types::{S2Config, S2Endpoints};
 /// Append session for pipelining multiple appends with backpressure control.
 ///
 /// See [`AppendSession`](append_session::AppendSession).

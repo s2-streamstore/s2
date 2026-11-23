@@ -1,14 +1,13 @@
 //! Documentation examples for Account and Basins page.
 //!
-//! Run with: cargo run --example docs_account_and_basins
+//! Run with: cargo run -p s2-sdk --example docs_account_and_basins
 
 use s2_sdk::{
     S2,
     types::{
-        AccessTokenScopeInput, BasinMatcher, BasinName, BasinNamePrefix, CreateBasinInput,
-        CreateStreamInput, IssueAccessTokenInput, ListAccessTokensInput, ListAllStreamsInput,
-        ListBasinsInput, ListStreamsInput, OperationGroupPermissions, ReadWritePermissions,
-        StreamMatcher,
+        AccessTokenScope, BasinMatcher, BasinName, CreateBasinInput, CreateStreamInput,
+        IssueAccessTokenInput, ListAccessTokensInput, ListAllStreamsInput, ListBasinsInput,
+        ListStreamsInput, OperationGroupPermissions, ReadWritePermissions, StreamMatcher,
     },
 };
 
@@ -68,11 +67,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .issue_access_token(
             IssueAccessTokenInput::new(
                 "user-1234-rw-token".parse()?,
-                AccessTokenScopeInput::from_op_group_perms(
+                AccessTokenScope::from_op_group_perms(
                     OperationGroupPermissions::new()
                         .with_stream(ReadWritePermissions::read_write()),
                 )
-                .with_basins(BasinMatcher::Prefix(BasinNamePrefix::default())) // all basins
+                .with_basins(BasinMatcher::all())
                 .with_streams(StreamMatcher::Prefix("users/1234/".parse()?)),
             )
             .with_expires_at("2027-01-01T00:00:00Z".parse()?)?,
@@ -90,7 +89,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     client
         .issue_access_token(IssueAccessTokenInput::new(
             "restricted-token".parse()?,
-            AccessTokenScopeInput::from_op_group_perms(
+            AccessTokenScope::from_op_group_perms(
                 OperationGroupPermissions::new().with_stream(ReadWritePermissions::read_only()),
             )
             .with_basins(BasinMatcher::Exact("production".parse()?))

@@ -12,7 +12,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use futures_core::Stream;
+use futures_core::{FusedFuture, Stream};
 use futures_util::{FutureExt, StreamExt};
 use s2_api::v1::stream::{proto, s2s};
 use tokio::{
@@ -27,14 +27,14 @@ use crate::{
     client::CancellationToken,
     error::{
         AbortedError, AppendSessionError, ConnectionLostError, ErrorContext, ProtocolError,
-        SessionClosedError, TimeoutError, TransportError,
+        SessionClosedError, TimeoutError, TransportError, ValidationError,
     },
     reconnect::AdvisedReconnects,
     retry::RetryBackoff,
     session::{FinishOnDrop, StreamHeaders, SubmitTicket, validate_max_unacked_bytes},
     types::{
-        AppendAck, AppendInput, AppendRetryPolicy, BasinName, MeteredBytes, ONE_MIB, StreamConfig,
-        StreamName, StreamPosition, ValidationError,
+        AppendAck, AppendInput, AppendRetryPolicy, BasinName, ONE_MIB, StreamConfig, StreamName,
+        StreamPosition,
     },
 };
 
@@ -44,6 +44,16 @@ const FRAME_CHUNK_BYTES: usize = 16 * 1024;
 
 /// A [`Future`] that resolves to an acknowledgement once the batch of records is appended.
 pub struct BatchSubmitTicket(SubmitTicket<AppendAck>);
+
+impl BatchSubmitTicket {
+    /// Poll the ticket without blocking, returning `Some` once the batch outcome is ready.
+    ///
+    /// Returns `None` if the batch is still in flight or if the outcome was already consumed.
+    #[must_use]
+    pub fn try_ack(&mut self) -> Option<Result<AppendAck, AppendSessionError>> {
+        self.0.try_ack()
+    }
+}
 
 impl fmt::Debug for BatchSubmitTicket {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -59,12 +69,18 @@ impl Future for BatchSubmitTicket {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[must_use]
+impl FusedFuture for BatchSubmitTicket {
+    fn is_terminated(&self) -> bool {
+        self.0.is_terminated()
+    }
+}
+
 /// Configuration for an [`AppendSession`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[must_use]
 pub struct AppendSessionConfig {
-    max_unacked_bytes: u32,
-    max_unacked_batches: Option<u32>,
+    max_unacked_bytes: usize,
+    max_unacked_batches: Option<usize>,
     stream_config: Option<StreamConfig>,
 }
 
@@ -85,26 +101,31 @@ impl AppendSessionConfig {
     }
 
     /// Return the limit on total metered bytes of unacknowledged [`AppendInput`]s held in memory.
-    pub fn max_unacked_bytes(&self) -> u32 {
+    #[must_use]
+    pub fn max_unacked_bytes(&self) -> usize {
         self.max_unacked_bytes
     }
 
     /// Return the limit on number of unacknowledged [`AppendInput`]s held in memory, if set.
-    pub fn max_unacked_batches(&self) -> Option<u32> {
+    #[must_use]
+    pub fn max_unacked_batches(&self) -> Option<usize> {
         self.max_unacked_batches
     }
 
     /// Return the stream configuration to apply if the stream is created on append, if set.
+    #[must_use]
     pub fn stream_config(&self) -> Option<&StreamConfig> {
         self.stream_config.as_ref()
     }
 
     /// Set the limit on total metered bytes of unacknowledged [`AppendInput`]s held in memory.
     ///
-    /// **Note:** It must be at least `1MiB`.
+    /// Defaults to `5 MiB`.
     ///
-    /// Defaults to `5MiB`.
-    pub fn with_max_unacked_bytes(self, max_unacked_bytes: u32) -> Result<Self, ValidationError> {
+    /// # Errors
+    ///
+    /// Returns [`ValidationError`] if `max_unacked_bytes` is less than `1 MiB`.
+    pub fn with_max_unacked_bytes(self, max_unacked_bytes: usize) -> Result<Self, ValidationError> {
         let max_unacked_bytes = validate_max_unacked_bytes(max_unacked_bytes)?;
         Ok(Self {
             max_unacked_bytes,
@@ -114,12 +135,14 @@ impl AppendSessionConfig {
 
     /// Set the limit on number of unacknowledged [`AppendInput`]s held in memory.
     ///
-    /// **Note:** Must be at least `1`.
-    ///
     /// Defaults to no limit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ValidationError`] if `max_unacked_batches` is `0`.
     pub fn with_max_unacked_batches(
         self,
-        max_unacked_batches: u32,
+        max_unacked_batches: usize,
     ) -> Result<Self, ValidationError> {
         if max_unacked_batches == 0 {
             return Err("max_unacked_batches must be at least 1".into());
@@ -277,7 +300,7 @@ impl AppendSessionCore {
         let abort = client_shutdown.child_token();
         let unacked_batches = Arc::new(AtomicUsize::new(0));
         let basin = client.name.clone();
-        let compression: s2s::CompressionAlgorithm = client.config().compression.into();
+        let compression = client.config().compression.into_api();
         let context = ErrorContext::stream(op, basin.as_ref(), stream.as_ref(), false);
 
         let span = debug_span!("append_session", op, basin = %basin, stream = %stream);
@@ -351,11 +374,11 @@ impl AppendSessionCore {
 
         // Encode and compress on the caller task before taking the gate so the session task stays
         // focused on network I/O and state transitions.
-        let record_count = input.records.len() as u64;
-        let api_input: proto::AppendInput = input.into();
+        let record_count = input.records().len() as u64;
+        let api_input = input.into_proto();
         let frame = s2s::SessionMessage::regular(self.compression, &api_input)
             .map_err(|err| {
-                AppendSessionError::Protocol(ProtocolError::new(
+                AppendSessionError::Protocol(ProtocolError::new_definite(
                     format!("failed to encode append frame: {err}"),
                     self.context.clone(),
                 ))
@@ -473,12 +496,17 @@ impl AppendSession {
     ///
     /// **Note**: After all submits, call [`close`](Self::close) to ensure all batches are
     /// appended. Dropping the session without closing aborts it.
+    ///
+    /// # Cancel safety
+    ///
+    /// This method is cancel safe while waiting for capacity. Dropping the future before it
+    /// resolves accepts nothing and releases any partially acquired reservation.
     pub async fn submit(
         &self,
         input: impl Into<AppendInput>,
     ) -> Result<BatchSubmitTicket, AppendSessionError> {
         let input = input.into();
-        let bytes = input.records.metered_bytes() as u32;
+        let bytes = input.metered_bytes();
         let permit = self.reserve(bytes).await?;
         permit.submit(input)
     }
@@ -488,15 +516,15 @@ impl AppendSession {
     /// Useful in [`select!`](tokio::select) loops where you want to interleave submission with
     /// other async work. See [`submit`](Self::submit) for a simpler API.
     ///
-    /// Capacity is granted FIFO. Validated before waiting; `bytes` must be between `8` and `1MiB`.
+    /// Capacity is granted FIFO. Validated before waiting; `bytes` must be between `8` and `1 MiB`.
     /// If the session closes or begins closing while waiting, returns [`SessionClosedError`].
     ///
     /// # Cancel safety
     ///
     /// This method is cancel safe. Dropping the future before completion accepts nothing and
     /// releases any partially acquired reservation.
-    pub async fn reserve(&self, bytes: u32) -> Result<BatchSubmitPermit, AppendSessionError> {
-        validate_reserve_bytes(bytes, ONE_MIB)?;
+    pub async fn reserve(&self, bytes: usize) -> Result<BatchSubmitPermit, AppendSessionError> {
+        validate_reserve_bytes(bytes, ONE_MIB, &self.core.context)?;
 
         self.check_open_for_reserve().await?;
 
@@ -532,10 +560,24 @@ impl AppendSession {
     ///
     /// Calling `close()` stops accepting new submissions immediately and waits until all
     /// already-accepted batches settle. Repeated or concurrent calls to `close()` return the same
-    /// result. Dropping a `close()` future cancels only the wait; dropping the [`AppendSession`]
-    /// aborts it.
+    /// result.
+    ///
+    /// # Cancel safety
+    ///
+    /// Dropping a `close()` future cancels only the wait; the session continues closing in the
+    /// background. Dropping the [`AppendSession`] itself aborts it.
     pub async fn close(&self) -> Result<(), AppendSessionError> {
         self.core.close().await
+    }
+
+    /// Immediately abort the session without waiting for unacknowledged batches.
+    ///
+    /// Equivalent to dropping the session early while keeping the handle alive (for example, when
+    /// the handle is shared behind an `Arc`). Already-sent unacknowledged batches fail with
+    /// [`AbortedError`], and unsent batches fail with [`SessionClosedError`]. Calling `abort()`
+    /// after the session has already closed is a no-op.
+    pub fn abort(&self) {
+        self.core.abort();
     }
 }
 
@@ -549,7 +591,7 @@ impl Drop for AppendSession {
 #[must_use = "a permit reserves session capacity; call `.submit(...)` to send the batch"]
 pub struct BatchSubmitPermit {
     append_permit: AppendPermit,
-    reserved_bytes: u32,
+    reserved_bytes: usize,
     core: Arc<AppendSessionCore>,
 }
 
@@ -562,7 +604,16 @@ impl fmt::Debug for BatchSubmitPermit {
 }
 
 impl BatchSubmitPermit {
+    /// Return the number of metered bytes reserved by this permit.
+    #[must_use]
+    pub fn reserved_bytes(&self) -> usize {
+        self.reserved_bytes
+    }
+
     /// Submit the batch using this permit.
+    ///
+    /// Any excess reserved capacity above the batch's actual metered byte size is released
+    /// immediately so waiting callers can proceed.
     ///
     /// Fails with [`ValidationError`] (releasing the reservation and leaving the session open) if
     /// the batch's metered size exceeds the reserved bytes. Fails with [`SessionClosedError`] if
@@ -572,62 +623,70 @@ impl BatchSubmitPermit {
         input: impl Into<AppendInput>,
     ) -> Result<BatchSubmitTicket, AppendSessionError> {
         let input = input.into();
-        let metered = input.records.metered_bytes();
-        if metered > self.reserved_bytes as usize {
-            return Err(AppendSessionError::Validation(ValidationError(format!(
-                "batch size in metered bytes ({metered}) exceeds reserved capacity ({})",
-                self.reserved_bytes
-            ))));
+        let metered = input.metered_bytes();
+        if metered > self.reserved_bytes {
+            return Err(AppendSessionError::Validation(
+                self.core.context.format_validation(format!(
+                    "batch size in metered bytes ({metered}) exceeds reserved capacity ({})",
+                    self.reserved_bytes
+                )),
+            ));
         }
 
         // Release any unused over-reserved capacity immediately (`A4a`).
-        self.append_permit.shrink(metered as u32);
+        self.append_permit.shrink(metered);
         self.core.submit(input, Some(self.append_permit))
     }
 }
 
-pub(crate) fn validate_reserve_bytes(bytes: u32, max_bytes: u32) -> Result<(), AppendSessionError> {
-    if (bytes as usize) < RECORD_BATCH_MIN.bytes {
-        return Err(AppendSessionError::Validation(ValidationError(format!(
-            "reserved bytes ({bytes}) must be at least {}",
-            RECORD_BATCH_MIN.bytes
-        ))));
+pub(crate) fn validate_reserve_bytes(
+    bytes: usize,
+    max_bytes: usize,
+    context: &ErrorContext,
+) -> Result<(), AppendSessionError> {
+    if bytes < RECORD_BATCH_MIN.bytes {
+        return Err(AppendSessionError::Validation(context.format_validation(
+            format!(
+                "reserved bytes ({bytes}) must be at least {}",
+                RECORD_BATCH_MIN.bytes
+            ),
+        )));
     }
     if bytes > max_bytes {
-        return Err(AppendSessionError::Validation(ValidationError(format!(
-            "reserved bytes ({bytes}) exceeds maximum ({max_bytes})"
-        ))));
+        return Err(AppendSessionError::Validation(context.format_validation(
+            format!("reserved bytes ({bytes}) exceeds maximum ({max_bytes})"),
+        )));
     }
     Ok(())
 }
 
 struct PermitWaiter {
     id: u64,
-    bytes: u32,
+    bytes: usize,
     granted: oneshot::Sender<()>,
 }
 
 struct PermitsState {
-    available_batches: Option<u32>,
-    total_bytes: u32,
-    available_bytes: u32,
+    available_batches: Option<usize>,
+    total_bytes: usize,
+    available_bytes: usize,
     next_waiter_id: u64,
     waiters: VecDeque<PermitWaiter>,
 }
 
 impl PermitsState {
-    fn can_satisfy(&self, bytes: u32) -> bool {
+    fn can_satisfy(&self, bytes: usize) -> bool {
         self.available_batches.is_none_or(|c| c >= 1) && self.available_bytes >= bytes
     }
 
-    fn take(&mut self, bytes: u32) {
+    fn take(&mut self, bytes: usize) {
         if let Some(c) = self.available_batches.as_mut() {
             *c -= 1;
         }
         self.available_bytes -= bytes;
     }
 
-    fn release(&mut self, bytes: u32) {
+    fn release(&mut self, bytes: usize) {
         if let Some(c) = self.available_batches.as_mut() {
             *c += 1;
         }
@@ -655,7 +714,7 @@ impl PermitsState {
 
 pub(crate) struct AppendPermit {
     inner: Arc<StdMutex<PermitsState>>,
-    bytes: u32,
+    bytes: usize,
     has_batch_slot: bool,
 }
 
@@ -669,7 +728,7 @@ impl fmt::Debug for AppendPermit {
 
 impl AppendPermit {
     /// Release excess over-reserved byte capacity immediately once exact size is known.
-    pub(crate) fn shrink(&mut self, new_bytes: u32) {
+    pub(crate) fn shrink(&mut self, new_bytes: usize) {
         if new_bytes < self.bytes {
             let excess = self.bytes - new_bytes;
             self.bytes = new_bytes;
@@ -707,7 +766,7 @@ pub(crate) struct AppendPermits {
 }
 
 impl AppendPermits {
-    pub(crate) fn new(count_permits: Option<u32>, bytes_permits: u32) -> Self {
+    pub(crate) fn new(count_permits: Option<usize>, bytes_permits: usize) -> Self {
         Self {
             inner: Arc::new(StdMutex::new(PermitsState {
                 available_batches: count_permits,
@@ -719,7 +778,7 @@ impl AppendPermits {
         }
     }
 
-    pub(crate) fn in_flight_bytes(&self) -> u32 {
+    pub(crate) fn in_flight_bytes(&self) -> usize {
         let state = self.inner.lock().unwrap();
         state.total_bytes - state.available_bytes
     }
@@ -729,7 +788,7 @@ impl AppendPermits {
     }
 
     #[cfg(test)]
-    fn try_acquire(&self, bytes: u32) -> Option<AppendPermit> {
+    fn try_acquire(&self, bytes: usize) -> Option<AppendPermit> {
         let mut state = self.inner.lock().unwrap();
         if state.waiters.is_empty() && state.can_satisfy(bytes) {
             let has_batch_slot = state.available_batches.is_some();
@@ -744,21 +803,21 @@ impl AppendPermits {
         }
     }
 
-    pub(crate) async fn acquire(&self, bytes: u32) -> AppendPermit {
+    pub(crate) async fn acquire(&self, bytes: usize) -> AppendPermit {
         self.acquire_inner(bytes, None).await
     }
 
     /// Acquire capacity FIFO, notifying `on_wait` strictly after enqueueing this waiter so a
     /// woken consumer is guaranteed to observe `has_waiters() == true` (`A5a`).
-    pub(crate) async fn acquire_notifying(&self, bytes: u32, on_wait: &Notify) -> AppendPermit {
+    pub(crate) async fn acquire_notifying(&self, bytes: usize, on_wait: &Notify) -> AppendPermit {
         self.acquire_inner(bytes, Some(on_wait)).await
     }
 
-    async fn acquire_inner(&self, bytes: u32, on_wait: Option<&Notify>) -> AppendPermit {
+    async fn acquire_inner(&self, bytes: usize, on_wait: Option<&Notify>) -> AppendPermit {
         struct AcquireGuard<'a> {
             inner: &'a StdMutex<PermitsState>,
             id: u64,
-            bytes: u32,
+            bytes: usize,
             rx: oneshot::Receiver<()>,
             acquired: bool,
         }

@@ -1,6 +1,6 @@
 //! Documentation examples for Streams page.
 //!
-//! Run with: cargo run --example docs_streams
+//! Run with: cargo run -p s2-sdk --example docs_streams
 
 use std::time::Duration;
 
@@ -99,22 +99,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Stream has {} records", tail.seq_num);
     // ANCHOR_END: check-tail
 
-    // Cleanup
-    basin.delete_stream(stream_name).await?;
-
     println!("Streams examples completed");
 
     // The following read session examples are for documentation snippets only.
-    // They are not executed because they would block waiting for new records.
+    // They are not executed unless RUN_READ_SESSIONS is set because they would block waiting
+    // for new records.
     if std::env::var("RUN_READ_SESSIONS").is_err() {
+        basin.delete_stream(stream_name).await?;
         return Ok(());
     }
 
     // ANCHOR: read-session
-    let mut session = stream.read_session(
-        ReadInput::new().with_start(ReadStart::SeqNum(0)),
-        ReadSessionConfig::new(),
-    )?;
+    let mut session = stream.read_session(ReadStart::SeqNum(0), ReadSessionConfig::new())?;
 
     while let Some(record) = session.next().await {
         let record = record?;
@@ -124,10 +120,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ANCHOR: read-session-tail-offset
     // Start reading from 10 records before the current tail
-    let mut session = stream.read_session(
-        ReadInput::new().with_start(ReadStart::TailOffset(10)),
-        ReadSessionConfig::new(),
-    )?;
+    let mut session = stream.read_session(ReadStart::TailOffset(10), ReadSessionConfig::new())?;
 
     while let Some(record) = session.next().await {
         let record = record?;
@@ -140,10 +133,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let one_hour_ago = (Timestamp::now() - Duration::from_secs(3600))
         .as_millisecond()
         .max(0) as u64;
-    let mut session = stream.read_session(
-        ReadInput::new().with_start(ReadStart::Timestamp(one_hour_ago)),
-        ReadSessionConfig::new(),
-    )?;
+    let mut session =
+        stream.read_session(ReadStart::Timestamp(one_hour_ago), ReadSessionConfig::new())?;
 
     while let Some(record) = session.next().await {
         let record = record?;
@@ -184,6 +175,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("[{}] {:?}", record.seq_num, record.body);
     }
     // ANCHOR_END: read-session-wait
+
+    basin.delete_stream(stream_name).await?;
 
     Ok(())
 }

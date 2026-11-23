@@ -4,9 +4,8 @@
 use std::time::Duration;
 
 use s2_sdk::{
-    S2,
-    error::RequestError,
-    types::{S2Config, S2Endpoints, ValidationError},
+    S2, S2Config, S2Endpoints,
+    error::{RequestError, ValidationError},
 };
 use testcontainers::{
     ContainerAsync, ContainerRequest, GenericImage, ImageExt, TestcontainersError,

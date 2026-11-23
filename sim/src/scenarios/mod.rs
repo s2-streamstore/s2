@@ -25,7 +25,7 @@ pub const STREAM: &str = "sim-stream";
 const PROVISION_ATTEMPTS: u32 = 30;
 
 fn client(retry: RetryConfig) -> eyre::Result<S2> {
-    let endpoints = S2Endpoints::for_endpoint(&lite_host::endpoint())?;
+    let endpoints = S2Endpoints::for_endpoint(lite_host::endpoint())?;
     Ok(S2::new_with_connector(
         S2Config::new("unused-token")
             .with_endpoints(endpoints)

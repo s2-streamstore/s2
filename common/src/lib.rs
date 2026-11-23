@@ -23,16 +23,19 @@ pub struct ValidationError(pub String);
 
 impl ValidationError {
     /// Return the human-readable validation error message.
+    #[must_use]
     pub fn message(&self) -> &str {
         &self.0
     }
 
     /// Whether retrying the operation with the same inputs may succeed (always `false`).
+    #[must_use]
     pub fn is_retryable(&self) -> bool {
         false
     }
 
     /// Whether the failed attempt certainly had no side effects (always `true`).
+    #[must_use]
     pub fn has_no_side_effects(&self) -> bool {
         true
     }

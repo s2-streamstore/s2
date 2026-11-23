@@ -336,13 +336,7 @@ impl From<crate::types::ResolvedStreamConfig> for StreamConfigView {
                 _ => "unknown".to_owned(),
             },
             timestamping: TimestampingConfigView {
-                mode: match timestamping_mode {
-                    s2_sdk::types::TimestampingMode::ClientPrefer => "client-prefer".to_owned(),
-                    s2_sdk::types::TimestampingMode::ClientRequire => "client-require".to_owned(),
-                    s2_sdk::types::TimestampingMode::Arrival => "arrival".to_owned(),
-                    s2_sdk::types::TimestampingMode::Unknown(name) => name,
-                    _ => "unknown".to_owned(),
-                },
+                mode: timestamping_mode.as_str().to_owned(),
                 uncapped: timestamping_uncapped,
             },
             delete_on_empty: DeleteOnEmptyConfigView {
@@ -350,6 +344,57 @@ impl From<crate::types::ResolvedStreamConfig> for StreamConfigView {
             },
         }
     }
+}
+
+fn api_stream_config_to_sdk(
+    config: s2_api::v1::config::StreamConfig,
+) -> s2_sdk::types::StreamConfig {
+    let mut out = s2_sdk::types::StreamConfig::new();
+    if let Some(sc) = config.storage_class {
+        out = out.with_storage_class(sc);
+    }
+    if let Some(rp) = config.retention_policy {
+        let rp = match rp {
+            MaybeKnown::Known(s2_api::v1::config::RetentionPolicy::Age(secs)) => {
+                s2_sdk::types::RetentionPolicy::Age(secs)
+            }
+            MaybeKnown::Known(s2_api::v1::config::RetentionPolicy::Infinite(_)) => {
+                s2_sdk::types::RetentionPolicy::Infinite
+            }
+            MaybeKnown::Unknown(name) => s2_sdk::types::RetentionPolicy::Unknown(name),
+        };
+        out = out.with_retention_policy(rp);
+    }
+    if let Some(ts) = config.timestamping {
+        let mut sdk_ts = s2_sdk::types::TimestampingConfig::new();
+        if let Some(mode) = ts.mode {
+            let mode = match mode {
+                MaybeKnown::Known(s2_api::v1::config::TimestampingMode::ClientPrefer) => {
+                    s2_sdk::types::TimestampingMode::ClientPrefer
+                }
+                MaybeKnown::Known(s2_api::v1::config::TimestampingMode::ClientRequire) => {
+                    s2_sdk::types::TimestampingMode::ClientRequire
+                }
+                MaybeKnown::Known(s2_api::v1::config::TimestampingMode::Arrival) => {
+                    s2_sdk::types::TimestampingMode::Arrival
+                }
+                MaybeKnown::Unknown(name) => s2_sdk::types::TimestampingMode::Unknown(name),
+            };
+            sdk_ts = sdk_ts.with_mode(mode);
+        }
+        if let Some(uncapped) = ts.uncapped {
+            sdk_ts = sdk_ts.with_uncapped(uncapped);
+        }
+        out = out.with_timestamping(sdk_ts);
+    }
+    if let Some(doe) = config.delete_on_empty {
+        out = out.with_delete_on_empty(
+            s2_sdk::types::DeleteOnEmptyConfig::new()
+                .with_min_age(std::time::Duration::from_secs(doe.min_age_secs))
+                .expect("whole-second duration"),
+        );
+    }
+    out
 }
 
 /// Presentation of an effective basin configuration, with stream defaults materialized.
@@ -372,7 +417,7 @@ impl From<s2_api::v1::config::BasinConfig> for BasinConfigView {
 
         Self {
             default_stream_config: resolve_stream_config(
-                default_stream_config.unwrap_or_default().into(),
+                api_stream_config_to_sdk(default_stream_config.unwrap_or_default()),
                 Default::default(),
             )
             .into(),
@@ -481,7 +526,7 @@ fn basin_stream_defaults_view(config: s2_api::v1::config::BasinConfig) -> Result
 }
 
 fn stream_view(config: s2_api::v1::config::StreamConfig) -> Result<Value, CliError> {
-    let config = resolve_stream_config(config.into(), Default::default());
+    let config = resolve_stream_config(api_stream_config_to_sdk(config), Default::default());
     Ok(serde_json::to_value(StreamConfigView::from(config))?)
 }
 

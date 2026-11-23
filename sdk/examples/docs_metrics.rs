@@ -1,6 +1,6 @@
 //! Documentation examples for Metrics page.
 //!
-//! Run with: cargo run --example docs_metrics
+//! Run with: cargo run -p s2-sdk --example docs_metrics
 
 use std::time::Duration;
 

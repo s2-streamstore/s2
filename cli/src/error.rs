@@ -399,7 +399,7 @@ mod tests {
         #[case] expected: &str,
     ) {
         let sdk_error = || {
-            S2Error::Validation(s2_sdk::types::ValidationError(
+            S2Error::Validation(s2_sdk::error::ValidationError(
                 "invalid access token: bad".into(),
             ))
         };
@@ -417,7 +417,7 @@ mod tests {
 
     #[test]
     fn operation_error_report_does_not_duplicate_sdk_error() {
-        let sdk_error = S2Error::Validation(s2_sdk::types::ValidationError(
+        let sdk_error = S2Error::Validation(s2_sdk::error::ValidationError(
             "stream_not_found: stream 'my-stream' does not exist".into(),
         ));
         let rendered = format!(

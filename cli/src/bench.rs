@@ -24,10 +24,7 @@ use s2_sdk::{
     error::AppendSessionError,
     producer::{ProducerConfig, RecordAck},
     read_session::ReadSessionConfig,
-    types::{
-        AppendRecord, Header, MeteredBytes as _, RECORD_BATCH_MAX, ReadInput, ReadStart,
-        SequencedRecord,
-    },
+    types::{AppendRecord, Header, RECORD_BATCH_MAX, ReadInput, ReadStart, SequencedRecord},
 };
 use tokio::{
     sync::mpsc,
@@ -522,7 +519,7 @@ pub fn bench_write(
                     // Rate limit delay
                 }
 
-                permit = producer.reserve(record_size as u32), if !stopping() && throttle_delay.is_none() => {
+                permit = producer.reserve(record_size), if !stopping() && throttle_delay.is_none() => {
                     match permit {
                         Ok(permit) => {
                             let submit_time = Instant::now();

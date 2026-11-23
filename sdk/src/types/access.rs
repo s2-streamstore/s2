@@ -1,9 +1,8 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, fmt};
 
 use jiff::Timestamp;
 use s2_api::v1::{self as api, MaybeKnown};
 use s2_common::{
-    ValidationError,
     access::{AccessTokenId, AccessTokenIdPrefix, AccessTokenIdStartAfter},
     basin::{BasinName, BasinNamePrefix},
     network_policy::{NetworkPolicyRef, NetworkPolicySelector},
@@ -11,30 +10,39 @@ use s2_common::{
 };
 
 use super::validate_rfc3339_timestamp;
+use crate::error::ValidationError;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-#[non_exhaustive]
-#[must_use]
 /// Input for [`list_access_tokens`](crate::S2::list_access_tokens) operation.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[must_use]
 pub struct ListAccessTokensInput {
-    /// Filter access tokens whose IDs begin with this value.
-    ///
-    /// Defaults to `""`.
-    pub prefix: AccessTokenIdPrefix,
-    /// Filter access tokens whose IDs are lexicographically greater than this value.
-    ///
-    /// Defaults to `""`.
-    pub start_after: AccessTokenIdStartAfter,
-    /// Number of access tokens to return in a page. Will be clamped to a maximum of `1000`.
-    ///
-    /// Defaults to `1000`.
-    pub limit: Option<usize>,
+    prefix: AccessTokenIdPrefix,
+    start_after: AccessTokenIdStartAfter,
+    limit: Option<usize>,
 }
 
 impl ListAccessTokensInput {
     /// Create a new [`ListAccessTokensInput`] with default values.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Return the prefix filter.
+    #[must_use]
+    pub fn prefix(&self) -> &AccessTokenIdPrefix {
+        &self.prefix
+    }
+
+    /// Return the pagination cursor (`start_after`).
+    #[must_use]
+    pub fn start_after(&self) -> &AccessTokenIdStartAfter {
+        &self.start_after
+    }
+
+    /// Return the page size limit, if set.
+    #[must_use]
+    pub fn limit(&self) -> Option<usize> {
+        self.limit
     }
 
     /// Set the prefix used to filter access tokens whose IDs begin with this value.
@@ -58,37 +66,44 @@ impl ListAccessTokensInput {
             ..self
         }
     }
-}
 
-impl From<ListAccessTokensInput> for api::access::ListAccessTokensRequest {
-    fn from(value: ListAccessTokensInput) -> Self {
-        Self {
-            prefix: Some(value.prefix),
-            start_after: Some(value.start_after),
-            limit: value.limit,
+    pub(crate) fn set_start_after(&mut self, start_after: AccessTokenIdStartAfter) {
+        self.start_after = start_after;
+    }
+
+    pub(crate) fn into_api(self) -> api::access::ListAccessTokensRequest {
+        api::access::ListAccessTokensRequest {
+            prefix: Some(self.prefix),
+            start_after: Some(self.start_after),
+            limit: self.limit,
         }
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-#[non_exhaustive]
-#[must_use]
 /// Input for [`list_all_access_tokens`](crate::S2::list_all_access_tokens) operation.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[must_use]
 pub struct ListAllAccessTokensInput {
-    /// Filter access tokens whose IDs begin with this value.
-    ///
-    /// Defaults to `""`.
-    pub prefix: AccessTokenIdPrefix,
-    /// Filter access tokens whose IDs are lexicographically greater than this value.
-    ///
-    /// Defaults to `""`.
-    pub start_after: AccessTokenIdStartAfter,
+    prefix: AccessTokenIdPrefix,
+    start_after: AccessTokenIdStartAfter,
 }
 
 impl ListAllAccessTokensInput {
     /// Create a new [`ListAllAccessTokensInput`] with default values.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Return the prefix filter.
+    #[must_use]
+    pub fn prefix(&self) -> &AccessTokenIdPrefix {
+        &self.prefix
+    }
+
+    /// Return the pagination cursor (`start_after`).
+    #[must_use]
+    pub fn start_after(&self) -> &AccessTokenIdStartAfter {
+        &self.start_after
     }
 
     /// Set the prefix used to filter access tokens whose IDs begin with this value.
@@ -104,11 +119,17 @@ impl ListAllAccessTokensInput {
             ..self
         }
     }
+
+    pub(crate) fn into_list_input(self) -> ListAccessTokensInput {
+        ListAccessTokensInput::new()
+            .with_prefix(self.prefix)
+            .with_start_after(self.start_after)
+    }
 }
 
+/// Access token information.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-/// Access token information.
 pub struct AccessTokenInfo {
     /// Access token ID.
     pub id: AccessTokenId,
@@ -123,25 +144,61 @@ pub struct AccessTokenInfo {
     pub network_policy: Option<NetworkPolicyRef>,
 }
 
-impl From<api::access::AccessTokenInfo> for AccessTokenInfo {
-    fn from(value: api::access::AccessTokenInfo) -> Self {
+impl AccessTokenInfo {
+    /// Construct an [`AccessTokenInfo`].
+    ///
+    /// This is intended for building fixtures in downstream tests.
+    #[must_use]
+    pub fn new(id: AccessTokenId, scope: AccessTokenScope) -> Self {
+        Self {
+            id,
+            expires_at: None,
+            auto_prefix_streams: false,
+            scope,
+            network_policy: None,
+        }
+    }
+
+    /// Set the expiration timestamp.
+    #[must_use]
+    pub fn with_expires_at(mut self, expires_at: Timestamp) -> Self {
+        self.expires_at = Some(expires_at);
+        self
+    }
+
+    /// Set whether stream names are auto-prefixed.
+    #[must_use]
+    pub fn with_auto_prefix_streams(mut self, auto_prefix_streams: bool) -> Self {
+        self.auto_prefix_streams = auto_prefix_streams;
+        self
+    }
+
+    /// Set the bound network policy reference.
+    #[must_use]
+    pub fn with_network_policy(mut self, network_policy: NetworkPolicyRef) -> Self {
+        self.network_policy = Some(network_policy);
+        self
+    }
+
+    pub(crate) fn from_api(value: api::access::AccessTokenInfo) -> Self {
         Self {
             id: value.id,
             expires_at: value.expires_at,
             auto_prefix_streams: value.auto_prefix_streams,
-            scope: value.scope.into(),
+            scope: AccessTokenScope::from_api(value.scope),
             network_policy: value.network_policy,
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 /// Pattern for matching basins.
 ///
 /// See [`AccessTokenScope::basins`].
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum BasinMatcher {
     /// Match no basins.
+    #[default]
     None,
     /// Match exactly this basin.
     Exact(BasinName),
@@ -151,13 +208,22 @@ pub enum BasinMatcher {
     Unknown(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
+impl BasinMatcher {
+    /// Match all basins (equivalent to an empty prefix).
+    #[must_use]
+    pub fn all() -> Self {
+        Self::Prefix(BasinNamePrefix::default())
+    }
+}
+
 /// Pattern for matching streams.
 ///
 /// See [`AccessTokenScope::streams`].
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum StreamMatcher {
     /// Match no streams.
+    #[default]
     None,
     /// Match exactly this stream.
     Exact(StreamName),
@@ -167,13 +233,22 @@ pub enum StreamMatcher {
     Unknown(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
+impl StreamMatcher {
+    /// Match all streams (equivalent to an empty prefix).
+    #[must_use]
+    pub fn all() -> Self {
+        Self::Prefix(StreamNamePrefix::default())
+    }
+}
+
 /// Pattern for matching access tokens.
 ///
 /// See [`AccessTokenScope::access_tokens`].
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum AccessTokenMatcher {
     /// Match no access tokens.
+    #[default]
     None,
     /// Match exactly this access token.
     Exact(AccessTokenId),
@@ -183,22 +258,24 @@ pub enum AccessTokenMatcher {
     Unknown(String),
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-#[non_exhaustive]
+impl AccessTokenMatcher {
+    /// Match all access tokens (equivalent to an empty prefix).
+    #[must_use]
+    pub fn all() -> Self {
+        Self::Prefix(AccessTokenIdPrefix::default())
+    }
+}
+
 /// Permissions indicating allowed operations.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[must_use]
 pub struct ReadWritePermissions {
-    /// Read permission.
-    ///
-    /// Defaults to `false`.
-    pub read: bool,
-    /// Write permission.
-    ///
-    /// Defaults to `false`.
-    pub write: bool,
+    read: bool,
+    write: bool,
 }
 
 impl ReadWritePermissions {
-    /// Create a new [`ReadWritePermissions`] with default values.
+    /// Create a new [`ReadWritePermissions`] with default values (`read = false`, `write = false`).
     pub fn new() -> Self {
         Self::default()
     }
@@ -226,45 +303,53 @@ impl ReadWritePermissions {
             write: true,
         }
     }
-}
 
-impl From<ReadWritePermissions> for api::access::ReadWritePermissions {
-    fn from(value: ReadWritePermissions) -> Self {
-        Self {
-            read: Some(value.read),
-            write: Some(value.write),
-        }
+    /// Return whether read permission is granted.
+    #[must_use]
+    pub fn read(&self) -> bool {
+        self.read
     }
-}
 
-impl From<api::access::ReadWritePermissions> for ReadWritePermissions {
-    fn from(value: api::access::ReadWritePermissions) -> Self {
+    /// Return whether write permission is granted.
+    #[must_use]
+    pub fn write(&self) -> bool {
+        self.write
+    }
+
+    /// Set read permission.
+    pub fn with_read(self, read: bool) -> Self {
+        Self { read, ..self }
+    }
+
+    /// Set write permission.
+    pub fn with_write(self, write: bool) -> Self {
+        Self { write, ..self }
+    }
+
+    pub(crate) fn from_api(value: api::access::ReadWritePermissions) -> Self {
         Self {
             read: value.read.unwrap_or_default(),
             write: value.write.unwrap_or_default(),
         }
     }
+
+    pub(crate) fn into_api(self) -> api::access::ReadWritePermissions {
+        api::access::ReadWritePermissions {
+            read: Some(self.read),
+            write: Some(self.write),
+        }
+    }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-#[non_exhaustive]
-#[must_use]
 /// Permissions at the operation group level.
 ///
 /// See [`AccessTokenScope::op_group_perms`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[must_use]
 pub struct OperationGroupPermissions {
-    /// Account-level access permissions.
-    ///
-    /// Defaults to `None`.
-    pub account: Option<ReadWritePermissions>,
-    /// Basin-level access permissions.
-    ///
-    /// Defaults to `None`.
-    pub basin: Option<ReadWritePermissions>,
-    /// Stream-level access permissions.
-    ///
-    /// Defaults to `None`.
-    pub stream: Option<ReadWritePermissions>,
+    account: Option<ReadWritePermissions>,
+    basin: Option<ReadWritePermissions>,
+    stream: Option<ReadWritePermissions>,
 }
 
 impl OperationGroupPermissions {
@@ -300,6 +385,24 @@ impl OperationGroupPermissions {
         }
     }
 
+    /// Return account-level access permissions, if set.
+    #[must_use]
+    pub fn account(&self) -> Option<ReadWritePermissions> {
+        self.account
+    }
+
+    /// Return basin-level access permissions, if set.
+    #[must_use]
+    pub fn basin(&self) -> Option<ReadWritePermissions> {
+        self.basin
+    }
+
+    /// Return stream-level access permissions, if set.
+    #[must_use]
+    pub fn stream(&self) -> Option<ReadWritePermissions> {
+        self.stream
+    }
+
     /// Set account-level access permissions.
     pub fn with_account(self, account: ReadWritePermissions) -> Self {
         Self {
@@ -323,33 +426,29 @@ impl OperationGroupPermissions {
             ..self
         }
     }
-}
 
-impl From<OperationGroupPermissions> for api::access::PermittedOperationGroups {
-    fn from(value: OperationGroupPermissions) -> Self {
+    pub(crate) fn from_api(value: api::access::PermittedOperationGroups) -> Self {
         Self {
-            account: value.account.map(Into::into),
-            basin: value.basin.map(Into::into),
-            stream: value.stream.map(Into::into),
+            account: value.account.map(ReadWritePermissions::from_api),
+            basin: value.basin.map(ReadWritePermissions::from_api),
+            stream: value.stream.map(ReadWritePermissions::from_api),
+        }
+    }
+
+    pub(crate) fn into_api(self) -> api::access::PermittedOperationGroups {
+        api::access::PermittedOperationGroups {
+            account: self.account.map(ReadWritePermissions::into_api),
+            basin: self.basin.map(ReadWritePermissions::into_api),
+            stream: self.stream.map(ReadWritePermissions::into_api),
         }
     }
 }
 
-impl From<api::access::PermittedOperationGroups> for OperationGroupPermissions {
-    fn from(value: api::access::PermittedOperationGroups) -> Self {
-        Self {
-            account: value.account.map(Into::into),
-            basin: value.basin.map(Into::into),
-            stream: value.stream.map(Into::into),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[non_exhaustive]
 /// Individual operation that can be permitted.
 ///
 /// See [`AccessTokenScope::ops`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Operation {
     /// List basins.
     ListBasins,
@@ -412,23 +511,30 @@ pub enum Operation {
 }
 
 macro_rules! map_operations {
-    ($($sdk:ident => $api:ident),* $(,)?) => {
-        impl From<Operation> for MaybeKnown<api::access::Operation> {
-            fn from(value: Operation) -> Self {
-                match value {
-                    $(Operation::$sdk => Self::Known(api::access::Operation::$api),)*
-                    Operation::Unknown(name) => Self::Unknown(name),
+    ($($sdk:ident => ($api:ident, $wire:literal)),* $(,)?) => {
+        impl Operation {
+            /// Return the kebab-case wire name of this operation.
+            #[must_use]
+            pub fn as_str(&self) -> &str {
+                match self {
+                    $(Self::$sdk => $wire,)*
+                    Self::Unknown(name) => name,
                 }
             }
-        }
 
-        impl From<MaybeKnown<api::access::Operation>> for Operation {
-            fn from(value: MaybeKnown<api::access::Operation>) -> Self {
+            pub(crate) fn from_api(value: MaybeKnown<api::access::Operation>) -> Self {
                 match value {
                     MaybeKnown::Known(op) => match op {
-                        $(api::access::Operation::$api => Operation::$sdk,)*
+                        $(api::access::Operation::$api => Self::$sdk,)*
                     },
-                    MaybeKnown::Unknown(name) => Operation::Unknown(name),
+                    MaybeKnown::Unknown(name) => Self::Unknown(name),
+                }
+            }
+
+            pub(crate) fn into_api(self) -> MaybeKnown<api::access::Operation> {
+                match self {
+                    $(Self::$sdk => MaybeKnown::Known(api::access::Operation::$api),)*
+                    Self::Unknown(name) => MaybeKnown::Unknown(name),
                 }
             }
         }
@@ -436,46 +542,95 @@ macro_rules! map_operations {
 }
 
 map_operations! {
-    ListBasins => ListBasins,
-    CreateBasin => CreateBasin,
-    DeleteBasin => DeleteBasin,
-    ReconfigureBasin => ReconfigureBasin,
-    GetBasinConfig => GetBasinConfig,
-    IssueAccessToken => IssueAccessToken,
-    RevokeAccessToken => RevokeAccessToken,
-    ListAccessTokens => ListAccessTokens,
-    ListStreams => ListStreams,
-    CreateStream => CreateStream,
-    DeleteStream => DeleteStream,
-    GetStreamConfig => GetStreamConfig,
-    ReconfigureStream => ReconfigureStream,
-    CheckTail => CheckTail,
-    Append => Append,
-    Read => Read,
-    Trim => Trim,
-    Fence => Fence,
-    GetAccountMetrics => AccountMetrics,
-    GetBasinMetrics => BasinMetrics,
-    GetStreamMetrics => StreamMetrics,
-    ListLocations => ListLocations,
-    GetDefaultLocation => GetDefaultLocation,
-    SetDefaultLocation => SetDefaultLocation,
-    ListNetworkPolicies => ListNetworkPolicies,
-    CreateNetworkPolicy => CreateNetworkPolicy,
-    GetNetworkPolicy => GetNetworkPolicy,
-    DeleteNetworkPolicy => DeleteNetworkPolicy,
+    ListBasins => (ListBasins, "list-basins"),
+    CreateBasin => (CreateBasin, "create-basin"),
+    DeleteBasin => (DeleteBasin, "delete-basin"),
+    ReconfigureBasin => (ReconfigureBasin, "reconfigure-basin"),
+    GetBasinConfig => (GetBasinConfig, "get-basin-config"),
+    IssueAccessToken => (IssueAccessToken, "issue-access-token"),
+    RevokeAccessToken => (RevokeAccessToken, "revoke-access-token"),
+    ListAccessTokens => (ListAccessTokens, "list-access-tokens"),
+    ListStreams => (ListStreams, "list-streams"),
+    CreateStream => (CreateStream, "create-stream"),
+    DeleteStream => (DeleteStream, "delete-stream"),
+    GetStreamConfig => (GetStreamConfig, "get-stream-config"),
+    ReconfigureStream => (ReconfigureStream, "reconfigure-stream"),
+    CheckTail => (CheckTail, "check-tail"),
+    Append => (Append, "append"),
+    Read => (Read, "read"),
+    Trim => (Trim, "trim"),
+    Fence => (Fence, "fence"),
+    GetAccountMetrics => (AccountMetrics, "account-metrics"),
+    GetBasinMetrics => (BasinMetrics, "basin-metrics"),
+    GetStreamMetrics => (StreamMetrics, "stream-metrics"),
+    ListLocations => (ListLocations, "list-locations"),
+    GetDefaultLocation => (GetDefaultLocation, "get-default-location"),
+    SetDefaultLocation => (SetDefaultLocation, "set-default-location"),
+    ListNetworkPolicies => (ListNetworkPolicies, "list-network-policies"),
+    CreateNetworkPolicy => (CreateNetworkPolicy, "create-network-policy"),
+    GetNetworkPolicy => (GetNetworkPolicy, "get-network-policy"),
+    DeleteNetworkPolicy => (DeleteNetworkPolicy, "delete-network-policy"),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl fmt::Display for Operation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+macro_rules! impl_resource_matcher_conversions {
+    ($($matcher:ident($exact:ty, $prefix:ty)),* $(,)?) => {
+        $(
+            impl $matcher {
+                pub(crate) fn from_api(
+                    value: MaybeKnown<
+                        api::access::ResourceSet<api::access::MaybeEmpty<$exact>, $prefix>,
+                    >,
+                ) -> Self {
+                    use api::access::{MaybeEmpty, ResourceSet};
+                    match value {
+                        MaybeKnown::Known(ResourceSet::Exact(MaybeEmpty::NonEmpty(e))) => {
+                            Self::Exact(e)
+                        }
+                        MaybeKnown::Known(ResourceSet::Exact(MaybeEmpty::Empty)) => Self::None,
+                        MaybeKnown::Known(ResourceSet::Prefix(p)) => Self::Prefix(p),
+                        MaybeKnown::Unknown(name) => Self::Unknown(name),
+                    }
+                }
+
+                pub(crate) fn into_api(
+                    self,
+                ) -> MaybeKnown<api::access::ResourceSet<api::access::MaybeEmpty<$exact>, $prefix>>
+                {
+                    use api::access::{MaybeEmpty, ResourceSet};
+                    match self {
+                        Self::None => ResourceSet::Exact(MaybeEmpty::Empty).into(),
+                        Self::Exact(e) => ResourceSet::Exact(MaybeEmpty::NonEmpty(e)).into(),
+                        Self::Prefix(p) => ResourceSet::Prefix(p).into(),
+                        Self::Unknown(name) => MaybeKnown::Unknown(name),
+                    }
+                }
+            }
+        )*
+    };
+}
+
+impl_resource_matcher_conversions! {
+    BasinMatcher(BasinName, BasinNamePrefix),
+    StreamMatcher(StreamName, StreamNamePrefix),
+    AccessTokenMatcher(AccessTokenId, AccessTokenIdPrefix),
+}
+
 /// Scope of an access token.
 ///
-/// **Note:** The final set of permitted operations is the union of [`ops`](Self::ops)
-/// and the operations permitted by [`op_group_perms`](Self::op_group_perms). Also, the
-/// final set must not be empty.
+/// **Note:** When issuing a token, the final set of permitted operations is the union of
+/// [`ops`](Self::ops) and the operations permitted by [`op_group_perms`](Self::op_group_perms),
+/// and must not be empty.
 ///
-/// See [`IssueAccessTokenInput::scope`].
+/// See [`IssueAccessTokenInput::scope`] and [`AccessTokenInfo::scope`].
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 #[must_use]
-pub struct AccessTokenScopeInput {
+pub struct AccessTokenScope {
     basins: Option<BasinMatcher>,
     streams: Option<StreamMatcher>,
     access_tokens: Option<AccessTokenMatcher>,
@@ -483,50 +638,48 @@ pub struct AccessTokenScopeInput {
     ops: HashSet<Operation>,
 }
 
-impl AccessTokenScopeInput {
-    /// Create a new [`AccessTokenScopeInput`] with the given permitted operations.
-    pub fn from_ops(ops: impl IntoIterator<Item = Operation>) -> Self {
-        Self {
-            basins: None,
-            streams: None,
-            access_tokens: None,
-            op_group_perms: None,
-            ops: ops.into_iter().collect(),
-        }
+impl AccessTokenScope {
+    /// Create a new empty [`AccessTokenScope`].
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    /// Create a new [`AccessTokenScopeInput`] with the given operation group permissions.
+    /// Create a new [`AccessTokenScope`] with the given permitted operations.
+    pub fn from_ops(ops: impl IntoIterator<Item = Operation>) -> Self {
+        Self::new().with_ops(ops)
+    }
+
+    /// Create a new [`AccessTokenScope`] with the given operation group permissions.
     pub fn from_op_group_perms(op_group_perms: OperationGroupPermissions) -> Self {
-        Self {
-            basins: None,
-            streams: None,
-            access_tokens: None,
-            op_group_perms: Some(op_group_perms),
-            ops: HashSet::default(),
-        }
+        Self::new().with_op_group_perms(op_group_perms)
     }
 
     /// Return the permitted basins matcher, if any.
+    #[must_use]
     pub fn basins(&self) -> Option<&BasinMatcher> {
         self.basins.as_ref()
     }
 
     /// Return the permitted streams matcher, if any.
+    #[must_use]
     pub fn streams(&self) -> Option<&StreamMatcher> {
         self.streams.as_ref()
     }
 
     /// Return the permitted access tokens matcher, if any.
+    #[must_use]
     pub fn access_tokens(&self) -> Option<&AccessTokenMatcher> {
         self.access_tokens.as_ref()
     }
 
     /// Return the operation group permissions, if any.
-    pub fn op_group_perms(&self) -> Option<&OperationGroupPermissions> {
-        self.op_group_perms.as_ref()
+    #[must_use]
+    pub fn op_group_perms(&self) -> Option<OperationGroupPermissions> {
+        self.op_group_perms
     }
 
     /// Return the individually permitted operations.
+    #[must_use]
     pub fn ops(&self) -> &HashSet<Operation> {
         &self.ops
     }
@@ -576,115 +729,49 @@ impl AccessTokenScopeInput {
             ..self
         }
     }
-}
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-/// Scope of an access token.
-pub struct AccessTokenScope {
-    /// Permitted basins.
-    pub basins: Option<BasinMatcher>,
-    /// Permitted streams.
-    pub streams: Option<StreamMatcher>,
-    /// Permitted access tokens.
-    pub access_tokens: Option<AccessTokenMatcher>,
-    /// Permissions at the operation group level.
-    pub op_group_perms: Option<OperationGroupPermissions>,
-    /// Permitted operations.
-    pub ops: HashSet<Operation>,
-}
-
-macro_rules! impl_resource_matcher_conversions {
-    ($($matcher:ident($exact:ty, $prefix:ty)),* $(,)?) => {
-        $(
-            impl From<MaybeKnown<api::access::ResourceSet<api::access::MaybeEmpty<$exact>, $prefix>>>
-                for $matcher
-            {
-                fn from(
-                    value: MaybeKnown<
-                        api::access::ResourceSet<api::access::MaybeEmpty<$exact>, $prefix>,
-                    >,
-                ) -> Self {
-                    use api::access::{MaybeEmpty, ResourceSet};
-                    match value {
-                        MaybeKnown::Known(ResourceSet::Exact(MaybeEmpty::NonEmpty(e))) => {
-                            Self::Exact(e)
-                        }
-                        MaybeKnown::Known(ResourceSet::Exact(MaybeEmpty::Empty)) => Self::None,
-                        MaybeKnown::Known(ResourceSet::Prefix(p)) => Self::Prefix(p),
-                        MaybeKnown::Unknown(name) => Self::Unknown(name),
-                    }
-                }
-            }
-
-            impl From<$matcher>
-                for MaybeKnown<api::access::ResourceSet<api::access::MaybeEmpty<$exact>, $prefix>>
-            {
-                fn from(value: $matcher) -> Self {
-                    use api::access::{MaybeEmpty, ResourceSet};
-                    match value {
-                        $matcher::None => ResourceSet::Exact(MaybeEmpty::Empty).into(),
-                        $matcher::Exact(e) => ResourceSet::Exact(MaybeEmpty::NonEmpty(e)).into(),
-                        $matcher::Prefix(p) => ResourceSet::Prefix(p).into(),
-                        $matcher::Unknown(name) => MaybeKnown::Unknown(name),
-                    }
-                }
-            }
-        )*
-    };
-}
-
-impl_resource_matcher_conversions! {
-    BasinMatcher(BasinName, BasinNamePrefix),
-    StreamMatcher(StreamName, StreamNamePrefix),
-    AccessTokenMatcher(AccessTokenId, AccessTokenIdPrefix),
-}
-
-impl From<api::access::AccessTokenScope> for AccessTokenScope {
-    fn from(value: api::access::AccessTokenScope) -> Self {
+    pub(crate) fn from_api(value: api::access::AccessTokenScope) -> Self {
         Self {
-            basins: value.basins.map(Into::into),
-            streams: value.streams.map(Into::into),
-            access_tokens: value.access_tokens.map(Into::into),
-            op_group_perms: value.op_groups.map(Into::into),
+            basins: value.basins.map(BasinMatcher::from_api),
+            streams: value.streams.map(StreamMatcher::from_api),
+            access_tokens: value.access_tokens.map(AccessTokenMatcher::from_api),
+            op_group_perms: value.op_groups.map(OperationGroupPermissions::from_api),
             ops: value
                 .ops
-                .map(|ops| ops.into_iter().map(Into::into).collect())
+                .map(|ops| ops.into_iter().map(Operation::from_api).collect())
                 .unwrap_or_default(),
         }
     }
-}
 
-impl From<AccessTokenScopeInput> for api::access::AccessTokenScope {
-    fn from(value: AccessTokenScopeInput) -> Self {
-        Self {
-            basins: value.basins.map(Into::into),
-            streams: value.streams.map(Into::into),
-            access_tokens: value.access_tokens.map(Into::into),
-            op_groups: value.op_group_perms.map(Into::into),
-            ops: if value.ops.is_empty() {
+    pub(crate) fn into_api(self) -> api::access::AccessTokenScope {
+        api::access::AccessTokenScope {
+            basins: self.basins.map(BasinMatcher::into_api),
+            streams: self.streams.map(StreamMatcher::into_api),
+            access_tokens: self.access_tokens.map(AccessTokenMatcher::into_api),
+            op_groups: self.op_group_perms.map(OperationGroupPermissions::into_api),
+            ops: if self.ops.is_empty() {
                 None
             } else {
-                Some(value.ops.into_iter().map(Into::into).collect())
+                Some(self.ops.into_iter().map(Operation::into_api).collect())
             },
         }
     }
 }
 
+/// Input for [`issue_access_token`](crate::S2::issue_access_token).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[must_use]
-/// Input for [`issue_access_token`](crate::S2::issue_access_token).
 pub struct IssueAccessTokenInput {
     id: AccessTokenId,
     expires_at: Option<Timestamp>,
     auto_prefix_streams: bool,
-    scope: AccessTokenScopeInput,
+    scope: AccessTokenScope,
     network_policy: Option<NetworkPolicySelector>,
 }
 
 impl IssueAccessTokenInput {
     /// Create a new [`IssueAccessTokenInput`] with the given id and scope.
-    pub fn new(id: AccessTokenId, scope: AccessTokenScopeInput) -> Self {
+    pub fn new(id: AccessTokenId, scope: AccessTokenScope) -> Self {
         Self {
             id,
             expires_at: None,
@@ -695,27 +782,32 @@ impl IssueAccessTokenInput {
     }
 
     /// Return the access token ID.
+    #[must_use]
     pub fn id(&self) -> &AccessTokenId {
         &self.id
     }
 
     /// Return the expiration time, if set.
+    #[must_use]
     pub fn expires_at(&self) -> Option<Timestamp> {
         self.expires_at
     }
 
     /// Return whether stream names are automatically prefixed during creation and stripped during
     /// listing.
+    #[must_use]
     pub fn auto_prefix_streams(&self) -> bool {
         self.auto_prefix_streams
     }
 
     /// Return the scope of the token.
-    pub fn scope(&self) -> &AccessTokenScopeInput {
+    #[must_use]
+    pub fn scope(&self) -> &AccessTokenScope {
         &self.scope
     }
 
     /// Return the network policy restricting this token, if any.
+    #[must_use]
     pub fn network_policy(&self) -> Option<&NetworkPolicySelector> {
         self.network_policy.as_ref()
     }
@@ -755,23 +847,21 @@ impl IssueAccessTokenInput {
     /// Set whether to automatically prefix stream names during creation and strip the prefix during
     /// listing.
     ///
-    /// **Note:** [`scope.streams`](AccessTokenScopeInput::with_streams) must be set with a prefix.
+    /// **Note:** [`scope.streams`](AccessTokenScope::with_streams) must be set with a prefix.
     pub fn with_auto_prefix_streams(self, auto_prefix_streams: bool) -> Self {
         Self {
             auto_prefix_streams,
             ..self
         }
     }
-}
 
-impl From<IssueAccessTokenInput> for api::access::IssueAccessTokenRequest {
-    fn from(value: IssueAccessTokenInput) -> Self {
-        Self {
-            id: value.id,
-            expires_at: value.expires_at,
-            auto_prefix_streams: value.auto_prefix_streams.then_some(true),
-            scope: value.scope.into(),
-            network_policy: value.network_policy,
+    pub(crate) fn into_api(self) -> api::access::IssueAccessTokenRequest {
+        api::access::IssueAccessTokenRequest {
+            id: self.id,
+            expires_at: self.expires_at,
+            auto_prefix_streams: self.auto_prefix_streams.then_some(true),
+            scope: self.scope.into_api(),
+            network_policy: self.network_policy,
         }
     }
 }

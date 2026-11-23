@@ -32,14 +32,14 @@ use crate::{
     client::{self, CancellationToken, StreamingResponse, UnaryResponse},
     error::{
         AbortedError, AppendSessionError, ClientClosedError, ConnectionLostError, ErrorCode,
-        ErrorContext, OpScope, ProtocolError, ReadSessionError, TransportError,
+        ErrorContext, OpScope, ProtocolError, ReadSessionError, TransportError, ValidationError,
     },
     frame_signal::FrameSignal,
     retry::RetryBackoff,
     session::StreamHeaders,
     types::{
         AccessToken, AccessTokenId, AppendRetryPolicy, BasinName, Compression, EnsureOutput,
-        NetworkPolicySelector, RetryConfig, S2Config, StreamName, ValidationError,
+        NetworkPolicySelector, RetryConfig, S2Config, StreamName,
     },
 };
 
@@ -666,13 +666,7 @@ impl<'a> UnaryCall<'a> {
     ) -> Result<(), crate::error::RequestError> {
         match self.send_raw::<crate::error::RequestError>().await {
             Ok(_) => Ok(()),
-            Err(err)
-                if err
-                    .server_error()
-                    .is_some_and(|s| s.known_code() == Some(ignore_not_found)) =>
-            {
-                Ok(())
-            }
+            Err(err) if err.has_error_code(ignore_not_found) => Ok(()),
             Err(err) => Err(err),
         }
     }

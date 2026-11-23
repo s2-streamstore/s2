@@ -109,15 +109,6 @@ fn delete_on_empty_to_sdk(
     })
 }
 
-fn format_encryption_algorithm(algorithm: &s2_sdk::types::EncryptionAlgorithm) -> &str {
-    match algorithm {
-        s2_sdk::types::EncryptionAlgorithm::Aegis256 => "aegis-256",
-        s2_sdk::types::EncryptionAlgorithm::Aes256Gcm => "aes-256-gcm",
-        s2_sdk::types::EncryptionAlgorithm::Unknown(name) => name,
-        _ => "unknown",
-    }
-}
-
 pub fn validate(spec: &s2_resource_spec::Resources) -> miette::Result<()> {
     s2_resource_spec::validate(spec).map_err(|e| miette::miette!("{}", e))
 }
@@ -254,10 +245,8 @@ struct FieldDiff {
 }
 
 fn is_not_found_error(error: &RequestError) -> bool {
-    error
-        .server_error()
-        .and_then(|error| error.known_code())
-        .is_some_and(|code| matches!(code, ErrorCode::BasinNotFound | ErrorCode::StreamNotFound))
+    error.has_error_code(ErrorCode::BasinNotFound)
+        || error.has_error_code(ErrorCode::StreamNotFound)
 }
 
 fn format_retention_policy(rp: RetentionPolicy) -> String {
@@ -286,16 +275,6 @@ fn format_sdk_retention_policy(rp: &s2_sdk::types::RetentionPolicy) -> String {
     }
 }
 
-fn format_sdk_timestamping_mode(m: &s2_sdk::types::TimestampingMode) -> &str {
-    match m {
-        s2_sdk::types::TimestampingMode::ClientPrefer => "client-prefer",
-        s2_sdk::types::TimestampingMode::ClientRequire => "client-require",
-        s2_sdk::types::TimestampingMode::Arrival => "arrival",
-        s2_sdk::types::TimestampingMode::Unknown(name) => name,
-        _ => "unknown",
-    }
-}
-
 fn default_stream_config_field(field: &'static str) -> &'static str {
     match field {
         "storage_class" => "default_stream_config.storage_class",
@@ -310,46 +289,47 @@ fn default_stream_config_field(field: &'static str) -> &'static str {
 fn diff_basin_config(existing: &BasinConfig, desired: &BasinConfig) -> Vec<FieldDiff> {
     let mut diffs = Vec::new();
 
-    if existing.stream_cipher != desired.stream_cipher {
+    if existing.stream_cipher() != desired.stream_cipher() {
         diffs.push(FieldDiff {
             field: "stream_cipher",
             old: existing
-                .stream_cipher
-                .as_ref()
-                .map(format_encryption_algorithm)
+                .stream_cipher()
+                .map(s2_sdk::types::EncryptionAlgorithm::as_str)
                 .unwrap_or("none")
                 .to_string(),
             new: desired
-                .stream_cipher
-                .as_ref()
-                .map(format_encryption_algorithm)
+                .stream_cipher()
+                .map(s2_sdk::types::EncryptionAlgorithm::as_str)
                 .unwrap_or("none")
                 .to_string(),
         });
     }
 
-    if existing.create_stream_on_append != desired.create_stream_on_append {
+    if existing.create_stream_on_append() != desired.create_stream_on_append() {
         diffs.push(FieldDiff {
             field: "create_stream_on_append",
-            old: existing.create_stream_on_append.to_string(),
-            new: desired.create_stream_on_append.to_string(),
+            old: existing.create_stream_on_append().to_string(),
+            new: desired.create_stream_on_append().to_string(),
         });
     }
 
-    if existing.create_stream_on_read != desired.create_stream_on_read {
+    if existing.create_stream_on_read() != desired.create_stream_on_read() {
         diffs.push(FieldDiff {
             field: "create_stream_on_read",
-            old: existing.create_stream_on_read.to_string(),
-            new: desired.create_stream_on_read.to_string(),
+            old: existing.create_stream_on_read().to_string(),
+            new: desired.create_stream_on_read().to_string(),
         });
     }
 
     let existing_dsc = resolve_stream_config(
-        existing.default_stream_config.clone().unwrap_or_default(),
+        existing
+            .default_stream_config()
+            .cloned()
+            .unwrap_or_default(),
         Default::default(),
     );
     let desired_dsc = resolve_stream_config(
-        desired.default_stream_config.clone().unwrap_or_default(),
+        desired.default_stream_config().cloned().unwrap_or_default(),
         Default::default(),
     );
     for sd in diff_stream_configs(&existing_dsc, &desired_dsc) {
@@ -394,8 +374,8 @@ fn diff_stream_configs(
     if existing.timestamping_mode != desired.timestamping_mode {
         diffs.push(FieldDiff {
             field: "timestamping.mode",
-            old: format_sdk_timestamping_mode(&existing.timestamping_mode).to_string(),
-            new: format_sdk_timestamping_mode(&desired.timestamping_mode).to_string(),
+            old: existing.timestamping_mode.as_str().to_string(),
+            new: desired.timestamping_mode.as_str().to_string(),
         });
     }
 
@@ -425,7 +405,7 @@ fn spec_basin_fields(spec: &s2_resource_spec::BasinConfig) -> Vec<FieldDiff> {
         fields.push(FieldDiff {
             field: "stream_cipher",
             old: String::new(),
-            new: format_encryption_algorithm(&algorithm).to_string(),
+            new: algorithm.as_str().to_string(),
         });
     }
     if let Some(v) = spec.create_stream_on_append {
@@ -607,23 +587,27 @@ pub async fn dry_run(s2: &s2_sdk::S2, spec: s2_resource_spec::Resources) -> miet
     };
 
     for basin_spec in spec.basins {
-        let mut desired_basin_config = basin_spec
+        let desired_basin_config = basin_spec
             .config
             .clone()
             .map(basin_config_to_sdk)
             .unwrap_or_default();
-        let desired_basin_defaults = desired_basin_config
-            .default_stream_config
-            .get_or_insert_default();
-        if desired_basin_defaults.storage_class.is_none() {
-            desired_basin_defaults.storage_class = default_storage_class.clone();
+        let mut desired_basin_defaults = desired_basin_config
+            .default_stream_config()
+            .cloned()
+            .unwrap_or_default();
+        if desired_basin_defaults.storage_class().is_none()
+            && let Some(ref sc) = default_storage_class
+        {
+            desired_basin_defaults = desired_basin_defaults.with_storage_class(sc.clone());
         }
-        let desired_basin_defaults = desired_basin_defaults.clone();
+        let desired_basin_config =
+            desired_basin_config.with_default_stream_config(desired_basin_defaults.clone());
 
         let basin_action = match s2.get_basin_config(basin_spec.name.clone()).await {
             Ok(existing) => {
                 let diffs = diff_basin_config(&existing, &desired_basin_config);
-                ResourceAction::from_diff(diffs, desired_basin_defaults.storage_class.is_none())
+                ResourceAction::from_diff(diffs, desired_basin_defaults.storage_class().is_none())
             }
             Err(e) if is_not_found_error(&e) => ResourceAction::Create,
             Err(e) => {

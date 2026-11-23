@@ -8,7 +8,7 @@ use std::{
     time::Duration,
 };
 
-use futures_core::Stream;
+use futures_core::{FusedFuture, Stream};
 use futures_util::{
     StreamExt,
     future::{FutureExt, Shared},
@@ -32,11 +32,11 @@ use crate::{
     reconnect::AdvisedReconnects,
     retry::RetryBackoff,
     session::StreamHeaders,
-    types::{MeteredBytes, ReadBatch, ReadInput, SequencedRecord, StreamName, StreamPosition},
+    types::{ReadBatch, ReadInput, SequencedRecord, StreamName, StreamPosition},
 };
 
 /// Retry policy for a continuous read session.
-#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Hash)]
 pub enum ReadSessionRetryPolicy {
     /// Stop after the retry budget configured by [`RetryConfig`](crate::types::RetryConfig) is
     /// exhausted.
@@ -49,8 +49,25 @@ pub enum ReadSessionRetryPolicy {
     Unbounded,
 }
 
+impl ReadSessionRetryPolicy {
+    /// Return the setting name of this retry policy.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Budgeted => "budgeted",
+            Self::Unbounded => "unbounded",
+        }
+    }
+}
+
+impl fmt::Display for ReadSessionRetryPolicy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Configuration for a continuous read session.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 #[must_use]
 pub struct ReadSessionConfig {
     retry_policy: ReadSessionRetryPolicy,
@@ -63,6 +80,7 @@ impl ReadSessionConfig {
     }
 
     /// Return the configured retry policy.
+    #[must_use]
     pub fn retry_policy(&self) -> ReadSessionRetryPolicy {
         self.retry_policy
     }
@@ -95,7 +113,10 @@ impl Future for CaughtUpFuture {
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match &mut *self {
             Self::Pending(rx) => match Pin::new(rx).poll(cx) {
-                Poll::Ready(Ok(result)) => Poll::Ready(result),
+                Poll::Ready(Ok(result)) => {
+                    *self = Self::Ready(result.clone());
+                    Poll::Ready(result)
+                }
                 Poll::Ready(Err(_)) => {
                     unreachable!("ReadSessionCore::drop resolves every pending CaughtUp")
                 }
@@ -111,9 +132,26 @@ impl Future for CaughtUpFuture {
 ///
 /// Resolves to the stream tail position when the session is caught up, or fails with the session's
 /// terminal error (or [`SessionClosedError`] if the session closes cleanly before catching up).
-#[derive(Clone)]
+///
+/// **Important:** Does not drive reading — continue polling the session concurrently (for example
+/// via [`ReadSession::next`] in another task or `tokio::select!`) while awaiting this future.
+///
+/// Once resolved, its value never changes, and re-polling returns the same outcome without
+/// panicking.
 #[must_use = "futures do nothing unless `.await`ed or polled"]
-pub struct CaughtUp(CaughtUpFuture);
+pub struct CaughtUp {
+    inner: CaughtUpFuture,
+    done: bool,
+}
+
+impl Clone for CaughtUp {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            done: false,
+        }
+    }
+}
 
 impl fmt::Debug for CaughtUp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -125,7 +163,19 @@ impl Future for CaughtUp {
     type Output = Result<StreamPosition, ReadSessionError>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        Pin::new(&mut self.0).poll(cx)
+        match Pin::new(&mut self.inner).poll(cx) {
+            Poll::Ready(res) => {
+                self.done = true;
+                Poll::Ready(res)
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl FusedFuture for CaughtUp {
+    fn is_terminated(&self) -> bool {
+        self.done
     }
 }
 
@@ -402,7 +452,10 @@ impl ReadSessionState {
             ));
             inner.on_ended(Some(err));
         }
-        CaughtUp(inner.catch_up.future())
+        CaughtUp {
+            inner: inner.catch_up.future(),
+            done: false,
+        }
     }
 
     fn on_message_fetched(
@@ -633,6 +686,10 @@ impl ReadSession {
     }
 
     /// Return a future for the current or next caught-up tail.
+    ///
+    /// **Important:** Does not drive reading — continue polling [`next`](Self::next) concurrently
+    /// while awaiting this future, or it will remain pending indefinitely. See
+    /// [`ReadSessionState::caught_up`] for full details.
     pub fn caught_up(&self) -> CaughtUp {
         self.core.state.caught_up()
     }
@@ -735,6 +792,10 @@ impl ReadBatchSession {
     }
 
     /// Return a future for the current or next caught-up tail.
+    ///
+    /// **Important:** Does not drive reading — continue polling [`next`](Self::next) concurrently
+    /// while awaiting this future, or it will remain pending indefinitely. See
+    /// [`ReadSessionState::caught_up`] for full details.
     pub fn caught_up(&self) -> CaughtUp {
         self.core.state.caught_up()
     }
@@ -1021,9 +1082,10 @@ impl ReadDriver {
             }
 
             let item = match next_res {
-                Ok(Some(Ok(frame))) => {
-                    Ok(Some((ReadBatch::from(frame.msg), frame.reconnect_advised)))
-                }
+                Ok(Some(Ok(frame))) => Ok(Some((
+                    ReadBatch::from_proto(frame.msg),
+                    frame.reconnect_advised,
+                ))),
                 Ok(Some(Err(err))) => Err(err),
                 Ok(None) => Ok(None),
                 Err(_) => {
@@ -1561,6 +1623,43 @@ mod tests {
             state.caught_up().await,
             Err(ReadSessionError::Aborted(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn caught_up_fused_and_repoll_after_resolution_does_not_panic() {
+        use futures_core::FusedFuture as _;
+
+        let (mut session, tx, state, _shutdown) = test_session_parts(Some(0));
+        let mut cu = session.caught_up();
+        assert!(!cu.is_terminated());
+        assert!(poll!(Pin::new(&mut cu)).is_pending());
+
+        state.on_message_fetched(Some(0), Some(position(1)));
+        tx.send(DriverEvent::Batch(batch(
+            vec![record(0)],
+            Some(position(1)),
+        )))
+        .await
+        .unwrap();
+        assert_eq!(session.next().await.unwrap().unwrap().seq_num, 0);
+
+        let first = poll!(Pin::new(&mut cu));
+        assert!(matches!(first, Poll::Ready(Ok(pos)) if pos == position(1)));
+        assert!(cu.is_terminated());
+
+        // Re-polling a resolved CaughtUp future returns the cached result rather than panicking.
+        let second = poll!(Pin::new(&mut cu));
+        assert!(matches!(second, Poll::Ready(Ok(pos)) if pos == position(1)));
+        assert!(cu.is_terminated());
+
+        // Cloning a resolved CaughtUp resets termination so the clone can be polled once.
+        let mut cloned = cu.clone();
+        assert!(!cloned.is_terminated());
+        assert!(matches!(
+            poll!(Pin::new(&mut cloned)),
+            Poll::Ready(Ok(pos)) if pos == position(1)
+        ));
+        assert!(cloned.is_terminated());
     }
 
     #[test]

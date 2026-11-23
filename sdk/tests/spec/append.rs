@@ -13,8 +13,7 @@ use s2_sdk::{
     error::{AppendError, AppendSessionError},
     producer::ProducerConfig,
     types::{
-        AppendAck, AppendInput, AppendRecord, AppendRecordBatch, AppendRetryPolicy, MeteredBytes,
-        RetryConfig,
+        AppendAck, AppendInput, AppendRecord, AppendRecordBatch, AppendRetryPolicy, RetryConfig,
     },
 };
 
@@ -519,7 +518,7 @@ async fn spec_a5a_producer_flush_partial_batch_on_backpressure() {
         .unwrap();
 
     let rec_600k = AppendRecord::new(vec![b'x'; 600 * 1024]).unwrap();
-    let size_600k = rec_600k.metered_bytes() as u32;
+    let size_600k = rec_600k.metered_bytes();
     let permit_x = prod_race.reserve(size_600k).await.unwrap();
     let mut reserve_y = Box::pin(prod_race.reserve(size_600k));
     assert!(futures_util::poll!(reserve_y.as_mut()).is_pending());
@@ -1676,4 +1675,104 @@ async fn spec_a1_malformed_ack_returns_protocol_error() {
         matches!(close_err, AppendSessionError::Protocol(_)),
         "{close_err:?}"
     );
+}
+
+// spec: r1 E7, A8c
+#[tokio::test]
+async fn session_abort_try_ack_fused_and_validation_context() {
+    use futures_core::FusedFuture as _;
+
+    // 1. E7: session validation errors include op/basin/stream context.
+    let stall_server = MockH2Server::start(|_conn_id, req, respond| async move {
+        let Some(s2s) = S2sResponder::open(respond) else {
+            return;
+        };
+        let _keep = (req, s2s);
+        std::future::pending::<()>().await;
+    })
+    .await;
+    let stream = stall_server.stream(no_retry_config());
+
+    let session = stream.append_session(AppendSessionConfig::new()).unwrap();
+    let err = session.reserve(1).await.unwrap_err();
+    assert!(matches!(err, AppendSessionError::Validation(_)));
+    let msg = err.to_string();
+    assert!(
+        msg.contains("append_session") && msg.contains("test-basin") && msg.contains("test-stream"),
+        "expected E7 context on reserve ValidationError, got: {msg}"
+    );
+
+    let permit = session.reserve(8).await.unwrap();
+    assert_eq!(permit.reserved_bytes(), 8);
+    let err = permit
+        .submit(AppendRecord::new("payload longer than 0 bytes").unwrap())
+        .unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("append_session") && msg.contains("test-basin") && msg.contains("test-stream"),
+        "expected E7 context on permit.submit ValidationError, got: {msg}"
+    );
+
+    // Explicit abort() settles pending tickets and close() promptly even while handle stays alive.
+    let mut ticket = session.submit(sample_append_input()).await.unwrap();
+    assert!(!ticket.is_terminated());
+    assert!(ticket.try_ack().is_none());
+    session.abort();
+    let close_err = tokio::time::timeout(Duration::from_secs(1), session.close())
+        .await
+        .expect("abort must settle close promptly")
+        .unwrap_err();
+    assert!(matches!(close_err, AppendSessionError::Aborted(_)));
+    let ticket_err = ticket
+        .try_ack()
+        .expect("ticket settled after close")
+        .unwrap_err();
+    assert!(ticket.is_terminated());
+    assert!(ticket.try_ack().is_none());
+    assert!(matches!(
+        ticket_err,
+        AppendSessionError::Aborted(_) | AppendSessionError::SessionClosed(_)
+    ));
+
+    // Same for Producer: E7 validation context + explicit abort() + try_ack() / FusedFuture.
+    let producer = stream
+        .producer(
+            ProducerConfig::new()
+                .with_max_batch_bytes(16)
+                .unwrap()
+                .with_linger(Duration::from_secs(60)),
+        )
+        .unwrap();
+    let err = producer
+        .submit(AppendRecord::new("this record exceeds 16 bytes").unwrap())
+        .await
+        .unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("producer") && msg.contains("test-basin") && msg.contains("test-stream"),
+        "expected E7 context on producer.submit ValidationError, got: {msg}"
+    );
+
+    let mut rec_ticket = producer
+        .submit(AppendRecord::new("hi").unwrap())
+        .await
+        .unwrap();
+    assert!(!rec_ticket.is_terminated());
+    assert!(rec_ticket.try_ack().is_none());
+    producer.abort();
+    let close_err = tokio::time::timeout(Duration::from_secs(1), producer.close())
+        .await
+        .expect("producer abort must settle close promptly")
+        .unwrap_err();
+    assert!(matches!(close_err, AppendSessionError::Aborted(_)));
+    let rec_err = rec_ticket
+        .try_ack()
+        .expect("record ticket settled")
+        .unwrap_err();
+    assert!(rec_ticket.is_terminated());
+    assert!(rec_ticket.try_ack().is_none());
+    assert!(matches!(
+        rec_err,
+        AppendSessionError::Aborted(_) | AppendSessionError::SessionClosed(_)
+    ));
 }

@@ -12,12 +12,13 @@ pub(crate) use append::{
     AppendPermit, AppendPermits, AppendSession, AppendSessionConfig, AppendSessionCore,
     BatchSubmitTicket, SessionLifecycle, validate_reserve_bytes,
 };
+use futures_core::FusedFuture;
 pub(crate) use read::{ReadBatchSession, ReadSession, ReadSessionConfig};
 use tokio::sync::oneshot;
 
 use crate::{
-    error::{AbortedError, AppendSessionError, ErrorContext},
-    types::{ONE_MIB, ValidationError},
+    error::{AbortedError, AppendSessionError, ErrorContext, ValidationError},
+    types::ONE_MIB,
 };
 
 /// Ensures a session's [`SessionLifecycle`] reaches `Closed` with an [`AbortedError`] if its
@@ -63,7 +64,9 @@ pub(crate) struct StreamHeaders {
     pub stream_config: Option<http::HeaderValue>,
 }
 
-pub(crate) fn validate_max_unacked_bytes(max_unacked_bytes: u32) -> Result<u32, ValidationError> {
+pub(crate) fn validate_max_unacked_bytes(
+    max_unacked_bytes: usize,
+) -> Result<usize, ValidationError> {
     if max_unacked_bytes < ONE_MIB {
         return Err(format!("max_unacked_bytes must be at least {ONE_MIB}").into());
     }
@@ -75,6 +78,7 @@ pub(crate) struct SubmitTicket<T> {
     lifecycle: Arc<SessionLifecycle>,
     context: ErrorContext,
     dropped_msg: &'static str,
+    done: bool,
 }
 
 impl<T> SubmitTicket<T> {
@@ -89,6 +93,30 @@ impl<T> SubmitTicket<T> {
             lifecycle,
             context,
             dropped_msg,
+            done: false,
+        }
+    }
+
+    fn closed_err(&self) -> AppendSessionError {
+        self.lifecycle.terminal_err().unwrap_or_else(|| {
+            AppendSessionError::Aborted(AbortedError::new(self.dropped_msg, self.context.clone()))
+        })
+    }
+
+    pub(crate) fn try_ack(&mut self) -> Option<Result<T, AppendSessionError>> {
+        if self.done {
+            return None;
+        }
+        match self.rx.try_recv() {
+            Ok(res) => {
+                self.done = true;
+                Some(res)
+            }
+            Err(oneshot::error::TryRecvError::Closed) => {
+                self.done = true;
+                Some(Err(self.closed_err()))
+            }
+            Err(oneshot::error::TryRecvError::Empty) => None,
         }
     }
 }
@@ -98,16 +126,21 @@ impl<T> Future for SubmitTicket<T> {
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match Pin::new(&mut self.rx).poll(cx) {
-            Poll::Ready(Ok(res)) => Poll::Ready(res),
+            Poll::Ready(Ok(res)) => {
+                self.done = true;
+                Poll::Ready(res)
+            }
             Poll::Ready(Err(_)) => {
-                Poll::Ready(Err(self.lifecycle.terminal_err().unwrap_or_else(|| {
-                    AppendSessionError::Aborted(AbortedError::new(
-                        self.dropped_msg,
-                        self.context.clone(),
-                    ))
-                })))
+                self.done = true;
+                Poll::Ready(Err(self.closed_err()))
             }
             Poll::Pending => Poll::Pending,
         }
+    }
+}
+
+impl<T> FusedFuture for SubmitTicket<T> {
+    fn is_terminated(&self) -> bool {
+        self.done
     }
 }

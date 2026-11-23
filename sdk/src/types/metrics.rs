@@ -1,14 +1,15 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fmt};
 
 use jiff::Timestamp;
 use s2_api::v1::{self as api, MaybeKnown};
-use s2_common::{ValidationError, access::AccessTokenId};
+use s2_common::access::AccessTokenId;
 
 use super::{timestamp_from_epoch_secs, validate_metrics_timestamp};
+use crate::error::ValidationError;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 /// Interval to accumulate over for timeseries metric sets.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum TimeseriesInterval {
     /// Minute.
     Minute,
@@ -20,35 +21,50 @@ pub enum TimeseriesInterval {
     Unknown(String),
 }
 
-impl From<TimeseriesInterval> for MaybeKnown<api::metrics::TimeseriesInterval> {
-    fn from(value: TimeseriesInterval) -> Self {
-        let known = match value {
-            TimeseriesInterval::Minute => api::metrics::TimeseriesInterval::Minute,
-            TimeseriesInterval::Hour => api::metrics::TimeseriesInterval::Hour,
-            TimeseriesInterval::Day => api::metrics::TimeseriesInterval::Day,
-            TimeseriesInterval::Unknown(name) => return Self::Unknown(name),
-        };
-        Self::Known(known)
+impl TimeseriesInterval {
+    /// Return the wire name of this timeseries interval.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Minute => "minute",
+            Self::Hour => "hour",
+            Self::Day => "day",
+            Self::Unknown(name) => name,
+        }
     }
-}
 
-impl From<MaybeKnown<api::metrics::TimeseriesInterval>> for TimeseriesInterval {
-    fn from(value: MaybeKnown<api::metrics::TimeseriesInterval>) -> Self {
+    pub(crate) fn from_api(value: MaybeKnown<api::metrics::TimeseriesInterval>) -> Self {
         let value = match value {
             MaybeKnown::Known(value) => value,
             MaybeKnown::Unknown(name) => return Self::Unknown(name),
         };
         match value {
-            api::metrics::TimeseriesInterval::Minute => TimeseriesInterval::Minute,
-            api::metrics::TimeseriesInterval::Hour => TimeseriesInterval::Hour,
-            api::metrics::TimeseriesInterval::Day => TimeseriesInterval::Day,
+            api::metrics::TimeseriesInterval::Minute => Self::Minute,
+            api::metrics::TimeseriesInterval::Hour => Self::Hour,
+            api::metrics::TimeseriesInterval::Day => Self::Day,
         }
+    }
+
+    pub(crate) fn into_api(self) -> MaybeKnown<api::metrics::TimeseriesInterval> {
+        let known = match self {
+            Self::Minute => api::metrics::TimeseriesInterval::Minute,
+            Self::Hour => api::metrics::TimeseriesInterval::Hour,
+            Self::Day => api::metrics::TimeseriesInterval::Day,
+            Self::Unknown(name) => return MaybeKnown::Unknown(name),
+        };
+        MaybeKnown::Known(known)
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[must_use]
+impl fmt::Display for TimeseriesInterval {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Time range for metrics queries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[must_use]
 pub struct TimeRange {
     start_secs: u32,
     end_secs: u32,
@@ -73,11 +89,13 @@ impl TimeRange {
     }
 
     /// Start timestamp (inclusive), floored to whole Unix seconds.
+    #[must_use]
     pub fn start(&self) -> Timestamp {
         timestamp_from_epoch_secs(self.start_secs)
     }
 
     /// End timestamp (exclusive), floored to whole Unix seconds.
+    #[must_use]
     pub fn end(&self) -> Timestamp {
         timestamp_from_epoch_secs(self.end_secs)
     }
@@ -91,9 +109,9 @@ impl TimeRange {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[must_use]
 /// Time range and accumulation interval for metrics queries.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[must_use]
 pub struct TimeRangeAndInterval {
     range: TimeRange,
     interval: Option<TimeseriesInterval>,
@@ -122,16 +140,19 @@ impl TimeRangeAndInterval {
     }
 
     /// Start timestamp (inclusive), floored to whole Unix seconds.
+    #[must_use]
     pub fn start(&self) -> Timestamp {
         self.range.start()
     }
 
     /// End timestamp (exclusive), floored to whole Unix seconds.
+    #[must_use]
     pub fn end(&self) -> Timestamp {
         self.range.end()
     }
 
     /// Return the interval to accumulate over, if explicitly configured.
+    #[must_use]
     pub fn interval(&self) -> Option<&TimeseriesInterval> {
         self.interval.as_ref()
     }
@@ -154,8 +175,8 @@ impl From<TimeRange> for TimeRangeAndInterval {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
 /// Account metric set to return.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AccountMetricSet {
     /// Returns a [`LabelMetric`] representing all basins which had at least one stream within the
     /// specified time range.
@@ -184,31 +205,31 @@ pub enum AccountMetricSet {
     TokenActivity(Vec<AccessTokenId>),
 }
 
-impl From<AccountMetricSet> for api::metrics::AccountMetricSetRequest {
-    fn from(value: AccountMetricSet) -> Self {
-        let (set, start, end, interval, token_ids) = match value {
-            AccountMetricSet::ActiveBasins(range) => (
+impl AccountMetricSet {
+    pub(crate) fn into_api(self) -> api::metrics::AccountMetricSetRequest {
+        let (set, start, end, interval, token_ids) = match self {
+            Self::ActiveBasins(range) => (
                 api::metrics::AccountMetricSet::ActiveBasins,
                 Some(range.start_secs),
                 Some(range.end_secs),
                 None,
                 Vec::new(),
             ),
-            AccountMetricSet::AccountOps(args) => (
+            Self::AccountOps(args) => (
                 api::metrics::AccountMetricSet::AccountOps,
                 Some(args.range.start_secs),
                 Some(args.range.end_secs),
                 args.interval,
                 Vec::new(),
             ),
-            AccountMetricSet::EstimatedBillableUsage(args) => (
+            Self::EstimatedBillableUsage(args) => (
                 api::metrics::AccountMetricSet::EstimatedBillableUsage,
                 Some(args.range.start_secs),
                 Some(args.range.end_secs),
                 args.interval,
                 Vec::new(),
             ),
-            AccountMetricSet::TokenActivity(token_ids) => (
+            Self::TokenActivity(token_ids) => (
                 api::metrics::AccountMetricSet::TokenActivity,
                 None,
                 None,
@@ -216,18 +237,18 @@ impl From<AccountMetricSet> for api::metrics::AccountMetricSetRequest {
                 token_ids,
             ),
         };
-        Self {
+        api::metrics::AccountMetricSetRequest {
             set,
             start,
             end,
-            interval: interval.map(Into::into),
+            interval: interval.map(TimeseriesInterval::into_api),
             token_ids,
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
 /// Basin metric set to return.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BasinMetricSet {
     /// Returns a [`GaugeMetric`] representing a timeseries of total stored bytes across all streams
     /// in the basin, with one observed value for each hour over the requested time range.
@@ -271,57 +292,57 @@ pub enum BasinMetricSet {
     BasinOps(TimeRangeAndInterval),
 }
 
-impl From<BasinMetricSet> for api::metrics::BasinMetricSetRequest {
-    fn from(value: BasinMetricSet) -> Self {
-        let (set, range, interval) = match value {
-            BasinMetricSet::Storage(range) => (api::metrics::BasinMetricSet::Storage, range, None),
-            BasinMetricSet::AppendOps(args) => (
+impl BasinMetricSet {
+    pub(crate) fn into_api(self) -> api::metrics::BasinMetricSetRequest {
+        let (set, range, interval) = match self {
+            Self::Storage(range) => (api::metrics::BasinMetricSet::Storage, range, None),
+            Self::AppendOps(args) => (
                 api::metrics::BasinMetricSet::AppendOps,
                 args.range,
                 args.interval,
             ),
-            BasinMetricSet::ReadOps(args) => (
+            Self::ReadOps(args) => (
                 api::metrics::BasinMetricSet::ReadOps,
                 args.range,
                 args.interval,
             ),
-            BasinMetricSet::ReadThroughput(args) => (
+            Self::ReadThroughput(args) => (
                 api::metrics::BasinMetricSet::ReadThroughput,
                 args.range,
                 args.interval,
             ),
-            BasinMetricSet::AppendThroughput(args) => (
+            Self::AppendThroughput(args) => (
                 api::metrics::BasinMetricSet::AppendThroughput,
                 args.range,
                 args.interval,
             ),
-            BasinMetricSet::BasinOps(args) => (
+            Self::BasinOps(args) => (
                 api::metrics::BasinMetricSet::BasinOps,
                 args.range,
                 args.interval,
             ),
         };
-        Self {
+        api::metrics::BasinMetricSetRequest {
             set,
             start: Some(range.start_secs),
             end: Some(range.end_secs),
-            interval: interval.map(Into::into),
+            interval: interval.map(TimeseriesInterval::into_api),
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
 /// Stream metric set to return.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StreamMetricSet {
     /// Returns a [`GaugeMetric`] representing a timeseries of total stored bytes for the stream,
     /// with one observed value for each minute over the requested time range.
     Storage(TimeRange),
 }
 
-impl From<StreamMetricSet> for api::metrics::StreamMetricSetRequest {
-    fn from(value: StreamMetricSet) -> Self {
-        match value {
-            StreamMetricSet::Storage(range) => Self {
+impl StreamMetricSet {
+    pub(crate) fn into_api(self) -> api::metrics::StreamMetricSetRequest {
+        match self {
+            Self::Storage(range) => api::metrics::StreamMetricSetRequest {
                 set: api::metrics::StreamMetricSet::Storage,
                 start: Some(range.start_secs),
                 end: Some(range.end_secs),
@@ -331,9 +352,9 @@ impl From<StreamMetricSet> for api::metrics::StreamMetricSetRequest {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 /// Unit in which metric values are measured.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum MetricUnit {
     /// Size in bytes.
     Bytes,
@@ -345,23 +366,40 @@ pub enum MetricUnit {
     Unknown(String),
 }
 
-impl From<MaybeKnown<api::metrics::MetricUnit>> for MetricUnit {
-    fn from(value: MaybeKnown<api::metrics::MetricUnit>) -> Self {
+impl MetricUnit {
+    /// Return the wire name of this metric unit.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Bytes => "bytes",
+            Self::Operations => "operations",
+            Self::Usd => "usd",
+            Self::Unknown(name) => name,
+        }
+    }
+
+    pub(crate) fn from_api(value: MaybeKnown<api::metrics::MetricUnit>) -> Self {
         let value = match value {
             MaybeKnown::Known(value) => value,
             MaybeKnown::Unknown(name) => return Self::Unknown(name),
         };
         match value {
-            api::metrics::MetricUnit::Bytes => MetricUnit::Bytes,
-            api::metrics::MetricUnit::Operations => MetricUnit::Operations,
-            api::metrics::MetricUnit::Usd => MetricUnit::Usd,
+            api::metrics::MetricUnit::Bytes => Self::Bytes,
+            api::metrics::MetricUnit::Operations => Self::Operations,
+            api::metrics::MetricUnit::Usd => Self::Usd,
         }
     }
 }
 
+impl fmt::Display for MetricUnit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Single named value.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
-/// Single named value.
 pub struct ScalarMetric {
     /// Metric name.
     pub name: String,
@@ -371,10 +409,24 @@ pub struct ScalarMetric {
     pub value: f64,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-#[non_exhaustive]
+impl ScalarMetric {
+    /// Construct a [`ScalarMetric`].
+    ///
+    /// This is intended for building fixtures in downstream tests.
+    #[must_use]
+    pub fn new(name: impl Into<String>, unit: MetricUnit, value: f64) -> Self {
+        Self {
+            name: name.into(),
+            unit,
+            value,
+        }
+    }
+}
+
 /// Named series of `(timestamp, value)` datapoints, each representing an accumulation over a
 /// specified interval.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct AccumulationMetric {
     /// Timeseries name.
     pub name: String,
@@ -387,9 +439,29 @@ pub struct AccumulationMetric {
     pub values: Vec<(Timestamp, f64)>,
 }
 
+impl AccumulationMetric {
+    /// Construct an [`AccumulationMetric`].
+    ///
+    /// This is intended for building fixtures in downstream tests.
+    #[must_use]
+    pub fn new(
+        name: impl Into<String>,
+        unit: MetricUnit,
+        interval: TimeseriesInterval,
+        values: Vec<(Timestamp, f64)>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            unit,
+            interval,
+            values,
+        }
+    }
+}
+
+/// Named series of `(timestamp, value)` datapoints, each representing an instantaneous value.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
-/// Named series of `(timestamp, value)` datapoints, each representing an instantaneous value.
 pub struct GaugeMetric {
     /// Timeseries name.
     pub name: String,
@@ -400,9 +472,23 @@ pub struct GaugeMetric {
     pub values: Vec<(Timestamp, f64)>,
 }
 
+impl GaugeMetric {
+    /// Construct a [`GaugeMetric`].
+    ///
+    /// This is intended for building fixtures in downstream tests.
+    #[must_use]
+    pub fn new(name: impl Into<String>, unit: MetricUnit, values: Vec<(Timestamp, f64)>) -> Self {
+        Self {
+            name: name.into(),
+            unit,
+            values,
+        }
+    }
+}
+
+/// Set of string labels.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-/// Set of string labels.
 pub struct LabelMetric {
     /// Label name.
     pub name: String,
@@ -410,9 +496,22 @@ pub struct LabelMetric {
     pub values: Vec<String>,
 }
 
+impl LabelMetric {
+    /// Construct a [`LabelMetric`].
+    ///
+    /// This is intended for building fixtures in downstream tests.
+    #[must_use]
+    pub fn new(name: impl Into<String>, values: Vec<String>) -> Self {
+        Self {
+            name: name.into(),
+            values,
+        }
+    }
+}
+
+/// Named set of string attributes observed at a point in time.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-/// Named set of string attributes observed at a point in time.
 pub struct RecordMetric {
     /// Record name.
     pub name: String,
@@ -422,9 +521,27 @@ pub struct RecordMetric {
     pub fields: BTreeMap<String, String>,
 }
 
+impl RecordMetric {
+    /// Construct a [`RecordMetric`].
+    ///
+    /// This is intended for building fixtures in downstream tests.
+    #[must_use]
+    pub fn new(
+        name: impl Into<String>,
+        timestamp: Timestamp,
+        fields: BTreeMap<String, String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            timestamp,
+            fields,
+        }
+    }
+}
+
+/// Individual metric in a returned metric set.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
-/// Individual metric in a returned metric set.
 pub enum Metric {
     /// Single named value.
     Scalar(ScalarMetric),
@@ -441,42 +558,42 @@ pub enum Metric {
     Unknown(String),
 }
 
-impl From<MaybeKnown<api::metrics::Metric>> for Metric {
-    fn from(value: MaybeKnown<api::metrics::Metric>) -> Self {
+impl Metric {
+    pub(crate) fn from_api(value: MaybeKnown<api::metrics::Metric>) -> Self {
         let value = match value {
             MaybeKnown::Known(value) => value,
             MaybeKnown::Unknown(name) => return Self::Unknown(name),
         };
         match value {
-            api::metrics::Metric::Scalar(sm) => Metric::Scalar(ScalarMetric {
+            api::metrics::Metric::Scalar(sm) => Self::Scalar(ScalarMetric {
                 name: sm.name,
-                unit: sm.unit.into(),
+                unit: MetricUnit::from_api(sm.unit),
                 value: sm.value,
             }),
-            api::metrics::Metric::Accumulation(am) => Metric::Accumulation(AccumulationMetric {
+            api::metrics::Metric::Accumulation(am) => Self::Accumulation(AccumulationMetric {
                 name: am.name,
-                unit: am.unit.into(),
-                interval: am.interval.into(),
+                unit: MetricUnit::from_api(am.unit),
+                interval: TimeseriesInterval::from_api(am.interval),
                 values: am
                     .values
                     .into_iter()
                     .map(|(ts, v)| (timestamp_from_epoch_secs(ts), v))
                     .collect(),
             }),
-            api::metrics::Metric::Gauge(gm) => Metric::Gauge(GaugeMetric {
+            api::metrics::Metric::Gauge(gm) => Self::Gauge(GaugeMetric {
                 name: gm.name,
-                unit: gm.unit.into(),
+                unit: MetricUnit::from_api(gm.unit),
                 values: gm
                     .values
                     .into_iter()
                     .map(|(ts, v)| (timestamp_from_epoch_secs(ts), v))
                     .collect(),
             }),
-            api::metrics::Metric::Label(lm) => Metric::Label(LabelMetric {
+            api::metrics::Metric::Label(lm) => Self::Label(LabelMetric {
                 name: lm.name,
                 values: lm.values,
             }),
-            api::metrics::Metric::Record(rm) => Metric::Record(RecordMetric {
+            api::metrics::Metric::Record(rm) => Self::Record(RecordMetric {
                 name: rm.name,
                 timestamp: timestamp_from_epoch_secs(rm.timestamp),
                 fields: rm.fields,

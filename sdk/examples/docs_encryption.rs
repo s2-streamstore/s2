@@ -1,6 +1,6 @@
 //! Documentation examples for Encryption page.
 //!
-//! Run with: cargo run --example docs_encryption
+//! Run with: cargo run -p s2-sdk --example docs_encryption
 
 use s2_sdk::{
     S2,

@@ -10,16 +10,16 @@ use s2_sdk::{
     producer::{ProducerConfig, RecordAck},
     read_session::{ReadBatchSession, ReadSessionConfig},
     types::{
-        AccessTokenId, AccessTokenInfo, AccessTokenScopeInput, AccountMetricSet, AppendAck,
-        AppendInput, AppendRecord, AppendRecordBatch, AwsPrivateNetPolicy, BasinInfo,
-        BasinMetricSet, BasinName, BasinReconfiguration, CommandRecord, CreateBasinInput,
+        AccessTokenId, AccessTokenInfo, AccessTokenScope, AccountMetricSet, AppendAck, AppendInput,
+        AppendRecord, AwsPrivateNetPolicy, BasinInfo, BasinMetricSet, BasinName,
+        BasinReconfiguration, CommandRecord, CreateBasinInput, CreateNetworkPolicyInput,
         CreateStreamInput, EncryptionKey, FencingToken, IssueAccessTokenInput,
         ListAccessTokensInput, ListAllAccessTokensInput, ListAllBasinsInput,
         ListAllNetworkPoliciesInput, ListAllStreamsInput, ListBasinsInput,
-        ListNetworkPoliciesInput, ListStreamsInput, LocationInfo, LocationName, MeteredBytes,
-        Metric, NetworkPolicy, NetworkPolicyInfo, NetworkPolicySelector, PublicNetPolicy,
-        ReadInput, ReadStart, SequencedRecord, StreamInfo, StreamMetricSet, StreamNamePrefix,
-        StreamPosition, StreamReconfiguration, TimeRangeAndInterval, TimeseriesInterval, Timestamp,
+        ListNetworkPoliciesInput, ListStreamsInput, LocationInfo, LocationName, Metric,
+        NetworkPolicy, NetworkPolicyInfo, NetworkPolicySelector, PublicNetPolicy, ReadInput,
+        ReadStart, SequencedRecord, StreamInfo, StreamMetricSet, StreamNamePrefix, StreamPosition,
+        StreamReconfiguration, TimeRangeAndInterval, TimeseriesInterval, Timestamp,
     },
 };
 
@@ -233,7 +233,7 @@ pub async fn get_access_token_api(
 
 /// A preset allows every resource of a kind that no flag names. Without one, the token cannot
 /// access that kind at all.
-fn access_token_scope(args: &IssueAccessTokenArgs) -> Result<AccessTokenScopeInput, CliError> {
+fn access_token_scope(args: &IssueAccessTokenArgs) -> Result<AccessTokenScope, CliError> {
     let op_group_perms = args
         .preset
         .map(PermittedOperationGroups::from)
@@ -246,25 +246,27 @@ fn access_token_scope(args: &IssueAccessTokenArgs) -> Result<AccessTokenScopeInp
     }
     let all = args.preset.is_some();
 
-    let mut scope = AccessTokenScopeInput::from_ops(args.ops.iter().cloned().map(|op| op.into()));
+    let mut scope = AccessTokenScope::from_ops(args.ops.iter().cloned().map(|op| op.into()));
     if let Some(v) = args.basins_exact.clone() {
         scope = scope.with_basins(sdk::types::BasinMatcher::Exact(v));
-    } else if let Some(v) = args.basins_prefix.clone().or(all.then(Default::default)) {
+    } else if let Some(v) = args.basins_prefix.clone() {
         scope = scope.with_basins(sdk::types::BasinMatcher::Prefix(v));
+    } else if all {
+        scope = scope.with_basins(sdk::types::BasinMatcher::all());
     }
     if let Some(v) = args.streams_exact.clone() {
         scope = scope.with_streams(sdk::types::StreamMatcher::Exact(v));
-    } else if let Some(v) = args.streams_prefix.clone().or(all.then(Default::default)) {
+    } else if let Some(v) = args.streams_prefix.clone() {
         scope = scope.with_streams(sdk::types::StreamMatcher::Prefix(v));
+    } else if all {
+        scope = scope.with_streams(sdk::types::StreamMatcher::all());
     }
     if let Some(v) = args.access_tokens_exact.clone() {
         scope = scope.with_access_tokens(sdk::types::AccessTokenMatcher::Exact(v));
-    } else if let Some(v) = args
-        .access_tokens_prefix
-        .clone()
-        .or(all.then(Default::default))
-    {
+    } else if let Some(v) = args.access_tokens_prefix.clone() {
         scope = scope.with_access_tokens(sdk::types::AccessTokenMatcher::Prefix(v));
+    } else if all {
+        scope = scope.with_access_tokens(sdk::types::AccessTokenMatcher::all());
     }
     if let Some(op_group_perms) = op_group_perms {
         scope = scope.with_op_group_perms(op_group_perms.into());
@@ -380,7 +382,7 @@ pub async fn create_network_policy(
         policy = policy.with_private_net(AwsPrivateNetPolicy::new(aws_vpce));
     }
 
-    s2.create_network_policy(slug, policy)
+    s2.create_network_policy(CreateNetworkPolicyInput::new(slug, policy))
         .await
         .map_err(|e| CliError::op(OpKind::CreateNetworkPolicy, e))
 }
@@ -761,7 +763,7 @@ where
         let mut records = records;
         let mut pending_acks = FuturesOrdered::new();
         let mut stashed_record: Option<AppendRecord> = None;
-        let mut stashed_bytes: u32 = 0;
+        let mut stashed_bytes: usize = 0;
 
         'inner: loop {
             tokio::select! {
@@ -787,7 +789,7 @@ where
                 res = records.next(), if stashed_record.is_none() => {
                     match res {
                         Some(Ok(record)) => {
-                            stashed_bytes = record.metered_bytes() as u32;
+                            stashed_bytes = record.metered_bytes();
                             stashed_record = Some(record);
                         }
                         Some(Err(e)) => {
@@ -880,10 +882,7 @@ async fn append_command(
     match_seq_num: Option<u64>,
     op_error: OpKind,
 ) -> Result<AppendAck, CliError> {
-    let record: AppendRecord = command.into();
-    let records = AppendRecordBatch::try_from_iter([record])
-        .expect("single command record should always fit in a batch");
-    let mut input = AppendInput::new(records);
+    let mut input = AppendInput::new(command);
     if let Some(ft) = fencing_token {
         input = input.with_fencing_token(ft);
     }

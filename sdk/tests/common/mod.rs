@@ -7,9 +7,12 @@ use std::{
     },
 };
 
-use s2_sdk::types::{
-    BasinName, Compression, CreateBasinInput, CreateStreamInput, S2Config, S2Endpoints, StreamName,
-    ValidationError,
+use s2_sdk::{
+    error::ValidationError,
+    types::{
+        BasinName, Compression, CreateBasinInput, CreateStreamInput, S2Config, S2Endpoints,
+        StreamName,
+    },
 };
 use test_context::AsyncTestContext;
 

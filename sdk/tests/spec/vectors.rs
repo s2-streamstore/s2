@@ -8,7 +8,6 @@ use std::{
 
 use bytes::{Bytes, BytesMut};
 use s2_api::v1::{
-    self as api,
     error::ErrorCode,
     stream::s2s::{FrameDecoder, SessionMessage},
 };
@@ -16,18 +15,19 @@ use s2_sdk::{
     S2,
     append_session::AppendSessionConfig,
     batching::BatcherConfig,
-    error::{AppendError, ReadError, ReadSessionError, S2Error},
+    error::{AppendError, ReadError, ReadSessionError, S2Error, ValidationError},
     producer::ProducerConfig,
     read_session::ReadSessionConfig,
     types::{
-        AccessTokenMatcher, AccessTokenScopeInput, AccountEndpoint, AccountMetricSet, AppendInput,
+        AccessTokenMatcher, AccessTokenScope, AccountEndpoint, AccountMetricSet, AppendInput,
         AppendRecord, AppendRecordBatch, BasinEndpoint, BasinMatcher, BasinMetricSet, BasinName,
         CommandRecord, Compression, DeleteOnEmptyConfig, DeleteOnEmptyReconfiguration,
         EncryptionAlgorithm, EncryptionKey, FencingToken, Header, IssueAccessTokenInput,
-        MeteredBytes, Metric, MetricUnit, Operation, OperationGroupPermissions, PrivateNet,
-        PrivateNetPolicy, PublicNetPolicy, ReadInput, ReadStart, RetentionPolicy, RetryConfig,
-        S2Config, S2Endpoints, SequencedRecord, StreamMatcher, StreamMetricSet, TimeRange,
-        TimeRangeAndInterval, TimeseriesInterval, Timestamp, TimestampingMode, ValidationError,
+        ListAccessTokensInput, Metric, MetricUnit, NetworkPolicySlug, Operation,
+        OperationGroupPermissions, PrivateNet, PrivateNetPolicy, PublicNetPolicy, ReadInput,
+        ReadStart, RetentionPolicy, RetryConfig, S2Config, S2Endpoints, SequencedRecord,
+        StreamMatcher, StreamMetricSet, TimeRange, TimeRangeAndInterval, TimeseriesInterval,
+        Timestamp, TimestampingMode,
     },
 };
 use serde::Deserialize;
@@ -320,7 +320,7 @@ async fn spec_vectors_keys() {
         let label = format!("[{}] {}", case.rule, case.name);
         let result = match (&case.text, &case.bytes_hex) {
             (Some(text), None) => text.parse::<EncryptionKey>(),
-            (None, Some(hex)) => EncryptionKey::new(decode_hex(hex)),
+            (None, Some(hex)) => EncryptionKey::from_bytes(&decode_hex(hex)),
             _ => panic!("{label}: case must set exactly one of text or bytes_hex"),
         };
 
@@ -402,7 +402,7 @@ fn spec_vectors_numbers() {
                 }),
                 "append.match_seq_num" => check_u64(&|v| {
                     let input = AppendInput::new(dummy_batch.clone()).with_match_seq_num(v);
-                    assert_eq!(input.match_seq_num, Some(v), "{label}");
+                    assert_eq!(input.match_seq_num(), Some(v), "{label}");
                 }),
                 "read.start.seq_num" => check_u64(&|v| {
                     let input = ReadInput::new().with_start(ReadStart::SeqNum(v));
@@ -432,7 +432,7 @@ fn spec_vectors_numbers() {
                     }
                     Err(_) => assert!(!expect_valid, "{label}"),
                 },
-                "session.max_unacked_bytes" => match raw.parse::<u32>() {
+                "session.max_unacked_bytes" => match raw.parse::<usize>() {
                     Ok(v) => {
                         let sess = AppendSessionConfig::new().with_max_unacked_bytes(v);
                         let prod = ProducerConfig::new().with_max_unacked_bytes(v);
@@ -441,7 +441,7 @@ fn spec_vectors_numbers() {
                     }
                     Err(_) => assert!(!expect_valid, "{label}"),
                 },
-                "session.max_unacked_batches" => match raw.parse::<u32>() {
+                "session.max_unacked_batches" => match raw.parse::<usize>() {
                     Ok(v) => {
                         let res = AppendSessionConfig::new().with_max_unacked_batches(v);
                         assert_eq!(res.is_ok(), expect_valid, "{label}");
@@ -877,8 +877,7 @@ fn spec_d4_wall_clock_and_metrics_timestamps() {
     let file: DatesFile = read_json("sdk/vectors/dates.json");
     assert!(!file.cases.is_empty());
 
-    let scope =
-        AccessTokenScopeInput::from_op_group_perms(OperationGroupPermissions::read_write_all());
+    let scope = AccessTokenScope::from_op_group_perms(OperationGroupPermissions::read_write_all());
 
     for case in &file.cases {
         let label = format!("[{}] {}", case.rule, case.name);
@@ -1029,9 +1028,9 @@ async fn spec_vectors_errors() {
                             .parse()
                             .unwrap();
                         assert_eq!(e.assignable_seq_num, expected_seq, "{label}");
-                        assert_eq!(e.server.status.as_u16(), expected_status, "{label}");
-                        assert_eq!(e.server.code.as_deref(), expected_code, "{label}");
-                        assert_eq!(e.server.message, expected_message, "{label}");
+                        assert_eq!(e.server_error().status.as_u16(), expected_status, "{label}");
+                        assert_eq!(e.server_error().code.as_deref(), expected_code, "{label}");
+                        assert_eq!(e.server_error().message, expected_message, "{label}");
                     }
                     "FencingTokenMismatchError" => {
                         let AppendError::FencingTokenMismatch(e) = &err else {
@@ -1041,9 +1040,9 @@ async fn spec_vectors_errors() {
                         };
                         let expected_tok = expect["current_fencing_token"].as_str().unwrap();
                         assert_eq!(&*e.current_fencing_token, expected_tok, "{label}");
-                        assert_eq!(e.server.status.as_u16(), expected_status, "{label}");
-                        assert_eq!(e.server.code.as_deref(), expected_code, "{label}");
-                        assert_eq!(e.server.message, expected_message, "{label}");
+                        assert_eq!(e.server_error().status.as_u16(), expected_status, "{label}");
+                        assert_eq!(e.server_error().code.as_deref(), expected_code, "{label}");
+                        assert_eq!(e.server_error().message, expected_message, "{label}");
                     }
                     other => panic!("{label}: unexpected append error type {other:?}"),
                 }
@@ -1087,9 +1086,9 @@ async fn spec_vectors_errors() {
                             .unwrap();
                         assert_eq!(e.tail.seq_num, expected_seq, "{label}");
                         assert_eq!(e.tail.timestamp, expected_ts, "{label}");
-                        assert_eq!(e.server.status.as_u16(), expected_status, "{label}");
-                        assert_eq!(e.server.code.as_deref(), expected_code, "{label}");
-                        assert_eq!(e.server.message, expected_message, "{label}");
+                        assert_eq!(e.server_error().status.as_u16(), expected_status, "{label}");
+                        assert_eq!(e.server_error().code.as_deref(), expected_code, "{label}");
+                        assert_eq!(e.server_error().message, expected_message, "{label}");
                     }
                     "ServerError" => {
                         let ReadError::Server(se) = &err else {
@@ -1130,94 +1129,149 @@ async fn spec_vectors_errors() {
 }
 
 // spec: r1 F2, F3
-#[test]
-fn spec_f2_f3_open_enums_tagged_unions_and_closed_request_enums() {
-    fn decode_open<A, S>(json: &str) -> S
-    where
-        A: serde::de::DeserializeOwned,
-        S: From<api::MaybeKnown<A>>,
-    {
-        serde_json::from_str::<api::MaybeKnown<A>>(json)
-            .unwrap()
-            .into()
-    }
-
+#[tokio::test]
+async fn spec_f2_f3_open_enums_tagged_unions_and_closed_request_enums() {
     // F2: Every server-returned enum and externally tagged `oneOf` union preserves unknown wire
-    // name / tag in `Unknown(String)`.
+    // name / tag in `Unknown(String)` end-to-end across HTTP responses.
+    let server = MockH2Server::from_responses([
+        CannedResponse::new(
+            200,
+            r#"{
+                "values": [
+                    {"histogram":{"name":"latency","buckets":[1,2]}},
+                    {"scalar":{"name":"x","unit":"microseconds","value":1.0}},
+                    {"accumulation":{"name":"y","unit":"bytes","interval":"week","values":[]}}
+                ]
+            }"#,
+        ),
+        CannedResponse::new(
+            200,
+            r#"{
+                "stream_cipher": "chacha20-poly1305",
+                "default_stream_config": {
+                    "retention_policy": {"max_bytes": 1048576},
+                    "timestamping": {"mode": "hybrid"}
+                }
+            }"#,
+        ),
+        CannedResponse::new(
+            200,
+            r#"[{"name":"aws:us-east-1","is_private":false,"private_net":{"gcp":{"service_attachment":"projects/p/regions/r/serviceAttachments/s"}}}]"#,
+        ),
+        CannedResponse::new(
+            200,
+            r#"{
+                "id": "pol.a1b2c3d4",
+                "slug": "pol",
+                "created_at": "2026-01-01T00:00:00Z",
+                "policy": {
+                    "public_net": {"asn": [64512]},
+                    "private_net": {"gcp": {"psc_ids": ["1"]}}
+                }
+            }"#,
+        ),
+        CannedResponse::new(
+            200,
+            r#"{
+                "access_tokens": [{
+                    "id": "tok-1",
+                    "auto_prefix_streams": false,
+                    "scope": {
+                        "ops": ["future-op"],
+                        "basins": {"glob": "prod-*"},
+                        "streams": {"regex": "events-.*"},
+                        "access_tokens": {"tag": "ci"}
+                    }
+                }],
+                "has_more": false
+            }"#,
+        ),
+    ])
+    .await;
+    let s2 = server.client(no_retry_config());
+    let (basin_name, _) = test_basin_and_stream();
+
+    let metrics = s2
+        .get_account_metrics(AccountMetricSet::ActiveBasins(
+            TimeRange::new(
+                Timestamp::UNIX_EPOCH,
+                Timestamp::UNIX_EPOCH + Duration::from_secs(60),
+            )
+            .unwrap(),
+        ))
+        .await
+        .unwrap();
     assert!(matches!(
-        decode_open::<api::metrics::Metric, Metric>(
-            r#"{"histogram":{"name":"latency","buckets":[1,2]}}"#,
-        ),
-        Metric::Unknown(ref tag) if tag == "histogram"
+        &metrics[0],
+        Metric::Unknown(tag) if tag == "histogram"
     ));
+    assert!(matches!(
+        &metrics[1],
+        Metric::Scalar(s) if s.unit == MetricUnit::Unknown("microseconds".to_owned())
+    ));
+    assert!(matches!(
+        &metrics[2],
+        Metric::Accumulation(a) if a.interval == TimeseriesInterval::Unknown("week".to_owned())
+    ));
+
+    let basin_cfg = s2.get_basin_config(basin_name).await.unwrap();
     assert_eq!(
-        decode_open::<api::metrics::MetricUnit, MetricUnit>(r#""microseconds""#),
-        MetricUnit::Unknown("microseconds".to_owned())
+        basin_cfg.stream_cipher(),
+        Some(&EncryptionAlgorithm::Unknown(
+            "chacha20-poly1305".to_owned()
+        ))
+    );
+    let stream_cfg = basin_cfg.default_stream_config().unwrap();
+    assert_eq!(
+        stream_cfg.retention_policy(),
+        Some(&RetentionPolicy::Unknown("max_bytes".to_owned()))
     );
     assert_eq!(
-        decode_open::<api::metrics::TimeseriesInterval, TimeseriesInterval>(r#""week""#),
-        TimeseriesInterval::Unknown("week".to_owned())
-    );
-    assert_eq!(
-        decode_open::<api::config::RetentionPolicy, RetentionPolicy>(r#"{"max_bytes":1048576}"#),
-        RetentionPolicy::Unknown("max_bytes".to_owned())
-    );
-    assert_eq!(
-        decode_open::<api::config::TimestampingMode, TimestampingMode>(r#""hybrid""#),
-        TimestampingMode::Unknown("hybrid".to_owned())
-    );
-    assert_eq!(
-        decode_open::<api::config::EncryptionAlgorithm, EncryptionAlgorithm>(
-            r#""chacha20-poly1305""#
-        ),
-        EncryptionAlgorithm::Unknown("chacha20-poly1305".to_owned())
-    );
-    assert_eq!(
-        decode_open::<api::location::PrivateNet, PrivateNet>(
-            r#"{"gcp":{"service_attachment":"projects/p/regions/r/serviceAttachments/s"}}"#,
-        ),
-        PrivateNet::Unknown("gcp".to_owned())
-    );
-    assert_eq!(
-        decode_open::<api::network_policy::PublicNetPolicy, PublicNetPolicy>(r#"{"asn":[64512]}"#),
-        PublicNetPolicy::Unknown("asn".to_owned())
-    );
-    assert_eq!(
-        decode_open::<api::network_policy::PrivateNetPolicy, PrivateNetPolicy>(
-            r#"{"gcp":{"psc_ids":["1"]}}"#,
-        ),
-        PrivateNetPolicy::Unknown("gcp".to_owned())
-    );
-    assert_eq!(
-        decode_open::<api::access::Operation, Operation>(r#""future-op""#),
-        Operation::Unknown("future-op".to_owned())
+        stream_cfg.timestamping().unwrap().mode(),
+        Some(&TimestampingMode::Unknown("hybrid".to_owned()))
     );
 
-    let token_info: api::access::AccessTokenInfo = serde_json::from_str(
-        r#"{
-            "id": "tok-1",
-            "auto_prefix_streams": false,
-            "scope": {
-                "basins": {"glob": "prod-*"},
-                "streams": {"regex": "events-.*"},
-                "access_tokens": {"tag": "ci"}
-            }
-        }"#,
-    )
-    .unwrap();
-    let sdk_token: s2_sdk::types::AccessTokenInfo = token_info.into();
-    assert!(matches!(
-        sdk_token.scope.basins,
-        Some(BasinMatcher::Unknown(ref t)) if t == "glob"
-    ));
-    assert!(matches!(
-        sdk_token.scope.streams,
-        Some(StreamMatcher::Unknown(ref t)) if t == "regex"
-    ));
-    assert!(matches!(
-        sdk_token.scope.access_tokens,
-        Some(AccessTokenMatcher::Unknown(ref t)) if t == "tag"
-    ));
+    let locations = s2.list_locations().await.unwrap();
+    assert_eq!(
+        locations[0].private_net,
+        Some(PrivateNet::Unknown("gcp".to_owned()))
+    );
+
+    let pol = s2
+        .get_network_policy("pol".parse::<NetworkPolicySlug>().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        pol.policy.public_net(),
+        Some(&PublicNetPolicy::Unknown("asn".to_owned()))
+    );
+    assert_eq!(
+        pol.policy.private_net(),
+        Some(&PrivateNetPolicy::Unknown("gcp".to_owned()))
+    );
+
+    let tokens = s2
+        .list_access_tokens(ListAccessTokensInput::new())
+        .await
+        .unwrap();
+    let scope = &tokens.values[0].scope;
+    assert!(
+        scope
+            .ops()
+            .contains(&Operation::Unknown("future-op".to_owned()))
+    );
+    assert_eq!(
+        scope.basins(),
+        Some(&BasinMatcher::Unknown("glob".to_owned()))
+    );
+    assert_eq!(
+        scope.streams(),
+        Some(&StreamMatcher::Unknown("regex".to_owned()))
+    );
+    assert_eq!(
+        scope.access_tokens(),
+        Some(&AccessTokenMatcher::Unknown("tag".to_owned()))
+    );
 
     // F3: Client-sent-only enums are closed (verified by exhaustive match with no wildcard and no
     // Unknown variant).

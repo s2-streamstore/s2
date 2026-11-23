@@ -16,9 +16,12 @@ use http::{
     header::HeaderValue,
     uri::{Authority, Scheme},
 };
+use rustls::crypto::CryptoProvider;
 use s2_api::v1::stream::s2s::CompressionAlgorithm;
-use s2_common::{ValidationError, basin::BasinName};
+use s2_common::basin::BasinName;
 use secrecy::{ExposeSecret, SecretBox, SecretString};
+
+use crate::error::ValidationError;
 
 #[cfg(feature = "_hidden")]
 #[derive(Debug, Clone, thiserror::Error)]
@@ -82,20 +85,46 @@ impl fmt::Debug for AccessToken {
 
 /// Client-supplied encryption key for server-side encryption.
 ///
-/// Represents raw key bytes encoded as standard padded base64 for the `s2-encryption-key`
-/// header. Key length validation is left to the server, since the required length depends on
-/// the stream's cipher.
+/// Represents non-empty raw key bytes encoded as standard padded base64 for the
+/// `s2-encryption-key` header. Construct from raw key bytes with [`from_bytes`](Self::from_bytes)
+/// or from base64 text with [`from_base64`](Self::from_base64) / [`FromStr`]. Key length
+/// validation is left to the server, since the required length depends on the stream's cipher.
 #[derive(Clone)]
+#[must_use]
 pub struct EncryptionKey(SecretString);
 
 impl EncryptionKey {
     /// Construct an [`EncryptionKey`] from raw key bytes.
-    pub fn new(bytes: impl AsRef<[u8]>) -> Result<Self, ValidationError> {
-        let bytes = bytes.as_ref();
+    ///
+    /// Takes a byte slice rather than `impl AsRef<[u8]>` so a base64 `&str` cannot be
+    /// accidentally double-encoded; use [`from_base64`](Self::from_base64) or [`str::parse`] for
+    /// base64-encoded keys.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ValidationError`] if `bytes` is empty.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ValidationError> {
         if bytes.is_empty() {
             return Err(ValidationError("encryption key must not be empty".into()));
         }
         Ok(Self(SecretString::from(Base64::encode_string(bytes))))
+    }
+
+    /// Construct an [`EncryptionKey`] from standard padded base64 text (ignoring surrounding
+    /// whitespace).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ValidationError`] if `encoded` is empty or not valid standard padded base64.
+    pub fn from_base64(encoded: impl AsRef<str>) -> Result<Self, ValidationError> {
+        let trimmed = encoded.as_ref().trim();
+        if trimmed.is_empty() {
+            return Err(ValidationError("encryption key must not be empty".into()));
+        }
+        let _decoded = SecretBox::from(Base64::decode_vec(trimmed).map_err(|_| {
+            ValidationError("encryption key must be valid standard padded base64".into())
+        })?);
+        Ok(Self(SecretString::from(trimmed.to_owned())))
     }
 
     /// Encode this key as a sensitive HTTP header value for `s2-encryption-key`.
@@ -111,14 +140,23 @@ impl FromStr for EncryptionKey {
     type Err = ValidationError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let trimmed = s.trim();
-        if trimmed.is_empty() {
-            return Err(ValidationError("encryption key must not be empty".into()));
-        }
-        let _decoded = SecretBox::from(Base64::decode_vec(trimmed).map_err(|_| {
-            ValidationError("encryption key must be valid standard padded base64".into())
-        })?);
-        Ok(Self(SecretString::from(trimmed.to_owned())))
+        Self::from_base64(s)
+    }
+}
+
+impl TryFrom<&str> for EncryptionKey {
+    type Error = ValidationError;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        Self::from_base64(s)
+    }
+}
+
+impl TryFrom<String> for EncryptionKey {
+    type Error = ValidationError;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        Self::from_base64(s)
     }
 }
 
@@ -129,7 +167,7 @@ impl fmt::Debug for EncryptionKey {
 }
 
 /// Authority for connecting to an S2 basin.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum BasinAuthority {
     /// Parent zone for basins. DNS is used to route to the correct cell for the basin.
     ParentZone(Authority),
@@ -251,7 +289,8 @@ fn is_ip_literal(authority: &Authority) -> bool {
 }
 
 /// Account endpoint.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[must_use]
 pub struct AccountEndpoint {
     pub(super) scheme: Scheme,
     pub(super) authority: Authority,
@@ -259,8 +298,12 @@ pub struct AccountEndpoint {
 
 impl AccountEndpoint {
     /// Create a new [`AccountEndpoint`] with the given endpoint.
-    pub fn new(endpoint: &str) -> Result<Self, ValidationError> {
-        endpoint.parse()
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ValidationError`] if the scheme, host, or port is invalid.
+    pub fn new(endpoint: impl AsRef<str>) -> Result<Self, ValidationError> {
+        endpoint.as_ref().parse()
     }
 }
 
@@ -276,6 +319,22 @@ impl FromStr for AccountEndpoint {
     }
 }
 
+impl TryFrom<&str> for AccountEndpoint {
+    type Error = ValidationError;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        s.parse()
+    }
+}
+
+impl TryFrom<String> for AccountEndpoint {
+    type Error = ValidationError;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        s.parse()
+    }
+}
+
 impl fmt::Display for AccountEndpoint {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}://{}", self.scheme, self.authority)
@@ -283,7 +342,8 @@ impl fmt::Display for AccountEndpoint {
 }
 
 /// Basin endpoint.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[must_use]
 pub struct BasinEndpoint {
     pub(super) scheme: Scheme,
     pub(super) authority: BasinAuthority,
@@ -292,10 +352,12 @@ pub struct BasinEndpoint {
 impl BasinEndpoint {
     /// Create a new [`BasinEndpoint`] with the given endpoint.
     ///
-    /// Returns an error if the `{basin}.` placeholder is used with an IP address,
-    /// which cannot have basin subdomains.
-    pub fn new(endpoint: &str) -> Result<Self, ValidationError> {
-        endpoint.parse()
+    /// # Errors
+    ///
+    /// Returns [`ValidationError`] if the scheme, host, or port is invalid, or if the `{basin}.`
+    /// placeholder is used with an IP address (which cannot have basin subdomains).
+    pub fn new(endpoint: impl AsRef<str>) -> Result<Self, ValidationError> {
+        endpoint.as_ref().parse()
     }
 }
 
@@ -323,6 +385,22 @@ impl FromStr for BasinEndpoint {
     }
 }
 
+impl TryFrom<&str> for BasinEndpoint {
+    type Error = ValidationError;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        s.parse()
+    }
+}
+
+impl TryFrom<String> for BasinEndpoint {
+    type Error = ValidationError;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        s.parse()
+    }
+}
+
 impl fmt::Display for BasinEndpoint {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.authority {
@@ -332,9 +410,9 @@ impl fmt::Display for BasinEndpoint {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[must_use]
 /// Endpoints for the S2 environment.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[must_use]
 pub struct S2Endpoints {
     pub(crate) scheme: Scheme,
     pub(crate) account_authority: Authority,
@@ -347,8 +425,29 @@ impl Default for S2Endpoints {
     }
 }
 
+impl fmt::Display for S2Endpoints {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.basin_authority {
+            BasinAuthority::ParentZone(zone) => write!(
+                f,
+                "account={}://{}, basin={}://{{basin}}.{zone}",
+                self.scheme, self.account_authority, self.scheme
+            ),
+            BasinAuthority::Direct(authority) => write!(
+                f,
+                "account={}://{}, basin={}://{authority}",
+                self.scheme, self.account_authority, self.scheme
+            ),
+        }
+    }
+}
+
 impl S2Endpoints {
     /// Create a new [`S2Endpoints`] with the given account and basin endpoints.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ValidationError`] if the two endpoints do not use the same scheme.
     pub fn new(
         account_endpoint: AccountEndpoint,
         basin_endpoint: BasinEndpoint,
@@ -366,7 +465,11 @@ impl S2Endpoints {
     /// Create endpoints for a single account and basin endpoint.
     ///
     /// This is useful for S2-compatible services that expose both APIs at one endpoint.
-    pub fn for_endpoint(endpoint: &str) -> Result<Self, ValidationError> {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ValidationError`] if `endpoint` is not a valid endpoint.
+    pub fn for_endpoint(endpoint: impl AsRef<str>) -> Result<Self, ValidationError> {
         let account = AccountEndpoint::new(endpoint)?;
         Ok(Self {
             scheme: account.scheme,
@@ -379,14 +482,26 @@ impl S2Endpoints {
     ///
     /// Reads `S2_ACCOUNT_ENDPOINT` and `S2_BASIN_ENDPOINT`. Empty values are treated as unset.
     /// If neither variable is set, returns the default S2 Cloud endpoints ([`Self::for_cloud`]).
-    /// If only one is set, returns a [`ValidationError`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ValidationError`] if only one endpoint variable is set, or if either endpoint is
+    /// invalid or mismatched.
     pub fn from_env() -> Result<Self, ValidationError> {
-        Self::from_env_with(|key| std::env::var(key))
+        Self::from_env_inner(|key| std::env::var(key))
     }
 
     /// Create a new [`S2Endpoints`] from a custom environment variable lookup function.
+    #[cfg(feature = "_hidden")]
     #[doc(hidden)]
-    pub fn from_env_with<F>(mut var: F) -> Result<Self, ValidationError>
+    pub fn from_env_with<F>(var: F) -> Result<Self, ValidationError>
+    where
+        F: FnMut(&str) -> Result<String, VarError>,
+    {
+        Self::from_env_inner(var)
+    }
+
+    pub(crate) fn from_env_inner<F>(mut var: F) -> Result<Self, ValidationError>
     where
         F: FnMut(&str) -> Result<String, VarError>,
     {
@@ -422,11 +537,13 @@ impl S2Endpoints {
     }
 
     /// Return the resolved origin for account requests (e.g. `https://a.s2.dev`).
+    #[must_use]
     pub fn account_origin(&self) -> String {
         format!("{}://{}", self.scheme, self.account_authority)
     }
 
     /// Return the resolved origin for requests targeting `basin`.
+    #[must_use]
     pub fn basin_origin(&self, basin: &BasinName) -> String {
         match &self.basin_authority {
             BasinAuthority::ParentZone(zone) => format!("{}://{basin}.{zone}", self.scheme),
@@ -435,15 +552,17 @@ impl S2Endpoints {
     }
 
     /// Whether basin requests must send the `s2-basin` header.
+    #[must_use]
     pub fn uses_basin_header(&self) -> bool {
         matches!(self.basin_authority, BasinAuthority::Direct(_))
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Compression algorithm for request and response bodies.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Compression {
     /// No compression.
+    #[default]
     None,
     /// Gzip compression.
     Gzip,
@@ -451,21 +570,38 @@ pub enum Compression {
     Zstd,
 }
 
-impl From<Compression> for CompressionAlgorithm {
-    fn from(value: Compression) -> Self {
-        match value {
-            Compression::None => CompressionAlgorithm::None,
-            Compression::Gzip => CompressionAlgorithm::Gzip,
-            Compression::Zstd => CompressionAlgorithm::Zstd,
+impl Compression {
+    /// Return the wire/setting name of this compression algorithm.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Gzip => "gzip",
+            Self::Zstd => "zstd",
+        }
+    }
+
+    pub(crate) fn into_api(self) -> CompressionAlgorithm {
+        match self {
+            Self::None => CompressionAlgorithm::None,
+            Self::Gzip => CompressionAlgorithm::Gzip,
+            Self::Zstd => CompressionAlgorithm::Zstd,
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+impl fmt::Display for Compression {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Retry policy for [`append`](crate::S2Stream::append) and
 /// [`append_session`](crate::S2Stream::append_session) operations.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AppendRetryPolicy {
     /// Retry all appends. Use when duplicate records on the stream are acceptable.
+    #[default]
     All,
     /// Retry only when the failed attempt certainly had no side effects.
     ///
@@ -475,7 +611,23 @@ pub enum AppendRetryPolicy {
     NoSideEffects,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+impl AppendRetryPolicy {
+    /// Return the setting name of this retry policy.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::NoSideEffects => "no_side_effects",
+        }
+    }
+}
+
+impl fmt::Display for AppendRetryPolicy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Configuration for retrying requests in case of transient failures.
 ///
 /// Exponential backoff with jitter is the retry strategy. Below is the pseudocode for the strategy:
@@ -484,6 +636,7 @@ pub enum AppendRetryPolicy {
 ///     jitter = rand[0, base_delay]
 ///     delay  = base_delay + jitter
 /// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[must_use]
 pub struct RetryConfig {
     pub(crate) max_attempts: NonZeroU32,
@@ -514,28 +667,36 @@ impl RetryConfig {
     }
 
     /// Return the total number of attempts including the initial try.
+    #[must_use]
     pub fn max_attempts(&self) -> u32 {
         self.max_attempts.get()
     }
 
     /// Return the minimum base delay for retries.
+    #[must_use]
     pub fn min_base_delay(&self) -> Duration {
         self.min_base_delay
     }
 
     /// Return the maximum base delay for retries.
+    #[must_use]
     pub fn max_base_delay(&self) -> Duration {
         self.max_base_delay
     }
 
     /// Return the retry policy for append operations.
+    #[must_use]
     pub fn append_retry_policy(&self) -> AppendRetryPolicy {
         self.append_retry_policy
     }
 
     /// Set the total number of attempts including the initial try.
     ///
-    /// **Note:** Must be at least `1`.
+    /// Defaults to `3`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ValidationError`] if `max_attempts` is `0`.
     pub fn with_max_attempts(self, max_attempts: u32) -> Result<Self, ValidationError> {
         let max_attempts = NonZeroU32::new(max_attempts)
             .ok_or_else(|| ValidationError("max_attempts must be at least 1".into()))?;
@@ -546,6 +707,8 @@ impl RetryConfig {
     }
 
     /// Set the minimum base delay for retries.
+    ///
+    /// Defaults to `100ms`.
     pub fn with_min_base_delay(self, min_base_delay: Duration) -> Self {
         Self {
             min_base_delay,
@@ -554,6 +717,8 @@ impl RetryConfig {
     }
 
     /// Set the maximum base delay for retries.
+    ///
+    /// Defaults to `1s`.
     pub fn with_max_base_delay(self, max_base_delay: Duration) -> Self {
         Self {
             max_base_delay,
@@ -563,6 +728,8 @@ impl RetryConfig {
 
     /// Set the retry policy for [`append`](crate::S2Stream::append) and
     /// [`append_session`](crate::S2Stream::append_session) operations.
+    ///
+    /// Defaults to [`AppendRetryPolicy::All`].
     pub fn with_append_retry_policy(self, append_retry_policy: AppendRetryPolicy) -> Self {
         Self {
             append_retry_policy,
@@ -577,7 +744,7 @@ impl RetryConfig {
 /// 16 MiB per-stream receive window, and 32 MiB connection receive window.
 /// Receive windows bound unconsumed server-to-client DATA only; they do not
 /// affect append throughput, which is governed by the server's receive windows.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 #[must_use]
 pub struct Http2Config {
     pub(crate) max_concurrent_requests: Option<usize>,
@@ -603,16 +770,19 @@ impl Http2Config {
     }
 
     /// Return the configured per-connection concurrent request cap, if overridden.
+    #[must_use]
     pub fn max_concurrent_requests(&self) -> Option<usize> {
         self.max_concurrent_requests
     }
 
     /// Return the configured initial per-stream receive window in bytes, if overridden.
+    #[must_use]
     pub fn stream_receive_window(&self) -> Option<u32> {
         self.stream_receive_window
     }
 
     /// Return the configured connection-level receive window in bytes, if overridden.
+    #[must_use]
     pub fn connection_receive_window(&self) -> Option<u32> {
         self.connection_receive_window
     }
@@ -688,9 +858,9 @@ impl Http2Config {
     }
 }
 
+/// Configuration for [`S2`](crate::S2).
 #[derive(Clone)]
 #[must_use]
-/// Configuration for [`S2`](crate::S2).
 pub struct S2Config {
     pub(crate) access_token: AccessToken,
     pub(crate) endpoints: S2Endpoints,
@@ -702,7 +872,7 @@ pub struct S2Config {
     pub(crate) user_agent: HeaderValue,
     pub(crate) default_headers: HeaderMap,
     pub(crate) insecure_skip_cert_verification: bool,
-    pub(crate) rustls_crypto_provider: Option<Arc<rustls::crypto::CryptoProvider>>,
+    pub(crate) rustls_crypto_provider: Option<Arc<CryptoProvider>>,
 }
 
 impl fmt::Debug for S2Config {
@@ -752,13 +922,26 @@ impl S2Config {
     ///
     /// Reads `S2_ACCESS_TOKEN`, and optionally `S2_ACCOUNT_ENDPOINT` and `S2_BASIN_ENDPOINT`
     /// (empty endpoint variables are treated as unset; if one is set, both must be set).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ValidationError`] if `S2_ACCESS_TOKEN` is missing, empty, or invalid, or if the
+    /// endpoint variables are incomplete or invalid.
     pub fn from_env() -> Result<Self, ValidationError> {
-        Self::from_env_with(|key| std::env::var(key))
+        Self::from_env_inner(|key| std::env::var(key))
     }
 
     /// Create a new [`S2Config`] from a custom environment variable lookup function.
+    #[cfg(feature = "_hidden")]
     #[doc(hidden)]
-    pub fn from_env_with<F>(mut var: F) -> Result<Self, ValidationError>
+    pub fn from_env_with<F>(var: F) -> Result<Self, ValidationError>
+    where
+        F: FnMut(&str) -> Result<String, VarError>,
+    {
+        Self::from_env_inner(var)
+    }
+
+    fn from_env_inner<F>(mut var: F) -> Result<Self, ValidationError>
     where
         F: FnMut(&str) -> Result<String, VarError>,
     {
@@ -770,11 +953,12 @@ impl S2Config {
             }
         };
         crate::api::authorization_header(&access_token)?;
-        let endpoints = S2Endpoints::from_env_with(var)?;
+        let endpoints = S2Endpoints::from_env_inner(var)?;
         Ok(Self::new(access_token).with_endpoints(endpoints))
     }
 
     /// Return the configured endpoints.
+    #[must_use]
     pub fn endpoints(&self) -> &S2Endpoints {
         &self.endpoints
     }
@@ -785,11 +969,13 @@ impl S2Config {
     }
 
     /// Return the timeout for establishing a connection to the server.
+    #[must_use]
     pub fn connection_timeout(&self) -> Duration {
         self.connection_timeout
     }
 
     /// Return the timeout for requests.
+    #[must_use]
     pub fn request_timeout(&self) -> Duration {
         self.request_timeout
     }
@@ -800,11 +986,13 @@ impl S2Config {
     }
 
     /// Return the compression algorithm for requests and responses.
+    #[must_use]
     pub fn compression(&self) -> Compression {
         self.compression
     }
 
     /// Return whether TLS certificate verification is disabled.
+    #[must_use]
     pub fn insecure_skip_cert_verification(&self) -> bool {
         self.insecure_skip_cert_verification
     }
@@ -887,9 +1075,11 @@ impl S2Config {
 
     /// Set the timeout for establishing a connection to the server.
     ///
-    /// **Note:** Must be greater than zero.
-    ///
     /// Defaults to `3s`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ValidationError`] if `connection_timeout` is zero.
     pub fn with_connection_timeout(
         self,
         connection_timeout: Duration,
@@ -905,9 +1095,11 @@ impl S2Config {
 
     /// Set the timeout for requests.
     ///
-    /// **Note:** Must be greater than zero.
-    ///
     /// Defaults to `5s`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ValidationError`] if `request_timeout` is zero.
     pub fn with_request_timeout(self, request_timeout: Duration) -> Result<Self, ValidationError> {
         if request_timeout.is_zero() {
             return Err("request_timeout must be greater than zero".into());
@@ -927,7 +1119,7 @@ impl S2Config {
 
     /// Set the compression algorithm for requests and responses.
     ///
-    /// Defaults to no compression.
+    /// Defaults to [`Compression::None`].
     pub fn with_compression(self, compression: Compression) -> Self {
         Self {
             compression,
@@ -961,12 +1153,9 @@ impl S2Config {
     /// provider if one has been installed, or returns an error for HTTPS endpoints otherwise.
     ///
     /// Use this when your application needs a specific rustls provider, such as
-    /// `ring` or a custom [`rustls::crypto::CryptoProvider`]. The corresponding
-    /// rustls provider feature must be enabled in the dependency graph.
-    pub fn with_rustls_crypto_provider(
-        self,
-        provider: impl Into<Arc<rustls::crypto::CryptoProvider>>,
-    ) -> Self {
+    /// `ring` (including when workspace feature unification enables both `rustls-aws-lc-rs`
+    /// and `rustls-ring`) or a custom [`CryptoProvider`].
+    pub fn with_rustls_crypto_provider(self, provider: impl Into<Arc<CryptoProvider>>) -> Self {
         Self {
             rustls_crypto_provider: Some(provider.into()),
             ..self
@@ -1001,16 +1190,16 @@ impl S2Config {
 }
 
 #[cfg(feature = "rustls-aws-lc-rs")]
-fn default_rustls_crypto_provider() -> Option<Arc<rustls::crypto::CryptoProvider>> {
+fn default_rustls_crypto_provider() -> Option<Arc<CryptoProvider>> {
     Some(Arc::new(rustls::crypto::aws_lc_rs::default_provider()))
 }
 
 #[cfg(all(not(feature = "rustls-aws-lc-rs"), feature = "rustls-ring"))]
-fn default_rustls_crypto_provider() -> Option<Arc<rustls::crypto::CryptoProvider>> {
+fn default_rustls_crypto_provider() -> Option<Arc<CryptoProvider>> {
     Some(Arc::new(rustls::crypto::ring::default_provider()))
 }
 
 #[cfg(all(not(feature = "rustls-aws-lc-rs"), not(feature = "rustls-ring")))]
-fn default_rustls_crypto_provider() -> Option<Arc<rustls::crypto::CryptoProvider>> {
+fn default_rustls_crypto_provider() -> Option<Arc<CryptoProvider>> {
     None
 }

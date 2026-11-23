@@ -2,8 +2,8 @@ use s2_sdk::{
     S2,
     read_session::ReadSessionConfig,
     types::{
-        AppendRecord, AppendRecordBatch, BasinName, CreateBasinInput, CreateStreamInput, ReadInput,
-        ReadStart, StreamName,
+        AppendRecord, AppendRecordBatch, BasinName, CreateBasinInput, CreateStreamInput, ReadStart,
+        StreamName, Timestamp,
     },
 };
 
@@ -11,7 +11,7 @@ use s2_sdk::{
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let s2 = S2::from_env()?;
 
-    let suffix = &uuid::Uuid::new_v4().simple().to_string()[..8];
+    let suffix = Timestamp::now().as_millisecond();
     let basin_name: BasinName = format!("caught-up-{suffix}").parse()?;
     let stream_name: StreamName = "example".parse()?;
     let basin = s2.basin(basin_name.clone());
@@ -30,10 +30,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ])?)
         .await?;
 
-    let mut session = stream.read_session(
-        ReadInput::new().with_start(ReadStart::TailOffset(2)),
-        ReadSessionConfig::new(),
-    )?;
+    let mut session = stream.read_session(ReadStart::TailOffset(2), ReadSessionConfig::new())?;
     let mut caught_up = session.caught_up();
 
     loop {

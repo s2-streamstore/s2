@@ -44,8 +44,8 @@ use record_format::{
 use s2_sdk::{
     S2,
     types::{
-        AppendRetryPolicy, CreateStreamInput, DeleteOnEmptyConfig, EncryptionKey, LocationInfo,
-        MeteredBytes, Metric, PrivateNet, RetentionPolicy, RetryConfig,
+        AppendRetryPolicy, Command as SdkCommand, CreateStreamInput, DeleteOnEmptyConfig,
+        EncryptionKey, LocationInfo, Metric, PrivateNet, RetentionPolicy, RetryConfig,
         StreamConfig as SdkStreamConfig, StreamName, Timestamp, TimestampingConfig,
         TimestampingMode,
     },
@@ -931,7 +931,9 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
                         .with_mode(TimestampingMode::ClientRequire)
                         .with_uncapped(true),
                 );
-            stream_config.storage_class = args.storage_class;
+            if let Some(storage_class) = args.storage_class {
+                stream_config = stream_config.with_storage_class(storage_class);
+            }
 
             let s2 = S2::new(sdk_config.clone().with_retry(
                 RetryConfig::new().with_append_retry_policy(AppendRetryPolicy::NoSideEffects),
@@ -1121,27 +1123,18 @@ async fn write_record(
     match format {
         RecordFormat::Text => {
             if record.is_command_record() {
-                if let Some(header) = record.headers.first() {
-                    let cmd_type = &header.value;
-                    let cmd_desc = if cmd_type.as_ref() == b"fence" {
-                        let fencing_token = String::from_utf8_lossy(&record.body);
-                        format!("new fencing token \"{}\"", fencing_token)
-                    } else if cmd_type.as_ref() == b"trim" {
-                        let trim_point = if record.body.len() >= 8 {
-                            u64::from_be_bytes(record.body[..8].try_into().unwrap_or_default())
-                        } else {
-                            0
-                        };
-                        format!("trim to {}", trim_point)
-                    } else {
-                        "unknown command".to_string()
-                    };
-                    eprintln!(
-                        "{} // {}",
-                        cmd_desc.bold(),
-                        format_position(record.seq_num, record.timestamp)
-                    );
-                }
+                let cmd_desc = match record.command() {
+                    Some(SdkCommand::Fence { fencing_token }) => {
+                        format!("new fencing token \"{fencing_token}\"")
+                    }
+                    Some(SdkCommand::Trim { trim_point }) => format!("trim to {trim_point}"),
+                    _ => "unknown command".to_string(),
+                };
+                eprintln!(
+                    "{} // {}",
+                    cmd_desc.bold(),
+                    format_position(record.seq_num, record.timestamp)
+                );
             } else {
                 TextFormatter::write_record(record, writer)
                     .await
@@ -1340,13 +1333,10 @@ mod tests {
     #[test]
     fn location_listing_marks_the_default_storage_class() {
         colored::control::set_override(false);
-        let render = |json: &str| {
-            let location: s2_api::v1::location::LocationInfo = serde_json::from_str(json).unwrap();
-            render_location_listing(&location.into(), false)
-        };
 
-        let listed = r#"{"name": "aws:us-east-1", "is_private": false,
-            "storage_classes": ["express", "standard"], "default_storage_class": "express"}"#;
+        let listed = LocationInfo::new("aws:us-east-1".parse().unwrap(), false)
+            .with_storage_classes(["express", "standard"])
+            .with_default_storage_class("express");
         let expected = [
             "aws:us-east-1 (public)",
             "  storage classes:",
@@ -1354,11 +1344,12 @@ mod tests {
             "    standard",
             "",
         ];
-        assert_eq!(render(listed), expected.join("\n"));
+        assert_eq!(render_location_listing(&listed, false), expected.join("\n"));
 
         // The default is not lost when the account cannot use it.
-        let unlisted = r#"{"name": "aws:us-east-1", "is_private": true,
-            "storage_classes": ["standard"], "default_storage_class": "express"}"#;
+        let unlisted = LocationInfo::new("aws:us-east-1".parse().unwrap(), true)
+            .with_storage_classes(["standard"])
+            .with_default_storage_class("express");
         let expected = [
             "aws:us-east-1 (private)",
             "  storage classes:",
@@ -1366,6 +1357,9 @@ mod tests {
             "  default storage class: express",
             "",
         ];
-        assert_eq!(render(unlisted), expected.join("\n"));
+        assert_eq!(
+            render_location_listing(&unlisted, false),
+            expected.join("\n")
+        );
     }
 }
