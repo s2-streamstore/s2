@@ -59,11 +59,14 @@ async fn create_list_and_delete_basin() -> Result<(), Box<dyn std::error::Error>
         values => panic!("unexpected basin listing after delete: {values:?}"),
     }
 
+    // Deleting a nonexistent basin is idempotent (M4).
+    s2.delete_basin(unique_basin_name()).await?;
+
     Ok(())
 }
 
 #[tokio::test]
-async fn basin_config_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
+async fn basin_config_and_reconfigure() -> Result<(), Box<dyn std::error::Error>> {
     let s2 = s2();
     let basin_name = unique_basin_name();
     let config = BasinConfig::new()
@@ -74,49 +77,39 @@ async fn basin_config_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
                     DeleteOnEmptyConfig::new().with_min_age(Duration::from_secs(60))?,
                 ),
         )
+        .with_create_stream_on_append(true)
         .with_create_stream_on_read(true);
 
-    s2.create_basin(CreateBasinInput::new(basin_name.clone()).with_config(config.clone()))
+    s2.create_basin(CreateBasinInput::new(basin_name.clone()).with_config(config))
         .await?;
 
-    let retrieved_config = s2.get_basin_config(basin_name.clone()).await?;
+    let retrieved = s2.get_basin_config(basin_name.clone()).await?;
     assert_matches!(
-        retrieved_config,
+        retrieved,
         BasinConfig {
             default_stream_config: Some(StreamConfig {
                 storage_class: Some(ref storage_class),
                 delete_on_empty: Some(ref delete_on_empty),
                 ..
             }),
+            create_stream_on_append: true,
             create_stream_on_read: true,
             ..
         } if storage_class == "express" && delete_on_empty.min_age() == Duration::from_secs(60)
     );
 
-    s2.delete_basin(basin_name).await?;
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn reconfigure_basin() -> Result<(), Box<dyn std::error::Error>> {
-    let s2 = s2();
-    let basin_name = unique_basin_name();
-
-    s2.create_basin(
-        CreateBasinInput::new(basin_name.clone())
-            .with_config(BasinConfig::new().with_create_stream_on_append(true)),
-    )
-    .await?;
-
-    let new_config = BasinReconfiguration::new()
-        .with_default_stream_config(StreamReconfiguration::new().with_storage_class("standard"))
-        .with_create_stream_on_append(false);
-
-    let updated_config = s2.reconfigure_basin(basin_name.clone(), new_config).await?;
-
+    let updated = s2
+        .reconfigure_basin(
+            basin_name.clone(),
+            BasinReconfiguration::new()
+                .with_default_stream_config(
+                    StreamReconfiguration::new().with_storage_class("standard"),
+                )
+                .with_create_stream_on_append(false),
+        )
+        .await?;
     assert_matches!(
-        updated_config,
+        updated,
         BasinConfig {
             default_stream_config: Some(StreamConfig {
                 storage_class: Some(ref storage_class),
@@ -133,88 +126,41 @@ async fn reconfigure_basin() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[tokio::test]
-async fn ensure_basin_created() -> Result<(), Box<dyn std::error::Error>> {
+async fn ensure_basin_lifecycle() -> Result<(), Box<dyn std::error::Error>> {
     let s2 = s2();
     let basin_name = unique_basin_name();
 
-    let output = s2
+    let created = s2
         .ensure_basin(
             EnsureBasinInput::new(basin_name.clone())
                 .with_config(BasinConfig::new().with_create_stream_on_read(true)),
         )
         .await?;
-
-    assert_matches!(output, EnsureOutput::Created(info) => {
-        assert_eq!(basin_name, info.name);
+    assert_matches!(created, EnsureOutput::Created(info) => {
+        assert_eq!(info.name, basin_name);
     });
 
     let config = s2.get_basin_config(basin_name.clone()).await?;
-
     assert!(config.create_stream_on_read);
 
-    s2.delete_basin(basin_name).await?;
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn ensure_basin_config_updated() -> Result<(), Box<dyn std::error::Error>> {
-    let s2 = s2();
-    let basin_name = unique_basin_name();
-
-    let output = s2
-        .ensure_basin(
-            EnsureBasinInput::new(basin_name.clone())
-                .with_config(BasinConfig::new().with_create_stream_on_append(true)),
-        )
-        .await?;
-
-    assert_matches!(output, EnsureOutput::Created(info) => {
-        assert_eq!(basin_name, info.name);
-    });
-
-    let output = s2
-        .ensure_basin(
-            EnsureBasinInput::new(basin_name.clone())
-                .with_config(BasinConfig::new().with_create_stream_on_append(false)),
-        )
-        .await?;
-
-    assert_matches!(output, EnsureOutput::Updated(_));
-
-    let updated_config = s2.get_basin_config(basin_name.clone()).await?;
-
-    assert!(!updated_config.create_stream_on_append);
-
-    s2.delete_basin(basin_name).await?;
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn ensure_basin_config_unchanged() -> Result<(), Box<dyn std::error::Error>> {
-    let s2 = s2();
-    let basin_name = unique_basin_name();
-
-    let output = s2
-        .ensure_basin(EnsureBasinInput::new(basin_name.clone()))
-        .await?;
-
-    assert_matches!(output, EnsureOutput::Created(info) => {
-        assert_eq!(basin_name, info.name);
-    });
-
-    let config = s2.get_basin_config(basin_name.clone()).await?;
-
-    let output = s2
+    let noop = s2
         .ensure_basin(EnsureBasinInput::new(basin_name.clone()).with_config(config.clone()))
         .await?;
+    assert_matches!(noop, EnsureOutput::Noop(_));
+    assert_eq!(s2.get_basin_config(basin_name.clone()).await?, config);
 
-    assert_matches!(output, EnsureOutput::Noop(_));
-
-    let updated_config = s2.get_basin_config(basin_name.clone()).await?;
-
-    assert_eq!(config, updated_config);
+    let updated = s2
+        .ensure_basin(
+            EnsureBasinInput::new(basin_name.clone())
+                .with_config(BasinConfig::new().with_create_stream_on_read(false)),
+        )
+        .await?;
+    assert_matches!(updated, EnsureOutput::Updated(_));
+    assert!(
+        !s2.get_basin_config(basin_name.clone())
+            .await?
+            .create_stream_on_read
+    );
 
     s2.delete_basin(basin_name).await?;
 
@@ -222,92 +168,49 @@ async fn ensure_basin_config_unchanged() -> Result<(), Box<dyn std::error::Error
 }
 
 #[tokio::test]
-async fn list_basins_with_limit() -> Result<(), Box<dyn std::error::Error>> {
+async fn list_basins_filters() -> Result<(), Box<dyn std::error::Error>> {
     let s2 = s2();
-    let basin_name_1 = unique_basin_name();
-    let basin_name_2 = unique_basin_name();
-
-    s2.create_basin(CreateBasinInput::new(basin_name_1.clone()))
-        .await?;
-    s2.create_basin(CreateBasinInput::new(basin_name_2.clone()))
-        .await?;
-
-    let page = s2.list_basins(ListBasinsInput::new().with_limit(1)).await?;
-
-    assert_eq!(page.values.len(), 1);
-    assert!(page.has_more);
-
-    s2.delete_basin(basin_name_1).await?;
-    s2.delete_basin(basin_name_2).await?;
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn list_basins_with_prefix() -> Result<(), Box<dyn std::error::Error>> {
-    let s2 = s2();
-
     let prefix_1: BasinNamePrefix = uuid().parse().expect("valid basin name prefix");
     let prefix_2: BasinNamePrefix = uuid().parse().expect("valid basin name prefix");
-    let basin_name_1: BasinName = format!("{}-a", prefix_1).parse().expect("valid basin name");
-    let basin_name_2: BasinName = format!("{}-b", prefix_2).parse().expect("valid basin name");
+    let basin_1a: BasinName = format!("{prefix_1}-a").parse().expect("valid basin name");
+    let basin_1b: BasinName = format!("{prefix_1}-b").parse().expect("valid basin name");
+    let basin_2a: BasinName = format!("{prefix_2}-a").parse().expect("valid basin name");
 
-    s2.create_basin(CreateBasinInput::new(basin_name_1.clone()))
+    for name in [&basin_1a, &basin_1b, &basin_2a] {
+        s2.create_basin(CreateBasinInput::new(name.clone())).await?;
+    }
+
+    let by_prefix = s2
+        .list_basins(ListBasinsInput::new().with_prefix(prefix_1.clone()))
         .await?;
-    s2.create_basin(CreateBasinInput::new(basin_name_2.clone()))
-        .await?;
+    assert_eq!(by_prefix.values.len(), 2);
+    assert_eq!(by_prefix.values[0].name, basin_1a);
+    assert_eq!(by_prefix.values[1].name, basin_1b);
 
-    let page = s2
-        .list_basins(ListBasinsInput::new().with_prefix(prefix_1))
-        .await?;
-
-    assert_eq!(page.values.len(), 1);
-    assert_matches!(page.values.first(), Some(b) => {
-        assert_eq!(b.name, basin_name_1)
-    });
-
-    s2.delete_basin(basin_name_1).await?;
-    s2.delete_basin(basin_name_2).await?;
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn list_basins_with_prefix_and_start_after() -> Result<(), Box<dyn std::error::Error>> {
-    let s2 = s2();
-
-    let prefix: BasinNamePrefix = uuid().parse().expect("valid prefix");
-    let basin_name_1: BasinName = format!("{}-a", prefix).parse().expect("valid basin name");
-    let basin_name_2: BasinName = format!("{}-b", prefix).parse().expect("valid basin name");
-
-    s2.create_basin(CreateBasinInput::new(basin_name_1.clone()))
-        .await?;
-    s2.create_basin(CreateBasinInput::new(basin_name_2.clone()))
-        .await?;
-
-    let page = s2
+    let limited = s2
         .list_basins(
             ListBasinsInput::new()
-                .with_prefix(prefix)
-                .with_start_after(basin_name_1.as_ref().parse().expect("valid start after")),
+                .with_prefix(prefix_1.clone())
+                .with_limit(1),
         )
         .await?;
+    assert_eq!(limited.values.len(), 1);
+    assert_eq!(limited.values[0].name, basin_1a);
+    assert!(limited.has_more);
 
-    assert_eq!(page.values.len(), 1);
-    assert_eq!(page.values[0].name, basin_name_2);
+    let after = s2
+        .list_basins(
+            ListBasinsInput::new()
+                .with_prefix(prefix_1)
+                .with_start_after(basin_1a.as_ref().parse().expect("valid start after")),
+        )
+        .await?;
+    assert_eq!(after.values.len(), 1);
+    assert_eq!(after.values[0].name, basin_1b);
 
-    s2.delete_basin(basin_name_1).await?;
-    s2.delete_basin(basin_name_2).await?;
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn delete_nonexistent_basin_succeeds() -> Result<(), Box<dyn std::error::Error>> {
-    let s2 = s2();
-    let result = s2.delete_basin(unique_basin_name()).await;
-
-    assert_matches!(result, Ok(()));
+    for name in [basin_1a, basin_1b, basin_2a] {
+        s2.delete_basin(name).await?;
+    }
 
     Ok(())
 }
@@ -316,35 +219,6 @@ async fn delete_nonexistent_basin_succeeds() -> Result<(), Box<dyn std::error::E
 async fn issue_list_and_revoke_access_token() -> Result<(), Box<dyn std::error::Error>> {
     let s2 = s2();
     let token_id: AccessTokenId = uuid().parse().expect("valid token id");
-
-    let _token = s2
-        .issue_access_token(IssueAccessTokenInput::new(
-            token_id.clone(),
-            AccessTokenScopeInput::from_op_group_perms(OperationGroupPermissions::read_write_all()),
-        ))
-        .await?;
-
-    let page = s2
-        .list_access_tokens(ListAccessTokensInput::new().with_prefix(token_id.clone().into()))
-        .await?;
-
-    assert!(page.values.iter().any(|t| t.id == token_id));
-
-    s2.revoke_access_token(token_id.clone()).await?;
-
-    let page = s2.list_access_tokens(ListAccessTokensInput::new()).await?;
-
-    assert!(!page.values.iter().any(|t| t.id == token_id));
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn issue_access_token_with_expiration_and_auto_prefix_streams()
--> Result<(), Box<dyn std::error::Error>> {
-    let s2 = s2();
-    let token_id: AccessTokenId = uuid().parse().expect("valid token id");
-
     let expires_at = Timestamp::now() + Duration::from_secs(3600);
 
     let token = s2
@@ -362,31 +236,74 @@ async fn issue_access_token_with_expiration_and_auto_prefix_streams()
             .with_auto_prefix_streams(true),
         )
         .await?;
-
     assert!(!token.is_empty());
 
-    let page = s2.list_access_tokens(ListAccessTokensInput::new()).await?;
-
-    let issued_token = page
+    let page = s2
+        .list_access_tokens(ListAccessTokensInput::new().with_prefix(token_id.clone().into()))
+        .await?;
+    let issued = page
         .values
         .iter()
         .find(|t| t.id == token_id)
         .expect("token should be present");
-    assert_eq!(issued_token.expires_at, Some(expires_at));
-    assert!(issued_token.auto_prefix_streams);
+    assert_eq!(issued.expires_at, Some(expires_at));
+    assert!(issued.auto_prefix_streams);
 
-    s2.revoke_access_token(token_id).await?;
+    s2.revoke_access_token(token_id.clone()).await?;
+
+    let page = s2
+        .list_access_tokens(ListAccessTokensInput::new().with_prefix(token_id.clone().into()))
+        .await?;
+    assert!(!page.values.iter().any(|t| t.id == token_id));
 
     Ok(())
 }
 
 #[tokio::test]
-async fn issue_access_token_with_auto_prefix_streams_but_without_prefix_errors()
--> Result<(), Box<dyn std::error::Error>> {
+async fn list_access_tokens_with_prefix_and_limit() -> Result<(), Box<dyn std::error::Error>> {
+    let s2 = s2();
+    let prefix = uuid();
+    let token_id_1: AccessTokenId = format!("{prefix}-a").parse().expect("valid token id");
+    let token_id_2: AccessTokenId = format!("{prefix}-b").parse().expect("valid token id");
+    let token_id_3: AccessTokenId = format!("{}-c", uuid()).parse().expect("valid token id");
+
+    let scope =
+        AccessTokenScopeInput::from_op_group_perms(OperationGroupPermissions::read_write_all());
+    for id in [&token_id_1, &token_id_2, &token_id_3] {
+        s2.issue_access_token(IssueAccessTokenInput::new(id.clone(), scope.clone()))
+            .await?;
+    }
+
+    let prefix_parsed: AccessTokenIdPrefix = prefix.parse().expect("valid prefix");
+    let by_prefix = s2
+        .list_access_tokens(ListAccessTokensInput::new().with_prefix(prefix_parsed.clone()))
+        .await?;
+    assert_eq!(by_prefix.values.len(), 2);
+    assert!(by_prefix.values.iter().any(|t| t.id == token_id_1));
+    assert!(by_prefix.values.iter().any(|t| t.id == token_id_2));
+
+    let limited = s2
+        .list_access_tokens(
+            ListAccessTokensInput::new()
+                .with_prefix(prefix_parsed)
+                .with_limit(1),
+        )
+        .await?;
+    assert_eq!(limited.values.len(), 1);
+
+    for id in [token_id_1, token_id_2, token_id_3] {
+        s2.revoke_access_token(id).await?;
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn issue_access_token_validation_errors() -> Result<(), Box<dyn std::error::Error>> {
     let s2 = s2();
     let token_id: AccessTokenId = uuid().parse().expect("valid token id");
 
-    let result = s2
+    let err = s2
         .issue_access_token(
             IssueAccessTokenInput::new(
                 token_id.clone(),
@@ -397,100 +314,23 @@ async fn issue_access_token_with_auto_prefix_streams_but_without_prefix_errors()
             .with_auto_prefix_streams(true),
         )
         .await;
-
-    assert_matches!(result, Err(RequestError::Server(ServerError { code, message, .. })) => {
+    assert_matches!(err, Err(RequestError::Server(ServerError { code, message, .. })) => {
         assert_eq!(code.as_deref(), Some("invalid"));
         assert_eq!(message, "Auto prefixing is only allowed for streams with prefix matching");
     });
-    Ok(())
-}
 
-#[tokio::test]
-async fn issue_access_token_with_no_permitted_ops_errors() -> Result<(), Box<dyn std::error::Error>>
-{
-    let s2 = s2();
-    let token_id: AccessTokenId = uuid().parse().expect("valid token id");
-
-    let result_matches = |result: Result<String, RequestError>| {
-        assert_matches!(result, Err(RequestError::Server(ServerError { code, message, .. })) => {
+    for scope in [
+        AccessTokenScopeInput::from_op_group_perms(OperationGroupPermissions::new()),
+        AccessTokenScopeInput::from_ops(vec![]),
+    ] {
+        let err = s2
+            .issue_access_token(IssueAccessTokenInput::new(token_id.clone(), scope))
+            .await;
+        assert_matches!(err, Err(RequestError::Server(ServerError { code, message, .. })) => {
             assert_eq!(code.as_deref(), Some("invalid"));
             assert_eq!(message, "Access token permissions cannot be empty");
         });
-    };
-
-    let result = s2
-        .issue_access_token(IssueAccessTokenInput::new(
-            token_id.clone(),
-            AccessTokenScopeInput::from_op_group_perms(OperationGroupPermissions::new()),
-        ))
-        .await;
-
-    result_matches(result);
-
-    let result = s2
-        .issue_access_token(IssueAccessTokenInput::new(
-            token_id.clone(),
-            AccessTokenScopeInput::from_ops(vec![]),
-        ))
-        .await;
-
-    result_matches(result);
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn list_access_tokens_with_limit() -> Result<(), Box<dyn std::error::Error>> {
-    let s2 = s2();
-
-    let page = s2
-        .list_access_tokens(ListAccessTokensInput::new().with_limit(1))
-        .await?;
-
-    assert_eq!(page.values.len(), 1);
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn list_access_tokens_with_prefix() -> Result<(), Box<dyn std::error::Error>> {
-    let s2 = s2();
-    let prefix = format!("{}", uuid::Uuid::new_v4().simple());
-    let token_id_1: AccessTokenId = format!("{}-a", prefix).parse().expect("valid token id");
-    let token_id_2: AccessTokenId = format!("{}-b", prefix).parse().expect("valid token id");
-    let token_id_3: AccessTokenId = format!("{}-c", uuid::Uuid::new_v4().simple())
-        .parse()
-        .expect("valid token id");
-
-    let scope =
-        AccessTokenScopeInput::from_op_group_perms(OperationGroupPermissions::read_write_all());
-
-    s2.issue_access_token(IssueAccessTokenInput::new(
-        token_id_1.clone(),
-        scope.clone(),
-    ))
-    .await?;
-    s2.issue_access_token(IssueAccessTokenInput::new(
-        token_id_2.clone(),
-        scope.clone(),
-    ))
-    .await?;
-    s2.issue_access_token(IssueAccessTokenInput::new(token_id_3.clone(), scope))
-        .await?;
-
-    let page = s2
-        .list_access_tokens(
-            ListAccessTokensInput::new().with_prefix(prefix.parse().expect("valid prefix")),
-        )
-        .await?;
-
-    assert_eq!(page.values.len(), 2);
-    assert!(page.values.iter().any(|t| t.id == token_id_1));
-    assert!(page.values.iter().any(|t| t.id == token_id_2));
-
-    s2.revoke_access_token(token_id_1).await?;
-    s2.revoke_access_token(token_id_2).await?;
-    s2.revoke_access_token(token_id_3).await?;
+    }
 
     Ok(())
 }

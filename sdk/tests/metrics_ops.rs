@@ -182,9 +182,7 @@ where
 
 #[test_context(S2Stream)]
 #[tokio_shared_rt::test(shared)]
-async fn account_metrics_active_basins(
-    stream: &S2Stream,
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn account_metrics(stream: &S2Stream) -> Result<(), Box<dyn std::error::Error>> {
     append_sample(stream).await?;
 
     let client = s2();
@@ -193,56 +191,31 @@ async fn account_metrics_active_basins(
             .iter()
             .any(|m| matches!(m, Metric::Label(l) if !l.values.is_empty()))
     };
-    let metrics = fetch_or_poll_storage(
+    let active = fetch_or_poll_storage(
         "account",
         || client.get_account_metrics(AccountMetricSet::ActiveBasins(time_range(1))),
         has_labels,
     )
     .await?;
-
-    assert!(metrics.iter().all(|m| matches!(m, Metric::Label(_))));
+    assert!(active.iter().all(|m| matches!(m, Metric::Label(_))));
     if long_metrics_enabled() {
-        assert!(has_labels(&metrics));
+        assert!(has_labels(&active));
     }
 
-    Ok(())
-}
-
-#[test_context(S2Stream)]
-#[tokio_shared_rt::test(shared)]
-async fn account_metrics_account_ops_default_interval(
-    stream: &S2Stream,
-) -> Result<(), Box<dyn std::error::Error>> {
-    append_sample(stream).await?;
-
-    let client = s2();
-    let metrics = poll_fast_metrics("account", || {
+    let default_ops = poll_fast_metrics("account", || {
         client.get_account_metrics(AccountMetricSet::AccountOps(time_range_and_interval(
             1, None,
         )))
     })
     .await?;
-
-    assert!(metrics.iter().all(|m| {
+    assert!(default_ops.iter().all(|m| {
         matches!(
             m,
             Metric::Accumulation(acc)
-                if acc.unit == MetricUnit::Operations
-                    && acc.interval == TimeseriesInterval::Hour
+                if acc.unit == MetricUnit::Operations && acc.interval == TimeseriesInterval::Hour
         )
     }));
 
-    Ok(())
-}
-
-#[test_context(S2Stream)]
-#[tokio_shared_rt::test(shared)]
-async fn account_metrics_account_ops_intervals(
-    stream: &S2Stream,
-) -> Result<(), Box<dyn std::error::Error>> {
-    append_sample(stream).await?;
-
-    let client = s2();
     for (hours, interval) in [
         (1, TimeseriesInterval::Minute),
         (24, TimeseriesInterval::Hour),
@@ -258,182 +231,78 @@ async fn account_metrics_account_ops_intervals(
         assert!(
             metrics
                 .iter()
-                .all(|m| { matches!(m, Metric::Accumulation(acc) if acc.interval == interval) })
+                .all(|m| matches!(m, Metric::Accumulation(acc) if acc.interval == interval))
         );
     }
 
-    Ok(())
-}
-
-#[test_context(S2Stream)]
-#[tokio_shared_rt::test(shared)]
-async fn account_metrics_empty_time_range(
-    stream: &S2Stream,
-) -> Result<(), Box<dyn std::error::Error>> {
-    append_sample(stream).await?;
-
-    let client = s2();
-    let metrics = fetch_with_timeout(
+    let _ = fetch_with_timeout(
         "account",
-        client.get_account_metrics(AccountMetricSet::ActiveBasins(TimeRange::new(
-            ts(0),
-            ts(3600),
-        )?)),
+        client.get_account_metrics(AccountMetricSet::EstimatedBillableUsage(
+            time_range_and_interval(1, None),
+        )),
     )
     .await?;
 
-    assert!(metrics.iter().all(|m| matches!(m, Metric::Label(_))));
-
     Ok(())
 }
 
 #[test_context(S2Stream)]
 #[tokio_shared_rt::test(shared)]
-async fn basin_metrics_storage(stream: &S2Stream) -> Result<(), Box<dyn std::error::Error>> {
+async fn basin_metrics(stream: &S2Stream) -> Result<(), Box<dyn std::error::Error>> {
     append_sample(stream).await?;
+    read_sample(stream).await?;
 
     let client = s2();
-    let metrics = fetch_or_poll_storage(
+    let basin = stream.basin_name();
+
+    let storage = fetch_or_poll_storage(
         "basin",
-        || {
-            client.get_basin_metrics(
-                stream.basin_name().clone(),
-                BasinMetricSet::Storage(time_range(1)),
-            )
-        },
+        || client.get_basin_metrics(basin.clone(), BasinMetricSet::Storage(time_range(1))),
         metrics_have_data,
     )
     .await?;
-
     assert!(
-        metrics
+        storage
             .iter()
             .all(|m| matches!(m, Metric::Gauge(g) if g.unit == MetricUnit::Bytes))
     );
     if long_metrics_enabled() {
-        assert!(metrics_have_data(&metrics));
+        assert!(metrics_have_data(&storage));
     }
 
-    Ok(())
-}
-
-#[test_context(S2Stream)]
-#[tokio_shared_rt::test(shared)]
-async fn basin_metrics_append_ops(stream: &S2Stream) -> Result<(), Box<dyn std::error::Error>> {
-    append_sample(stream).await?;
-
-    let client = s2();
-    let metrics = poll_fast_metrics("basin", || {
-        client.get_basin_metrics(
-            stream.basin_name().clone(),
+    let sets = [
+        (
             BasinMetricSet::AppendOps(time_range_and_interval(1, None)),
-        )
-    })
-    .await?;
-
-    assert!(
-        metrics.iter().all(|m| {
-            matches!(m, Metric::Accumulation(acc) if acc.unit == MetricUnit::Operations)
-        })
-    );
-
-    Ok(())
-}
-
-#[test_context(S2Stream)]
-#[tokio_shared_rt::test(shared)]
-async fn basin_metrics_read_ops(stream: &S2Stream) -> Result<(), Box<dyn std::error::Error>> {
-    append_sample(stream).await?;
-    read_sample(stream).await?;
-
-    let client = s2();
-    let metrics = poll_fast_metrics("basin", || {
-        client.get_basin_metrics(
-            stream.basin_name().clone(),
+            MetricUnit::Operations,
+        ),
+        (
             BasinMetricSet::ReadOps(time_range_and_interval(1, None)),
-        )
-    })
-    .await?;
-
-    assert!(
-        metrics.iter().all(|m| {
-            matches!(m, Metric::Accumulation(acc) if acc.unit == MetricUnit::Operations)
-        })
-    );
-
-    Ok(())
-}
-
-#[test_context(S2Stream)]
-#[tokio_shared_rt::test(shared)]
-async fn basin_metrics_read_throughput(
-    stream: &S2Stream,
-) -> Result<(), Box<dyn std::error::Error>> {
-    append_sample(stream).await?;
-    read_sample(stream).await?;
-
-    let client = s2();
-    let metrics = poll_fast_metrics("basin", || {
-        client.get_basin_metrics(
-            stream.basin_name().clone(),
+            MetricUnit::Operations,
+        ),
+        (
             BasinMetricSet::ReadThroughput(time_range_and_interval(1, None)),
-        )
-    })
-    .await?;
-
-    assert!(
-        metrics
-            .iter()
-            .all(|m| matches!(m, Metric::Accumulation(acc) if acc.unit == MetricUnit::Bytes))
-    );
-
-    Ok(())
-}
-
-#[test_context(S2Stream)]
-#[tokio_shared_rt::test(shared)]
-async fn basin_metrics_append_throughput(
-    stream: &S2Stream,
-) -> Result<(), Box<dyn std::error::Error>> {
-    append_sample(stream).await?;
-
-    let client = s2();
-    let metrics = poll_fast_metrics("basin", || {
-        client.get_basin_metrics(
-            stream.basin_name().clone(),
+            MetricUnit::Bytes,
+        ),
+        (
             BasinMetricSet::AppendThroughput(time_range_and_interval(1, None)),
-        )
-    })
-    .await?;
-
-    assert!(
-        metrics
-            .iter()
-            .all(|m| matches!(m, Metric::Accumulation(acc) if acc.unit == MetricUnit::Bytes))
-    );
-
-    Ok(())
-}
-
-#[test_context(S2Stream)]
-#[tokio_shared_rt::test(shared)]
-async fn basin_metrics_basin_ops(stream: &S2Stream) -> Result<(), Box<dyn std::error::Error>> {
-    append_sample(stream).await?;
-
-    let client = s2();
-    let metrics = poll_fast_metrics("basin", || {
-        client.get_basin_metrics(
-            stream.basin_name().clone(),
+            MetricUnit::Bytes,
+        ),
+        (
             BasinMetricSet::BasinOps(time_range_and_interval(1, None)),
-        )
-    })
-    .await?;
-
-    assert!(
-        metrics.iter().all(|m| {
-            matches!(m, Metric::Accumulation(acc) if acc.unit == MetricUnit::Operations)
+            MetricUnit::Operations,
+        ),
+    ];
+    for (set, expected_unit) in sets {
+        let metrics = poll_fast_metrics("basin", || {
+            client.get_basin_metrics(basin.clone(), set.clone())
         })
-    );
+        .await?;
+        assert!(
+            metrics
+                .iter()
+                .all(|m| matches!(m, Metric::Accumulation(acc) if acc.unit == expected_unit))
+        );
+    }
 
     Ok(())
 }
@@ -471,185 +340,72 @@ async fn stream_metrics_storage(stream: &S2Stream) -> Result<(), Box<dyn std::er
 
 #[test_context(S2Stream)]
 #[tokio_shared_rt::test(shared)]
-async fn account_metrics_invalid_time_ranges(
+async fn metrics_empty_and_invalid_time_ranges(
     stream: &S2Stream,
 ) -> Result<(), Box<dyn std::error::Error>> {
     append_sample(stream).await?;
 
     let client = s2();
-    let now = Timestamp::now();
+    let basin = stream.basin_name();
+    let stream_name = stream.stream_name();
+    let empty_range = TimeRange::new(ts(0), ts(3600))?;
 
-    for (start, end) in invalid_time_ranges(now) {
-        let result = fetch_with_timeout(
-            "account",
-            client.get_account_metrics(AccountMetricSet::ActiveBasins(TimeRange::new(start, end)?)),
-        )
-        .await;
-
-        assert_matches!(
-            result,
-            Err(RequestError::Server(ServerError { code, .. })) => {
-                assert_eq!(code.as_deref(), Some("invalid"));
-            }
-        );
-    }
-
-    Ok(())
-}
-
-#[test_context(S2Stream)]
-#[tokio_shared_rt::test(shared)]
-async fn account_metrics_all_sets(stream: &S2Stream) -> Result<(), Box<dyn std::error::Error>> {
-    append_sample(stream).await?;
-
-    let client = s2();
-    let range = time_range(1);
-    let range_with_interval = time_range_and_interval(1, None);
-    let sets = [
-        AccountMetricSet::ActiveBasins(range),
-        AccountMetricSet::AccountOps(range_with_interval.clone()),
-        AccountMetricSet::EstimatedBillableUsage(range_with_interval),
-    ];
-
-    for set in sets {
-        let _ = fetch_with_timeout("account", client.get_account_metrics(set)).await?;
-    }
-
-    Ok(())
-}
-
-#[test_context(S2Stream)]
-#[tokio_shared_rt::test(shared)]
-async fn basin_metrics_empty_time_range(
-    stream: &S2Stream,
-) -> Result<(), Box<dyn std::error::Error>> {
-    append_sample(stream).await?;
-
-    let client = s2();
-    let metrics = fetch_with_timeout(
-        "basin",
-        client.get_basin_metrics(
-            stream.basin_name().clone(),
-            BasinMetricSet::Storage(TimeRange::new(ts(0), ts(3600))?),
-        ),
+    let acct_empty = fetch_with_timeout(
+        "account",
+        client.get_account_metrics(AccountMetricSet::ActiveBasins(empty_range)),
     )
     .await?;
+    assert!(acct_empty.iter().all(|m| matches!(m, Metric::Label(_))));
 
-    assert!(metrics.iter().all(|m| matches!(m, Metric::Gauge(_))));
+    let basin_empty = fetch_with_timeout(
+        "basin",
+        client.get_basin_metrics(basin.clone(), BasinMetricSet::Storage(empty_range)),
+    )
+    .await?;
+    assert!(basin_empty.iter().all(|m| matches!(m, Metric::Gauge(_))));
 
-    Ok(())
-}
-
-#[test_context(S2Stream)]
-#[tokio_shared_rt::test(shared)]
-async fn basin_metrics_invalid_time_ranges(
-    stream: &S2Stream,
-) -> Result<(), Box<dyn std::error::Error>> {
-    append_sample(stream).await?;
-
-    let client = s2();
-    let now = Timestamp::now();
-
-    for (start, end) in invalid_time_ranges(now) {
-        let result = fetch_with_timeout(
-            "basin",
-            client.get_basin_metrics(
-                stream.basin_name().clone(),
-                BasinMetricSet::Storage(TimeRange::new(start, end)?),
-            ),
-        )
-        .await;
-
-        assert_matches!(
-            result,
-            Err(RequestError::Server(ServerError { code, .. })) => {
-                assert_eq!(code.as_deref(), Some("invalid"));
-            }
-        );
-    }
-
-    Ok(())
-}
-
-#[test_context(S2Stream)]
-#[tokio_shared_rt::test(shared)]
-async fn basin_metrics_all_sets(stream: &S2Stream) -> Result<(), Box<dyn std::error::Error>> {
-    append_sample(stream).await?;
-    read_sample(stream).await?;
-
-    let client = s2();
-    let range = time_range(1);
-    let range_with_interval = time_range_and_interval(1, None);
-    let sets = [
-        BasinMetricSet::Storage(range),
-        BasinMetricSet::AppendOps(range_with_interval.clone()),
-        BasinMetricSet::ReadOps(range_with_interval.clone()),
-        BasinMetricSet::ReadThroughput(range_with_interval.clone()),
-        BasinMetricSet::AppendThroughput(range_with_interval.clone()),
-        BasinMetricSet::BasinOps(range_with_interval),
-    ];
-
-    for set in sets {
-        let _ = fetch_with_timeout(
-            "basin",
-            client.get_basin_metrics(stream.basin_name().clone(), set),
-        )
-        .await?;
-    }
-
-    Ok(())
-}
-
-#[test_context(S2Stream)]
-#[tokio_shared_rt::test(shared)]
-async fn stream_metrics_empty_time_range(
-    stream: &S2Stream,
-) -> Result<(), Box<dyn std::error::Error>> {
-    append_sample(stream).await?;
-
-    let client = s2();
-    let metrics = fetch_with_timeout(
+    let stream_empty = fetch_with_timeout(
         "stream",
         client.get_stream_metrics(
-            stream.basin_name().clone(),
-            stream.stream_name().clone(),
-            StreamMetricSet::Storage(TimeRange::new(ts(0), ts(3600))?),
+            basin.clone(),
+            stream_name.clone(),
+            StreamMetricSet::Storage(empty_range),
         ),
     )
     .await?;
+    assert!(stream_empty.iter().all(|m| matches!(m, Metric::Gauge(_))));
 
-    assert!(metrics.iter().all(|m| matches!(m, Metric::Gauge(_))));
-
-    Ok(())
-}
-
-#[test_context(S2Stream)]
-#[tokio_shared_rt::test(shared)]
-async fn stream_metrics_invalid_time_ranges(
-    stream: &S2Stream,
-) -> Result<(), Box<dyn std::error::Error>> {
-    append_sample(stream).await?;
-
-    let client = s2();
     let now = Timestamp::now();
-
     for (start, end) in invalid_time_ranges(now) {
-        let result = fetch_with_timeout(
+        let range = TimeRange::new(start, end)?;
+        let acct_res = fetch_with_timeout(
+            "account",
+            client.get_account_metrics(AccountMetricSet::ActiveBasins(range)),
+        )
+        .await;
+        let basin_res = fetch_with_timeout(
+            "basin",
+            client.get_basin_metrics(basin.clone(), BasinMetricSet::Storage(range)),
+        )
+        .await;
+        let stream_res = fetch_with_timeout(
             "stream",
             client.get_stream_metrics(
-                stream.basin_name().clone(),
-                stream.stream_name().clone(),
-                StreamMetricSet::Storage(TimeRange::new(start, end)?),
+                basin.clone(),
+                stream_name.clone(),
+                StreamMetricSet::Storage(range),
             ),
         )
         .await;
 
-        assert_matches!(
-            result,
-            Err(RequestError::Server(ServerError { code, .. })) => {
-                assert_eq!(code.as_deref(), Some("invalid"));
-            }
-        );
+        for result in [acct_res, basin_res, stream_res] {
+            assert_matches!(
+                result,
+                Err(RequestError::Server(ServerError { code, .. })) => {
+                    assert_eq!(code.as_deref(), Some("invalid"));
+                }
+            );
+        }
     }
 
     Ok(())

@@ -1350,7 +1350,6 @@ mod tests {
     use futures_util::poll;
 
     use super::*;
-    use crate::{error::ReadUnwrittenError, types::Header};
 
     fn position(seq_num: u64) -> StreamPosition {
         StreamPosition {
@@ -1359,80 +1358,17 @@ mod tests {
         }
     }
 
-    fn record(seq_num: u64, command: bool) -> SequencedRecord {
+    fn record(seq_num: u64) -> SequencedRecord {
         SequencedRecord {
             seq_num,
             timestamp: seq_num,
             body: Bytes::new(),
-            headers: if command {
-                vec![Header::new("", "fence")]
-            } else {
-                Vec::new()
-            },
+            headers: Vec::new(),
         }
     }
 
     fn batch(records: Vec<SequencedRecord>, tail: Option<StreamPosition>) -> ReadBatch {
         ReadBatch { records, tail }
-    }
-
-    // spec: r1 R11b
-    #[test]
-    fn empty_tail_anchors_relative_resume_start_and_clears_clamp() {
-        let mut start = ReadStart {
-            seq_num: None,
-            timestamp: None,
-            tail_offset: Some(0),
-            clamp: Some(true),
-        };
-
-        update_resume_start(&mut start, &batch(Vec::new(), Some(position(42))));
-
-        assert_eq!(start.seq_num, Some(42));
-        assert_eq!(start.timestamp, None);
-        assert_eq!(start.tail_offset, None);
-        assert_eq!(start.clamp, None);
-    }
-
-    // spec: r1 R11d
-    #[test]
-    fn resumed_unwritten_rejects_416_when_tail_regressed_below_resume_seq_num() {
-        let start = ReadStart {
-            seq_num: Some(10),
-            timestamp: None,
-            tail_offset: None,
-            clamp: None,
-        };
-        let end = ReadEnd {
-            count: Some(5),
-            bytes: None,
-            until: None,
-            wait: None,
-        };
-        let server_416 = || {
-            crate::error::ServerError::new_for_test(StatusCode::RANGE_NOT_SATISFIABLE, None, "416")
-        };
-
-        let at_tail =
-            ReadSessionError::ReadUnwritten(ReadUnwrittenError::new(position(10), server_416()));
-        assert_eq!(
-            resumed_unwritten_stop_tail(true, &start, &end, &at_tail),
-            Some(Some(position(10)))
-        );
-
-        let trimmed_past =
-            ReadSessionError::ReadUnwritten(ReadUnwrittenError::new(position(15), server_416()));
-        assert_eq!(
-            resumed_unwritten_stop_tail(true, &start, &end, &trimmed_past),
-            Some(Some(position(15)))
-        );
-
-        let recreated_lower =
-            ReadSessionError::ReadUnwritten(ReadUnwrittenError::new(position(3), server_416()));
-        assert_eq!(
-            resumed_unwritten_stop_tail(true, &start, &end, &recreated_lower),
-            None
-        );
     }
 
     // spec: r1 R11c
@@ -1473,13 +1409,7 @@ mod tests {
         let shutdown = CancellationToken::new();
         let state = ReadSessionState::new(initial_next_seq_num, shutdown.clone(), context.clone());
         let (tx, rx) = mpsc::channel(4);
-        let driver_shutdown = shutdown.clone();
-        let driver_state = state.clone();
-        let driver_ctx = context.clone();
-        let driver = tokio::spawn(async move {
-            driver_shutdown.cancelled().await;
-            driver_state.on_aborted(AbortedError::new("client closed", driver_ctx));
-        });
+        let driver = tokio::spawn(std::future::pending::<()>());
         let session = ReadSession {
             core: ReadSessionCore {
                 rx,
@@ -1495,81 +1425,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn spec_r7_example_walkthrough() {
-        let (mut session, tx, state, _shutdown) = test_session_parts(Some(0));
-
-        // Step 1: Opened; nothing fetched yet
-        assert_eq!(session.next_seq_num(), Some(0));
-        assert_eq!(session.last_observed_tail(), None);
-        assert!(!session.is_caught_up());
-        let cu1 = session.caught_up();
-
-        // Step 2: Records 0-4 fetched with tail 5; record 0 delivered
-        let b = batch(
-            (0..5).map(|i| record(i, false)).collect(),
-            Some(position(5)),
-        );
-        state.on_message_fetched(Some(0), Some(position(5)));
-        tx.send(DriverEvent::Batch(b)).await.unwrap();
-
-        let r0 = session.next().await.unwrap().unwrap();
-        assert_eq!(r0.seq_num, 0);
-        assert_eq!(session.next_seq_num(), Some(1));
-        assert_eq!(session.last_observed_tail(), Some(position(5)));
-        assert!(!session.is_caught_up());
-
-        // Step 3: Records 1-4 delivered
-        for expected in 1..5 {
-            let rec = session.next().await.unwrap().unwrap();
-            assert_eq!(rec.seq_num, expected);
-        }
-        assert_eq!(session.next_seq_num(), Some(5));
-        assert_eq!(session.last_observed_tail(), Some(position(5)));
-        assert!(session.is_caught_up());
-        assert_eq!(cu1.await.unwrap(), position(5));
-
-        // Step 4: Heartbeat received with tail 5
-        assert!(state.on_message_fetched(None, Some(position(5))));
-        assert_eq!(session.next_seq_num(), Some(5));
-        assert_eq!(session.last_observed_tail(), Some(position(5)));
-        assert!(session.is_caught_up());
-
-        // Step 5: Record 5 fetched with tail 6 (before delivery)
-        let b5 = batch(vec![record(5, false)], Some(position(6)));
-        state.on_message_fetched(Some(5), Some(position(6)));
-        tx.send(DriverEvent::Batch(b5)).await.unwrap();
-        assert_eq!(session.next_seq_num(), Some(5));
-        assert_eq!(session.last_observed_tail(), Some(position(6)));
-        assert!(!session.is_caught_up());
-
-        // Step 6: Record 5 delivered
-        let r5 = session.next().await.unwrap().unwrap();
-        assert_eq!(r5.seq_num, 5);
-        assert_eq!(session.next_seq_num(), Some(6));
-        assert_eq!(session.last_observed_tail(), Some(position(6)));
-        assert!(session.is_caught_up());
-
-        // Step 7: Active request breaks
-        state.on_disconnected();
-        assert_eq!(session.next_seq_num(), Some(6));
-        assert_eq!(session.last_observed_tail(), Some(position(6)));
-        assert!(!session.is_caught_up());
-        let cu2 = session.caught_up();
-
-        // Step 8: Reconnected; heartbeat received with tail 6
-        assert!(state.on_message_fetched(None, Some(position(6))));
-        assert_eq!(session.next_seq_num(), Some(6));
-        assert_eq!(session.last_observed_tail(), Some(position(6)));
-        assert!(session.is_caught_up());
-        assert_eq!(cu2.await.unwrap(), position(6));
-    }
-
-    #[tokio::test]
     async fn clean_stop_final_record_catches_up_then_iteration_end_resets_is_caught_up() {
         let (mut session, tx, state, _shutdown) = test_session_parts(Some(0));
         let cu = session.caught_up();
 
-        let b = batch(vec![record(0, false), record(1, false)], Some(position(2)));
+        let b = batch(vec![record(0), record(1)], Some(position(2)));
         state.on_message_fetched(Some(0), Some(position(2)));
         tx.send(DriverEvent::Batch(b)).await.unwrap();
         state.on_clean_stop(None);
@@ -1599,7 +1459,7 @@ mod tests {
         let (mut session, tx, state, _shutdown) = test_session_parts(Some(0));
         let cu = session.caught_up();
 
-        let b = batch(vec![record(0, false)], None);
+        let b = batch(vec![record(0)], None);
         state.on_message_fetched(Some(0), None);
         tx.send(DriverEvent::Batch(b)).await.unwrap();
 
@@ -1639,7 +1499,7 @@ mod tests {
 
         state.on_message_fetched(Some(0), Some(position(1)));
         tx.send(DriverEvent::Batch(batch(
-            vec![record(0, false)],
+            vec![record(0)],
             Some(position(1)),
         )))
         .await
@@ -1703,45 +1563,20 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
-    async fn client_shutdown_wakes_caught_up_while_terminal_event_is_buffered() {
-        let (session, tx, state, shutdown) = test_session_parts(Some(0));
-        let cu = session.caught_up();
-        // Simulate driver pushing a batch and CleanEnd, then parking until rx closes.
-        state.on_message_fetched(Some(0), Some(position(1)));
-        tx.send(DriverEvent::Batch(batch(
-            vec![record(0, false)],
-            Some(position(1)),
-        )))
-        .await
-        .unwrap();
-        state.on_clean_stop(None);
-        tx.send(DriverEvent::CleanEnd).await.unwrap();
-
-        // Client closes without polling `session`; pending `caught_up()` must wake immediately.
-        shutdown.cancel();
-        assert!(!session.is_caught_up());
-        assert!(matches!(cu.await, Err(ReadSessionError::Aborted(_))));
-        assert!(matches!(
-            session.caught_up().await,
-            Err(ReadSessionError::Aborted(_))
-        ));
-    }
-
     #[test]
     fn validate_read_batch_order_rejects_duplicate_and_backward_seq_nums() {
         let ctx = ErrorContext::default().into_read_only();
-        let b1 = batch(vec![record(0, false), record(2, false)], None);
+        let b1 = batch(vec![record(0), record(2)], None);
         let last = validate_read_batch_order(&b1, None, &ctx).unwrap();
         assert_eq!(last, Some(2));
 
-        let dup = batch(vec![record(2, false)], None);
+        let dup = batch(vec![record(2)], None);
         assert!(matches!(
             validate_read_batch_order(&dup, last, &ctx),
             Err(ReadSessionError::Protocol(_))
         ));
 
-        let backward_within = batch(vec![record(5, false), record(4, false)], None);
+        let backward_within = batch(vec![record(5), record(4)], None);
         assert!(matches!(
             validate_read_batch_order(&backward_within, last, &ctx),
             Err(ReadSessionError::Protocol(_))

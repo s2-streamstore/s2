@@ -7,16 +7,10 @@ use std::{
     time::Duration,
 };
 
-use bytes::Bytes;
-use http::Response;
-use prost::Message as _;
-use s2_api::v1::stream::proto::{
-    ReadBatch as ProtoReadBatch, StreamPosition as ProtoStreamPosition,
-};
 use s2_sdk::{
     error::{ReadError, ReadSessionError},
     read_session::{ReadSession, ReadSessionConfig, ReadSessionRetryPolicy},
-    types::{EncryptionKey, ReadInput, ReadStart, RetryConfig},
+    types::{EncryptionKey, ReadInput, ReadStart},
 };
 
 use crate::support::*;
@@ -24,7 +18,6 @@ use crate::support::*;
 // spec: r1 R1, R2, R3, R4
 #[tokio::test]
 async fn spec_r2_r3_r4_unary_read_stop_options_empty_batch_416_and_check_tail() {
-    let (basin_name, stream_name) = test_basin_and_stream();
     let captured = Arc::new(Mutex::new(Vec::<(
         String,
         BTreeMap<String, String>,
@@ -34,7 +27,7 @@ async fn spec_r2_r3_r4_unary_read_stop_options_empty_batch_416_and_check_tail() 
 
     let server = MockH2Server::start({
         let captured = captured.clone();
-        move |_conn_id, req, mut respond| {
+        move |_conn_id, req, respond| {
             let captured = captured.clone();
             async move {
                 let path = req.uri().path().to_owned();
@@ -47,41 +40,13 @@ async fn spec_r2_r3_r4_unary_read_stop_options_empty_batch_416_and_check_tail() 
                     guard.len()
                 };
                 if path.ends_with("/records/tail") {
-                    let resp = Response::builder()
-                        .status(200)
-                        .header("content-type", "application/json")
-                        .body(())
-                        .unwrap();
-                    if let Ok(mut send) = respond.send_response(resp, false) {
-                        let _ = send.send_data(
-                            Bytes::from_static(br#"{"tail":{"seq_num":42,"timestamp":4200}}"#),
-                            true,
-                        );
-                    }
+                    send_tail_json(respond, 200, 42, 4200);
                 } else if idx == 2 {
                     // Empty batch when stop condition met before any record (R3).
-                    let empty = proto_read_batch_records(&[], Some(42));
-                    let resp = Response::builder()
-                        .status(200)
-                        .header("content-type", "application/protobuf")
-                        .body(())
-                        .unwrap();
-                    if let Ok(mut send) = respond.send_response(resp, false) {
-                        let _ = send.send_data(Bytes::from(empty), true);
-                    }
+                    send_proto(respond, proto_read_batch_records(&[], Some(42)));
                 } else {
                     // wait=0 at tail returns 416 ReadUnwrittenError (R3).
-                    let resp = Response::builder()
-                        .status(416)
-                        .header("content-type", "application/json")
-                        .body(())
-                        .unwrap();
-                    if let Ok(mut send) = respond.send_response(resp, false) {
-                        let _ = send.send_data(
-                            Bytes::from_static(br#"{"tail":{"seq_num":42,"timestamp":4200}}"#),
-                            true,
-                        );
-                    }
+                    send_tail_json(respond, 416, 42, 4200);
                 }
             }
         }
@@ -89,11 +54,7 @@ async fn spec_r2_r3_r4_unary_read_stop_options_empty_batch_416_and_check_tail() 
     .await;
 
     let key = EncryptionKey::new([0x11u8; 32]).unwrap();
-    let stream = server
-        .client(no_retry_config())
-        .basin(basin_name)
-        .stream(stream_name)
-        .with_encryption_key(key);
+    let stream = server.stream(no_retry_config()).with_encryption_key(key);
 
     // R4 + C4: check_tail returns tail position and omits s2-encryption-key / s2-stream-config.
     let tail = stream.check_tail().await.unwrap();
@@ -150,12 +111,7 @@ async fn spec_r2_r3_r4_unary_read_stop_options_empty_batch_416_and_check_tail() 
 // spec: r1 R5, R6, R6a, R6b, R6c, R7, R7a, R7b, R7c, R8, R8a, R8b, R8c, R8d
 #[tokio::test]
 async fn spec_r5_r6_r7_r8_read_session_records_batches_readahead_state_and_caught_up() {
-    let (basin_name, stream_name) = test_basin_and_stream();
-    let fast_retry = RetryConfig::new()
-        .with_max_attempts(3)
-        .unwrap()
-        .with_min_base_delay(Duration::ZERO)
-        .with_max_base_delay(Duration::ZERO);
+    let fast_retry = fast_retry_config(3);
 
     // 1. R5 + R6 + R6c + R7 + R7a + R7b + R7c + R8 + R8a-R8d: Walk the exact spec Example table
     //    over loopback HTTP/2 with a concurrent observer task!
@@ -211,10 +167,7 @@ async fn spec_r5_r6_r7_r8_read_session_records_batches_readahead_state_and_caugh
     })
     .await;
 
-    let stream = server
-        .client(fast_retry)
-        .basin(basin_name.clone())
-        .stream(stream_name.clone());
+    let stream = server.stream(fast_retry);
 
     let mut session = stream
         .read_session(
@@ -266,34 +219,27 @@ async fn spec_r5_r6_r7_r8_read_session_records_batches_readahead_state_and_caugh
 
     // Heartbeat tail=5 (ts=2000) -> observed and still caught up
     send_step4_hb.notify_one();
-    tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            if state
+    wait_until(
+        Duration::from_secs(2),
+        || {
+            state
                 .last_observed_tail()
                 .is_some_and(|t| t.seq_num == 5 && t.timestamp == 2000)
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .expect("driver should observe step 4 heartbeat");
+        },
+        "driver should observe step 4 heartbeat",
+    )
+    .await;
     assert!(state.is_caught_up());
 
     // Record 5 fetched with tail=6 BEFORE delivery -> next_seq_num=5, last_observed_tail=6,
     // is_caught_up=false!
     send_step5_rec5.notify_one();
-    tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            if state.last_observed_tail().is_some_and(|t| t.seq_num == 6) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .expect("driver should fetch record 5 and update last_observed_tail");
+    wait_until(
+        Duration::from_secs(2),
+        || state.last_observed_tail().is_some_and(|t| t.seq_num == 6),
+        "driver should fetch record 5 and update last_observed_tail",
+    )
+    .await;
     assert_eq!(state.next_seq_num(), Some(5));
     assert!(!state.is_caught_up());
     // R8a: already-resolved caught_up future never changes!
@@ -307,16 +253,12 @@ async fn spec_r5_r6_r7_r8_read_session_records_batches_readahead_state_and_caugh
 
     // Active request breaks -> is_caught_up=false; caught_up() stays pending across retry (R8c)
     break_conn.notify_one();
-    tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            if !state.is_caught_up() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .expect("is_caught_up must clear on disconnect");
+    wait_until(
+        Duration::from_secs(2),
+        || !state.is_caught_up(),
+        "is_caught_up must clear on disconnect",
+    )
+    .await;
     assert_eq!(state.next_seq_num(), Some(6));
     assert_eq!(state.last_observed_tail().unwrap().seq_num, 6);
     let cu_across_retry = state.caught_up();
@@ -350,9 +292,7 @@ async fn spec_r5_r6_r7_r8_read_session_records_batches_readahead_state_and_caugh
     .await;
 
     let mut batch_session = batch_server
-        .client(no_retry_config())
-        .basin(basin_name.clone())
-        .stream(stream_name.clone())
+        .stream(no_retry_config())
         .read_batch_session(
             ReadInput::new()
                 .with_start(ReadStart::SeqNum(0))
@@ -386,9 +326,7 @@ async fn spec_r5_r6_r7_r8_read_session_records_batches_readahead_state_and_caugh
     .await;
 
     let mut ra_session = readahead_server
-        .client(no_retry_config())
-        .basin(basin_name)
-        .stream(stream_name)
+        .stream(no_retry_config())
         .read_session(
             ReadInput::new().with_start(ReadStart::SeqNum(0)),
             ReadSessionConfig::default(),
@@ -396,18 +334,12 @@ async fn spec_r5_r6_r7_r8_read_session_records_batches_readahead_state_and_caugh
         .unwrap();
 
     async fn wait_and_assert_tail(session: &ReadSession, expected: u64, msg: &str) {
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while session.last_observed_tail().map(|t| t.seq_num) != Some(expected) {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .unwrap_or_else(|_| {
-            panic!(
-                "{msg}: timed out waiting for tail {expected}, got {:?}",
-                session.last_observed_tail()
-            )
-        });
+        wait_until(
+            Duration::from_secs(2),
+            || session.last_observed_tail().map(|t| t.seq_num) == Some(expected),
+            msg,
+        )
+        .await;
         // Settle briefly to verify the driver does not decode past the 1-batch-ahead cap.
         tokio::time::sleep(Duration::from_millis(25)).await;
         assert_eq!(
@@ -457,25 +389,19 @@ async fn spec_r9_r10_read_session_closing_buffered_delivery_and_abort() {
     let eof_attempts = Arc::new(AtomicUsize::new(0));
     let eof_server = MockH2Server::start({
         let eof_attempts = eof_attempts.clone();
-        move |_conn_id, _req, mut respond| {
+        move |_conn_id, _req, respond| {
             let eof_attempts = eof_attempts.clone();
             async move {
                 eof_attempts.fetch_add(1, Ordering::SeqCst);
-                let resp = Response::builder()
-                    .status(200)
-                    .header("content-type", "s2s/proto")
-                    .body(())
-                    .unwrap();
-                let _ = respond.send_response(resp, true);
+                if let Some(mut s2s) = S2sResponder::open(respond) {
+                    s2s.send_eof();
+                }
             }
         }
     })
     .await;
 
-    let stream = eof_server
-        .client(fast_retry_2)
-        .basin(basin_name.clone())
-        .stream(stream_name.clone());
+    let stream = eof_server.stream(fast_retry_2);
 
     // Without stop option -> retried (2 attempts) then fails with ConnectionLostError.
     let mut no_stop = stream
@@ -499,30 +425,17 @@ async fn spec_r9_r10_read_session_closing_buffered_delivery_and_abort() {
 
     // 2. R9c + R10: Terminal failure delivers all already-fetched records FIRST, then yields the
     //    unwrapped failure once, then None!
-    let fail_server = MockH2Server::start(|_conn_id, _req, mut respond| async move {
-        let resp = Response::builder()
-            .status(200)
-            .header("content-type", "s2s/proto")
-            .body(())
-            .unwrap();
-        let Ok(mut send) = respond.send_response(resp, false) else {
+    let fail_server = MockH2Server::start(|_conn_id, _req, respond| async move {
+        let Some(mut s2s) = S2sResponder::open(respond) else {
             return;
         };
-        let _ = send.send_data(
-            encode_s2s_regular_frame(&proto_read_batch_records(&[0, 1], None), false),
-            false,
-        );
-        let _ = send.send_data(
-            encode_s2s_terminal_frame(404, br#"{"code":"stream_not_found","message":"deleted"}"#),
-            true,
-        );
+        s2s.send_regular(&proto_read_batch_records(&[0, 1], None), false, false);
+        s2s.send_terminal(404, br#"{"code":"stream_not_found","message":"deleted"}"#);
     })
     .await;
 
     let mut fail_sess = fail_server
-        .client(no_retry_config())
-        .basin(basin_name.clone())
-        .stream(stream_name.clone())
+        .stream(no_retry_config())
         .read_session(
             ReadInput::new().with_start(ReadStart::SeqNum(0)),
             ReadSessionConfig::default(),
@@ -538,31 +451,22 @@ async fn spec_r9_r10_read_session_closing_buffered_delivery_and_abort() {
     assert!(err.has_no_side_effects());
     assert!(fail_sess.next().await.is_none());
 
-    // 3. R9b: Dropping a pending next() future cancels only the wait without losing records;
-    //    dropping the session rejects pending caught_up with SessionClosedError(None).
+    // 3. R9b: Dropping a pending next() future cancels only the wait without losing records.
     let delayed_connected = Arc::new(tokio::sync::Notify::new());
     let delayed_release = Arc::new(tokio::sync::Notify::new());
     let delayed_server = MockH2Server::start({
         let delayed_connected = delayed_connected.clone();
         let delayed_release = delayed_release.clone();
-        move |_conn_id, _req, mut respond| {
+        move |_conn_id, _req, respond| {
             let delayed_connected = delayed_connected.clone();
             let delayed_release = delayed_release.clone();
             async move {
-                let resp = Response::builder()
-                    .status(200)
-                    .header("content-type", "s2s/proto")
-                    .body(())
-                    .unwrap();
-                let Ok(mut send) = respond.send_response(resp, false) else {
+                let Some(mut s2s) = S2sResponder::open(respond) else {
                     return;
                 };
                 delayed_connected.notify_one();
                 delayed_release.notified().await;
-                let _ = send.send_data(
-                    encode_s2s_regular_frame(&proto_read_batch_records(&[0, 1], Some(2)), false),
-                    false,
-                );
+                s2s.send_regular(&proto_read_batch_records(&[0, 1], Some(2)), false, false);
                 std::future::pending::<()>().await;
             }
         }
@@ -606,7 +510,6 @@ async fn spec_r9_r10_read_session_closing_buffered_delivery_and_abort() {
 // spec: r1 T7d
 #[tokio::test]
 async fn spec_t7d_read_session_heartbeat_timeout_and_backpressure_pause() {
-    let (basin_name, stream_name) = test_basin_and_stream();
     let fast_retry_2 = fast_retry_config(2);
 
     let attempts = Arc::new(AtomicUsize::new(0));
@@ -636,9 +539,7 @@ async fn spec_t7d_read_session_heartbeat_timeout_and_backpressure_pause() {
     .await;
 
     let mut session = server
-        .client(fast_retry_2)
-        .basin(basin_name)
-        .stream(stream_name)
+        .stream(fast_retry_2)
         .read_session(
             ReadInput::new().with_start(ReadStart::SeqNum(0)),
             ReadSessionConfig::default(),
@@ -649,20 +550,17 @@ async fn spec_t7d_read_session_heartbeat_timeout_and_backpressure_pause() {
     assert_eq!(session.next().await.unwrap().unwrap().seq_num, 0);
     // Deterministically wait until the driver has decoded B1 into the bounded 1-slot channel and
     // is parked on `tx.reserve()` before pausing the Tokio clock.
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while session.last_observed_tail().map(|t| t.seq_num) != Some(3) {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .expect("driver must decode B1 into the bounded channel");
+    wait_until(
+        Duration::from_secs(2),
+        || session.last_observed_tail().map(|t| t.seq_num) == Some(3),
+        "driver must decode B1 into the bounded channel",
+    )
+    .await;
     tokio::task::yield_now().await;
 
     // Advance 60s (> 20s heartbeat timeout!) while caller has NOT consumed buffered records.
     // T7d: backpressure time MUST NOT count toward the 20s heartbeat timeout!
-    tokio::time::pause();
-    tokio::time::advance(Duration::from_secs(60)).await;
-    tokio::time::resume();
+    advance_virtual_time(Duration::from_secs(60)).await;
     tokio::task::yield_now().await;
     assert_eq!(
         attempts.load(Ordering::SeqCst),
@@ -679,9 +577,7 @@ async fn spec_t7d_read_session_heartbeat_timeout_and_backpressure_pause() {
     // and retries onto attempt 2, which delivers record 3!
     let mut next_rec = Box::pin(session.next());
     assert!(futures_util::poll!(next_rec.as_mut()).is_pending());
-    tokio::time::pause();
-    tokio::time::advance(Duration::from_secs(21)).await;
-    tokio::time::resume();
+    advance_virtual_time(Duration::from_secs(21)).await;
     let rec3 = tokio::time::timeout(Duration::from_secs(3), next_rec)
         .await
         .expect("heartbeat timeout must trigger retry")
@@ -694,12 +590,7 @@ async fn spec_t7d_read_session_heartbeat_timeout_and_backpressure_pause() {
 // spec: r1 R11, R11a, R11b, R11c, R11d, T5, T5b
 #[tokio::test]
 async fn spec_r11_t5_t5b_read_session_resume_clamp_wait_416_and_unbounded() {
-    let (basin_name, stream_name) = test_basin_and_stream();
-    let fast_retry_2 = RetryConfig::new()
-        .with_max_attempts(2)
-        .unwrap()
-        .with_min_base_delay(Duration::ZERO)
-        .with_max_base_delay(Duration::ZERO);
+    let fast_retry_2 = fast_retry_config(2);
 
     // 1. R11 + R11a + R11b + R11c + R11d: Start with TailOffset(2), clamp=true, count=5, wait=10s:
     //    - Attempt 1: sends heartbeat tail=10 -> resolves start to 10 & starts wait clock (t=0). At
@@ -724,7 +615,7 @@ async fn spec_r11_t5_t5b_read_session_resume_clamp_wait_416_and_unbounded() {
         let break_a1 = break_a1.clone();
         let break_a2 = break_a2.clone();
         let a1_hb1_sent = a1_hb1_sent.clone();
-        move |_conn_id, req, mut respond| {
+        move |_conn_id, req, respond| {
             let seen_queries = seen_queries.clone();
             let attempt_ctr = attempt_ctr.clone();
             let send_hb2 = send_hb2.clone();
@@ -735,46 +626,23 @@ async fn spec_r11_t5_t5b_read_session_resume_clamp_wait_416_and_unbounded() {
                 let idx = attempt_ctr.fetch_add(1, Ordering::SeqCst) + 1;
                 seen_queries.lock().unwrap().push(query_pairs(req.uri()));
                 if idx == 3 {
-                    let resp = Response::builder()
-                        .status(416)
-                        .header("content-type", "application/json")
-                        .body(())
-                        .unwrap();
-                    if let Ok(mut send) = respond.send_response(resp, false) {
-                        let _ = send.send_data(
-                            Bytes::from_static(br#"{"tail":{"seq_num":12,"timestamp":1200}}"#),
-                            true,
-                        );
-                    }
+                    send_tail_json(respond, 416, 12, 1200);
                     return;
                 }
-                let resp = Response::builder()
-                    .status(200)
-                    .header("content-type", "s2s/proto")
-                    .body(())
-                    .unwrap();
-                let Ok(mut send) = respond.send_response(resp, false) else {
+                let Some(mut s2s) = S2sResponder::open(respond) else {
                     return;
                 };
                 if idx == 1 {
-                    let _ = send
-                        .send_data(encode_s2s_regular_frame(&proto_heartbeat(10), false), false);
+                    s2s.send_regular(&proto_heartbeat(10), false, false);
                     a1_hb1_sent.notify_one();
                     send_hb2.notified().await;
-                    let _ = send
-                        .send_data(encode_s2s_regular_frame(&proto_heartbeat(10), false), false);
+                    s2s.send_regular(&proto_heartbeat(10), false, false);
                     break_a1.notified().await;
-                    send.send_reset(h2::Reason::INTERNAL_ERROR);
+                    s2s.reset(h2::Reason::INTERNAL_ERROR);
                 } else {
-                    let _ = send.send_data(
-                        encode_s2s_regular_frame(
-                            &proto_read_batch_records(&[10, 11], Some(12)),
-                            false,
-                        ),
-                        false,
-                    );
+                    s2s.send_regular(&proto_read_batch_records(&[10, 11], Some(12)), false, false);
                     break_a2.notified().await;
-                    send.send_reset(h2::Reason::INTERNAL_ERROR);
+                    s2s.reset(h2::Reason::INTERNAL_ERROR);
                 }
             }
         }
@@ -782,9 +650,7 @@ async fn spec_r11_t5_t5b_read_session_resume_clamp_wait_416_and_unbounded() {
     .await;
 
     let mut session = server
-        .client(fast_retry_2)
-        .basin(basin_name.clone())
-        .stream(stream_name.clone())
+        .stream(fast_retry_2)
         .read_session(
             ReadInput::new()
                 .with_start(ReadStart::TailOffset(2))
@@ -800,22 +666,17 @@ async fn spec_r11_t5_t5b_read_session_resume_clamp_wait_416_and_unbounded() {
         .await
         .expect("hb1 sent");
     // Wait until the client driver has actually decoded hb1 and resolved next_seq_num to 10!
-    tokio::time::timeout(Duration::from_secs(3), async {
-        while session.next_seq_num() != Some(10) {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .expect("client must resolve start from hb1");
+    wait_until(
+        Duration::from_secs(3),
+        || session.next_seq_num() == Some(10),
+        "client must resolve start from hb1",
+    )
+    .await;
     // Wait 3s, send 2nd heartbeat (must NOT reset clock), wait 2.1s more (5.1s total elapsed).
-    tokio::time::pause();
-    tokio::time::advance(Duration::from_secs(3)).await;
-    tokio::time::resume();
+    advance_virtual_time(Duration::from_secs(3)).await;
     send_hb2.notify_one();
     tokio::time::sleep(Duration::from_millis(30)).await;
-    tokio::time::pause();
-    tokio::time::advance(Duration::from_millis(2_100)).await;
-    tokio::time::resume();
+    advance_virtual_time(Duration::from_millis(2_100)).await;
     break_a1.notify_one();
 
     // Attempt 2 delivers records 10 and 11 (restarting wait clock!).
@@ -823,9 +684,7 @@ async fn spec_r11_t5_t5b_read_session_resume_clamp_wait_416_and_unbounded() {
     assert_eq!(session.next().await.unwrap().unwrap().seq_num, 11);
 
     // Wait 11.4s (> 10s wait) -> break attempt 2 -> Attempt 3 sends wait=0, gets 416 -> clean end!
-    tokio::time::pause();
-    tokio::time::advance(Duration::from_millis(11_400)).await;
-    tokio::time::resume();
+    advance_virtual_time(Duration::from_millis(11_400)).await;
     break_a2.notify_one();
     assert!(
         tokio::time::timeout(Duration::from_secs(3), session.next())
@@ -857,46 +716,27 @@ async fn spec_r11_t5_t5b_read_session_resume_clamp_wait_416_and_unbounded() {
     assert_eq!(qs[2].get("count").map(String::as_str), Some("3"));
     assert_eq!(qs[2].get("wait").map(String::as_str), Some("0"));
 
-    // 2. R11d negative check: 416 on resumed request while wait > 0 STILL fails with ReadUnwritten!
+    // 2. R11d negative check: 416 on resumed request while wait > 0 (with tail == resume_seq) STILL
+    //    fails with ReadUnwritten!
     let r11d_neg_attempts = Arc::new(AtomicUsize::new(0));
     let r11d_break = Arc::new(tokio::sync::Notify::new());
     let r11d_neg_server = MockH2Server::start({
         let r11d_neg_attempts = r11d_neg_attempts.clone();
         let r11d_break = r11d_break.clone();
-        move |_conn_id, _req, mut respond| {
+        move |_conn_id, _req, respond| {
             let r11d_neg_attempts = r11d_neg_attempts.clone();
             let r11d_break = r11d_break.clone();
             async move {
                 let idx = r11d_neg_attempts.fetch_add(1, Ordering::SeqCst) + 1;
                 if idx == 1 {
-                    let resp = Response::builder()
-                        .status(200)
-                        .header("content-type", "s2s/proto")
-                        .body(())
-                        .unwrap();
-                    if let Ok(mut send) = respond.send_response(resp, false) {
-                        let _ = send.send_data(
-                            encode_s2s_regular_frame(
-                                &proto_read_batch_records(&[0], Some(1)),
-                                false,
-                            ),
-                            false,
-                        );
+                    if let Some(mut s2s) = S2sResponder::open(respond) {
+                        s2s.send_regular(&proto_read_batch_records(&[0], Some(1)), false, false);
                         r11d_break.notified().await;
-                        send.send_reset(h2::Reason::INTERNAL_ERROR);
+                        s2s.reset(h2::Reason::INTERNAL_ERROR);
                     }
                 } else {
-                    let resp = Response::builder()
-                        .status(416)
-                        .header("content-type", "application/json")
-                        .body(())
-                        .unwrap();
-                    if let Ok(mut send) = respond.send_response(resp, false) {
-                        let _ = send.send_data(
-                            Bytes::from_static(br#"{"tail":{"seq_num":0,"timestamp":0}}"#),
-                            true,
-                        );
-                    }
+                    // tail.seq_num == resume_seq_num (1) so only the wait > 0 check rejects it.
+                    send_tail_json(respond, 416, 1, 100);
                 }
             }
         }
@@ -904,9 +744,7 @@ async fn spec_r11_t5_t5b_read_session_resume_clamp_wait_416_and_unbounded() {
     .await;
 
     let mut neg_sess = r11d_neg_server
-        .client(fast_retry_2)
-        .basin(basin_name.clone())
-        .stream(stream_name.clone())
+        .stream(fast_retry_2)
         .read_session(
             ReadInput::new()
                 .with_start(ReadStart::SeqNum(0))
@@ -919,7 +757,7 @@ async fn spec_r11_t5_t5b_read_session_resume_clamp_wait_416_and_unbounded() {
     r11d_break.notify_one();
     let err = neg_sess.next().await.unwrap().unwrap_err();
     assert!(
-        matches!(err, ReadSessionError::ReadUnwritten(_)),
+        matches!(err, ReadSessionError::ReadUnwritten(ref e) if e.tail.seq_num == 1),
         "R11d: 416 while wait > 0 must still fail with ReadUnwrittenError, got {err:?}"
     );
 
@@ -927,37 +765,14 @@ async fn spec_r11_t5_t5b_read_session_resume_clamp_wait_416_and_unbounded() {
     let unbounded_attempts = Arc::new(AtomicUsize::new(0));
     let unbounded_server = MockH2Server::start({
         let unbounded_attempts = unbounded_attempts.clone();
-        move |_conn_id, _req, mut respond| {
+        move |_conn_id, _req, respond| {
             let unbounded_attempts = unbounded_attempts.clone();
             async move {
                 let idx = unbounded_attempts.fetch_add(1, Ordering::SeqCst) + 1;
                 if idx <= 5 {
-                    let resp = Response::builder()
-                        .status(503)
-                        .header("content-type", "application/json")
-                        .body(())
-                        .unwrap();
-                    if let Ok(mut send) = respond.send_response(resp, false) {
-                        let _ = send.send_data(
-                            Bytes::from_static(br#"{"code":"unavailable","message":"retry"}"#),
-                            true,
-                        );
-                    }
-                } else {
-                    let resp = Response::builder()
-                        .status(200)
-                        .header("content-type", "s2s/proto")
-                        .body(())
-                        .unwrap();
-                    if let Ok(mut send) = respond.send_response(resp, false) {
-                        let _ = send.send_data(
-                            encode_s2s_regular_frame(
-                                &proto_read_batch_records(&[0], Some(1)),
-                                false,
-                            ),
-                            true,
-                        );
-                    }
+                    send_json(respond, 503, r#"{"code":"unavailable","message":"retry"}"#);
+                } else if let Some(mut s2s) = S2sResponder::open(respond) {
+                    s2s.send_regular(&proto_read_batch_records(&[0], Some(1)), false, true);
                 }
             }
         }
@@ -965,9 +780,7 @@ async fn spec_r11_t5_t5b_read_session_resume_clamp_wait_416_and_unbounded() {
     .await;
 
     let mut unbounded_sess = unbounded_server
-        .client(fast_retry_2)
-        .basin(basin_name)
-        .stream(stream_name)
+        .stream(fast_retry_2)
         .read_session(
             ReadInput::new()
                 .with_start(ReadStart::SeqNum(0))
@@ -983,44 +796,29 @@ async fn spec_r11_t5_t5b_read_session_resume_clamp_wait_416_and_unbounded() {
 // spec: r1 T6a
 #[tokio::test]
 async fn spec_t6a_read_session_reconnect_advice_cooldown() {
-    let (basin_name, stream_name) = test_basin_and_stream();
     let seen_conns = Arc::new(Mutex::new(Vec::<usize>::new()));
     let req_idx = Arc::new(AtomicUsize::new(0));
     let server = MockH2Server::start({
         let seen_conns = seen_conns.clone();
         let req_idx = req_idx.clone();
-        move |conn_id, _req, mut respond| {
+        move |conn_id, _req, respond| {
             let seen_conns = seen_conns.clone();
             let req_idx = req_idx.clone();
             async move {
                 let n = req_idx.fetch_add(1, Ordering::SeqCst);
                 seen_conns.lock().unwrap().push(conn_id);
-                let resp = Response::builder()
-                    .status(200)
-                    .header("content-type", "s2s/proto")
-                    .body(())
-                    .unwrap();
-                let Ok(mut send) = respond.send_response(resp, false) else {
+                let Some(mut s2s) = S2sResponder::open(respond) else {
                     return;
                 };
                 if n == 0 {
                     // Record 0 with reconnect-advised bit -> client reconnects on a new connection.
-                    let _ = send.send_data(
-                        encode_s2s_regular_frame(&proto_read_batch(0, 1), true),
-                        false,
-                    );
+                    s2s.send_regular(&proto_read_batch(0, 1), true, false);
                     std::future::pending::<()>().await;
                 } else {
                     // Request 2: Record 1 WITH reconnect-advised bit (ignored within 60 s
                     // cooldown!), then Record 2 on the SAME request before clean EOF.
-                    let _ = send.send_data(
-                        encode_s2s_regular_frame(&proto_read_batch(1, 2), true),
-                        false,
-                    );
-                    let _ = send.send_data(
-                        encode_s2s_regular_frame(&proto_read_batch(2, 3), false),
-                        true,
-                    );
+                    s2s.send_regular(&proto_read_batch(1, 2), true, false);
+                    s2s.send_regular(&proto_read_batch(2, 3), false, true);
                 }
             }
         }
@@ -1028,9 +826,7 @@ async fn spec_t6a_read_session_reconnect_advice_cooldown() {
     .await;
 
     let mut session = server
-        .client(no_retry_config())
-        .basin(basin_name)
-        .stream(stream_name)
+        .stream(no_retry_config())
         .read_session(
             ReadInput::new()
                 .with_start(ReadStart::SeqNum(0))
@@ -1061,8 +857,6 @@ async fn spec_t6a_read_session_reconnect_advice_cooldown() {
 // refreshed remaining wait instead of prematurely terminating on the server's shorter timer.
 #[tokio::test]
 async fn regression_read_session_r11c_reduced_wait_refreshes_after_record() {
-    let (basin_name, stream_name) = test_basin_and_stream();
-
     // Baseline wait = 4s.
     // - Attempt 1 sends heartbeat (starts idle clock), waits for virtual time advance (1.2s), then
     //   resets connection.
@@ -1076,7 +870,7 @@ async fn regression_read_session_r11c_reduced_wait_refreshes_after_record() {
         let observed_waits = observed_waits.clone();
         let attempt_idx = attempt_idx.clone();
         let trigger_reset = trigger_reset.clone();
-        move |_conn_id, req, mut respond| {
+        move |_conn_id, req, respond| {
             let observed_waits = observed_waits.clone();
             let attempt_idx = attempt_idx.clone();
             let trigger_reset = trigger_reset.clone();
@@ -1086,41 +880,22 @@ async fn regression_read_session_r11c_reduced_wait_refreshes_after_record() {
                     .and_then(|v| v.parse::<u32>().ok());
                 observed_waits.lock().unwrap().push(wait_param);
                 let n = attempt_idx.fetch_add(1, Ordering::SeqCst);
-                let resp = Response::builder()
-                    .status(200)
-                    .header("content-type", "s2s/proto")
-                    .body(())
-                    .unwrap();
-                let Ok(mut send) = respond.send_response(resp, false) else {
+                let Some(mut s2s) = S2sResponder::open(respond) else {
                     return;
                 };
                 match n {
                     0 => {
-                        let hb = ProtoReadBatch {
-                            records: vec![],
-                            tail: Some(ProtoStreamPosition {
-                                seq_num: 0,
-                                timestamp: 1000,
-                            }),
-                        }
-                        .encode_to_vec();
-                        let _ = send.send_data(encode_s2s_regular_frame(&hb, false), false);
+                        s2s.send_regular(&proto_heartbeat(0), false, false);
                         trigger_reset.notified().await;
-                        send.send_reset(h2::Reason::INTERNAL_ERROR);
+                        s2s.reset(h2::Reason::INTERNAL_ERROR);
                     }
                     1 => {
                         // Deliver record 0 on the reduced-wait attempt, then clean EOF immediately.
-                        let _ = send.send_data(
-                            encode_s2s_regular_frame(&proto_read_batch(0, 1), false),
-                            true,
-                        );
+                        s2s.send_regular(&proto_read_batch(0, 1), false, true);
                     }
                     _ => {
                         // Attempt 3: deliver record 1 and end cleanly.
-                        let _ = send.send_data(
-                            encode_s2s_regular_frame(&proto_read_batch(1, 2), false),
-                            true,
-                        );
+                        s2s.send_regular(&proto_read_batch(1, 2), false, true);
                     }
                 }
             }
@@ -1129,9 +904,7 @@ async fn regression_read_session_r11c_reduced_wait_refreshes_after_record() {
     .await;
 
     let mut sess = r11c_server
-        .client(fast_retry_config(3))
-        .basin(basin_name)
-        .stream(stream_name)
+        .stream(fast_retry_config(3))
         .read_session(
             ReadInput::new()
                 .with_start(ReadStart::SeqNum(0))
@@ -1150,9 +923,7 @@ async fn regression_read_session_r11c_reduced_wait_refreshes_after_record() {
     assert_eq!(caught.seq_num, 0);
 
     // Advance virtual clock past 1s so remaining_wait drops from 4s to 3s, then reset Attempt 1.
-    tokio::time::pause();
-    tokio::time::advance(Duration::from_millis(1200)).await;
-    tokio::time::resume();
+    advance_virtual_time(Duration::from_millis(1200)).await;
     trigger_reset.notify_one();
 
     let mut seqs = Vec::new();
@@ -1175,55 +946,35 @@ async fn regression_read_session_r11c_reduced_wait_refreshes_after_record() {
 }
 
 // spec: r1 R11d
-// Regression: R11d zero-wait 416 must resolve caught_up() across a trimmed gap, and count=0
-// disconnect must stop cleanly instead of sending count=0.
+// Regression: R11d resumed 416 (both omitted-wait with a stop limit and zero-wait) resolves
+// caught_up() across a trimmed gap, rejects tail regression (recreated stream), and stops cleanly
+// when count is exhausted instead of sending count=0.
 #[tokio::test]
 async fn regression_read_session_r11d_caught_up_and_count_exhausted() {
-    let (basin_name, stream_name) = test_basin_and_stream();
-
-    // 1. R11d: resumed zero-wait 416 resolves caught_up() and advances next_seq_num across trimmed
-    //    gap (record 0 has tail=3 so session is not yet caught up, then attempt 2 gets 416
-    //    {tail:5}).
+    // 1. R11d (omitted wait + stop option): resumed 416 resolves caught_up() and advances
+    //    next_seq_num across trimmed gap (record 0 has tail=3, then attempt 2 gets 416 {tail:5}).
     let r11d_attempt = Arc::new(AtomicUsize::new(0));
     let r11d_reset_gate = Arc::new(tokio::sync::Notify::new());
     let r11d_server = MockH2Server::start({
         let r11d_attempt = r11d_attempt.clone();
         let r11d_reset_gate = r11d_reset_gate.clone();
-        move |_conn_id, _req, mut respond| {
+        move |_conn_id, _req, respond| {
             let r11d_attempt = r11d_attempt.clone();
             let r11d_reset_gate = r11d_reset_gate.clone();
             async move {
                 let n = r11d_attempt.fetch_add(1, Ordering::SeqCst);
                 if n == 0 {
-                    let resp = Response::builder()
-                        .status(200)
-                        .header("content-type", "s2s/proto")
-                        .body(())
-                        .unwrap();
-                    if let Ok(mut send) = respond.send_response(resp, false) {
+                    if let Some(mut s2s) = S2sResponder::open(respond) {
                         // Record 0 with tail=3 so session is still behind tail after delivering 0.
-                        let _ = send.send_data(
-                            encode_s2s_regular_frame(&proto_read_batch(0, 3), false),
-                            false,
-                        );
+                        s2s.send_regular(&proto_read_batch(0, 3), false, false);
                         // Wait until client receives record 0 before resetting so h2 does not
                         // drop the buffered DATA frame on RST_STREAM.
                         r11d_reset_gate.notified().await;
-                        send.send_reset(h2::Reason::INTERNAL_ERROR);
+                        s2s.reset(h2::Reason::INTERNAL_ERROR);
                     }
                 } else {
-                    // Resumed with wait=0 -> 416 with tail jumped to seq 5 (trimmed gap).
-                    let resp = Response::builder()
-                        .status(416)
-                        .header("content-type", "application/json")
-                        .body(())
-                        .unwrap();
-                    if let Ok(mut send) = respond.send_response(resp, false) {
-                        let _ = send.send_data(
-                            Bytes::from_static(br#"{"tail":{"seq_num":5,"timestamp":5000}}"#),
-                            true,
-                        );
-                    }
+                    // Resumed with omitted wait + count -> 416 with tail jumped to seq 5.
+                    send_tail_json(respond, 416, 5, 5000);
                 }
             }
         }
@@ -1231,20 +982,11 @@ async fn regression_read_session_r11d_caught_up_and_count_exhausted() {
     .await;
 
     let mut r11d_sess = r11d_server
-        .client(
-            RetryConfig::new()
-                .with_max_attempts(2)
-                .unwrap()
-                .with_min_base_delay(Duration::ZERO)
-                .with_max_base_delay(Duration::ZERO),
-        )
-        .basin(basin_name.clone())
-        .stream(stream_name.clone())
+        .stream(fast_retry_config(2))
         .read_session(
             ReadInput::new()
                 .with_start(ReadStart::SeqNum(0))
-                .with_wait(Duration::ZERO)
-                .unwrap(),
+                .with_count(10),
             ReadSessionConfig::default(),
         )
         .unwrap();
@@ -1258,48 +1000,31 @@ async fn regression_read_session_r11d_caught_up_and_count_exhausted() {
     assert_eq!(r11d_sess.last_observed_tail().unwrap().seq_num, 5);
     assert_eq!(cu.await.unwrap().seq_num, 5);
 
-    // 2b. R11d recreated-stream guard: resumed zero-wait 416 whose tail.seq_num < resume_seq_num
-    //     MUST surface ReadUnwrittenError (not silently stop cleanly!).
+    // 2. R11d recreated-stream guard: resumed zero-wait 416 whose tail.seq_num < resume_seq_num
+    //    MUST surface ReadUnwrittenError (not silently stop cleanly!).
     let recreated_attempt = Arc::new(AtomicUsize::new(0));
     let recreated_reset_gate = Arc::new(tokio::sync::Notify::new());
     let recreated_server = MockH2Server::start({
         let recreated_attempt = recreated_attempt.clone();
         let recreated_reset_gate = recreated_reset_gate.clone();
-        move |_conn_id, _req, mut respond| {
+        move |_conn_id, _req, respond| {
             let recreated_attempt = recreated_attempt.clone();
             let recreated_reset_gate = recreated_reset_gate.clone();
             async move {
                 let n = recreated_attempt.fetch_add(1, Ordering::SeqCst);
                 if n == 0 {
-                    let resp = Response::builder()
-                        .status(200)
-                        .header("content-type", "s2s/proto")
-                        .body(())
-                        .unwrap();
-                    if let Ok(mut send) = respond.send_response(resp, false) {
-                        let _ = send.send_data(
-                            encode_s2s_regular_frame(
-                                &proto_read_batch_records(&[0, 1, 2, 3, 4], Some(5)),
-                                false,
-                            ),
+                    if let Some(mut s2s) = S2sResponder::open(respond) {
+                        s2s.send_regular(
+                            &proto_read_batch_records(&[0, 1, 2, 3, 4], Some(5)),
+                            false,
                             false,
                         );
                         recreated_reset_gate.notified().await;
-                        send.send_reset(h2::Reason::INTERNAL_ERROR);
+                        s2s.reset(h2::Reason::INTERNAL_ERROR);
                     }
                 } else {
                     // Stream was deleted & recreated with tail.seq_num = 1 (< resume_seq_num = 5).
-                    let resp = Response::builder()
-                        .status(416)
-                        .header("content-type", "application/json")
-                        .body(())
-                        .unwrap();
-                    if let Ok(mut send) = respond.send_response(resp, false) {
-                        let _ = send.send_data(
-                            Bytes::from_static(br#"{"tail":{"seq_num":1,"timestamp":100}}"#),
-                            true,
-                        );
-                    }
+                    send_tail_json(respond, 416, 1, 100);
                 }
             }
         }
@@ -1307,15 +1032,7 @@ async fn regression_read_session_r11d_caught_up_and_count_exhausted() {
     .await;
 
     let mut recreated_sess = recreated_server
-        .client(
-            RetryConfig::new()
-                .with_max_attempts(2)
-                .unwrap()
-                .with_min_base_delay(Duration::ZERO)
-                .with_max_base_delay(Duration::ZERO),
-        )
-        .basin(basin_name.clone())
-        .stream(stream_name.clone())
+        .stream(fast_retry_config(2))
         .read_session(
             ReadInput::new()
                 .with_start(ReadStart::SeqNum(0))
@@ -1347,23 +1064,15 @@ async fn regression_read_session_r11d_caught_up_and_count_exhausted() {
     let count_server = MockH2Server::start({
         let count_reqs = count_reqs.clone();
         let count_reset_gate = count_reset_gate.clone();
-        move |_conn_id, _req, mut respond| {
+        move |_conn_id, _req, respond| {
             let count_reqs = count_reqs.clone();
             let count_reset_gate = count_reset_gate.clone();
             async move {
                 count_reqs.fetch_add(1, Ordering::SeqCst);
-                let resp = Response::builder()
-                    .status(200)
-                    .header("content-type", "s2s/proto")
-                    .body(())
-                    .unwrap();
-                if let Ok(mut send) = respond.send_response(resp, false) {
-                    let _ = send.send_data(
-                        encode_s2s_regular_frame(&proto_read_batch(0, 1), false),
-                        false,
-                    );
+                if let Some(mut s2s) = S2sResponder::open(respond) {
+                    s2s.send_regular(&proto_read_batch(0, 1), false, false);
                     count_reset_gate.notified().await;
-                    send.send_reset(h2::Reason::INTERNAL_ERROR);
+                    s2s.reset(h2::Reason::INTERNAL_ERROR);
                 }
             }
         }
@@ -1371,15 +1080,7 @@ async fn regression_read_session_r11d_caught_up_and_count_exhausted() {
     .await;
 
     let mut count_sess = count_server
-        .client(
-            RetryConfig::new()
-                .with_max_attempts(3)
-                .unwrap()
-                .with_min_base_delay(Duration::ZERO)
-                .with_max_base_delay(Duration::ZERO),
-        )
-        .basin(basin_name)
-        .stream(stream_name)
+        .stream(fast_retry_config(3))
         .read_session(
             ReadInput::new()
                 .with_start(ReadStart::SeqNum(0))

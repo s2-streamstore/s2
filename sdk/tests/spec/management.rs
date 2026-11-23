@@ -3,9 +3,7 @@ use std::{
     time::Duration,
 };
 
-use bytes::Bytes;
 use futures_util::StreamExt as _;
-use http::Response;
 use s2_api::v1 as api;
 use s2_sdk::{
     error::{AppendError, RequestError},
@@ -14,7 +12,7 @@ use s2_sdk::{
         DeleteOnEmptyReconfiguration, EnsureBasinInput, EnsureOutput, EnsureStreamInput,
         IssueAccessTokenInput, ListAllBasinsInput, ListAllStreamsInput, ListBasinsInput,
         ListStreamsInput, NetworkPolicy, Operation, OperationGroupPermissions, PublicNetPolicy,
-        Reconfigure, RetentionPolicy, RetryConfig, StreamReconfiguration, TimestampingMode,
+        Reconfigure, RetentionPolicy, StreamReconfiguration, TimestampingMode,
         TimestampingReconfiguration,
     },
 };
@@ -165,15 +163,21 @@ fn spec_m3_reconfiguration_three_states() {
 
     let basin_reset = BasinReconfiguration::new()
         .reset_default_stream_config()
-        .reset_stream_cipher();
+        .reset_stream_cipher()
+        .reset_create_stream_on_append()
+        .reset_create_stream_on_read();
     assert_eq!(basin_reset.default_stream_config(), Reconfigure::Reset);
     assert_eq!(basin_reset.stream_cipher(), Reconfigure::Reset);
+    assert_eq!(basin_reset.create_stream_on_append(), Reconfigure::Reset);
+    assert_eq!(basin_reset.create_stream_on_read(), Reconfigure::Reset);
     let basin_api: api::config::BasinReconfiguration = basin_reset.into();
     assert_eq!(
         serde_json::to_value(&basin_api).unwrap(),
         serde_json::json!({
             "default_stream_config": null,
             "stream_cipher": null,
+            "create_stream_on_append": null,
+            "create_stream_on_read": null,
         })
     );
 }
@@ -181,11 +185,7 @@ fn spec_m3_reconfiguration_three_states() {
 // spec: r1 T2d
 #[tokio::test]
 async fn spec_t2d_definite_only_retries_for_token_and_network_policy() {
-    let fast_retry_3 = RetryConfig::new()
-        .with_max_attempts(3)
-        .unwrap()
-        .with_min_base_delay(Duration::ZERO)
-        .with_max_base_delay(Duration::ZERO);
+    let fast_retry_3 = fast_retry_config(3);
 
     let token_input = || {
         IssueAccessTokenInput::new(
@@ -261,25 +261,12 @@ async fn spec_t2d_definite_only_retries_for_token_and_network_policy() {
 
     // 5. AppendRetryPolicy::NoSideEffects must NOT retry indefinite 503 unavailable even if the
     //    server replies immediately before consuming request body frames (T2c/T2d).
-    let early_503 = MockH2Server::start(|_conn_id, _req, mut respond| async move {
-        let resp = Response::builder()
-            .status(503)
-            .header("content-type", "application/json")
-            .body(())
-            .unwrap();
-        if let Ok(mut send) = respond.send_response(resp, false) {
-            let _ = send.send_data(
-                Bytes::from_static(br#"{"code":"unavailable","message":"busy"}"#),
-                true,
-            );
-        }
+    let early_503 = MockH2Server::start(|_conn_id, _req, respond| async move {
+        send_json(respond, 503, r#"{"code":"unavailable","message":"busy"}"#);
     })
     .await;
-    let (basin_name, stream_name) = test_basin_and_stream();
     let err = early_503
-        .client(fast_retry_3.with_append_retry_policy(AppendRetryPolicy::NoSideEffects))
-        .basin(basin_name)
-        .stream(stream_name)
+        .stream(fast_retry_3.with_append_retry_policy(AppendRetryPolicy::NoSideEffects))
         .append(sample_append_input())
         .await
         .expect_err("NoSideEffects must not retry indefinite 503");
@@ -293,16 +280,13 @@ async fn spec_m5_m6_m7_m8_issue_token_and_list_pagination() {
     let seen_start_after = Arc::new(Mutex::new(Vec::<Option<String>>::new()));
     let server = MockH2Server::start({
         let seen_start_after = seen_start_after.clone();
-        move |_conn_id, req, mut respond| {
+        move |_conn_id, req, respond| {
             let seen_start_after = seen_start_after.clone();
             async move {
                 let method = req.method().clone();
                 let path = req.uri().path().to_owned();
                 let params = query_pairs(req.uri());
-                let mut body = req.into_body();
-                while let Some(Ok(chunk)) = body.data().await {
-                    let _ = body.flow_control().release_capacity(chunk.len());
-                }
+                let _ = drain_body(&mut req.into_body()).await;
 
                 let payload: &[u8] = if method == http::Method::POST && path == "/v1/access-tokens" {
                     br#"{"access_token":"s2_issued_secret_val"}"#
@@ -331,14 +315,7 @@ async fn spec_m5_m6_m7_m8_issue_token_and_list_pagination() {
                     br#"{"streams":[],"has_more":false}"#
                 };
 
-                let resp = Response::builder()
-                    .status(200)
-                    .header("content-type", "application/json")
-                    .body(())
-                    .unwrap();
-                if let Ok(mut send) = respond.send_response(resp, false) {
-                    let _ = send.send_data(Bytes::copy_from_slice(payload), true);
-                }
+                send_json(respond, 200, payload);
             }
         }
     })

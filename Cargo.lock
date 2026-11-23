@@ -5132,7 +5132,6 @@ dependencies = [
  "hyper-util",
  "jiff",
  "pin-project-lite",
- "proptest",
  "prost",
  "rand 0.10.4",
  "rstest",

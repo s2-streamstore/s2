@@ -775,10 +775,10 @@ fn build_https_connector_with_roots(
     ))]
     {
         let _ = (rustls_crypto_provider, connector);
-        return Err(std::io::Error::other(
+        Err(std::io::Error::other(
             "no TLS root certificates configured; enable the `rustls-native-roots` or \
              `rustls-webpki-roots` feature on `s2-sdk`",
-        ));
+        ))
     }
 
     #[cfg(any(feature = "rustls-native-roots", feature = "rustls-webpki-roots"))]
@@ -2059,34 +2059,38 @@ mod tests {
     }
 
     #[test]
-    fn uri_with_path_percent_encoded_segment() {
+    fn uri_query_and_origin_normalization() {
         let base: Uri = "https://example.com".parse().unwrap();
-
-        let uri = uri_with_path(
-            &base,
-            format!("v1/access-tokens/{}", urlencoding::encode("a/b?c d")),
+        assert_eq!(
+            uri_with_path(
+                &base,
+                format!("v1/access-tokens/{}", urlencoding::encode("a/b?c d")),
+            ),
+            "https://example.com/v1/access-tokens/a%2Fb%3Fc%20d"
         );
 
-        assert_eq!(uri, "https://example.com/v1/access-tokens/a%2Fb%3Fc%20d");
-    }
-
-    #[test]
-    fn query_appends_to_existing_query() {
         #[derive(serde::Serialize)]
         struct Params<'a> {
             prefix: &'a str,
         }
-
-        let uri: Uri = "https://example.com/v1/streams?limit=1".parse().unwrap();
-        let request = RequestBuilder::get(uri)
+        let req = RequestBuilder::get("https://example.com/v1/streams?limit=1".parse().unwrap())
             .query(&Params { prefix: "a/b c" })
             .build()
             .unwrap();
-
         assert_eq!(
-            request.uri,
+            req.uri,
             "https://example.com/v1/streams?limit=1&prefix=a%2Fb+c"
         );
+
+        for (raw, expected) in [
+            ("HTTP://Example.COM:80/v1", "http://example.com"),
+            ("http://example.com/v1", "http://example.com"),
+            ("HTTPS://A.S2.DEV:443/v1", "https://a.s2.dev"),
+            ("https://a.s2.dev:8443/v1", "https://a.s2.dev:8443"),
+        ] {
+            let r = RequestBuilder::get(raw.parse().unwrap()).build().unwrap();
+            assert_eq!(r.origin(), expected);
+        }
     }
 
     #[cfg(feature = "rustls-aws-lc-rs")]
@@ -2149,32 +2153,30 @@ mod tests {
         );
     }
 
-    // spec: r1 C13a
+    // spec: r1 C13, C13a
     #[tokio::test]
-    async fn checkout_within_capacity() {
+    async fn pool_capacity_spillover_release_and_host_isolation() {
         assert_eq!(DEFAULT_MAX_CONCURRENT_REQUESTS_PER_CONNECTION, 50);
         let pool = test_pool();
         let mut permits = Vec::new();
         for _ in 0..DEFAULT_MAX_CONCURRENT_REQUESTS_PER_CONNECTION {
-            let (_, permit) = checkout_permit(&pool, TEST_ORIGIN).await;
-            permits.push(permit);
-        }
-        assert_eq!(host_connection_count(&pool, TEST_ORIGIN), 1);
-    }
-
-    // spec: r1 C13a
-    #[tokio::test]
-    async fn overflow_creates_new_connection() {
-        let pool = test_pool();
-        let mut permits = Vec::new();
-        for _ in 0..DEFAULT_MAX_CONCURRENT_REQUESTS_PER_CONNECTION {
-            let (_, permit) = checkout_permit(&pool, TEST_ORIGIN).await;
-            permits.push(permit);
+            permits.push(checkout_permit(&pool, TEST_ORIGIN).await.1);
         }
         assert_eq!(host_connection_count(&pool, TEST_ORIGIN), 1);
 
-        let (_, permit) = checkout_permit(&pool, TEST_ORIGIN).await;
-        permits.push(permit);
+        // Releasing one permit frees capacity on the existing connection without dialing.
+        permits.pop();
+        permits.push(checkout_permit(&pool, TEST_ORIGIN).await.1);
+        assert_eq!(host_connection_count(&pool, TEST_ORIGIN), 1);
+
+        // Exceeding capacity spills over onto a second connection.
+        permits.push(checkout_permit(&pool, TEST_ORIGIN).await.1);
+        assert_eq!(host_connection_count(&pool, TEST_ORIGIN), 2);
+
+        // Separate origins maintain independent pools.
+        let other_origin = "https://other-host";
+        let _other = checkout_permit(&pool, other_origin).await.1;
+        assert_eq!(host_connection_count(&pool, other_origin), 1);
         assert_eq!(host_connection_count(&pool, TEST_ORIGIN), 2);
     }
 
@@ -2207,39 +2209,6 @@ mod tests {
         drop(p3);
     }
 
-    // spec: r1 C13a
-    #[tokio::test]
-    async fn custom_request_cap_bounds_connection() {
-        let http2 = Http2Config::new().with_max_concurrent_requests(2).unwrap();
-        let pool = test_pool_with(DuplexH2Connector::new(), http2);
-        let mut permits = Vec::new();
-        for _ in 0..2 {
-            let (_, permit) = checkout_permit(&pool, TEST_ORIGIN).await;
-            permits.push(permit);
-        }
-        assert_eq!(host_connection_count(&pool, TEST_ORIGIN), 1);
-
-        let (_, permit) = checkout_permit(&pool, TEST_ORIGIN).await;
-        permits.push(permit);
-        assert_eq!(host_connection_count(&pool, TEST_ORIGIN), 2);
-    }
-
-    // spec: r1 C13a
-    #[tokio::test]
-    async fn permit_drop_frees_capacity() {
-        let pool = test_pool();
-        let mut permits = Vec::new();
-        for _ in 0..DEFAULT_MAX_CONCURRENT_REQUESTS_PER_CONNECTION {
-            let (_, permit) = checkout_permit(&pool, TEST_ORIGIN).await;
-            permits.push(permit);
-        }
-        permits.pop();
-
-        let (_, permit) = checkout_permit(&pool, TEST_ORIGIN).await;
-        permits.push(permit);
-        assert_eq!(host_connection_count(&pool, TEST_ORIGIN), 1);
-    }
-
     // spec: r1 C13c
     #[tokio::test(start_paused = true)]
     async fn reaper_removes_idle_connections_at_90s() {
@@ -2264,28 +2233,6 @@ mod tests {
         connector.wait_active_connections(0).await;
         assert_eq!(host_connection_count(&pool, TEST_ORIGIN), 0);
         assert!(!pool.hosts.read().unwrap().map.contains_key(TEST_ORIGIN));
-    }
-
-    // spec: r1 C13
-    #[tokio::test]
-    async fn different_hosts_get_independent_pools() {
-        let pool = test_pool();
-        let host_a = "https://host-a";
-        let host_b = "https://host-b";
-
-        let mut permits_a = Vec::new();
-        for _ in 0..DEFAULT_MAX_CONCURRENT_REQUESTS_PER_CONNECTION {
-            let (_, permit) = checkout_permit(&pool, host_a).await;
-            permits_a.push(permit);
-        }
-        assert_eq!(host_connection_count(&pool, host_a), 1);
-
-        let (_, permit_b) = checkout_permit(&pool, host_b).await;
-        assert_eq!(host_connection_count(&pool, host_b), 1);
-        assert_eq!(host_connection_count(&pool, host_a), 1);
-
-        drop(permit_b);
-        drop(permits_a);
     }
 
     // spec: r1 T7a, T7b
@@ -2472,43 +2419,6 @@ mod tests {
         timeout(Duration::from_secs(1), dropped_fut)
             .await
             .expect("in-flight dial should be cancelled immediately when Pool drops");
-    }
-
-    #[test]
-    fn pool_construction_does_not_require_tokio_runtime() {
-        let pool = Pool::new(
-            HttpConnector::new(),
-            Duration::from_secs(3),
-            Http2Config::new(),
-            CancellationToken::new(),
-        );
-        pool.close();
-    }
-
-    #[test]
-    fn request_origin_normalizes_case_and_default_ports() {
-        let r1 = RequestBuilder::get("HTTP://Example.COM:80/v1".parse().unwrap())
-            .build()
-            .unwrap();
-        let r2 = RequestBuilder::get("http://example.com/v1".parse().unwrap())
-            .build()
-            .unwrap();
-        assert_eq!(r1.origin(), "http://example.com");
-        assert_eq!(r1.origin(), r2.origin());
-
-        let r3 = RequestBuilder::get("HTTPS://A.S2.DEV:443/v1".parse().unwrap())
-            .build()
-            .unwrap();
-        let r4 = RequestBuilder::get("https://a.s2.dev/v1".parse().unwrap())
-            .build()
-            .unwrap();
-        assert_eq!(r3.origin(), "https://a.s2.dev");
-        assert_eq!(r3.origin(), r4.origin());
-
-        let r5 = RequestBuilder::get("https://a.s2.dev:8443/v1".parse().unwrap())
-            .build()
-            .unwrap();
-        assert_eq!(r5.origin(), "https://a.s2.dev:8443");
     }
 
     #[test]

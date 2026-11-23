@@ -701,19 +701,16 @@ mod tests {
     use crate::types::MeteredBytes as _;
 
     #[tokio::test]
-    async fn batches_should_be_empty_when_record_stream_is_empty() {
-        let batches: Vec<_> = Batcher::new(
-            futures_util::stream::iter::<Vec<AppendRecord>>(vec![]),
+    async fn batches_respect_count_limit_and_advance_match_seq_num() -> Result<(), ValidationError>
+    {
+        let empty: Vec<_> = Batcher::new(
+            futures_util::stream::iter(Vec::<AppendRecord>::new()),
             BatcherConfig::new(),
         )
         .collect()
         .await;
-        assert!(batches.is_empty());
-    }
+        assert!(empty.is_empty());
 
-    #[tokio::test]
-    async fn batches_respect_count_limit_and_advance_match_seq_num() -> Result<(), ValidationError>
-    {
         let records: Vec<_> = (0..10)
             .map(|i| AppendRecord::new(format!("record{i}")))
             .collect::<Result<_, _>>()?;

@@ -94,8 +94,17 @@ mod tests {
         let mut backoff = RetryBackoff::from_config(&config);
 
         if budgeted {
-            let delays: Vec<_> = backoff.collect();
+            assert_eq!(backoff.attempt_number(), 1);
+            assert_eq!(backoff.remaining(), max_attempts - 1);
+            assert!(backoff.next().is_some());
+            assert_eq!(backoff.attempt_number(), 2);
+            backoff.reset();
+            assert_eq!(backoff.attempt_number(), 1);
+            assert_eq!(backoff.remaining(), max_attempts - 1);
+
+            let delays: Vec<_> = backoff.by_ref().collect();
             assert_eq!(delays.len(), (max_attempts - 1) as usize);
+            assert!(backoff.is_exhausted());
             for (i, d) in delays.into_iter().enumerate() {
                 let expected = min.saturating_mul(2u32.pow(i as u32)).min(max_base_delay);
                 assert!(d >= expected && d <= expected * 2, "step {i}: {d:?}");
@@ -114,30 +123,5 @@ mod tests {
             let after_reset = backoff.next_unbounded();
             assert!(after_reset >= min && after_reset <= min * 2);
         }
-    }
-
-    #[test]
-    fn backoff_with_reset() {
-        let config = RetryConfig::new().with_max_attempts(4).unwrap();
-        let mut backoff = RetryBackoff::from_config(&config);
-
-        assert_eq!(backoff.attempt_number(), 1);
-        assert_eq!(backoff.remaining(), 3);
-        assert!(!backoff.is_exhausted());
-
-        assert!(backoff.next().is_some());
-        assert_eq!(backoff.attempt_number(), 2);
-        assert_eq!(backoff.remaining(), 2);
-
-        backoff.reset();
-        assert_eq!(backoff.attempt_number(), 1);
-        assert_eq!(backoff.remaining(), 3);
-
-        for expected_attempt in 2..=4 {
-            assert!(backoff.next().is_some());
-            assert_eq!(backoff.attempt_number(), expected_attempt);
-        }
-        assert!(backoff.is_exhausted());
-        assert!(backoff.next().is_none());
     }
 }

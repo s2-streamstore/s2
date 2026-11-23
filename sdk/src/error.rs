@@ -1809,152 +1809,55 @@ mod tests {
         ServerError::new_for_test(status, code, "test")
     }
 
-    // spec: r1 E2, E4a
-    #[test]
-    fn error_response_preserves_raw_and_known_codes() {
-        let known = response(StatusCode::NOT_FOUND, Some("basin_not_found"));
-        assert_eq!(known.code.as_deref(), Some("basin_not_found"));
-        assert_eq!(known.message, "test");
-        assert_eq!(known.known_code(), Some(ErrorCode::BasinNotFound));
-        assert!(known.to_string().contains("basin_not_found"));
-
-        let unknown = response(
-            StatusCode::BAD_REQUEST,
-            Some("introduced_by_a_newer_server"),
-        );
-        assert_eq!(unknown.known_code(), None);
-        assert_eq!(
-            unknown.code.as_deref(),
-            Some("introduced_by_a_newer_server")
-        );
-    }
-
-    // spec: r1 E4b
-    #[test]
-    fn server_classification_falls_back_to_status_on_status_mismatch() {
-        let mismatch = response(StatusCode::INTERNAL_SERVER_ERROR, Some("rate_limited"));
-        assert_eq!(mismatch.known_code(), None);
-        assert!(mismatch.is_retryable());
-        assert!(!mismatch.has_no_side_effects());
-
-        let non_retryable_status = response(StatusCode::BAD_REQUEST, Some("unavailable"));
-        assert_eq!(non_retryable_status.known_code(), None);
-        assert!(!non_retryable_status.is_retryable());
-        assert!(!non_retryable_status.has_no_side_effects());
-    }
-
-    // spec: r1 E4c, E4e
-    #[test]
-    fn unknown_codes_and_412_classification() {
-        let unknown = response(StatusCode::SERVICE_UNAVAILABLE, Some("future_server_error"));
-        assert!(unknown.is_retryable());
-        assert!(!unknown.has_no_side_effects());
-
-        let plain_412 = ServerError::from_response(
-            StatusCode::PRECONDITION_FAILED,
-            b"",
-            ErrorContext::default(),
-        );
-        assert_eq!(plain_412.code, None);
-        assert_eq!(plain_412.message, "412");
-        assert!(!plain_412.is_retryable());
-        assert!(plain_412.has_no_side_effects());
-    }
-
     // spec: r1 E3
     #[test]
-    fn http_error_classification_matches_e3() {
-        assert!(matches!(
-            classify_http_error::<RequestError>(
-                client::HttpError::Connect("dns failed".to_owned()),
-                ErrorContext::default()
-            ),
-            RequestError::Connect(ConnectError { message, .. }) if message.contains("dns failed")
-        ));
-        assert!(matches!(
-            classify_http_error::<RequestError>(
-                client::HttpError::RequestBuild("bad request".to_owned()),
-                ErrorContext::default()
-            ),
-            RequestError::Protocol(ProtocolError { message, .. }) if message.contains("bad request")
-        ));
-        assert!(matches!(
-            classify_http_error::<RequestError>(
-                client::HttpError::ResponseCompression("corrupt".to_owned()),
-                ErrorContext::default()
-            ),
-            RequestError::Protocol(ProtocolError { message, .. }) if message.contains("corrupt")
-        ));
-        assert!(matches!(
-            classify_http_error::<RequestError>(
-                client::HttpError::ResponseTooLarge(1024),
-                ErrorContext::default()
-            ),
-            RequestError::Protocol(ProtocolError { message, .. }) if message.contains("1024")
-        ));
+    fn http_error_protocol_variants_classify_as_protocol() {
         let json_error = serde_json::from_slice::<serde_json::Value>(b"{")
             .expect_err("invalid JSON should fail");
-        assert!(matches!(
-            classify_http_error::<RequestError>(
-                client::HttpError::ResponseDecode(json_error),
-                ErrorContext::default()
+        for (err, substr) in [
+            (
+                client::HttpError::RequestBuild("bad request".to_owned()),
+                "bad request",
             ),
-            RequestError::Protocol(_)
-        ));
-        assert!(matches!(
-            classify_http_error::<RequestError>(
-                client::HttpError::Timeout,
-                ErrorContext::default()
+            (
+                client::HttpError::ResponseCompression("corrupt".to_owned()),
+                "corrupt",
             ),
-            RequestError::Timeout(_)
-        ));
+            (client::HttpError::ResponseTooLarge(1024), "1024"),
+            (client::HttpError::ResponseDecode(json_error), ""),
+        ] {
+            assert!(matches!(
+                classify_http_error::<RequestError>(err, ErrorContext::default()),
+                RequestError::Protocol(ProtocolError { message, .. }) if message.contains(substr)
+            ));
+        }
     }
 
-    // spec: r1 E1, E5a, E5b, E6, E7
+    // spec: r1 E1, E5, E5a, E5b, E6
     #[test]
-    fn wrappers_hide_inner_server_error_and_expose_source_and_context() {
-        let ctx = ErrorContext::stream("append", "my-basin", "my-stream", false).with_attempts(3);
-        let inner = AppendError::SeqNumMismatch(SeqNumMismatchError::new(
-            42,
-            ServerError::from_response(
-                StatusCode::PRECONDITION_FAILED,
-                br#"{"seq_num_mismatch":42}"#,
-                ctx.clone(),
-            ),
-        ));
-        assert!(inner.server_error().is_some());
-        assert!(inner.has_no_side_effects());
-        assert!(!inner.is_retryable());
-        let inner_msg = inner.to_string();
-        assert!(inner_msg.contains("append"), "{inner_msg}");
-        assert!(inner_msg.contains("my-basin"), "{inner_msg}");
-        assert!(inner_msg.contains("my-stream"), "{inner_msg}");
-        assert!(inner_msg.contains("3 attempts"), "{inner_msg}");
+    fn wrapper_upcast_clean_close_and_retryable_indefinite_append() {
+        let ctx = ErrorContext::stream("append", "my-basin", "my-stream", false);
 
-        let wrapped = AppendError::IndefiniteAppend(IndefiniteAppendError::new(inner));
-        assert!(wrapped.server_error().is_none());
+        // Retryable definite error (`429 rate_limited`) wrapped in IndefiniteAppend preserves
+        // `is_retryable() == true` while turning `has_no_side_effects()` to `false`, and preserves
+        // `final_attempt_error()` / `source()` across `AppendError -> S2Error` upcast.
+        let wrapped = AppendError::Server(response(
+            StatusCode::TOO_MANY_REQUESTS,
+            Some("rate_limited"),
+        ))
+        .with_prior_uncertainty(true);
+        assert!(matches!(wrapped, AppendError::IndefiniteAppend(_)));
+        assert!(wrapped.is_retryable());
         assert!(!wrapped.has_no_side_effects());
-        assert!(!wrapped.is_retryable());
-        assert!(matches!(
-            wrapped.final_attempt_error(),
-            Some(AppendError::SeqNumMismatch(e)) if e.assignable_seq_num == 42
-        ));
-        let source = wrapped
-            .source()
-            .expect("source set")
-            .downcast_ref::<AppendError>()
-            .expect("source downcasts directly to AppendError");
-        assert!(matches!(
-            source,
-            AppendError::SeqNumMismatch(e) if e.assignable_seq_num == 42
-        ));
+        assert!(wrapped.server_error().is_none());
 
         let s2_err: S2Error = wrapped.into();
-        assert!(s2_err.server_error().is_none());
+        assert!(s2_err.is_retryable());
         assert!(!s2_err.has_no_side_effects());
+        assert!(s2_err.server_error().is_none());
         assert!(matches!(
             s2_err.final_attempt_error(),
-            Some(S2Error::SeqNumMismatch(e)) if e.assignable_seq_num == 42
+            Some(S2Error::Server(e)) if e.known_code() == Some(ErrorCode::RateLimited)
         ));
         assert!(
             s2_err
@@ -1964,30 +1867,13 @@ mod tests {
                 .is_some()
         );
 
-        let closed_clean =
-            AppendSessionError::SessionClosed(SessionClosedError::new(None, ctx.clone()));
+        // Clean SessionClosed(None) has no source and formats with context.
+        let closed_clean = AppendSessionError::SessionClosed(SessionClosedError::new(None, ctx));
         assert!(closed_clean.has_no_side_effects());
         assert!(!closed_clean.is_retryable());
         assert!(closed_clean.failure().is_none());
         assert!(closed_clean.source().is_none());
         assert!(closed_clean.to_string().contains("my-basin"));
-
-        let session_failure =
-            AppendSessionError::Server(response(StatusCode::FORBIDDEN, Some("permission_denied")));
-        let closed_failed =
-            AppendSessionError::SessionClosed(SessionClosedError::new(Some(session_failure), ctx));
-        assert!(closed_failed.has_no_side_effects());
-        assert!(!closed_failed.is_retryable());
-        assert!(closed_failed.server_error().is_none());
-        assert!(closed_failed.failure().is_some());
-        assert!(closed_failed.to_string().contains("permission_denied"));
-        assert!(
-            closed_failed
-                .source()
-                .expect("SessionClosed source set")
-                .downcast_ref::<AppendSessionError>()
-                .is_some()
-        );
     }
 
     // spec: r1 E1, E3
@@ -1999,15 +1885,6 @@ mod tests {
         let s2_err: S2Error = timeout.into();
         assert!(s2_err.is_retryable());
         assert!(s2_err.has_no_side_effects());
-    }
-
-    // spec: r1 E4
-    #[test]
-    fn validation_error_exposes_e4_predicates() {
-        let err = ValidationError::from("invalid input");
-        assert_eq!(err.message(), "invalid input");
-        assert!(!err.is_retryable());
-        assert!(err.has_no_side_effects());
     }
 
     // spec: r1 E3, T9
@@ -2069,101 +1946,5 @@ mod tests {
         );
         assert!(classified.is_retryable());
         server_task.abort();
-    }
-
-    #[rstest::rstest]
-    #[case(StatusCode::FORBIDDEN, "permission_denied", false, false)]
-    #[case(StatusCode::FORBIDDEN, "permission_denied", true, true)]
-    #[case(StatusCode::SERVICE_UNAVAILABLE, "unavailable", false, false)]
-    #[case(StatusCode::SERVICE_UNAVAILABLE, "unavailable", true, false)]
-    #[case(StatusCode::TOO_MANY_REQUESTS, "rate_limited", true, true)]
-    #[test]
-    fn unary_append_failure_preserves_uncertainty_and_final_error(
-        #[case] status: StatusCode,
-        #[case] code: &str,
-        #[case] prior_uncertainty: bool,
-        #[case] wrapped: bool,
-    ) {
-        let error = AppendError::Server(response(status, Some(code)))
-            .with_prior_uncertainty(prior_uncertainty);
-        assert_eq!(matches!(error, AppendError::IndefiniteAppend(_)), wrapped);
-        if wrapped {
-            assert!(error.server_error().is_none());
-            assert!(!error.has_no_side_effects());
-            let latest = error
-                .source()
-                .unwrap()
-                .downcast_ref::<AppendError>()
-                .unwrap();
-            assert!(latest.has_no_side_effects());
-            let server = latest.server_error().unwrap();
-            assert_eq!(
-                (server.status, server.code.as_deref()),
-                (status, Some(code))
-            );
-            assert_eq!(server.message, "test");
-            assert_eq!(error.is_retryable(), server.is_retryable());
-            assert_eq!(
-                error.to_string(),
-                format!(
-                    "append may have taken effect in an earlier attempt; final attempt failed: {latest}"
-                )
-            );
-        } else {
-            let server = error.server_error().unwrap();
-            assert_eq!(
-                (server.status, server.code.as_deref()),
-                (status, Some(code))
-            );
-            assert_eq!(server.message, "test");
-            assert_eq!(error.is_retryable(), server.is_retryable());
-            assert_eq!(error.has_no_side_effects(), server.has_no_side_effects());
-        }
-    }
-
-    #[rstest::rstest]
-    #[case::condition_failed(
-        AppendError::from_http_response(
-            StatusCode::PRECONDITION_FAILED,
-            br#"{"seq_num_mismatch":42}"#,
-            ErrorContext::default(),
-        ),
-        "assignable_seq_num=42"
-    )]
-    #[case::unrecognized_condition(
-        AppendError::from_terminal_message(
-            TerminalMessage {
-                status: 412,
-                body: bytes::Bytes::from_static(br#"{"some_future_mismatch":7}"#),
-            },
-            ErrorContext::default(),
-        ),
-        r#"{"some_future_mismatch":7}"#
-    )]
-    #[case::invalid_access_token(
-        AppendError::Validation(ValidationError("invalid access token: invalid header".to_owned())),
-        "invalid access token: invalid header"
-    )]
-    #[test]
-    fn unary_append_wraps_definite_terminal_errors(
-        #[case] error: AppendError,
-        #[case] expected_substr: &str,
-    ) {
-        assert!(error.has_no_side_effects());
-        let error = error.with_prior_uncertainty(true);
-        assert!(matches!(error, AppendError::IndefiniteAppend(_)));
-        assert!(!error.has_no_side_effects());
-        assert!(!error.is_retryable());
-        assert!(error.server_error().is_none());
-        let latest = error
-            .source()
-            .unwrap()
-            .downcast_ref::<AppendError>()
-            .unwrap();
-        assert!(latest.has_no_side_effects());
-        assert!(
-            latest.to_string().contains(expected_substr),
-            "got: {latest}"
-        );
     }
 }

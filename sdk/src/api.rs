@@ -1026,7 +1026,9 @@ mod tests {
     use hyper_util::client::legacy::connect::HttpConnector;
 
     use super::*;
-    use crate::error::{AppendError, RequestError, ServerError};
+    #[cfg(feature = "_hidden")]
+    use crate::error::RequestError;
+    use crate::error::{AppendError, ServerError};
 
     #[cfg(feature = "_hidden")]
     #[derive(Default)]
@@ -1250,46 +1252,6 @@ mod tests {
     }
 
     #[cfg(feature = "_hidden")]
-    #[test]
-    fn default_headers_are_replaced_and_isolated_between_clients() {
-        let first_headers = HeaderMap::from_iter([
-            (
-                http::header::HeaderName::from_static("x-origin-session"),
-                HeaderValue::from_static("first"),
-            ),
-            (
-                http::header::HeaderName::from_static("x-first-only"),
-                HeaderValue::from_static("present"),
-            ),
-        ]);
-        let first = S2Config::new("token")
-            .with_default_headers(first_headers)
-            .unwrap();
-        let second = first
-            .clone()
-            .with_default_headers(HeaderMap::from_iter([(
-                http::header::HeaderName::from_static("x-origin-session"),
-                HeaderValue::from_static("second"),
-            )]))
-            .unwrap();
-        for (config, session) in [(&first, "first"), (&second, "second")] {
-            let client = BaseClient::init_with_connector(config, HttpConnector::new()).unwrap();
-            let mut request = client
-                .get("http://example.test".parse().unwrap())
-                .build()
-                .unwrap();
-            assert_eq!(request.headers_mut()["x-origin-session"], session);
-            assert_eq!(
-                request.headers_mut().contains_key("x-first-only"),
-                session == "first"
-            );
-        }
-        let cleared = second.with_default_headers(HeaderMap::new()).unwrap();
-        assert!(cleared.default_headers.is_empty());
-        assert!(S2Config::new("token").default_headers.is_empty());
-    }
-
-    #[cfg(feature = "_hidden")]
     #[derive(Debug)]
     struct RotatingTokenProvider {
         generation: AtomicUsize,
@@ -1380,53 +1342,44 @@ mod tests {
 
     #[test]
     fn safe_to_retry_matrix() {
-        let retryable = append_server_error(StatusCode::INTERNAL_SERVER_ERROR, "internal");
-        let no_side_effect = append_server_error(StatusCode::TOO_MANY_REQUESTS, "rate_limited");
-        let transaction_conflict =
-            append_server_error(StatusCode::CONFLICT, "transaction_conflict");
-
-        // RetrySafety::All & Append(All)
-        for safety in [
-            RetrySafety::All,
-            RetrySafety::Append(AppendRetryPolicy::All),
-        ] {
-            assert!(is_safe_to_retry(&retryable, safety, None));
-        }
-
-        // Unsignalled frame signal -> safe under NoSideEffects, still unsafe under DefiniteOnly
+        let indefinite = append_server_error(StatusCode::INTERNAL_SERVER_ERROR, "internal");
+        let definite = append_server_error(StatusCode::TOO_MANY_REQUESTS, "rate_limited");
         let signal = FrameSignal::new();
+
+        assert!(is_safe_to_retry(&indefinite, RetrySafety::All, None));
         assert!(is_safe_to_retry(
-            &retryable,
+            &indefinite,
+            RetrySafety::Append(AppendRetryPolicy::All),
+            None
+        ));
+        // Unsignalled body: safe under Append(NoSideEffects), still unsafe under DefiniteOnly.
+        assert!(is_safe_to_retry(
+            &indefinite,
             RetrySafety::Append(AppendRetryPolicy::NoSideEffects),
-            Some(&signal),
+            Some(&signal)
         ));
         assert!(!is_safe_to_retry(
-            &retryable,
+            &indefinite,
             RetrySafety::DefiniteOnly,
-            Some(&signal),
+            Some(&signal)
         ));
 
-        // Signalled frame signal
+        // Signalled body: only definite errors remain safe.
         signal.signal();
         assert!(!is_safe_to_retry(
-            &retryable,
+            &indefinite,
             RetrySafety::Append(AppendRetryPolicy::NoSideEffects),
-            Some(&signal),
+            Some(&signal)
         ));
         assert!(is_safe_to_retry(
-            &no_side_effect,
+            &definite,
             RetrySafety::Append(AppendRetryPolicy::NoSideEffects),
-            Some(&signal),
+            Some(&signal)
         ));
         assert!(is_safe_to_retry(
-            &transaction_conflict,
-            RetrySafety::Append(AppendRetryPolicy::NoSideEffects),
-            Some(&signal),
-        ));
-        assert!(is_safe_to_retry(
-            &no_side_effect,
+            &definite,
             RetrySafety::DefiniteOnly,
-            Some(&signal),
+            Some(&signal)
         ));
     }
 

@@ -7,7 +7,6 @@ use std::{
 };
 
 use bytes::{Bytes, BytesMut};
-use http::Response;
 use s2_api::v1::{
     self as api,
     error::ErrorCode,
@@ -303,23 +302,12 @@ async fn spec_vectors_keys() {
     let seen_header = Arc::new(Mutex::new(None::<String>));
     let server = MockH2Server::start({
         let seen_header = seen_header.clone();
-        move |_conn_id, req, mut respond| {
+        move |_conn_id, req, respond| {
             let seen_header = seen_header.clone();
             async move {
-                *seen_header.lock().unwrap() = req
-                    .headers()
-                    .get("s2-encryption-key")
-                    .and_then(|v| v.to_str().ok())
-                    .map(str::to_owned);
-                let resp = Response::builder()
-                    .status(200)
-                    .header("content-type", "application/protobuf")
-                    .body(())
-                    .unwrap();
-                if let Ok(mut send) = respond.send_response(resp, false) {
-                    let _ =
-                        send.send_data(Bytes::from(proto_read_batch_records(&[], Some(0))), true);
-                }
+                *seen_header.lock().unwrap() =
+                    header_str(&req, "s2-encryption-key").map(str::to_owned);
+                send_proto(respond, proto_read_batch_records(&[], Some(0)));
             }
         }
     })
@@ -397,71 +385,46 @@ fn spec_vectors_numbers() {
         };
 
         if let Some(raw) = &case.value {
+            let check_u64 = |verify: &dyn Fn(u64)| match raw.parse::<u64>() {
+                Ok(v) => {
+                    assert!(expect_valid, "{label}");
+                    verify(v);
+                }
+                Err(_) => assert!(!expect_valid, "{label}: expected valid u64"),
+            };
             match case.field.as_str() {
-                "record.timestamp" => match raw.parse::<u64>() {
-                    Ok(v) => {
-                        assert!(expect_valid, "{label}");
-                        let rec = AppendRecord::new("").unwrap().with_timestamp(v);
-                        assert_eq!(rec.timestamp(), Some(v), "{label}");
-                    }
-                    Err(_) => assert!(!expect_valid, "{label}: expected valid u64"),
-                },
-                "append.match_seq_num" => match raw.parse::<u64>() {
-                    Ok(v) => {
-                        assert!(expect_valid, "{label}");
-                        let input = AppendInput::new(dummy_batch.clone()).with_match_seq_num(v);
-                        assert_eq!(input.match_seq_num, Some(v), "{label}");
-                    }
-                    Err(_) => assert!(!expect_valid, "{label}: expected valid u64"),
-                },
-                "read.start.seq_num" => match raw.parse::<u64>() {
-                    Ok(v) => {
-                        assert!(expect_valid, "{label}");
-                        let input = ReadInput::new().with_start(ReadStart::SeqNum(v));
-                        assert_eq!(input.start(), Some(ReadStart::SeqNum(v)), "{label}");
-                    }
-                    Err(_) => assert!(!expect_valid, "{label}: expected valid u64"),
-                },
-                "read.start.timestamp" => match raw.parse::<u64>() {
-                    Ok(v) => {
-                        assert!(expect_valid, "{label}");
-                        let input = ReadInput::new().with_start(ReadStart::Timestamp(v));
-                        assert_eq!(input.start(), Some(ReadStart::Timestamp(v)), "{label}");
-                    }
-                    Err(_) => assert!(!expect_valid, "{label}: expected valid u64"),
-                },
-                "read.stop.count" => match raw.parse::<u64>() {
-                    Ok(v) => {
-                        assert!(expect_valid, "{label}");
-                        let input = ReadInput::new().with_count(v);
-                        assert_eq!(input.count(), Some(v), "{label}");
-                    }
-                    Err(_) => assert!(!expect_valid, "{label}: expected valid u64"),
-                },
-                "read.stop.bytes" => match raw.parse::<u64>() {
-                    Ok(v) => {
-                        assert!(expect_valid, "{label}");
-                        let input = ReadInput::new().with_bytes(v);
-                        assert_eq!(input.bytes(), Some(v), "{label}");
-                    }
-                    Err(_) => assert!(!expect_valid, "{label}: expected valid u64"),
-                },
-                "read.stop.until" => match raw.parse::<u64>() {
-                    Ok(v) => {
-                        assert!(expect_valid, "{label}");
-                        let input = ReadInput::new().with_until(v);
-                        assert_eq!(input.until(), Some(v), "{label}");
-                    }
-                    Err(_) => assert!(!expect_valid, "{label}: expected valid u64"),
-                },
-                "trim.seq_num" => match raw.parse::<u64>() {
-                    Ok(v) => {
-                        assert!(expect_valid, "{label}");
-                        let rec: AppendRecord = CommandRecord::trim(v).into();
-                        assert_eq!(rec.body().as_ref(), &v.to_be_bytes(), "{label}");
-                    }
-                    Err(_) => assert!(!expect_valid, "{label}: expected valid u64"),
-                },
+                "record.timestamp" => check_u64(&|v| {
+                    assert_eq!(
+                        AppendRecord::new("").unwrap().with_timestamp(v).timestamp(),
+                        Some(v),
+                        "{label}"
+                    );
+                }),
+                "append.match_seq_num" => check_u64(&|v| {
+                    let input = AppendInput::new(dummy_batch.clone()).with_match_seq_num(v);
+                    assert_eq!(input.match_seq_num, Some(v), "{label}");
+                }),
+                "read.start.seq_num" => check_u64(&|v| {
+                    let input = ReadInput::new().with_start(ReadStart::SeqNum(v));
+                    assert_eq!(input.start(), Some(ReadStart::SeqNum(v)), "{label}");
+                }),
+                "read.start.timestamp" => check_u64(&|v| {
+                    let input = ReadInput::new().with_start(ReadStart::Timestamp(v));
+                    assert_eq!(input.start(), Some(ReadStart::Timestamp(v)), "{label}");
+                }),
+                "read.stop.count" => check_u64(&|v| {
+                    assert_eq!(ReadInput::new().with_count(v).count(), Some(v), "{label}");
+                }),
+                "read.stop.bytes" => check_u64(&|v| {
+                    assert_eq!(ReadInput::new().with_bytes(v).bytes(), Some(v), "{label}");
+                }),
+                "read.stop.until" => check_u64(&|v| {
+                    assert_eq!(ReadInput::new().with_until(v).until(), Some(v), "{label}");
+                }),
+                "trim.seq_num" => check_u64(&|v| {
+                    let rec: AppendRecord = CommandRecord::trim(v).into();
+                    assert_eq!(rec.body().as_ref(), &v.to_be_bytes(), "{label}");
+                }),
                 "client.max_attempts" => match raw.parse::<u32>() {
                     Ok(v) => {
                         let res = RetryConfig::new().with_max_attempts(v);
@@ -770,29 +733,18 @@ async fn spec_vectors_s2s_frames() {
     let pending_wire = Arc::new(Mutex::new(Bytes::new()));
     let server = MockH2Server::start({
         let pending_wire = pending_wire.clone();
-        move |_conn_id, _req, mut respond| {
+        move |_conn_id, _req, respond| {
             let pending_wire = pending_wire.clone();
             async move {
                 let wire = pending_wire.lock().unwrap().clone();
-                let resp = Response::builder()
-                    .status(200)
-                    .header("content-type", "s2s/proto")
-                    .body(())
-                    .unwrap();
-                if let Ok(mut send) = respond.send_response(resp, wire.is_empty())
-                    && !wire.is_empty()
-                {
-                    let _ = send.send_data(wire, true);
+                if let Some(mut s2s) = S2sResponder::open(respond) {
+                    s2s.send_raw(wire, true);
                 }
             }
         }
     })
     .await;
-    let (basin_name, stream_name) = test_basin_and_stream();
-    let stream = server
-        .client(no_retry_config())
-        .basin(basin_name)
-        .stream(stream_name);
+    let stream = server.stream(no_retry_config());
 
     for case in &file.cases {
         let label = format!("[{}] {}", case.rule, case.name);
@@ -955,11 +907,6 @@ fn spec_d4_wall_clock_and_metrics_timestamps() {
                             !expect_valid || secs > Timestamp::MAX.as_second(),
                             "{label}: unexpectedly unrepresentable in jiff::Timestamp"
                         );
-                        if expect_valid {
-                            eprintln!(
-                                "skipping {label}: epoch_secs={secs} exceeds jiff::Timestamp::MAX"
-                            );
-                        }
                     }
                 }
             }
@@ -968,11 +915,19 @@ fn spec_d4_wall_clock_and_metrics_timestamps() {
                 if case.expect.as_str() == Some("ValidationError") {
                     assert!(
                         TimeRange::new(ts, Timestamp::UNIX_EPOCH).is_err(),
-                        "{label}"
+                        "{label}: start"
+                    );
+                    assert!(
+                        TimeRange::new(Timestamp::UNIX_EPOCH, ts).is_err(),
+                        "{label}: end"
                     );
                     assert!(
                         TimeRangeAndInterval::new(ts, Timestamp::UNIX_EPOCH).is_err(),
-                        "{label}"
+                        "{label}: start"
+                    );
+                    assert!(
+                        TimeRangeAndInterval::new(Timestamp::UNIX_EPOCH, ts).is_err(),
+                        "{label}: end"
                     );
                 } else {
                     let expected_secs: i64 = case.expect["unix_secs"]
@@ -1012,13 +967,24 @@ struct ErrorCase {
     expect: serde_json::Value,
 }
 
-// spec: r1 E1, E2, E2a, E2b, E4a, E4b, E4c, E4e, C8
+// spec: r1 E1, E2, E2a, E2b, E4a, E4b, E4c, E4e, F4, C8
 #[tokio::test]
 async fn spec_vectors_errors() {
     let file: ErrorsFile = read_json("sdk/vectors/errors.json");
     assert!(!file.cases.is_empty());
 
-    let (basin_name, stream_name) = test_basin_and_stream();
+    let mut responses: Vec<CannedResponse> = file
+        .cases
+        .iter()
+        .map(|c| CannedResponse::new(c.status, c.body.clone()))
+        .collect();
+    // Extra E4c check: known code paired with mismatched HTTP status falls back to HTTP status.
+    responses.push(CannedResponse::new(
+        400,
+        r#"{"code":"unavailable","message":"mismatch"}"#,
+    ));
+    let server = MockH2Server::from_responses(responses).await;
+    let stream = server.stream(no_retry_config());
 
     for case in &file.cases {
         let label = format!("[{}] {}", case.rule, case.name);
@@ -1029,12 +995,6 @@ async fn spec_vectors_errors() {
         let expected_message = expect["message"].as_str().unwrap();
         let expected_retryable = expect["is_retryable"].as_bool().unwrap();
         let expected_no_side_effects = expect["has_no_side_effects"].as_bool().unwrap();
-
-        let server =
-            MockH2Server::from_responses([CannedResponse::new(case.status, case.body.clone())])
-                .await;
-        let s2 = server.client(no_retry_config());
-        let stream = s2.basin(basin_name.clone()).stream(stream_name.clone());
 
         match case.call.as_str() {
             "append" => {
@@ -1154,81 +1114,84 @@ async fn spec_vectors_errors() {
             other => panic!("{label}: unexpected call {other:?}"),
         }
     }
+
+    // E4c: status/code mismatch falls back to HTTP status classification.
+    let mismatch = stream
+        .append(sample_append_input())
+        .await
+        .expect_err("400 mismatch must fail");
+    assert!(!mismatch.is_retryable());
+    assert!(!mismatch.has_no_side_effects());
+    let AppendError::Server(se) = mismatch else {
+        panic!("expected ServerError, got {mismatch:?}");
+    };
+    assert_eq!(se.status.as_u16(), 400);
+    assert_eq!(se.code.as_deref(), Some("unavailable"));
 }
 
-// spec: r1 F2, F3, F4
+// spec: r1 F2, F3
 #[test]
-fn spec_f2_f3_f4_open_enums_tagged_unions_closed_request_enums_and_unknown_error_codes() {
+fn spec_f2_f3_open_enums_tagged_unions_and_closed_request_enums() {
+    fn decode_open<A, S>(json: &str) -> S
+    where
+        A: serde::de::DeserializeOwned,
+        S: From<api::MaybeKnown<A>>,
+    {
+        serde_json::from_str::<api::MaybeKnown<A>>(json)
+            .unwrap()
+            .into()
+    }
+
     // F2: Every server-returned enum and externally tagged `oneOf` union preserves unknown wire
     // name / tag in `Unknown(String)`.
-    let metric: Metric = serde_json::from_str::<api::MaybeKnown<api::metrics::Metric>>(
-        r#"{"histogram":{"name":"latency","buckets":[1,2]}}"#,
-    )
-    .unwrap()
-    .into();
-    assert!(matches!(metric, Metric::Unknown(ref tag) if tag == "histogram"));
-
-    let unit: MetricUnit =
-        serde_json::from_str::<api::MaybeKnown<api::metrics::MetricUnit>>(r#""microseconds""#)
-            .unwrap()
-            .into();
-    assert_eq!(unit, MetricUnit::Unknown("microseconds".to_owned()));
-
-    let interval: TimeseriesInterval =
-        serde_json::from_str::<api::MaybeKnown<api::metrics::TimeseriesInterval>>(r#""week""#)
-            .unwrap()
-            .into();
-    assert_eq!(interval, TimeseriesInterval::Unknown("week".to_owned()));
-
-    let retention: RetentionPolicy = serde_json::from_str::<
-        api::MaybeKnown<api::config::RetentionPolicy>,
-    >(r#"{"max_bytes":1048576}"#)
-    .unwrap()
-    .into();
-    assert_eq!(retention, RetentionPolicy::Unknown("max_bytes".to_owned()));
-
-    let ts_mode: TimestampingMode =
-        serde_json::from_str::<api::MaybeKnown<api::config::TimestampingMode>>(r#""hybrid""#)
-            .unwrap()
-            .into();
-    assert_eq!(ts_mode, TimestampingMode::Unknown("hybrid".to_owned()));
-
-    let cipher: EncryptionAlgorithm = serde_json::from_str::<
-        api::MaybeKnown<api::config::EncryptionAlgorithm>,
-    >(r#""chacha20-poly1305""#)
-    .unwrap()
-    .into();
+    assert!(matches!(
+        decode_open::<api::metrics::Metric, Metric>(
+            r#"{"histogram":{"name":"latency","buckets":[1,2]}}"#,
+        ),
+        Metric::Unknown(ref tag) if tag == "histogram"
+    ));
     assert_eq!(
-        cipher,
+        decode_open::<api::metrics::MetricUnit, MetricUnit>(r#""microseconds""#),
+        MetricUnit::Unknown("microseconds".to_owned())
+    );
+    assert_eq!(
+        decode_open::<api::metrics::TimeseriesInterval, TimeseriesInterval>(r#""week""#),
+        TimeseriesInterval::Unknown("week".to_owned())
+    );
+    assert_eq!(
+        decode_open::<api::config::RetentionPolicy, RetentionPolicy>(r#"{"max_bytes":1048576}"#),
+        RetentionPolicy::Unknown("max_bytes".to_owned())
+    );
+    assert_eq!(
+        decode_open::<api::config::TimestampingMode, TimestampingMode>(r#""hybrid""#),
+        TimestampingMode::Unknown("hybrid".to_owned())
+    );
+    assert_eq!(
+        decode_open::<api::config::EncryptionAlgorithm, EncryptionAlgorithm>(
+            r#""chacha20-poly1305""#
+        ),
         EncryptionAlgorithm::Unknown("chacha20-poly1305".to_owned())
     );
-
-    let priv_net: PrivateNet = serde_json::from_str::<api::MaybeKnown<api::location::PrivateNet>>(
-        r#"{"gcp":{"service_attachment":"projects/p/regions/r/serviceAttachments/s"}}"#,
-    )
-    .unwrap()
-    .into();
-    assert_eq!(priv_net, PrivateNet::Unknown("gcp".to_owned()));
-
-    let pub_pol: PublicNetPolicy = serde_json::from_str::<
-        api::MaybeKnown<api::network_policy::PublicNetPolicy>,
-    >(r#"{"asn":[64512]}"#)
-    .unwrap()
-    .into();
-    assert_eq!(pub_pol, PublicNetPolicy::Unknown("asn".to_owned()));
-
-    let priv_pol: PrivateNetPolicy = serde_json::from_str::<
-        api::MaybeKnown<api::network_policy::PrivateNetPolicy>,
-    >(r#"{"gcp":{"psc_ids":["1"]}}"#)
-    .unwrap()
-    .into();
-    assert_eq!(priv_pol, PrivateNetPolicy::Unknown("gcp".to_owned()));
-
-    let op: Operation =
-        serde_json::from_str::<api::MaybeKnown<api::access::Operation>>(r#""future-op""#)
-            .unwrap()
-            .into();
-    assert_eq!(op, Operation::Unknown("future-op".to_owned()));
+    assert_eq!(
+        decode_open::<api::location::PrivateNet, PrivateNet>(
+            r#"{"gcp":{"service_attachment":"projects/p/regions/r/serviceAttachments/s"}}"#,
+        ),
+        PrivateNet::Unknown("gcp".to_owned())
+    );
+    assert_eq!(
+        decode_open::<api::network_policy::PublicNetPolicy, PublicNetPolicy>(r#"{"asn":[64512]}"#),
+        PublicNetPolicy::Unknown("asn".to_owned())
+    );
+    assert_eq!(
+        decode_open::<api::network_policy::PrivateNetPolicy, PrivateNetPolicy>(
+            r#"{"gcp":{"psc_ids":["1"]}}"#,
+        ),
+        PrivateNetPolicy::Unknown("gcp".to_owned())
+    );
+    assert_eq!(
+        decode_open::<api::access::Operation, Operation>(r#""future-op""#),
+        Operation::Unknown("future-op".to_owned())
+    );
 
     let token_info: api::access::AccessTokenInfo = serde_json::from_str(
         r#"{
@@ -1301,8 +1264,4 @@ fn spec_f2_f3_f4_open_enums_tagged_unions_closed_request_enums_and_unknown_error
         BasinMetricSet::Storage(range),
         StreamMetricSet::Storage(range),
     );
-
-    // F4: Unrecognized server error codes classify by HTTP status (E4c).
-    let parsed: Result<ErrorCode, _> = "future_unknown_code".parse();
-    assert!(parsed.is_err());
 }

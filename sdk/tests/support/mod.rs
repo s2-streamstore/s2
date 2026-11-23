@@ -25,7 +25,7 @@ use s2_api::v1::stream::{
     s2s::{FrameDecoder, SessionMessage},
 };
 use s2_sdk::{
-    S2,
+    S2, S2Stream,
     types::{
         AppendInput, AppendRecord, AppendRecordBatch, BasinName, RetryConfig, S2Config,
         S2Endpoints, StreamName,
@@ -180,6 +180,17 @@ impl MockH2Server {
         let config = configure(S2Config::new("test-token").with_endpoints(endpoints));
         S2::new(config).expect("valid S2 client")
     }
+
+    pub fn stream(&self, retry: RetryConfig) -> S2Stream {
+        self.stream_with(|cfg| cfg.with_retry(retry))
+    }
+
+    pub fn stream_with(&self, configure: impl FnOnce(S2Config) -> S2Config) -> S2Stream {
+        let (basin_name, stream_name) = test_basin_and_stream();
+        self.client_with(configure)
+            .basin(basin_name)
+            .stream(stream_name)
+    }
 }
 
 impl Drop for MockH2Server {
@@ -262,6 +273,14 @@ impl S2sResponder {
         );
     }
 
+    pub fn send_ack(&mut self, start: u64, end: u64, reconnect_advised: bool, end_stream: bool) {
+        self.send_regular(&proto_append_ack(start, end), reconnect_advised, end_stream);
+    }
+
+    pub fn send_raw(&mut self, bytes: Bytes, end_stream: bool) {
+        let _ = self.0.send_data(bytes, end_stream);
+    }
+
     pub fn send_terminal(&mut self, status: u16, body: &[u8]) {
         let _ = self
             .0
@@ -274,6 +293,71 @@ impl S2sResponder {
 
     pub fn reset(&mut self, reason: h2::Reason) {
         self.0.send_reset(reason);
+    }
+}
+
+pub fn send_json(mut respond: SendResponse<Bytes>, status: u16, body: impl Into<Bytes>) {
+    let body = body.into();
+    let resp = Response::builder()
+        .status(status)
+        .header("content-type", "application/json")
+        .body(())
+        .expect("valid json response");
+    if body.is_empty() {
+        let _ = respond.send_response(resp, true);
+    } else if let Ok(mut send) = respond.send_response(resp, false) {
+        let _ = send.send_data(body, true);
+    }
+}
+
+pub fn send_proto(mut respond: SendResponse<Bytes>, body: impl Into<Bytes>) {
+    let resp = Response::builder()
+        .status(200)
+        .header("content-type", "application/protobuf")
+        .body(())
+        .expect("valid proto response");
+    if let Ok(mut send) = respond.send_response(resp, false) {
+        let _ = send.send_data(body.into(), true);
+    }
+}
+
+pub fn send_tail_json(respond: SendResponse<Bytes>, status: u16, seq_num: u64, timestamp: u64) {
+    send_json(
+        respond,
+        status,
+        format!(r#"{{"tail":{{"seq_num":{seq_num},"timestamp":{timestamp}}}}}"#),
+    );
+}
+
+pub async fn wait_until(timeout: Duration, mut pred: impl FnMut() -> bool, msg: &str) {
+    tokio::time::timeout(timeout, async {
+        while !pred() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting: {msg}"));
+}
+
+pub async fn advance_virtual_time(duration: Duration) {
+    tokio::time::pause();
+    tokio::time::advance(duration).await;
+    tokio::time::resume();
+}
+
+pub async fn read_append_input(
+    body: &mut h2::RecvStream,
+    buf: &mut BytesMut,
+) -> Option<s2_api::v1::stream::proto::AppendInput> {
+    match read_one_s2s_frame(body, buf, true).await? {
+        SessionMessage::Regular(regular) => {
+            let payload = regular.decompressed().expect("valid compressed s2s frame");
+            Some(
+                s2_api::v1::stream::proto::AppendInput::decode(payload)
+                    .expect("valid AppendInput protobuf"),
+            )
+        }
+        SessionMessage::Terminal(_) => None,
     }
 }
 

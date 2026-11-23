@@ -1,4 +1,5 @@
 use std::{
+    error::Error as StdError,
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -6,67 +7,86 @@ use std::{
     time::Duration,
 };
 
-use bytes::{Bytes, BytesMut};
-use http::Response;
-use prost::Message as _;
-use s2_api::v1::{self as api, stream::s2s::SessionMessage};
+use bytes::BytesMut;
 use s2_sdk::{
-    S2,
-    append_session::AppendSessionConfig,
+    append_session::{AppendSession, AppendSessionConfig},
     error::{AppendError, AppendSessionError},
     producer::ProducerConfig,
     types::{
-        AccountEndpoint, AppendInput, AppendRecord, AppendRecordBatch, AppendRetryPolicy,
-        BasinEndpoint, BasinName, MeteredBytes, RetryConfig, S2Config, S2Endpoints, StreamName,
+        AppendAck, AppendInput, AppendRecord, AppendRecordBatch, AppendRetryPolicy, MeteredBytes,
+        RetryConfig,
     },
 };
 
 use crate::support::*;
 
+async fn gated_ack_s2s_server(
+    gate: Arc<tokio::sync::Notify>,
+    on_frame: Option<Arc<tokio::sync::Notify>>,
+) -> MockH2Server {
+    MockH2Server::start(move |_conn_id, req, respond| {
+        let gate = gate.clone();
+        let on_frame = on_frame.clone();
+        async move {
+            let Some(mut s2s) = S2sResponder::open(respond) else {
+                return;
+            };
+            let mut body = req.into_body();
+            let mut buf = BytesMut::new();
+            let mut seq = 0u64;
+            while read_one_s2s_frame(&mut body, &mut buf, true)
+                .await
+                .is_some()
+            {
+                if let Some(ref notify) = on_frame {
+                    notify.notify_one();
+                }
+                gate.notified().await;
+                s2s.send_ack(seq, seq + 1, false, false);
+                seq += 1;
+            }
+            s2s.send_eof();
+        }
+    })
+    .await
+}
+
+async fn auto_ack_s2s_server() -> MockH2Server {
+    MockH2Server::start(|_conn_id, req, respond| async move {
+        let Some(mut s2s) = S2sResponder::open(respond) else {
+            return;
+        };
+        let mut body = req.into_body();
+        let mut buf = BytesMut::new();
+        let mut seq = 0u64;
+        while read_one_s2s_frame(&mut body, &mut buf, true)
+            .await
+            .is_some()
+        {
+            s2s.send_ack(seq, seq + 1, false, false);
+            seq += 1;
+        }
+        s2s.send_eof();
+    })
+    .await
+}
+
+async fn submit_and_ack(session: &AppendSession, input: AppendInput) -> AppendAck {
+    session
+        .submit(input)
+        .await
+        .expect("submit accepted")
+        .await
+        .expect("ack succeeded")
+}
+
 // spec: r1 A2, A2a, A2b, A2c, A2d, A5
 #[tokio::test]
 async fn spec_a2_validation_before_capacity_and_split_reserve_submit() {
-    let (basin_name, stream_name) = test_basin_and_stream();
-
     // Server holds the first batch unacked until released so capacity is full.
     let release = Arc::new(tokio::sync::Notify::new());
-    let server = MockH2Server::start({
-        let release = release.clone();
-        move |_conn_id, req, mut respond| {
-            let release = release.clone();
-            async move {
-                let resp = Response::builder()
-                    .status(200)
-                    .header("content-type", "s2s/proto")
-                    .body(())
-                    .unwrap();
-                let Ok(mut send) = respond.send_response(resp, false) else {
-                    return;
-                };
-                let mut body = req.into_body();
-                let mut buf = BytesMut::new();
-                let mut seq = 0u64;
-                while read_one_s2s_frame(&mut body, &mut buf, true)
-                    .await
-                    .is_some()
-                {
-                    release.notified().await;
-                    let _ = send.send_data(
-                        encode_s2s_regular_frame(&proto_append_ack(seq, seq + 1), false),
-                        false,
-                    );
-                    seq += 1;
-                }
-                let _ = send.send_data(Bytes::new(), true);
-            }
-        }
-    })
-    .await;
-
-    let stream = server
-        .client(no_retry_config())
-        .basin(basin_name)
-        .stream(stream_name);
+    let server = gated_ack_s2s_server(release.clone(), None).await;
+    let stream = server.stream(no_retry_config());
 
     // 1. AppendSession: reserve() validates before waiting for capacity; permit.submit() rejects
     //    batches larger than reserved_bytes, releases reservation, and leaves session open.
@@ -152,8 +172,6 @@ async fn spec_a2_validation_before_capacity_and_split_reserve_submit() {
 // spec: r1 A3, A3a, A3b, T9
 #[tokio::test]
 async fn spec_a3_t9_lazy_open_and_idle_disconnect_uses_no_budget() {
-    let (basin_name, stream_name) = test_basin_and_stream();
-
     let seen_attempts = Arc::new(Mutex::new(Vec::<String>::new()));
     let trigger_idle_reset = Arc::new(tokio::sync::Notify::new());
     let idle_reset_sent = Arc::new(tokio::sync::Notify::new());
@@ -161,7 +179,7 @@ async fn spec_a3_t9_lazy_open_and_idle_disconnect_uses_no_budget() {
         let seen_attempts = seen_attempts.clone();
         let trigger_idle_reset = trigger_idle_reset.clone();
         let idle_reset_sent = idle_reset_sent.clone();
-        move |_conn_id, req, mut respond| {
+        move |_conn_id, req, respond| {
             let seen_attempts = seen_attempts.clone();
             let trigger_idle_reset = trigger_idle_reset.clone();
             let idle_reset_sent = idle_reset_sent.clone();
@@ -172,12 +190,7 @@ async fn spec_a3_t9_lazy_open_and_idle_disconnect_uses_no_budget() {
                     g.push(hdr);
                     g.len()
                 };
-                let resp = Response::builder()
-                    .status(200)
-                    .header("content-type", "s2s/proto")
-                    .body(())
-                    .unwrap();
-                let Ok(mut send) = respond.send_response(resp, false) else {
+                let Some(mut s2s) = S2sResponder::open(respond) else {
                     return;
                 };
                 let mut body = req.into_body();
@@ -186,31 +199,22 @@ async fn spec_a3_t9_lazy_open_and_idle_disconnect_uses_no_budget() {
                     1 => {
                         // Ack batch 0, then immediately close cleanly while idle (T9).
                         let _ = read_one_s2s_frame(&mut body, &mut buf, true).await;
-                        let _ = send.send_data(
-                            encode_s2s_regular_frame(&proto_append_ack(0, 1), false),
-                            true,
-                        );
+                        s2s.send_ack(0, 1, false, true);
                     }
                     2 => {
                         // Ack batch 1, wait until caller observes idle state, then reset stream.
                         let _ = read_one_s2s_frame(&mut body, &mut buf, true).await;
-                        let _ = send.send_data(
-                            encode_s2s_regular_frame(&proto_append_ack(1, 2), false),
-                            false,
-                        );
+                        s2s.send_ack(1, 2, false, false);
                         trigger_idle_reset.notified().await;
-                        send.send_reset(h2::Reason::INTERNAL_ERROR);
+                        s2s.reset(h2::Reason::INTERNAL_ERROR);
                         idle_reset_sent.notify_one();
                     }
                     _ => {
                         // Ack batch 2 and wait for close.
                         let _ = read_one_s2s_frame(&mut body, &mut buf, true).await;
-                        let _ = send.send_data(
-                            encode_s2s_regular_frame(&proto_append_ack(2, 3), false),
-                            false,
-                        );
-                        while let Some(Ok(_)) = body.data().await {}
-                        let _ = send.send_data(Bytes::new(), true);
+                        s2s.send_ack(2, 3, false, false);
+                        let _ = drain_body(&mut body).await;
+                        s2s.send_eof();
                     }
                 }
             }
@@ -219,10 +223,7 @@ async fn spec_a3_t9_lazy_open_and_idle_disconnect_uses_no_budget() {
     .await;
 
     // max_attempts = 1: ANY budget consumption would immediately fail the session!
-    let stream = server
-        .client(no_retry_config())
-        .basin(basin_name)
-        .stream(stream_name);
+    let stream = server.stream(no_retry_config());
 
     // 1. Opening and closing idle AppendSession and Producer sends ZERO HTTP requests (A3).
     let idle_sess = stream.append_session(AppendSessionConfig::new()).unwrap();
@@ -246,13 +247,13 @@ async fn spec_a3_t9_lazy_open_and_idle_disconnect_uses_no_budget() {
     let session = stream.append_session(AppendSessionConfig::new()).unwrap();
     assert_eq!(server.request_count(), 0);
 
-    let ack0 = session
-        .submit(sample_append_input())
-        .await
-        .unwrap()
-        .await
-        .unwrap();
-    assert_eq!(ack0.end.seq_num, 1);
+    assert_eq!(
+        submit_and_ack(&session, sample_append_input())
+            .await
+            .end
+            .seq_num,
+        1
+    );
     // Allow the session task to process the clean EOF while idle; must NOT open request #2 yet.
     tokio::time::sleep(Duration::from_millis(20)).await;
     assert_eq!(
@@ -261,13 +262,13 @@ async fn spec_a3_t9_lazy_open_and_idle_disconnect_uses_no_budget() {
         "A3: idle clean end must not eagerly open a new request"
     );
 
-    let ack1 = session
-        .submit(sample_append_input())
-        .await
-        .unwrap()
-        .await
-        .unwrap();
-    assert_eq!(ack1.end.seq_num, 2);
+    assert_eq!(
+        submit_and_ack(&session, sample_append_input())
+            .await
+            .end
+            .seq_num,
+        2
+    );
     // Trigger RST_STREAM while idle, allow loopback delivery to the client task, and confirm it
     // does not fail or eagerly reconnect.
     let reset_done = idle_reset_sent.notified();
@@ -280,13 +281,13 @@ async fn spec_a3_t9_lazy_open_and_idle_disconnect_uses_no_budget() {
         "A3/T9: idle break must not eagerly open a new request"
     );
 
-    let ack2 = session
-        .submit(sample_append_input())
-        .await
-        .unwrap()
-        .await
-        .unwrap();
-    assert_eq!(ack2.end.seq_num, 3);
+    assert_eq!(
+        submit_and_ack(&session, sample_append_input())
+            .await
+            .end
+            .seq_num,
+        3
+    );
     session.close().await.unwrap();
 
     assert_eq!(
@@ -299,46 +300,9 @@ async fn spec_a3_t9_lazy_open_and_idle_disconnect_uses_no_budget() {
 // spec: r1 A4, A4a, A4b, A4c, T8
 #[tokio::test]
 async fn spec_a4_fifo_capacity_cancel_and_closing_wakes_waiters() {
-    let (basin_name, stream_name) = test_basin_and_stream();
-
     let ack_gate = Arc::new(tokio::sync::Notify::new());
-    let server = MockH2Server::start({
-        let ack_gate = ack_gate.clone();
-        move |_conn_id, req, mut respond| {
-            let ack_gate = ack_gate.clone();
-            async move {
-                let resp = Response::builder()
-                    .status(200)
-                    .header("content-type", "s2s/proto")
-                    .body(())
-                    .unwrap();
-                let Ok(mut send) = respond.send_response(resp, false) else {
-                    return;
-                };
-                let mut body = req.into_body();
-                let mut buf = BytesMut::new();
-                let mut seq = 0u64;
-                while read_one_s2s_frame(&mut body, &mut buf, true)
-                    .await
-                    .is_some()
-                {
-                    ack_gate.notified().await;
-                    let _ = send.send_data(
-                        encode_s2s_regular_frame(&proto_append_ack(seq, seq + 1), false),
-                        false,
-                    );
-                    seq += 1;
-                }
-                let _ = send.send_data(Bytes::new(), true);
-            }
-        }
-    })
-    .await;
-
-    let stream = server
-        .client(no_retry_config())
-        .basin(basin_name)
-        .stream(stream_name);
+    let server = gated_ack_s2s_server(ack_gate.clone(), None).await;
+    let stream = server.stream(no_retry_config());
 
     // 1. FIFO capacity: max_unacked_bytes = 1 MiB. Batch 1 takes 700 KiB -> 324 KiB remaining.
     //    Waiter A requests 500 KiB (must wait). Waiter B requests 200 KiB (fits in 324 KiB, but
@@ -413,29 +377,18 @@ async fn spec_a4_fifo_capacity_cancel_and_closing_wakes_waiters() {
 
     // 3. Producer rejects reserve()/submit() immediately once its owned AppendSession fails, even
     //    while permit capacity is still available (A4c/A9).
-    let fail_server = MockH2Server::start(|_conn_id, req, mut respond| async move {
-        let resp = Response::builder()
-            .status(200)
-            .header("content-type", "s2s/proto")
-            .body(())
-            .unwrap();
-        let Ok(mut send) = respond.send_response(resp, false) else {
+    let fail_server = MockH2Server::start(|_conn_id, req, respond| async move {
+        let Some(mut s2s) = S2sResponder::open(respond) else {
             return;
         };
         let mut body = req.into_body();
         let mut buf = BytesMut::new();
         let _ = read_one_s2s_frame(&mut body, &mut buf, true).await;
-        let _ = send.send_data(
-            encode_s2s_terminal_frame(412, br#"{"seq_num_mismatch":99}"#),
-            true,
-        );
+        s2s.send_terminal(412, br#"{"seq_num_mismatch":99}"#);
     })
     .await;
-    let (fail_basin, fail_stream) = test_basin_and_stream();
     let producer = fail_server
-        .client(no_retry_config())
-        .basin(fail_basin)
-        .stream(fail_stream)
+        .stream(no_retry_config())
         .producer(ProducerConfig::new().with_max_batch_records(1).unwrap())
         .unwrap();
     let t = producer
@@ -473,49 +426,32 @@ async fn spec_a4_fifo_capacity_cancel_and_closing_wakes_waiters() {
 // spec: r1 A5
 #[tokio::test]
 async fn spec_a5_producer_match_seq_overflow() {
-    let (basin_name, stream_name) = test_basin_and_stream();
-
     // Producer match_seq_num overflow rejects submit() with ValidationError without accepting
     // and leaves the producer open to flush/close earlier accepted records (A5). Per A5, end =
     // match_seq_num + record_count <= u64::MAX:
     //   - match_seq_num = u64::MAX rejects even the first record;
     //   - match_seq_num = u64::MAX - 1 accepts 1 record (end = u64::MAX) and rejects the 2nd.
-    let wire_match_seq = Arc::new(std::sync::Mutex::new(None::<u64>));
+    let wire_match_seq = Arc::new(Mutex::new(None::<u64>));
     let wire_match_seq_srv = wire_match_seq.clone();
-    let server = MockH2Server::start(move |_conn_id, req, mut respond| {
+    let server = MockH2Server::start(move |_conn_id, req, respond| {
         let wire_match_seq_srv = wire_match_seq_srv.clone();
         async move {
-            let resp = Response::builder()
-                .status(200)
-                .header("content-type", "s2s/proto")
-                .body(())
-                .unwrap();
-            let Ok(mut send) = respond.send_response(resp, false) else {
+            let Some(mut s2s) = S2sResponder::open(respond) else {
                 return;
             };
             let mut body = req.into_body();
             let mut buf = BytesMut::new();
-            if let Some(SessionMessage::Regular(regular)) =
-                read_one_s2s_frame(&mut body, &mut buf, true).await
-            {
-                let payload = regular.decompressed().unwrap();
-                let decoded = api::stream::proto::AppendInput::decode(payload).unwrap();
+            if let Some(decoded) = read_append_input(&mut body, &mut buf).await {
                 *wire_match_seq_srv.lock().unwrap() = decoded.match_seq_num;
-                let _ = send.send_data(
-                    encode_s2s_regular_frame(&proto_append_ack(u64::MAX - 1, u64::MAX), false),
-                    false,
-                );
+                s2s.send_ack(u64::MAX - 1, u64::MAX, false, false);
             }
-            while let Some(Ok(_)) = body.data().await {}
-            let _ = send.send_data(Bytes::new(), true);
+            let _ = drain_body(&mut body).await;
+            s2s.send_eof();
         }
     })
     .await;
 
-    let stream = server
-        .client(no_retry_config())
-        .basin(basin_name)
-        .stream(stream_name);
+    let stream = server.stream(no_retry_config());
 
     // match_seq_num = u64::MAX cannot fit even a single record (end would overflow u64).
     let at_max = stream
@@ -563,43 +499,15 @@ async fn spec_a5_producer_match_seq_overflow() {
 // spec: r1 A5a
 #[tokio::test]
 async fn spec_a5a_producer_flush_partial_batch_on_backpressure() {
-    let (basin_name, stream_name) = test_basin_and_stream();
-
     // 1. Lost-wakeup / multi-task reserve() race: Task X acquires a 600 KiB permit first (nothing
     //    in batcher yet), then Task Y blocks in reserve(600 KiB) on a 1 MiB capacity budget while
     //    linger is 1 hour. When Task X submits its record into the partial batch, no other batch is
     //    in flight and Task Y is already waiting, so A5a MUST flush the partial batch immediately
     //    instead of deadlocking!
-    let race_server = MockH2Server::start(|_conn_id, req, mut respond| async move {
-        let resp = Response::builder()
-            .status(200)
-            .header("content-type", "s2s/proto")
-            .body(())
-            .unwrap();
-        let Ok(mut send) = respond.send_response(resp, false) else {
-            return;
-        };
-        let mut body = req.into_body();
-        let mut buf = BytesMut::new();
-        let mut seq = 0u64;
-        while read_one_s2s_frame(&mut body, &mut buf, true)
-            .await
-            .is_some()
-        {
-            let _ = send.send_data(
-                encode_s2s_regular_frame(&proto_append_ack(seq, seq + 1), false),
-                false,
-            );
-            seq += 1;
-        }
-        let _ = send.send_data(Bytes::new(), true);
-    })
-    .await;
+    let race_server = auto_ack_s2s_server().await;
 
     let prod_race = race_server
-        .client(no_retry_config())
-        .basin(basin_name.clone())
-        .stream(stream_name.clone())
+        .stream(no_retry_config())
         .producer(
             ProducerConfig::new()
                 .with_max_unacked_bytes(1024 * 1024)
@@ -640,18 +548,13 @@ async fn spec_a5a_producer_flush_partial_batch_on_backpressure() {
         let batch1_seen = batch1_seen.clone();
         let allow_batch1_ack = allow_batch1_ack.clone();
         let batch2_seen = batch2_seen.clone();
-        move |_conn_id, req, mut respond| {
+        move |_conn_id, req, respond| {
             let batch_received = batch_received.clone();
             let batch1_seen = batch1_seen.clone();
             let allow_batch1_ack = allow_batch1_ack.clone();
             let batch2_seen = batch2_seen.clone();
             async move {
-                let resp = Response::builder()
-                    .status(200)
-                    .header("content-type", "s2s/proto")
-                    .body(())
-                    .unwrap();
-                let Ok(mut send) = respond.send_response(resp, false) else {
+                let Some(mut s2s) = S2sResponder::open(respond) else {
                     return;
                 };
                 let mut body = req.into_body();
@@ -668,13 +571,10 @@ async fn spec_a5a_producer_flush_partial_batch_on_backpressure() {
                     } else if n == 2 {
                         batch2_seen.notify_one();
                     }
-                    let _ = send.send_data(
-                        encode_s2s_regular_frame(&proto_append_ack(seq, seq + 1), false),
-                        false,
-                    );
+                    s2s.send_ack(seq, seq + 1, false, false);
                     seq += 1;
                 }
-                let _ = send.send_data(Bytes::new(), true);
+                s2s.send_eof();
             }
         }
     })
@@ -682,9 +582,7 @@ async fn spec_a5a_producer_flush_partial_batch_on_backpressure() {
 
     let prod_steady = Arc::new(
         steady_server
-            .client(no_retry_config())
-            .basin(basin_name)
-            .stream(stream_name)
+            .stream(no_retry_config())
             .producer(
                 ProducerConfig::new()
                     .with_max_unacked_bytes(1024 * 1024)
@@ -746,8 +644,6 @@ async fn spec_a5a_producer_flush_partial_batch_on_backpressure() {
 // spec: r1 A6, A6a, A6b, A6c, A6d, A8, A8b, A9, T10
 #[tokio::test]
 async fn spec_a6_a9_outcome_table_all_five_scenarios_and_producer_passthrough() {
-    let (basin_name, stream_name) = test_basin_and_stream();
-
     // Helper: runs the exact 3-batch scenario (A=40 KiB, B=40 KiB, C=1 KiB) where A and B fill
     // the 65535-byte HTTP/2 initial stream flow-control window so A and B are guaranteed sent while
     // C is guaranteed accepted but NEVER sent!
@@ -761,8 +657,6 @@ async fn spec_a6_a9_outcome_table_all_five_scenarios_and_producer_passthrough() 
     }
 
     async fn run_scenario(
-        basin_name: BasinName,
-        stream_name: StreamName,
         scenario: Scenario,
     ) -> (
         AppendSessionError,
@@ -826,6 +720,7 @@ async fn spec_a6_a9_outcome_table_all_five_scenarios_and_producer_passthrough() 
         } else {
             no_retry_config()
         };
+        let (basin_name, stream_name) = test_basin_and_stream();
         let s2 = server.client(retry);
         let session = s2
             .basin(basin_name)
@@ -851,8 +746,7 @@ async fn spec_a6_a9_outcome_table_all_five_scenarios_and_producer_passthrough() 
 
     // Row 1: Server rejects A with 412 -> A=412, B=SessionClosed(412), C=SessionClosed(412),
     // close=412
-    let (ea, eb, ec, eclose) =
-        run_scenario(basin_name.clone(), stream_name.clone(), Scenario::Reject412).await;
+    let (ea, eb, ec, eclose) = run_scenario(Scenario::Reject412).await;
     assert!(
         matches!(ea, AppendSessionError::SeqNumMismatch(_)),
         "{ea:?}"
@@ -872,12 +766,7 @@ async fn spec_a6_a9_outcome_table_all_five_scenarios_and_producer_passthrough() 
 
     // Row 2: Server fails A with storage (indefinite) -> A=storage, B=storage,
     // C=SessionClosed(storage), close=storage
-    let (ea, eb, ec, eclose) = run_scenario(
-        basin_name.clone(),
-        stream_name.clone(),
-        Scenario::FailStorage,
-    )
-    .await;
+    let (ea, eb, ec, eclose) = run_scenario(Scenario::FailStorage).await;
     assert!(
         matches!(ea, AppendSessionError::Server(ref s) if s.code.as_deref() == Some("storage")),
         "{ea:?}"
@@ -897,12 +786,7 @@ async fn spec_a6_a9_outcome_table_all_five_scenarios_and_producer_passthrough() 
 
     // Row 3: Connection lost -> A=ConnectionLost, B=ConnectionLost,
     // C=SessionClosed(ConnectionLost), close=ConnectionLost
-    let (ea, eb, ec, eclose) = run_scenario(
-        basin_name.clone(),
-        stream_name.clone(),
-        Scenario::ConnectionLost,
-    )
-    .await;
+    let (ea, eb, ec, eclose) = run_scenario(Scenario::ConnectionLost).await;
     assert!(
         matches!(ea, AppendSessionError::ConnectionLost(_)),
         "{ea:?}"
@@ -925,14 +809,16 @@ async fn spec_a6_a9_outcome_table_all_five_scenarios_and_producer_passthrough() 
     //   B = Indefinite(SessionClosed(Indefinite(412)))
     //   C = SessionClosed(Indefinite(412))
     //   close() = Indefinite(412)
-    let (ea, eb, ec, eclose) = run_scenario(
-        basin_name.clone(),
-        stream_name.clone(),
-        Scenario::RetryThen412,
-    )
-    .await;
+    let (ea, eb, ec, eclose) = run_scenario(Scenario::RetryThen412).await;
+    assert!(ea.server_error().is_none(), "E5a: {ea:?}");
+    assert!(!ea.has_no_side_effects(), "E5: {ea:?}");
     assert!(
-        matches!(ea, AppendSessionError::IndefiniteAppend(ref w) if matches!(w.final_attempt_error(), AppendSessionError::SeqNumMismatch(_))),
+        matches!(
+            ea,
+            AppendSessionError::IndefiniteAppend(ref w)
+                if matches!(w.final_attempt_error(), AppendSessionError::SeqNumMismatch(_))
+                    && w.source().and_then(|s| s.downcast_ref::<AppendSessionError>()).is_some()
+        ),
         "Row 4 A: {ea:?}"
     );
     assert!(
@@ -970,12 +856,7 @@ async fn spec_a6_a9_outcome_table_all_five_scenarios_and_producer_passthrough() 
 
     // Row 5: Client closed while A and B await acks -> A=Aborted, B=Aborted,
     // C=SessionClosed(Aborted), close=Aborted
-    let (ea, eb, ec, eclose) = run_scenario(
-        basin_name.clone(),
-        stream_name.clone(),
-        Scenario::ClientClose,
-    )
-    .await;
+    let (ea, eb, ec, eclose) = run_scenario(Scenario::ClientClose).await;
     assert!(matches!(ea, AppendSessionError::Aborted(_)), "{ea:?}");
     assert!(matches!(eb, AppendSessionError::Aborted(_)), "{eb:?}");
     assert!(
@@ -989,13 +870,8 @@ async fn spec_a6_a9_outcome_table_all_five_scenarios_and_producer_passthrough() 
 
     // T10 + A6d: Ack received before terminal error takes effect first, and Producer preserves
     // exact AppendSession outcomes without overriding them.
-    let t10_server = MockH2Server::start(|_conn_id, req, mut respond| async move {
-        let resp = Response::builder()
-            .status(200)
-            .header("content-type", "s2s/proto")
-            .body(())
-            .unwrap();
-        let Ok(mut send) = respond.send_response(resp, false) else {
+    let t10_server = MockH2Server::start(|_conn_id, req, respond| async move {
+        let Some(mut s2s) = S2sResponder::open(respond) else {
             return;
         };
         let mut body = req.into_body();
@@ -1009,14 +885,12 @@ async fn spec_a6_a9_outcome_table_all_five_scenarios_and_producer_passthrough() 
             412,
             br#"{"seq_num_mismatch":1}"#,
         ));
-        let _ = send.send_data(combined.freeze(), true);
+        s2s.send_raw(combined.freeze(), true);
     })
     .await;
 
     let producer = t10_server
-        .client(no_retry_config())
-        .basin(basin_name)
-        .stream(stream_name)
+        .stream(no_retry_config())
         .producer(
             ProducerConfig::new()
                 .with_max_batch_records(1)
@@ -1046,8 +920,6 @@ async fn spec_a6_a9_outcome_table_all_five_scenarios_and_producer_passthrough() 
 // spec: r1 A7, A4c
 #[tokio::test]
 async fn spec_a7_producer_flush_isolation_and_close_interaction() {
-    let (basin_name, stream_name) = test_basin_and_stream();
-
     let batch0_received = Arc::new(tokio::sync::Notify::new());
     let allow_batch0_ack = Arc::new(tokio::sync::Notify::new());
     let batch0_records = Arc::new(AtomicUsize::new(0));
@@ -1055,61 +927,40 @@ async fn spec_a7_producer_flush_isolation_and_close_interaction() {
         let batch0_received = batch0_received.clone();
         let allow_batch0_ack = allow_batch0_ack.clone();
         let batch0_records = batch0_records.clone();
-        move |_conn_id, req, mut respond| {
+        move |_conn_id, req, respond| {
             let batch0_received = batch0_received.clone();
             let allow_batch0_ack = allow_batch0_ack.clone();
             let batch0_records = batch0_records.clone();
             async move {
-                let resp = Response::builder()
-                    .status(200)
-                    .header("content-type", "s2s/proto")
-                    .body(())
-                    .unwrap();
-                let Ok(mut send) = respond.send_response(resp, false) else {
+                let Some(mut s2s) = S2sResponder::open(respond) else {
                     return;
                 };
                 let mut body = req.into_body();
                 let mut buf = BytesMut::new();
                 // Batch 0 succeeds after gate; Batch 1 fails with 412.
-                if let Some(SessionMessage::Regular(regular)) =
-                    read_one_s2s_frame(&mut body, &mut buf, true).await
-                {
-                    let decoded =
-                        api::stream::proto::AppendInput::decode(regular.decompressed().unwrap())
-                            .unwrap();
+                if let Some(decoded) = read_append_input(&mut body, &mut buf).await {
                     batch0_records.store(decoded.records.len(), Ordering::SeqCst);
                     batch0_received.notify_one();
                     allow_batch0_ack.notified().await;
-                    let _ = send.send_data(
-                        encode_s2s_regular_frame(
-                            &proto_append_ack(0, decoded.records.len() as u64),
-                            false,
-                        ),
-                        false,
-                    );
+                    s2s.send_ack(0, decoded.records.len() as u64, false, false);
                 }
                 if read_one_s2s_frame(&mut body, &mut buf, true)
                     .await
                     .is_some()
                 {
-                    let _ = send.send_data(
-                        encode_s2s_terminal_frame(412, br#"{"seq_num_mismatch":1}"#),
-                        true,
-                    );
+                    s2s.send_terminal(412, br#"{"seq_num_mismatch":1}"#);
                 }
             }
         }
     })
     .await;
 
-    let stream = server
-        .client(no_retry_config())
-        .basin(basin_name.clone())
-        .stream(stream_name.clone());
+    let stream = server.stream(no_retry_config());
 
-    // 1. With max_batch_records = 10 and long linger, flush() cuts the partial batch containing t0
-    //    so a record accepted after flush() begins is NOT co-batched with t0, and a failure on that
-    //    later record + close() does NOT fail flush0!
+    // 1. Empty flush succeeds immediately without opening a request, and leaves producer reusable;
+    //    then with max_batch_records = 10 and long linger, flush() cuts the partial batch
+    //    containing t0 so a record accepted after flush() begins is NOT co-batched with t0, and a
+    //    failure on that later record + close() does NOT fail flush0!
     let producer = Arc::new(
         stream
             .producer(
@@ -1120,6 +971,8 @@ async fn spec_a7_producer_flush_isolation_and_close_interaction() {
             )
             .unwrap(),
     );
+    producer.flush().await.expect("empty flush succeeds");
+    assert_eq!(server.request_count(), 0);
 
     let t0 = producer
         .submit(AppendRecord::new("ok").unwrap())
@@ -1182,49 +1035,10 @@ async fn spec_a7_producer_flush_isolation_and_close_interaction() {
 // spec: r1 A8a, A8c, T8
 #[tokio::test]
 async fn spec_a8_t8_close_idempotent_cancel_wait_and_drop_aborts() {
-    let (basin_name, stream_name) = test_basin_and_stream();
-
     let ack_gate = Arc::new(tokio::sync::Notify::new());
     let frame_seen = Arc::new(tokio::sync::Notify::new());
-    let server = MockH2Server::start({
-        let ack_gate = ack_gate.clone();
-        let frame_seen = frame_seen.clone();
-        move |_conn_id, req, mut respond| {
-            let ack_gate = ack_gate.clone();
-            let frame_seen = frame_seen.clone();
-            async move {
-                let resp = Response::builder()
-                    .status(200)
-                    .header("content-type", "s2s/proto")
-                    .body(())
-                    .unwrap();
-                let Ok(mut send) = respond.send_response(resp, false) else {
-                    return;
-                };
-                let mut body = req.into_body();
-                let mut buf = BytesMut::new();
-                if read_one_s2s_frame(&mut body, &mut buf, true)
-                    .await
-                    .is_some()
-                {
-                    frame_seen.notify_one();
-                    ack_gate.notified().await;
-                    let _ = send.send_data(
-                        encode_s2s_regular_frame(&proto_append_ack(0, 1), false),
-                        false,
-                    );
-                }
-                while let Some(Ok(_)) = body.data().await {}
-                let _ = send.send_data(Bytes::new(), true);
-            }
-        }
-    })
-    .await;
-
-    let stream = server
-        .client(no_retry_config())
-        .basin(basin_name)
-        .stream(stream_name);
+    let server = gated_ack_s2s_server(ack_gate.clone(), Some(frame_seen.clone())).await;
+    let stream = server.stream(no_retry_config());
 
     // 1. Dropping a close(&self) future cancels only the wait (T8); repeated/concurrent close()
     //    calls all return the exact same result (A8a).
@@ -1272,13 +1086,37 @@ async fn spec_a8_t8_close_idempotent_cancel_wait_and_drop_aborts() {
     let err = drop_ticket.await.unwrap_err();
     assert!(matches!(err, AppendSessionError::Aborted(_)), "{err:?}");
     assert!(!err.has_no_side_effects());
+
+    // 3. Dropping Producer with buffered (unsent) records fails all claimable tickets without
+    //    flushing them (A8c).
+    let drop_prod = stream
+        .producer(ProducerConfig::new().with_linger(Duration::from_secs(60)))
+        .unwrap();
+    let prod_t1 = drop_prod
+        .submit(AppendRecord::new("buf-1").unwrap())
+        .await
+        .unwrap();
+    let prod_t2 = drop_prod
+        .submit(AppendRecord::new("buf-2").unwrap())
+        .await
+        .unwrap();
+    drop(drop_prod);
+    for t in [prod_t1, prod_t2] {
+        let err = t.await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                AppendSessionError::SessionClosed(ref c)
+                    if matches!(c.failure(), Some(AppendSessionError::Aborted(_)))
+            ),
+            "A8c: dropped producer must fail unsent tickets with SessionClosed(Some(Aborted)), got {err:?}"
+        );
+    }
 }
 
 // spec: r1 T6a
 #[tokio::test]
 async fn spec_t6a_append_reconnect_advice_cooldown() {
-    let (basin_name, stream_name) = test_basin_and_stream();
-
     // T6a: Reconnect advice triggers handover to a new connection, then a second reconnect
     // advice within 60 s is ignored (stays on the same connection!).
     let seen_conns = Arc::new(Mutex::new(Vec::<usize>::new()));
@@ -1286,18 +1124,13 @@ async fn spec_t6a_append_reconnect_advice_cooldown() {
     let advice_server = MockH2Server::start({
         let seen_conns = seen_conns.clone();
         let req_idx = req_idx.clone();
-        move |conn_id, req, mut respond| {
+        move |conn_id, req, respond| {
             let seen_conns = seen_conns.clone();
             let req_idx = req_idx.clone();
             async move {
                 let n = req_idx.fetch_add(1, Ordering::SeqCst);
                 seen_conns.lock().unwrap().push(conn_id);
-                let resp = Response::builder()
-                    .status(200)
-                    .header("content-type", "s2s/proto")
-                    .body(())
-                    .unwrap();
-                let Ok(mut send) = respond.send_response(resp, false) else {
+                let Some(mut s2s) = S2sResponder::open(respond) else {
                     return;
                 };
                 let mut body = req.into_body();
@@ -1305,27 +1138,18 @@ async fn spec_t6a_append_reconnect_advice_cooldown() {
                 if n == 0 {
                     // Ack batch 0 with reconnect-advised bit -> client drains and closes body.
                     let _ = read_one_s2s_frame(&mut body, &mut buf, true).await;
-                    let _ = send.send_data(
-                        encode_s2s_regular_frame(&proto_append_ack(0, 1), true),
-                        false,
-                    );
-                    while let Some(Ok(_)) = body.data().await {}
-                    let _ = send.send_data(Bytes::new(), true);
+                    s2s.send_ack(0, 1, true, false);
+                    let _ = drain_body(&mut body).await;
+                    s2s.send_eof();
                 } else {
                     // Request 2: ack batch 1 WITH reconnect-advised bit (must be ignored within
                     // 60 s cooldown!), then ack batch 2 on the SAME request!
                     let _ = read_one_s2s_frame(&mut body, &mut buf, true).await;
-                    let _ = send.send_data(
-                        encode_s2s_regular_frame(&proto_append_ack(1, 2), true),
-                        false,
-                    );
+                    s2s.send_ack(1, 2, true, false);
                     let _ = read_one_s2s_frame(&mut body, &mut buf, true).await;
-                    let _ = send.send_data(
-                        encode_s2s_regular_frame(&proto_append_ack(2, 3), false),
-                        false,
-                    );
-                    while let Some(Ok(_)) = body.data().await {}
-                    let _ = send.send_data(Bytes::new(), true);
+                    s2s.send_ack(2, 3, false, false);
+                    let _ = drain_body(&mut body).await;
+                    s2s.send_eof();
                 }
             }
         }
@@ -1333,44 +1157,18 @@ async fn spec_t6a_append_reconnect_advice_cooldown() {
     .await;
 
     let session = advice_server
-        .client(no_retry_config())
-        .basin(basin_name.clone())
-        .stream(stream_name.clone())
+        .stream(no_retry_config())
         .append_session(AppendSessionConfig::new())
         .unwrap();
-    assert_eq!(
-        session
-            .submit(sample_append_input())
-            .await
-            .unwrap()
-            .await
-            .unwrap()
-            .end
-            .seq_num,
-        1
-    );
-    assert_eq!(
-        session
-            .submit(sample_append_input())
-            .await
-            .unwrap()
-            .await
-            .unwrap()
-            .end
-            .seq_num,
-        2
-    );
-    assert_eq!(
-        session
-            .submit(sample_append_input())
-            .await
-            .unwrap()
-            .await
-            .unwrap()
-            .end
-            .seq_num,
-        3
-    );
+    for expected_end in 1u64..=3 {
+        assert_eq!(
+            submit_and_ack(&session, sample_append_input())
+                .await
+                .end
+                .seq_num,
+            expected_end
+        );
+    }
     session.close().await.unwrap();
     let conns = seen_conns.lock().unwrap().clone();
     assert_eq!(
@@ -1387,8 +1185,6 @@ async fn spec_t6a_append_reconnect_advice_cooldown() {
 // spec: r1 T7c
 #[tokio::test]
 async fn spec_t7c_oldest_batch_ack_timeout() {
-    let (basin_name, stream_name) = test_basin_and_stream();
-
     // T7c: Only the oldest unacked batch is timed! With request_timeout = 10s (virtual time):
     //   - Batch 0 and Batch 1 are pipelined together at t = 0.
     //   - Advance 6s (< 10s) -> ack Batch 0.
@@ -1404,18 +1200,13 @@ async fn spec_t7c_oldest_batch_ack_timeout() {
         let send_ack0 = send_ack0.clone();
         let send_ack1 = send_ack1.clone();
         let b2_received = b2_received.clone();
-        move |_conn_id, req, mut respond| {
+        move |_conn_id, req, respond| {
             let both_received = both_received.clone();
             let send_ack0 = send_ack0.clone();
             let send_ack1 = send_ack1.clone();
             let b2_received = b2_received.clone();
             async move {
-                let resp = Response::builder()
-                    .status(200)
-                    .header("content-type", "s2s/proto")
-                    .body(())
-                    .unwrap();
-                let Ok(mut send) = respond.send_response(resp, false) else {
+                let Some(mut s2s) = S2sResponder::open(respond) else {
                     return;
                 };
                 let mut body = req.into_body();
@@ -1424,15 +1215,9 @@ async fn spec_t7c_oldest_batch_ack_timeout() {
                 let _ = read_one_s2s_frame(&mut body, &mut buf, true).await;
                 both_received.notify_one();
                 send_ack0.notified().await;
-                let _ = send.send_data(
-                    encode_s2s_regular_frame(&proto_append_ack(0, 1), false),
-                    false,
-                );
+                s2s.send_ack(0, 1, false, false);
                 send_ack1.notified().await;
-                let _ = send.send_data(
-                    encode_s2s_regular_frame(&proto_append_ack(1, 2), false),
-                    false,
-                );
+                s2s.send_ack(1, 2, false, false);
                 // Never ack Batch 2.
                 let _ = read_one_s2s_frame(&mut body, &mut buf, true).await;
                 b2_received.notify_one();
@@ -1442,23 +1227,12 @@ async fn spec_t7c_oldest_batch_ack_timeout() {
     })
     .await;
 
-    let ep = timeout_server.endpoint_url();
-    let endpoints = S2Endpoints::new(
-        AccountEndpoint::new(&ep).unwrap(),
-        BasinEndpoint::new(&ep).unwrap(),
-    )
-    .unwrap();
-    let s2 = S2::new(
-        S2Config::new("test-token")
-            .with_endpoints(endpoints)
-            .with_request_timeout(Duration::from_secs(10))
-            .unwrap()
-            .with_retry(no_retry_config()),
-    )
-    .unwrap();
-    let session = s2
-        .basin(basin_name)
-        .stream(stream_name)
+    let session = timeout_server
+        .stream_with(|cfg| {
+            cfg.with_request_timeout(Duration::from_secs(10))
+                .unwrap()
+                .with_retry(no_retry_config())
+        })
         .append_session(AppendSessionConfig::new())
         .unwrap();
 
@@ -1468,15 +1242,11 @@ async fn spec_t7c_oldest_batch_ack_timeout() {
         .await
         .expect("both batches received");
 
-    tokio::time::pause();
-    tokio::time::advance(Duration::from_secs(6)).await;
-    tokio::time::resume();
+    advance_virtual_time(Duration::from_secs(6)).await;
     send_ack0.notify_one();
     assert_eq!(t0.await.unwrap().end.seq_num, 1);
 
-    tokio::time::pause();
-    tokio::time::advance(Duration::from_secs(6)).await;
-    tokio::time::resume();
+    advance_virtual_time(Duration::from_secs(6)).await;
     send_ack1.notify_one();
     assert_eq!(
         t1.await
@@ -1490,9 +1260,7 @@ async fn spec_t7c_oldest_batch_ack_timeout() {
     tokio::time::timeout(Duration::from_secs(2), b2_received.notified())
         .await
         .expect("Batch 2 received");
-    tokio::time::pause();
-    tokio::time::advance(Duration::from_secs(11)).await;
-    tokio::time::resume();
+    advance_virtual_time(Duration::from_secs(11)).await;
     let err = t2.await.unwrap_err();
     assert!(matches!(err, AppendSessionError::Timeout(_)), "{err:?}");
     assert!(err.is_retryable());
@@ -1502,16 +1270,6 @@ async fn spec_t7c_oldest_batch_ack_timeout() {
 // spec: r1 T7c
 #[tokio::test]
 async fn spec_t7c_stalled_append_write_times_out_and_slow_progressing_upload_succeeds() {
-    let (basin_name, stream_name) = test_basin_and_stream();
-    // 256 KiB payload exceeds h2's default 64 KiB initial stream receive window so the peer must
-    // grant WINDOW_UPDATEs for upload to finish.
-    let large_batch = || {
-        AppendInput::new(
-            AppendRecordBatch::try_from_iter([AppendRecord::new(vec![b'x'; 256 * 1024]).unwrap()])
-                .unwrap(),
-        )
-    };
-
     // 1. Peer accepts 200 OK headers and stops granting HTTP/2 send capacity mid-batch (while
     //    keeping the connection and stream open). Attempt 1 must time out, retire the wedged
     //    connection, and retry cleanly on a fresh connection.
@@ -1520,67 +1278,50 @@ async fn spec_t7c_stalled_append_write_times_out_and_slow_progressing_upload_suc
     let stall_server = MockH2Server::start({
         let seen_conns = seen_conns.clone();
         let attempt_ctr = attempt_ctr.clone();
-        move |conn_id, req, mut respond| {
+        move |conn_id, req, respond| {
             let seen_conns = seen_conns.clone();
             let attempt_ctr = attempt_ctr.clone();
             async move {
                 seen_conns.lock().unwrap().push(conn_id);
                 let attempt = attempt_ctr.fetch_add(1, Ordering::SeqCst);
-                let resp = Response::builder()
-                    .status(200)
-                    .header("content-type", "s2s/proto")
-                    .body(())
-                    .unwrap();
-                let Ok(mut send) = respond.send_response(resp, false) else {
+                let Some(mut s2s) = S2sResponder::open(respond) else {
                     return;
                 };
                 let mut body = req.into_body();
                 if attempt == 0 {
-                    // Hold `_body` and `_send` open without calling release_capacity so h2's
+                    // Hold `body` and `s2s` open without calling release_capacity so h2's
                     // 64 KiB initial stream window stalls the 256 KiB upload indefinitely.
-                    let _keep_alive = (body, send);
+                    let _keep_alive = (body, s2s);
                     std::future::pending::<()>().await;
                 } else {
                     let mut buf = BytesMut::new();
                     let _ = read_one_s2s_frame(&mut body, &mut buf, true).await;
-                    let _ = send.send_data(
-                        encode_s2s_regular_frame(&proto_append_ack(0, 1), false),
-                        true,
-                    );
+                    s2s.send_ack(0, 1, false, true);
                 }
             }
         }
     })
     .await;
 
-    let ep = stall_server.endpoint_url();
-    let s2 = S2::new(
-        S2Config::new("test-token")
-            .with_endpoints(
-                S2Endpoints::new(
-                    AccountEndpoint::new(&ep).unwrap(),
-                    BasinEndpoint::new(&ep).unwrap(),
+    let session = stall_server
+        .stream_with(|cfg| {
+            cfg.with_request_timeout(Duration::from_millis(150))
+                .unwrap()
+                .with_retry(
+                    RetryConfig::new()
+                        .with_max_attempts(2)
+                        .unwrap()
+                        .with_min_base_delay(Duration::from_millis(10))
+                        .with_max_base_delay(Duration::from_millis(10))
+                        .with_append_retry_policy(AppendRetryPolicy::All),
                 )
-                .unwrap(),
-            )
-            .with_request_timeout(Duration::from_millis(150))
-            .unwrap()
-            .with_retry(
-                RetryConfig::new()
-                    .with_max_attempts(2)
-                    .unwrap()
-                    .with_min_base_delay(Duration::from_millis(10))
-                    .with_max_base_delay(Duration::from_millis(10))
-                    .with_append_retry_policy(AppendRetryPolicy::All),
-            ),
-    )
-    .unwrap();
-    let session = s2
-        .basin(basin_name.clone())
-        .stream(stream_name.clone())
+        })
         .append_session(AppendSessionConfig::new())
         .unwrap();
-    let ticket = session.submit(large_batch()).await.unwrap();
+    let ticket = session
+        .submit(sized_append_input(256 * 1024))
+        .await
+        .unwrap();
     let ack = tokio::time::timeout(Duration::from_secs(3), ticket)
         .await
         .expect("stalled append write must time out and recover")
@@ -1596,40 +1337,26 @@ async fn spec_t7c_stalled_append_write_times_out_and_slow_progressing_upload_suc
 
     // 2. With max_attempts = 1, a stalled write must fail the ticket and close() with TimeoutError
     //    instead of hanging forever.
-    let permanent_stall = MockH2Server::start(|_conn_id, req, mut respond| async move {
-        let resp = Response::builder()
-            .status(200)
-            .header("content-type", "s2s/proto")
-            .body(())
-            .unwrap();
-        let Ok(send) = respond.send_response(resp, false) else {
+    let permanent_stall = MockH2Server::start(|_conn_id, req, respond| async move {
+        let Some(s2s) = S2sResponder::open(respond) else {
             return;
         };
-        let _keep_alive = (req.into_body(), send);
+        let _keep_alive = (req.into_body(), s2s);
         std::future::pending::<()>().await;
     })
     .await;
-    let ep = permanent_stall.endpoint_url();
-    let s2_no_retry = S2::new(
-        S2Config::new("test-token")
-            .with_endpoints(
-                S2Endpoints::new(
-                    AccountEndpoint::new(&ep).unwrap(),
-                    BasinEndpoint::new(&ep).unwrap(),
-                )
-                .unwrap(),
-            )
-            .with_request_timeout(Duration::from_millis(120))
-            .unwrap()
-            .with_retry(no_retry_config()),
-    )
-    .unwrap();
-    let session = s2_no_retry
-        .basin(basin_name.clone())
-        .stream(stream_name.clone())
+    let session = permanent_stall
+        .stream_with(|cfg| {
+            cfg.with_request_timeout(Duration::from_millis(120))
+                .unwrap()
+                .with_retry(no_retry_config())
+        })
         .append_session(AppendSessionConfig::new())
         .unwrap();
-    let ticket = session.submit(large_batch()).await.unwrap();
+    let ticket = session
+        .submit(sized_append_input(256 * 1024))
+        .await
+        .unwrap();
     let err = tokio::time::timeout(Duration::from_secs(3), ticket)
         .await
         .expect("stalled write must not hang ticket")
@@ -1649,17 +1376,8 @@ async fn spec_t7c_stalled_append_write_times_out_and_slow_progressing_upload_suc
 
     // 3. Slow upload that keeps making forward chunk progress over > 2x request_timeout must NOT
     //    falsely time out, and the T7c ack timer must still start only after the last byte.
-    let slow_batch = AppendInput::new(
-        AppendRecordBatch::try_from_iter([AppendRecord::new(vec![b'y'; 512 * 1024]).unwrap()])
-            .unwrap(),
-    );
-    let slow_server = MockH2Server::start(|_conn_id, req, mut respond| async move {
-        let resp = Response::builder()
-            .status(200)
-            .header("content-type", "s2s/proto")
-            .body(())
-            .unwrap();
-        let Ok(mut send) = respond.send_response(resp, false) else {
+    let slow_server = MockH2Server::start(|_conn_id, req, respond| async move {
+        let Some(mut s2s) = S2sResponder::open(respond) else {
             return;
         };
         let mut body = req.into_body();
@@ -1686,33 +1404,21 @@ async fn spec_t7c_stalled_append_write_times_out_and_slow_progressing_upload_suc
         // After draining the final 64 KiB (~80 ms after client's last byte), wait another 40 ms
         // (~120 ms < 250 ms ack timeout, while total elapsed since submit is > 600 ms).
         tokio::time::sleep(Duration::from_millis(40)).await;
-        let _ = send.send_data(
-            encode_s2s_regular_frame(&proto_append_ack(0, 1), false),
-            true,
-        );
+        s2s.send_ack(0, 1, false, true);
     })
     .await;
-    let ep = slow_server.endpoint_url();
-    let s2_slow = S2::new(
-        S2Config::new("test-token")
-            .with_endpoints(
-                S2Endpoints::new(
-                    AccountEndpoint::new(&ep).unwrap(),
-                    BasinEndpoint::new(&ep).unwrap(),
-                )
-                .unwrap(),
-            )
-            .with_request_timeout(Duration::from_millis(250))
-            .unwrap()
-            .with_retry(no_retry_config()),
-    )
-    .unwrap();
-    let session = s2_slow
-        .basin(basin_name)
-        .stream(stream_name)
+    let session = slow_server
+        .stream_with(|cfg| {
+            cfg.with_request_timeout(Duration::from_millis(250))
+                .unwrap()
+                .with_retry(no_retry_config())
+        })
         .append_session(AppendSessionConfig::new())
         .unwrap();
-    let ticket = session.submit(slow_batch).await.unwrap();
+    let ticket = session
+        .submit(sized_append_input(512 * 1024))
+        .await
+        .unwrap();
     let ack = tokio::time::timeout(Duration::from_secs(3), ticket)
         .await
         .expect("slow progressing upload must complete")
@@ -1724,8 +1430,6 @@ async fn spec_t7c_stalled_append_write_times_out_and_slow_progressing_upload_suc
 // spec: r1 T6b
 #[tokio::test]
 async fn spec_t6b_append_session_server_draining_resend_and_exhaustion() {
-    let (basin_name, stream_name) = test_basin_and_stream();
-
     // 1. After progress (Batch 0 acked), terminal 503 server_draining causes AppendSession to
     //    reconnect on a fresh connection and resend ALL unacked batches (Batch 1 and Batch 2)
     //    without spending retry budget (verified with max_attempts = 1!).
@@ -1736,19 +1440,14 @@ async fn spec_t6b_append_session_server_draining_resend_and_exhaustion() {
         let seen_conns = seen_conns.clone();
         let attempt2_bodies = attempt2_bodies.clone();
         let attempt_ctr = attempt_ctr.clone();
-        move |conn_id, req, mut respond| {
+        move |conn_id, req, respond| {
             let seen_conns = seen_conns.clone();
             let attempt2_bodies = attempt2_bodies.clone();
             let attempt_ctr = attempt_ctr.clone();
             async move {
                 let n = attempt_ctr.fetch_add(1, Ordering::SeqCst);
                 seen_conns.lock().unwrap().push(conn_id);
-                let resp = Response::builder()
-                    .status(200)
-                    .header("content-type", "s2s/proto")
-                    .body(())
-                    .unwrap();
-                let Ok(mut send) = respond.send_response(resp, false) else {
+                let Some(mut s2s) = S2sResponder::open(respond) else {
                     return;
                 };
                 let mut body = req.into_body();
@@ -1756,40 +1455,22 @@ async fn spec_t6b_append_session_server_draining_resend_and_exhaustion() {
                 if n == 0 {
                     // Read Batch 0, Batch 1, Batch 2; ack Batch 0 (making progress), then fail
                     // with terminal 503 server_draining!
-                    let _ = read_one_s2s_frame(&mut body, &mut buf, true).await;
-                    let _ = read_one_s2s_frame(&mut body, &mut buf, true).await;
-                    let _ = read_one_s2s_frame(&mut body, &mut buf, true).await;
-                    let _ = send.send_data(
-                        encode_s2s_regular_frame(&proto_append_ack(0, 1), false),
-                        false,
-                    );
-                    let _ = send.send_data(
-                        encode_s2s_terminal_frame(
-                            503,
-                            br#"{"code":"server_draining","message":"draining"}"#,
-                        ),
-                        true,
-                    );
+                    for _ in 0..3 {
+                        let _ = read_one_s2s_frame(&mut body, &mut buf, true).await;
+                    }
+                    s2s.send_ack(0, 1, false, false);
+                    s2s.send_terminal(503, br#"{"code":"server_draining","message":"draining"}"#);
                 } else {
                     let mut seq = 1u64;
-                    while let Some(SessionMessage::Regular(regular)) =
-                        read_one_s2s_frame(&mut body, &mut buf, true).await
-                    {
-                        let decoded = api::stream::proto::AppendInput::decode(
-                            regular.decompressed().unwrap(),
-                        )
-                        .unwrap();
+                    while let Some(decoded) = read_append_input(&mut body, &mut buf).await {
                         attempt2_bodies
                             .lock()
                             .unwrap()
                             .push(decoded.records[0].body.to_vec());
-                        let _ = send.send_data(
-                            encode_s2s_regular_frame(&proto_append_ack(seq, seq + 1), false),
-                            false,
-                        );
+                        s2s.send_ack(seq, seq + 1, false, false);
                         seq += 1;
                     }
-                    let _ = send.send_data(Bytes::new(), true);
+                    s2s.send_eof();
                 }
             }
         }
@@ -1797,9 +1478,7 @@ async fn spec_t6b_append_session_server_draining_resend_and_exhaustion() {
     .await;
 
     let session = resend_server
-        .client(no_retry_config()) // max_attempts = 1!
-        .basin(basin_name.clone())
-        .stream(stream_name.clone())
+        .stream(no_retry_config()) // max_attempts = 1!
         .append_session(AppendSessionConfig::new())
         .unwrap();
     let t0 = session
@@ -1832,37 +1511,22 @@ async fn spec_t6b_append_session_server_draining_resend_and_exhaustion() {
 
     // 2. Sustained server_draining with NO progress exhausts max_attempts and resolves both
     //    AppendSession::close() and all unacked tickets promptly (T6).
-    let draining_server = MockH2Server::start(|_conn_id, req, mut respond| async move {
-        let resp = Response::builder()
-            .status(200)
-            .header("content-type", "s2s/proto")
-            .body(())
-            .unwrap();
-        let Ok(mut send) = respond.send_response(resp, false) else {
+    let draining_server = MockH2Server::start(|_conn_id, req, respond| async move {
+        let Some(mut s2s) = S2sResponder::open(respond) else {
             return;
         };
         let mut body = req.into_body();
         let mut buf = BytesMut::new();
         let _ = read_one_s2s_frame(&mut body, &mut buf, true).await;
-        let _ = send.send_data(
-            encode_s2s_terminal_frame(
-                503,
-                br#"{"code":"server_draining","message":"still draining"}"#,
-            ),
-            true,
+        s2s.send_terminal(
+            503,
+            br#"{"code":"server_draining","message":"still draining"}"#,
         );
     })
     .await;
 
-    let retry_2 = RetryConfig::new()
-        .with_max_attempts(2)
-        .unwrap()
-        .with_min_base_delay(Duration::ZERO)
-        .with_max_base_delay(Duration::ZERO);
     let session = draining_server
-        .client(retry_2)
-        .basin(basin_name)
-        .stream(stream_name)
+        .stream(fast_retry_config(2))
         .append_session(AppendSessionConfig::new())
         .unwrap();
     let t0 = session
@@ -1890,14 +1554,8 @@ async fn spec_t6b_append_session_server_draining_resend_and_exhaustion() {
 // ack 0 and deliver SeqNumMismatch (not ConnectionLost) to batch 1 (T10, A6a).
 #[tokio::test]
 async fn regression_append_session_drains_buffered_ack_and_terminal_412_after_body_drop() {
-    let (basin_name, stream_name) = test_basin_and_stream();
-    let server = MockH2Server::start(|_conn_id, req, mut respond| async move {
-        let resp = Response::builder()
-            .status(200)
-            .header("content-type", "s2s/proto")
-            .body(())
-            .unwrap();
-        let Ok(mut send) = respond.send_response(resp, false) else {
+    let server = MockH2Server::start(|_conn_id, req, respond| async move {
+        let Some(mut s2s) = S2sResponder::open(respond) else {
             return;
         };
         let mut body = req.into_body();
@@ -1907,21 +1565,13 @@ async fn regression_append_session_drains_buffered_ack_and_terminal_412_after_bo
         // Drop request body stream right before sending ack 0 + terminal 412 so the client's
         // input_tx.reserve() fails while responses are still in flight.
         drop(body);
-        let _ = send.send_data(
-            encode_s2s_regular_frame(&proto_append_ack(0, 1), false),
-            false,
-        );
-        let _ = send.send_data(
-            encode_s2s_terminal_frame(412, br#"{"seq_num_mismatch":1}"#),
-            true,
-        );
+        s2s.send_ack(0, 1, false, false);
+        s2s.send_terminal(412, br#"{"seq_num_mismatch":1}"#);
     })
     .await;
 
     let session = server
-        .client(no_retry_config())
-        .basin(basin_name)
-        .stream(stream_name)
+        .stream(no_retry_config())
         .append_session(AppendSessionConfig::new())
         .unwrap();
 
@@ -1952,73 +1602,24 @@ async fn regression_append_session_drains_buffered_ack_and_terminal_412_after_bo
     );
 }
 
-// Regression: invalid ack record count delivers ProtocolError to the batch ticket (not Aborted).
-#[tokio::test]
-async fn regression_append_session_invalid_ack_delivers_protocol_error_to_ticket() {
-    let (basin_name, stream_name) = test_basin_and_stream();
-    let server = MockH2Server::start(|_conn_id, req, mut respond| async move {
-        let resp = Response::builder()
-            .status(200)
-            .header("content-type", "s2s/proto")
-            .body(())
-            .unwrap();
-        let Ok(mut send) = respond.send_response(resp, false) else {
-            return;
-        };
-        let mut body = req.into_body();
-        let mut buf = BytesMut::new();
-        let _ = read_one_s2s_frame(&mut body, &mut buf, true).await;
-        // Batch had 1 record, but server erroneously acks 2 records [0, 2).
-        let _ = send.send_data(
-            encode_s2s_regular_frame(&proto_append_ack(0, 2), false),
-            true,
-        );
-    })
-    .await;
-
-    let session = server
-        .client(no_retry_config())
-        .basin(basin_name)
-        .stream(stream_name)
-        .append_session(AppendSessionConfig::new())
-        .unwrap();
-
-    let ticket = session.submit(sample_append_input()).await.unwrap();
-    let err = ticket.await.expect_err("bad ack must yield ProtocolError");
-    assert!(
-        matches!(err, AppendSessionError::Protocol(_)),
-        "expected ProtocolError, got {err:?}"
-    );
-    let close_err = session.close().await.unwrap_err();
-    assert!(
-        matches!(close_err, AppendSessionError::Protocol(_)),
-        "{close_err:?}"
-    );
-}
-
 // spec: r1 A1
 #[tokio::test]
-async fn spec_a1_unary_append_rejects_malformed_ack_range() {
-    let (basin_name, stream_name) = test_basin_and_stream();
-
-    let server = MockH2Server::from_responses([
-        // 1. end.seq_num < start.seq_num
+async fn spec_a1_malformed_ack_returns_protocol_error() {
+    // 1. Unary append: reversed range, count mismatch, and matching count.
+    let unary_server = MockH2Server::from_responses([
+        // end.seq_num < start.seq_num
         CannedResponse::new(200, proto_append_ack(5, 3))
             .with_header("content-type", "application/protobuf"),
-        // 2. end.seq_num - start.seq_num != batch record count (submitted 2, acked 1)
+        // end.seq_num - start.seq_num != batch record count (submitted 2, acked 1)
         CannedResponse::new(200, proto_append_ack(10, 11))
             .with_header("content-type", "application/protobuf"),
-        // 3. matching count (submitted 2, acked 2) succeeds
+        // matching count (submitted 2, acked 2) succeeds
         CannedResponse::new(200, proto_append_ack(10, 12))
             .with_header("content-type", "application/protobuf"),
     ])
     .await;
 
-    let stream = server
-        .client(RetryConfig::new().with_max_attempts(1).unwrap())
-        .basin(basin_name)
-        .stream(stream_name);
-
+    let stream = unary_server.stream(no_retry_config());
     let two_records = || {
         AppendInput::new(
             AppendRecordBatch::try_from_iter([
@@ -2046,4 +1647,33 @@ async fn spec_a1_unary_append_rejects_malformed_ack_range() {
     let ok_ack = stream.append(two_records()).await.unwrap();
     assert_eq!(ok_ack.start.seq_num, 10);
     assert_eq!(ok_ack.end.seq_num, 12);
+
+    // 2. AppendSession: invalid ack record count delivers ProtocolError to ticket & close().
+    let session_server = MockH2Server::start(|_conn_id, req, respond| async move {
+        let Some(mut s2s) = S2sResponder::open(respond) else {
+            return;
+        };
+        let mut body = req.into_body();
+        let mut buf = BytesMut::new();
+        let _ = read_one_s2s_frame(&mut body, &mut buf, true).await;
+        // Batch had 1 record, but server erroneously acks 2 records [0, 2).
+        s2s.send_ack(0, 2, false, true);
+    })
+    .await;
+
+    let session = session_server
+        .stream(no_retry_config())
+        .append_session(AppendSessionConfig::new())
+        .unwrap();
+    let ticket = session.submit(sample_append_input()).await.unwrap();
+    let err = ticket.await.expect_err("bad ack must yield ProtocolError");
+    assert!(
+        matches!(err, AppendSessionError::Protocol(_)),
+        "expected ProtocolError, got {err:?}"
+    );
+    let close_err = session.close().await.unwrap_err();
+    assert!(
+        matches!(close_err, AppendSessionError::Protocol(_)),
+        "{close_err:?}"
+    );
 }

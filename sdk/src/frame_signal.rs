@@ -91,20 +91,16 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn empty_body_does_not_signal() {
-        let signal = FrameSignal::new();
-        let body = RequestFrameMonitorBody::new(Empty::<Bytes>::new(), signal.clone());
-        let collected = body.collect().await.unwrap();
-        assert!(collected.to_bytes().is_empty());
-        assert!(!signal.is_signalled());
-    }
+    async fn monitor_body_signals_only_when_frame_yielded() {
+        let empty_signal = FrameSignal::new();
+        let empty = RequestFrameMonitorBody::new(Empty::<Bytes>::new(), empty_signal.clone());
+        assert!(empty.collect().await.unwrap().to_bytes().is_empty());
+        assert!(!empty_signal.is_signalled());
 
-    #[tokio::test]
-    async fn full_body_signals_on_frame() {
-        let signal = FrameSignal::new();
-        let body = RequestFrameMonitorBody::new(Full::new(Bytes::from("hello")), signal.clone());
-        let collected = body.collect().await.unwrap();
-        assert_eq!(collected.to_bytes().as_ref(), b"hello");
-        assert!(signal.is_signalled());
+        let full_signal = FrameSignal::new();
+        let full =
+            RequestFrameMonitorBody::new(Full::new(Bytes::from("hello")), full_signal.clone());
+        assert_eq!(full.collect().await.unwrap().to_bytes().as_ref(), b"hello");
+        assert!(full_signal.is_signalled());
     }
 }

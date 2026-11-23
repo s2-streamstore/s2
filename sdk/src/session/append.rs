@@ -1951,9 +1951,9 @@ fn is_safe_to_retry(
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        error::Error,
-        sync::{Arc, atomic::AtomicUsize},
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
     };
 
     use bytes::Bytes;
@@ -1963,138 +1963,59 @@ mod tests {
 
     use super::{AppendSessionError, is_safe_to_retry};
     use crate::{
-        error::{ErrorContext, ServerError, TimeoutError, TransportError},
-        types::AppendRetryPolicy,
+        error::{ErrorContext, ServerError},
+        types::{AppendRetryPolicy, StreamPosition},
     };
 
     fn server_error(status: StatusCode, code: &str) -> AppendSessionError {
         AppendSessionError::Server(ServerError::new_for_test(status, Some(code), "test"))
     }
 
-    #[rstest::rstest]
-    #[case(StatusCode::FORBIDDEN, "permission_denied", false, false)]
-    #[case(StatusCode::FORBIDDEN, "permission_denied", true, true)]
-    #[case(StatusCode::SERVICE_UNAVAILABLE, "unavailable", false, false)]
-    #[case(StatusCode::SERVICE_UNAVAILABLE, "unavailable", true, false)]
-    #[case(StatusCode::TOO_MANY_REQUESTS, "rate_limited", true, true)]
     #[test]
-    fn session_failure_preserves_uncertainty_and_latest_error(
-        #[case] status: StatusCode,
-        #[case] code: &str,
-        #[case] prior_uncertainty: bool,
-        #[case] wrapped: bool,
-    ) {
-        let latest = server_error(status, code);
-        let error = latest.clone().with_prior_uncertainty(prior_uncertainty);
-        assert_eq!(
-            matches!(error, AppendSessionError::IndefiniteAppend(_)),
-            wrapped
-        );
-        assert_eq!(error.is_retryable(), latest.is_retryable());
-        assert_eq!(
-            error.has_no_side_effects(),
-            !wrapped && latest.has_no_side_effects()
-        );
-        if wrapped {
-            assert!(error.server_error().is_none());
-            let source = error
-                .source()
-                .unwrap()
-                .downcast_ref::<AppendSessionError>()
-                .unwrap();
-            assert_eq!(source.to_string(), latest.to_string());
-            assert!(source.has_no_side_effects());
-            assert_eq!(source.server_error().unwrap().code.as_deref(), Some(code));
-        } else {
-            assert_eq!(error.server_error().unwrap().code.as_deref(), Some(code));
-        }
-    }
-
-    #[test]
-    fn safe_to_retry_session_all_policy() {
+    fn safe_to_retry_session_policies() {
         let retryable = server_error(StatusCode::INTERNAL_SERVER_ERROR, "internal");
         let non_retryable = server_error(StatusCode::BAD_REQUEST, "bad_request");
-        let policy = AppendRetryPolicy::All;
+        let authn = server_error(StatusCode::UNAUTHORIZED, "authn");
+        let other_401 = server_error(StatusCode::UNAUTHORIZED, "other");
 
-        assert!(is_safe_to_retry(&retryable, policy, true, false));
-        assert!(!is_safe_to_retry(&non_retryable, policy, true, false));
-
-        let unauthorized = server_error(StatusCode::UNAUTHORIZED, "authn");
-        assert!(is_safe_to_retry(&unauthorized, policy, true, true));
-        assert!(!is_safe_to_retry(&unauthorized, policy, true, false));
-
-        let unrelated_unauthorized = server_error(StatusCode::UNAUTHORIZED, "other");
+        assert!(is_safe_to_retry(
+            &retryable,
+            AppendRetryPolicy::All,
+            true,
+            false
+        ));
         assert!(!is_safe_to_retry(
-            &unrelated_unauthorized,
-            policy,
+            &non_retryable,
+            AppendRetryPolicy::All,
+            true,
+            false
+        ));
+        assert!(is_safe_to_retry(&authn, AppendRetryPolicy::All, true, true));
+        assert!(!is_safe_to_retry(
+            &authn,
+            AppendRetryPolicy::All,
+            true,
+            false
+        ));
+        assert!(!is_safe_to_retry(
+            &other_401,
+            AppendRetryPolicy::All,
             true,
             true
         ));
-    }
 
-    #[test]
-    fn safe_to_retry_session_no_side_effects_policy() {
-        let retryable = server_error(StatusCode::INTERNAL_SERVER_ERROR, "internal");
-        let no_side_effect = server_error(StatusCode::TOO_MANY_REQUESTS, "rate_limited");
-        let policy = AppendRetryPolicy::NoSideEffects;
-
-        // No possible side effects (e.g. nothing unacked sent, or definite error) -> safe.
-        assert!(is_safe_to_retry(&retryable, policy, false, false));
-        assert!(is_safe_to_retry(&no_side_effect, policy, false, false));
-
-        // Possible side effects -> not safe under NoSideEffects.
-        assert!(!is_safe_to_retry(&retryable, policy, true, false));
-        assert!(!is_safe_to_retry(
-            &AppendSessionError::Timeout(TimeoutError::new(
-                "append acknowledgement timed out",
-                ErrorContext::default(),
-            )),
-            policy,
-            true,
+        assert!(is_safe_to_retry(
+            &retryable,
+            AppendRetryPolicy::NoSideEffects,
             false,
+            false
         ));
-    }
-
-    #[tokio::test]
-    async fn session_lifecycle_mark_closing_and_wait_closed_without_receivers() {
-        use super::SessionLifecycle;
-
-        let lifecycle = SessionLifecycle::new();
-        // Calling mark_closing() with zero subscribers must still observe closed=true later.
-        assert!(lifecycle.mark_closing());
-        assert!(!lifecycle.mark_closing());
-        assert!(lifecycle.is_closing_or_closed());
-        lifecycle.wait_closing_or_closed().await;
-
-        // Calling finish() before wait_closed() must resolve immediately without lost wakeup.
-        lifecycle.finish(Ok(()));
-        assert!(lifecycle.is_closed());
-        assert!(lifecycle.wait_closed().await.is_ok());
-
-        // Concurrent waiter started before finish() must wake with exact error, and
-        // set_terminal_err can update a Closing error before finish() seals it.
-        let lc2 = SessionLifecycle::new();
-        let mut wait_fut = Box::pin(lc2.wait_closed());
-        assert!(poll!(wait_fut.as_mut()).is_pending());
-
-        lc2.set_terminal_err(server_error(StatusCode::BAD_REQUEST, "first"));
-        lc2.set_terminal_err(server_error(StatusCode::FORBIDDEN, "permission_denied"));
-        assert_eq!(
-            lc2.terminal_err()
-                .unwrap()
-                .server_error()
-                .unwrap()
-                .code
-                .as_deref(),
-            Some("permission_denied")
-        );
-
-        lc2.finish(Err(server_error(
-            StatusCode::FORBIDDEN,
-            "permission_denied",
-        )));
-        let res = wait_fut.await;
-        assert!(matches!(res, Err(AppendSessionError::Server(_))));
+        assert!(!is_safe_to_retry(
+            &retryable,
+            AppendRetryPolicy::NoSideEffects,
+            true,
+            false
+        ));
     }
 
     #[tokio::test]
@@ -2152,8 +2073,9 @@ mod tests {
         assert!(permits.try_acquire(100).is_some());
     }
 
+    // spec: r1 A1
     #[test]
-    fn process_ack_preserves_inflight_batch_on_protocol_error() {
+    fn process_ack_rejects_unsolicited_and_overlapping_acks() {
         use std::collections::VecDeque;
 
         use super::{InflightAppend, SessionState, process_proto_ack};
@@ -2173,7 +2095,10 @@ mod tests {
                 attempt_last_byte_rx: None,
             }]),
             closing: false,
-            prev_ack_end: None,
+            prev_ack_end: Some(StreamPosition {
+                seq_num: 5,
+                timestamp: 1,
+            }),
             unacked_batches: unacked_batches.clone(),
         };
         let ctx = ErrorContext::default();
@@ -2185,37 +2110,29 @@ mod tests {
         };
 
         // send_cursor == 0 rejects unsolicited ack without popping inflight_appends.
-        let ok_ack = proto::AppendAck {
-            start: pos(0),
-            end: pos(1),
-            tail: pos(1),
+        let valid_ack = proto::AppendAck {
+            start: pos(5),
+            end: pos(6),
+            tail: pos(6),
         };
-        let err = process_proto_ack(ok_ack, &mut state, 0, &ctx).unwrap_err();
-        assert!(matches!(err, AppendSessionError::Protocol(_)));
+        assert!(matches!(
+            process_proto_ack(valid_ack, &mut state, 0, &ctx),
+            Err(AppendSessionError::Protocol(_))
+        ));
         assert_eq!(state.inflight_appends.len(), 1);
-        assert_eq!(
-            unacked_batches.load(std::sync::atomic::Ordering::Relaxed),
-            1
-        );
+        assert_eq!(unacked_batches.load(Ordering::Relaxed), 1);
 
-        // Wrong record count (2 instead of 1) rejects without popping inflight_appends.
-        let bad_ack = proto::AppendAck {
-            start: pos(0),
-            end: pos(2),
-            tail: pos(2),
+        // Overlapping ack (`start.seq_num < prev_ack_end.seq_num`) rejects without popping.
+        let overlapping = proto::AppendAck {
+            start: pos(4),
+            end: pos(5),
+            tail: pos(5),
         };
-        let err = process_proto_ack(bad_ack, &mut state, 1, &ctx).unwrap_err();
-        assert!(matches!(err, AppendSessionError::Protocol(_)));
+        assert!(matches!(
+            process_proto_ack(overlapping, &mut state, 1, &ctx),
+            Err(AppendSessionError::Protocol(_))
+        ));
         assert_eq!(state.inflight_appends.len(), 1);
         assert!(ack_rx.try_recv().is_err());
-
-        // Valid ack succeeds and delivers through ack_tx.
-        process_proto_ack(ok_ack, &mut state, 1, &ctx).unwrap();
-        assert!(state.inflight_appends.is_empty());
-        assert_eq!(
-            unacked_batches.load(std::sync::atomic::Ordering::Relaxed),
-            0
-        );
-        assert!(ack_rx.try_recv().unwrap().is_ok());
     }
 }

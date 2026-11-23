@@ -9,7 +9,6 @@ use std::{
 
 use base64ct::Encoding as _;
 use bytes::{Bytes, BytesMut};
-use http::Response;
 use prost::Message as _;
 use s2_api::v1::{
     self as api,
@@ -28,10 +27,10 @@ use s2_sdk::{
     producer::{Producer, ProducerConfig},
     read_session::{ReadBatchSession, ReadSession, ReadSessionConfig, ReadSessionState},
     types::{
-        AccessTokenScopeInput, AccountEndpoint, AppendInput, AppendRecord, AppendRecordBatch,
-        AppendRetryPolicy, BasinEndpoint, Compression, CreateBasinInput, CreateStreamInput,
-        EncryptionKey, Header, Http2Config, IssueAccessTokenInput, ListBasinsInput, Operation,
-        ReadInput, ReadStart, RetryConfig, S2Config, S2Endpoints,
+        AccessTokenScopeInput, AppendInput, AppendRecord, AppendRecordBatch, AppendRetryPolicy,
+        Compression, CreateBasinInput, CreateStreamInput, EncryptionKey, Header, Http2Config,
+        IssueAccessTokenInput, ListBasinsInput, Operation, ReadInput, ReadStart, RetryConfig,
+        S2Config, S2Endpoints,
     },
 };
 
@@ -156,22 +155,12 @@ async fn spec_c6_e2_compressed_and_corrupt_error_bodies() {
     let comp_server = MockH2Server::start({
         let seen_unary = seen_unary.clone();
         let seen_session_compressions = seen_session_compressions.clone();
-        move |_conn_id, req, mut respond| {
+        move |_conn_id, req, respond| {
             let seen_unary = seen_unary.clone();
             let seen_session_compressions = seen_session_compressions.clone();
             async move {
-                let is_s2s = req
-                    .headers()
-                    .get("content-type")
-                    .and_then(|v| v.to_str().ok())
-                    == Some("s2s/proto");
-                if is_s2s {
-                    let resp = Response::builder()
-                        .status(200)
-                        .header("content-type", "s2s/proto")
-                        .body(())
-                        .unwrap();
-                    let Ok(mut send) = respond.send_response(resp, false) else {
+                if header_str(&req, "content-type") == Some("s2s/proto") {
+                    let Some(mut s2s) = S2sResponder::open(respond) else {
                         return;
                     };
                     let mut body = req.into_body();
@@ -182,65 +171,29 @@ async fn spec_c6_e2_compressed_and_corrupt_error_bodies() {
                     {
                         let comp_bits = (msg.encode()[3] & 0b0110_0000) >> 5;
                         seen_session_compressions.lock().unwrap().push(comp_bits);
-                        let _ = send.send_data(
-                            encode_s2s_regular_frame(
-                                &proto_append_ack(next_seq, next_seq + 1),
-                                false,
-                            ),
-                            false,
-                        );
+                        s2s.send_ack(next_seq, next_seq + 1, false, false);
                         next_seq += 1;
                     }
-                    let _ = send.send_data(Bytes::new(), true);
+                    s2s.send_eof();
                 } else {
-                    let ce = req
-                        .headers()
-                        .get("content-encoding")
-                        .and_then(|v| v.to_str().ok())
-                        .map(str::to_owned);
-                    let ae = req
-                        .headers()
-                        .get("accept-encoding")
-                        .and_then(|v| v.to_str().ok())
-                        .map(str::to_owned);
+                    let ce = header_str(&req, "content-encoding").map(str::to_owned);
+                    let ae = header_str(&req, "accept-encoding").map(str::to_owned);
                     seen_unary.lock().unwrap().push((ce, ae));
-                    let mut body = req.into_body();
-                    while let Some(Ok(_)) = body.data().await {}
-                    let resp = Response::builder()
-                        .status(200)
-                        .header("content-type", "application/protobuf")
-                        .body(())
-                        .unwrap();
-                    if let Ok(mut send) = respond.send_response(resp, false) {
-                        let _ = send.send_data(Bytes::from(proto_append_ack(0, 1)), true);
-                    }
+                    let _ = drain_body(&mut req.into_body()).await;
+                    send_proto(respond, proto_append_ack(0, 1));
                 }
             }
         }
     })
     .await;
 
-    let ep = comp_server.endpoint_url();
     let make_compressed_stream = |compression: Compression| {
-        let endpoints = S2Endpoints::new(
-            AccountEndpoint::new(&ep).unwrap(),
-            BasinEndpoint::new(&ep).unwrap(),
-        )
-        .unwrap();
-        let (b, s) = test_basin_and_stream();
-        S2::new(
-            S2Config::new("test-token")
-                .with_endpoints(endpoints)
-                .with_compression(compression)
-                .with_retry(no_retry_config()),
-        )
-        .unwrap()
-        .basin(b)
-        .stream(s)
+        comp_server.stream_with(|cfg| {
+            cfg.with_compression(compression)
+                .with_retry(no_retry_config())
+        })
     };
-    let large_input = AppendInput::new(
-        AppendRecordBatch::try_from_iter([AppendRecord::new(vec![b'x'; 2048]).unwrap()]).unwrap(),
-    );
+    let large_input = sized_append_input(2048);
 
     make_compressed_stream(Compression::None)
         .append(sample_append_input())
@@ -372,13 +325,7 @@ async fn spec_e2_typed_412_416_extra_fields_and_fallbacks() {
 // spec: r1 E1, E5, E5a, E5b, E7
 #[tokio::test]
 async fn spec_e5_e7_indefinite_append_wrapping_and_context() {
-    let (basin_name, stream_name) = test_basin_and_stream();
-    let fast_retry_all = RetryConfig::new()
-        .with_max_attempts(2)
-        .unwrap()
-        .with_min_base_delay(Duration::ZERO)
-        .with_max_base_delay(Duration::ZERO)
-        .with_append_retry_policy(AppendRetryPolicy::All);
+    let fast_retry_all = fast_retry_config(2).with_append_retry_policy(AppendRetryPolicy::All);
 
     // Case 1: indefinite attempt 1 + definite attempt 2 -> wrapped in IndefiniteAppendError
     let server = MockH2Server::from_responses([
@@ -386,10 +333,7 @@ async fn spec_e5_e7_indefinite_append_wrapping_and_context() {
         CannedResponse::new(412, r#"{"seq_num_mismatch":5}"#),
     ])
     .await;
-    let stream = server
-        .client(fast_retry_all)
-        .basin(basin_name.clone())
-        .stream(stream_name.clone());
+    let stream = server.stream(fast_retry_all);
 
     let err = stream.append(sample_append_input()).await.unwrap_err();
     assert!(!err.is_retryable());
@@ -430,11 +374,11 @@ async fn spec_e5_e7_indefinite_append_wrapping_and_context() {
         CannedResponse::new(503, r#"{"code":"unavailable","message":"busy 2"}"#),
     ])
     .await;
-    let stream = server
-        .client(fast_retry_all)
-        .basin(basin_name.clone())
-        .stream(stream_name.clone());
-    let err = stream.append(sample_append_input()).await.unwrap_err();
+    let err = server
+        .stream(fast_retry_all)
+        .append(sample_append_input())
+        .await
+        .unwrap_err();
     assert!(
         matches!(err, AppendError::Server(ref se) if se.message == "busy 2"),
         "indefinite final error must not be wrapped: {err:?}"
@@ -447,11 +391,11 @@ async fn spec_e5_e7_indefinite_append_wrapping_and_context() {
         CannedResponse::new(404, r#"{"code":"stream_not_found","message":"missing"}"#),
     ])
     .await;
-    let stream = server
-        .client(fast_retry_all)
-        .basin(basin_name.clone())
-        .stream(stream_name.clone());
-    let err = stream.append(sample_append_input()).await.unwrap_err();
+    let err = server
+        .stream(fast_retry_all)
+        .append(sample_append_input())
+        .await
+        .unwrap_err();
     assert!(
         matches!(err, AppendError::Server(ref se) if se.code.as_deref() == Some("stream_not_found")),
         "definite earlier attempt must not trigger IndefiniteAppend: {err:?}"
@@ -465,11 +409,11 @@ async fn spec_e5_e7_indefinite_append_wrapping_and_context() {
         r#"{"code":"stream_not_found","message":"missing"}"#,
     )])
     .await;
-    let stream = server
-        .client(no_retry_config())
-        .basin(basin_name)
-        .stream(stream_name);
-    let err = stream.append(sample_append_input()).await.unwrap_err();
+    let err = server
+        .stream(no_retry_config())
+        .append(sample_append_input())
+        .await
+        .unwrap_err();
     let display = err.to_string();
     assert!(display.contains("append"), "E7: {display}");
     assert!(display.contains("test-basin"), "E7: {display}");
@@ -480,33 +424,21 @@ async fn spec_e5_e7_indefinite_append_wrapping_and_context() {
 // spec: r1 E2, E2a, E2b, E5a, E5b, E6, T9
 #[tokio::test]
 async fn spec_e2_e6_s2s_terminal_frames_end_to_end() {
-    let (basin_name, stream_name) = test_basin_and_stream();
-
     // 1. Append session receiving 412 seq_num_mismatch terminal frame.
-    let append_terminal = encode_s2s_terminal_frame(412, br#"{"seq_num_mismatch":12}"#);
-    let server = MockH2Server::start(move |_conn_id, req, mut respond| {
-        let frame = append_terminal.clone();
-        async move {
-            let resp = Response::builder()
-                .status(200)
-                .header("content-type", "s2s/proto")
-                .body(())
-                .unwrap();
-            let Ok(mut send) = respond.send_response(resp, false) else {
-                return;
-            };
-            let mut body = req.into_body();
-            let _ = body.data().await;
-            let _ = send.send_data(frame, true);
-        }
+    let server = MockH2Server::start(|_conn_id, req, respond| async move {
+        let Some(mut s2s) = S2sResponder::open(respond) else {
+            return;
+        };
+        let mut body = req.into_body();
+        let _ = body.data().await;
+        s2s.send_terminal(412, br#"{"seq_num_mismatch":12}"#);
     })
     .await;
 
-    let stream = server
-        .client(no_retry_config())
-        .basin(basin_name.clone())
-        .stream(stream_name.clone());
-    let session = stream.append_session(AppendSessionConfig::new()).unwrap();
+    let session = server
+        .stream(no_retry_config())
+        .append_session(AppendSessionConfig::new())
+        .unwrap();
 
     let ticket = session
         .submit(sample_append_input())
@@ -553,28 +485,15 @@ async fn spec_e2_e6_s2s_terminal_frames_end_to_end() {
     );
 
     // 2. Read session receiving 416 tail terminal frame.
-    let read_terminal =
-        encode_s2s_terminal_frame(416, br#"{"tail":{"seq_num":5,"timestamp":1234}}"#);
-    let read_server = MockH2Server::start(move |_conn_id, _req, mut respond| {
-        let frame = read_terminal.clone();
-        async move {
-            let resp = Response::builder()
-                .status(200)
-                .header("content-type", "s2s/proto")
-                .body(())
-                .unwrap();
-            if let Ok(mut send) = respond.send_response(resp, false) {
-                let _ = send.send_data(frame, true);
-            }
+    let read_server = MockH2Server::start(|_conn_id, _req, respond| async move {
+        if let Some(mut s2s) = S2sResponder::open(respond) {
+            s2s.send_terminal(416, br#"{"tail":{"seq_num":5,"timestamp":1234}}"#);
         }
     })
     .await;
 
-    let read_stream = read_server
-        .client(no_retry_config())
-        .basin(basin_name)
-        .stream(stream_name);
-    let mut sess = read_stream
+    let mut sess = read_server
+        .stream(no_retry_config())
         .read_session(ReadInput::new(), ReadSessionConfig::default())
         .expect("open read session");
     let read_err = sess
@@ -788,19 +707,13 @@ async fn spec_c12_client_close_aborts_inflight_and_sessions_and_rejects_new_call
     );
 
     // Dropping S2 without calling close() keeps sessions alive.
-    let ack_server = MockH2Server::start(|_conn_id, req, mut respond| async move {
-        let resp = Response::builder()
-            .status(200)
-            .header("content-type", "s2s/proto")
-            .body(())
-            .unwrap();
-        let Ok(mut send) = respond.send_response(resp, false) else {
+    let ack_server = MockH2Server::start(|_conn_id, req, respond| async move {
+        let Some(mut s2s) = S2sResponder::open(respond) else {
             return;
         };
         let mut body = req.into_body();
         if let Some(Ok(_)) = body.data().await {
-            let ack = encode_s2s_regular_frame(&proto_append_ack(0, 1), false);
-            let _ = send.send_data(ack, true);
+            s2s.send_ack(0, 1, false, true);
         }
     })
     .await;
@@ -879,47 +792,25 @@ async fn spec_t7a_connection_timeout_bounds_tls_handshake() {
 // spec: r1 T4, T5a, T6
 #[tokio::test]
 async fn spec_t4_s2_attempt_header_unary_and_sessions() {
-    let (basin_name, stream_name) = test_basin_and_stream();
-    let fast_retry_3 = RetryConfig::new()
-        .with_max_attempts(3)
-        .unwrap()
-        .with_min_base_delay(Duration::ZERO)
-        .with_max_base_delay(Duration::ZERO);
+    let fast_retry_3 = fast_retry_config(3);
 
     // 1. Unary s2-attempt header: 1, 2, 3
     let unary_attempts = Arc::new(Mutex::new(Vec::<String>::new()));
     let unary_server = MockH2Server::start({
         let attempts = unary_attempts.clone();
-        move |_conn_id, req, mut respond| {
+        move |_conn_id, req, respond| {
             let attempts = attempts.clone();
             async move {
-                let hdr = req
-                    .headers()
-                    .get("s2-attempt")
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or("")
-                    .to_owned();
+                let hdr = header_str(&req, "s2-attempt").unwrap_or("").to_owned();
                 let idx = {
                     let mut guard = attempts.lock().unwrap();
                     guard.push(hdr);
                     guard.len()
                 };
                 if idx < 3 {
-                    let resp = Response::builder().status(503).body(()).unwrap();
-                    if let Ok(mut send) = respond.send_response(resp, false) {
-                        let _ = send.send_data(
-                            Bytes::from_static(br#"{"code":"unavailable","message":"busy"}"#),
-                            true,
-                        );
-                    }
+                    send_json(respond, 503, r#"{"code":"unavailable","message":"busy"}"#);
                 } else {
-                    let resp = Response::builder().status(200).body(()).unwrap();
-                    if let Ok(mut send) = respond.send_response(resp, false) {
-                        let _ = send.send_data(
-                            Bytes::from_static(br#"{"basins":[],"has_more":false}"#),
-                            true,
-                        );
-                    }
+                    send_json(respond, 200, r#"{"basins":[],"has_more":false}"#);
                 }
             }
         }
@@ -941,15 +832,10 @@ async fn spec_t4_s2_attempt_header_unary_and_sessions() {
     let append_attempts = Arc::new(Mutex::new(Vec::<String>::new()));
     let append_server = MockH2Server::start({
         let attempts = append_attempts.clone();
-        move |_conn_id, req, mut respond| {
+        move |_conn_id, req, respond| {
             let attempts = attempts.clone();
             async move {
-                let hdr = req
-                    .headers()
-                    .get("s2-attempt")
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or("")
-                    .to_owned();
+                let hdr = header_str(&req, "s2-attempt").unwrap_or("").to_owned();
                 let idx = {
                     let mut guard = attempts.lock().unwrap();
                     guard.push(hdr);
@@ -958,87 +844,49 @@ async fn spec_t4_s2_attempt_header_unary_and_sessions() {
                 match idx {
                     1 => {
                         // Ack batch 1, then drop connection when batch 2 arrives.
-                        let resp = Response::builder()
-                            .status(200)
-                            .header("content-type", "s2s/proto")
-                            .body(())
-                            .unwrap();
-                        let Ok(mut send) = respond.send_response(resp, false) else {
+                        let Some(mut s2s) = S2sResponder::open(respond) else {
                             return;
                         };
                         let mut body = req.into_body();
                         let _ = body.data().await;
-                        let _ = send.send_data(
-                            encode_s2s_regular_frame(&proto_append_ack(0, 1), false),
-                            false,
-                        );
+                        s2s.send_ack(0, 1, false, false);
                         let _ = body.data().await;
                         // Close cleanly while batch 2 is unacked -> ConnectionLost -> retry 0.
-                        let _ = send.send_data(Bytes::new(), true);
+                        s2s.send_eof();
                     }
                     2 => {
                         // Retry 0: fail immediately with 503 unavailable -> retry 1.
-                        let resp = Response::builder().status(503).body(()).unwrap();
-                        if let Ok(mut send) = respond.send_response(resp, false) {
-                            let _ = send.send_data(
-                                Bytes::from_static(br#"{"code":"unavailable","message":"busy"}"#),
-                                true,
-                            );
-                        }
+                        send_json(respond, 503, r#"{"code":"unavailable","message":"busy"}"#);
                     }
                     3 => {
                         // Retry 1: ack batch 2 with reconnect-advised bit -> handover (attempt 1).
-                        let resp = Response::builder()
-                            .status(200)
-                            .header("content-type", "s2s/proto")
-                            .body(())
-                            .unwrap();
-                        let Ok(mut send) = respond.send_response(resp, false) else {
+                        let Some(mut s2s) = S2sResponder::open(respond) else {
                             return;
                         };
                         let mut body = req.into_body();
                         let _ = body.data().await;
-                        let _ = send.send_data(
-                            encode_s2s_regular_frame(&proto_append_ack(1, 2), true),
-                            true,
-                        );
+                        s2s.send_ack(1, 2, true, true);
                     }
                     4 => {
                         // Handover request ends immediately with server_draining before any ack ->
                         // counts as retry 0 (T6) -> next request sends s2-attempt: 2.
-                        let resp = Response::builder()
-                            .status(200)
-                            .header("content-type", "s2s/proto")
-                            .body(())
-                            .unwrap();
-                        if let Ok(mut send) = respond.send_response(resp, false) {
-                            let _ = send.send_data(
-                                encode_s2s_terminal_frame(
-                                    503,
-                                    br#"{"code":"server_draining","message":"draining"}"#,
-                                ),
-                                true,
+                        if let Some(mut s2s) = S2sResponder::open(respond) {
+                            s2s.send_terminal(
+                                503,
+                                br#"{"code":"server_draining","message":"draining"}"#,
                             );
                         }
                     }
                     _ => {
                         // Attempt 2: ack batch 3 and close cleanly when client finishes.
-                        let resp = Response::builder()
-                            .status(200)
-                            .header("content-type", "s2s/proto")
-                            .body(())
-                            .unwrap();
-                        let Ok(mut send) = respond.send_response(resp, false) else {
+                        let Some(mut s2s) = S2sResponder::open(respond) else {
                             return;
                         };
                         let mut body = req.into_body();
                         let _ = body.data().await;
-                        let _ = send.send_data(
-                            encode_s2s_regular_frame(&proto_append_ack(2, 3), false),
-                            false,
-                        );
-                        while let Some(Ok(_)) = body.data().await {}
-                        let _ = send.send_data(Bytes::new(), true);
+                        s2s.send_ack(2, 3, false, false);
+                        let _ = drain_body(&mut body).await;
+                        s2s.send_eof();
                     }
                 }
             }
@@ -1046,62 +894,29 @@ async fn spec_t4_s2_attempt_header_unary_and_sessions() {
     })
     .await;
 
-    let append_stream = append_server
-        .client(fast_retry_3.with_append_retry_policy(AppendRetryPolicy::All))
-        .basin(basin_name.clone())
-        .stream(stream_name.clone());
-    let session = append_stream
+    let session = append_server
+        .stream(fast_retry_3.with_append_retry_policy(AppendRetryPolicy::All))
         .append_session(AppendSessionConfig::new())
         .expect("open session");
 
-    let ack1 = tokio::time::timeout(Duration::from_secs(3), async {
-        session
-            .submit(sample_append_input())
-            .await
-            .unwrap()
-            .await
-            .unwrap()
-    })
-    .await
-    .unwrap_or_else(|_| {
-        panic!(
-            "ack1 timed out; attempts={:?}",
-            *append_attempts.lock().unwrap()
-        )
-    });
-    assert_eq!(ack1.end.seq_num, 1);
-    let ack2 = tokio::time::timeout(Duration::from_secs(3), async {
-        session
-            .submit(sample_append_input())
-            .await
-            .unwrap()
-            .await
-            .unwrap()
-    })
-    .await
-    .unwrap_or_else(|_| {
-        panic!(
-            "ack2 timed out; attempts={:?}",
-            *append_attempts.lock().unwrap()
-        )
-    });
-    assert_eq!(ack2.end.seq_num, 2);
-    let ack3 = tokio::time::timeout(Duration::from_secs(3), async {
-        session
-            .submit(sample_append_input())
-            .await
-            .unwrap()
-            .await
-            .unwrap()
-    })
-    .await
-    .unwrap_or_else(|_| {
-        panic!(
-            "ack3 timed out; attempts={:?}",
-            *append_attempts.lock().unwrap()
-        )
-    });
-    assert_eq!(ack3.end.seq_num, 3);
+    for expected_end in 1u64..=3 {
+        let ack = tokio::time::timeout(Duration::from_secs(3), async {
+            session
+                .submit(sample_append_input())
+                .await
+                .unwrap()
+                .await
+                .unwrap()
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "ack {expected_end} timed out; attempts={:?}",
+                *append_attempts.lock().unwrap()
+            )
+        });
+        assert_eq!(ack.end.seq_num, expected_end);
+    }
     tokio::time::timeout(Duration::from_secs(3), session.close())
         .await
         .unwrap_or_else(|_| {
@@ -1122,52 +937,31 @@ async fn spec_t4_s2_attempt_header_unary_and_sessions() {
     let read_attempts = Arc::new(Mutex::new(Vec::<String>::new()));
     let read_server = MockH2Server::start({
         let attempts = read_attempts.clone();
-        move |_conn_id, req, mut respond| {
+        move |_conn_id, req, respond| {
             let attempts = attempts.clone();
             async move {
-                let hdr = req
-                    .headers()
-                    .get("s2-attempt")
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or("")
-                    .to_owned();
+                let hdr = header_str(&req, "s2-attempt").unwrap_or("").to_owned();
                 let idx = {
                     let mut guard = attempts.lock().unwrap();
                     guard.push(hdr);
                     guard.len()
                 };
-                let resp = Response::builder()
-                    .status(200)
-                    .header("content-type", "s2s/proto")
-                    .body(())
-                    .unwrap();
-                let Ok(mut send) = respond.send_response(resp, false) else {
+                let Some(mut s2s) = S2sResponder::open(respond) else {
                     return;
                 };
                 if idx == 1 {
                     // Progress (batch 0), then server_draining -> handover (attempt 1, no budget
                     // used).
-                    let _ = send.send_data(
-                        encode_s2s_regular_frame(&proto_read_batch(0, 1), false),
-                        false,
-                    );
+                    s2s.send_regular(&proto_read_batch(0, 1), false, false);
                 }
-                let _ = send.send_data(
-                    encode_s2s_terminal_frame(
-                        503,
-                        br#"{"code":"server_draining","message":"draining"}"#,
-                    ),
-                    true,
-                );
+                s2s.send_terminal(503, br#"{"code":"server_draining","message":"draining"}"#);
             }
         }
     })
     .await;
 
     let mut read_session = read_server
-        .client(fast_retry_3)
-        .basin(basin_name)
-        .stream(stream_name)
+        .stream(fast_retry_3)
         .read_session(ReadInput::new(), ReadSessionConfig::default())
         .expect("open read session");
     let first = tokio::time::timeout(Duration::from_secs(3), read_session.next())
@@ -1205,11 +999,7 @@ async fn spec_t4_s2_attempt_header_unary_and_sessions() {
 // spec: r1 T6, T6c
 #[tokio::test]
 async fn spec_t6_connection_retirement_on_server_draining_and_hot_server() {
-    let fast_retry_2 = RetryConfig::new()
-        .with_max_attempts(2)
-        .unwrap()
-        .with_min_base_delay(Duration::ZERO)
-        .with_max_base_delay(Duration::ZERO);
+    let fast_retry_2 = fast_retry_config(2);
 
     // Helper: serve first status+body, then 200 empty basins list, recording conn_id per request.
     async fn run_unary_retirement_case(
@@ -1222,25 +1012,15 @@ async fn spec_t6_connection_retirement_on_server_draining_and_hot_server() {
         let server = MockH2Server::start({
             let seen_conns = seen_conns.clone();
             let count = count.clone();
-            move |conn_id, _req, mut respond| {
+            move |conn_id, _req, respond| {
                 let seen_conns = seen_conns.clone();
                 let count = count.clone();
                 async move {
                     seen_conns.lock().unwrap().push(conn_id);
-                    let n = count.fetch_add(1, Ordering::SeqCst);
-                    if n == 0 {
-                        let resp = Response::builder().status(first_status).body(()).unwrap();
-                        if let Ok(mut send) = respond.send_response(resp, false) {
-                            let _ = send.send_data(Bytes::from_static(first_body), true);
-                        }
+                    if count.fetch_add(1, Ordering::SeqCst) == 0 {
+                        send_json(respond, first_status, first_body);
                     } else {
-                        let resp = Response::builder().status(200).body(()).unwrap();
-                        if let Ok(mut send) = respond.send_response(resp, false) {
-                            let _ = send.send_data(
-                                Bytes::from_static(br#"{"basins":[],"has_more":false}"#),
-                                true,
-                            );
-                        }
+                        send_json(respond, 200, r#"{"basins":[],"has_more":false}"#);
                     }
                 }
             }
@@ -1295,11 +1075,10 @@ async fn spec_t6_connection_retirement_on_server_draining_and_hot_server() {
     );
 
     // 4. Session hot_server retires connection AND consumes retry budget even after progress (T6c).
-    let (basin_name, stream_name) = test_basin_and_stream();
     let session_conns = Arc::new(Mutex::new(Vec::<usize>::new()));
     let session_server = MockH2Server::start({
         let session_conns = session_conns.clone();
-        move |conn_id, _req, mut respond| {
+        move |conn_id, _req, respond| {
             let session_conns = session_conns.clone();
             async move {
                 let idx = {
@@ -1307,33 +1086,20 @@ async fn spec_t6_connection_retirement_on_server_draining_and_hot_server() {
                     guard.push(conn_id);
                     guard.len()
                 };
-                let resp = Response::builder()
-                    .status(200)
-                    .header("content-type", "s2s/proto")
-                    .body(())
-                    .unwrap();
-                let Ok(mut send) = respond.send_response(resp, false) else {
+                let Some(mut s2s) = S2sResponder::open(respond) else {
                     return;
                 };
                 if idx == 1 {
-                    let _ = send.send_data(
-                        encode_s2s_regular_frame(&proto_read_batch(0, 1), false),
-                        false,
-                    );
+                    s2s.send_regular(&proto_read_batch(0, 1), false, false);
                 }
-                let _ = send.send_data(
-                    encode_s2s_terminal_frame(502, br#"{"code":"hot_server","message":"hot"}"#),
-                    true,
-                );
+                s2s.send_terminal(502, br#"{"code":"hot_server","message":"hot"}"#);
             }
         }
     })
     .await;
 
     let mut read_session = session_server
-        .client(fast_retry_2)
-        .basin(basin_name)
-        .stream(stream_name)
+        .stream(fast_retry_2)
         .read_session(ReadInput::new(), ReadSessionConfig::default())
         .expect("open read session");
     let _ = read_session.next().await.unwrap().unwrap();
@@ -1357,19 +1123,14 @@ async fn spec_t6_connection_retirement_on_server_draining_and_hot_server() {
 // spec: r1 E3, E4d, T1, T2c
 #[tokio::test]
 async fn spec_refused_stream_classified_as_definite_and_retried_under_no_side_effects() {
-    let (basin_name, stream_name) = test_basin_and_stream();
-
     // 1. With max_attempts = 1: REFUSED_STREAM is ConnectionLostError with has_no_side_effects =
     //    true.
     let server = MockH2Server::start(|_conn_id, _req, mut respond| async move {
         respond.send_reset(h2::Reason::REFUSED_STREAM);
     })
     .await;
-    let stream = server
-        .client(no_retry_config().with_append_retry_policy(AppendRetryPolicy::NoSideEffects))
-        .basin(basin_name.clone())
-        .stream(stream_name.clone());
-    let err = stream
+    let err = server
+        .stream(no_retry_config().with_append_retry_policy(AppendRetryPolicy::NoSideEffects))
         .append(sample_append_input())
         .await
         .expect_err("REFUSED_STREAM must fail with max_attempts = 1");
@@ -1390,33 +1151,17 @@ async fn spec_refused_stream_classified_as_definite_and_retried_under_no_side_ef
         move |_conn_id, _req, mut respond| {
             let count = count.clone();
             async move {
-                let n = count.fetch_add(1, Ordering::SeqCst);
-                if n == 0 {
+                if count.fetch_add(1, Ordering::SeqCst) == 0 {
                     respond.send_reset(h2::Reason::REFUSED_STREAM);
                 } else {
-                    let resp = Response::builder()
-                        .status(200)
-                        .header("content-type", "application/protobuf")
-                        .body(())
-                        .unwrap();
-                    if let Ok(mut send) = respond.send_response(resp, false) {
-                        let _ = send.send_data(Bytes::from(proto_append_ack(0, 1)), true);
-                    }
+                    send_proto(respond, proto_append_ack(0, 1));
                 }
             }
         }
     })
     .await;
-    let retry = RetryConfig::new()
-        .with_max_attempts(2)
-        .unwrap()
-        .with_min_base_delay(Duration::ZERO)
-        .with_max_base_delay(Duration::ZERO)
-        .with_append_retry_policy(AppendRetryPolicy::NoSideEffects);
     let ack = server
-        .client(retry)
-        .basin(basin_name)
-        .stream(stream_name)
+        .stream(fast_retry_config(2).with_append_retry_policy(AppendRetryPolicy::NoSideEffects))
         .append(sample_append_input())
         .await
         .expect("NoSideEffects must retry definite REFUSED_STREAM");
@@ -1439,47 +1184,28 @@ async fn spec_c5_c7_c10_c11_d1_a1_transport_user_agent_inputs_concurrency_and_bi
     assert_send::<ReadSession>();
     assert_send::<ReadBatchSession>();
 
-    let (basin_name, stream_name) = test_basin_and_stream();
     let seen_user_agents = Arc::new(Mutex::new(Vec::<String>::new()));
     let stored = Arc::new(Mutex::new(Vec::<api::stream::proto::AppendRecord>::new()));
 
     let server = MockH2Server::start({
         let seen_user_agents = seen_user_agents.clone();
         let stored = stored.clone();
-        move |_conn_id, req, mut respond| {
+        move |_conn_id, req, respond| {
             let seen_user_agents = seen_user_agents.clone();
             let stored = stored.clone();
             async move {
-                if let Some(ua) = req
-                    .headers()
-                    .get("user-agent")
-                    .and_then(|v| v.to_str().ok())
-                {
+                if let Some(ua) = header_str(&req, "user-agent") {
                     seen_user_agents.lock().unwrap().push(ua.to_owned());
                 }
                 let method = req.method().clone();
                 let path = req.uri().path().to_owned();
-                let mut body = req.into_body();
-                let mut req_bytes = BytesMut::new();
-                while let Some(Ok(chunk)) = body.data().await {
-                    req_bytes.extend_from_slice(&chunk);
-                    let _ = body.flow_control().release_capacity(chunk.len());
-                }
+                let req_bytes = drain_body(&mut req.into_body()).await;
 
                 if method == http::Method::POST && path.ends_with("/records") {
-                    let input =
-                        api::stream::proto::AppendInput::decode(req_bytes.freeze()).unwrap();
+                    let input = api::stream::proto::AppendInput::decode(req_bytes).unwrap();
                     let count = input.records.len() as u64;
                     *stored.lock().unwrap() = input.records;
-                    let ack = proto_append_ack(0, count);
-                    let resp = Response::builder()
-                        .status(200)
-                        .header("content-type", "application/protobuf")
-                        .body(())
-                        .unwrap();
-                    if let Ok(mut send) = respond.send_response(resp, false) {
-                        let _ = send.send_data(Bytes::from(ack), true);
-                    }
+                    send_proto(respond, proto_append_ack(0, count));
                 } else if method == http::Method::GET && path.ends_with("/records") {
                     let records: Vec<ProtoSequencedRecord> = stored
                         .lock()
@@ -1501,34 +1227,16 @@ async fn spec_c5_c7_c10_c11_d1_a1_transport_user_agent_inputs_concurrency_and_bi
                         records,
                     }
                     .encode_to_vec();
-                    let resp = Response::builder()
-                        .status(200)
-                        .header("content-type", "application/protobuf")
-                        .body(())
-                        .unwrap();
-                    if let Ok(mut send) = respond.send_response(resp, false) {
-                        let _ = send.send_data(Bytes::from(batch), true);
-                    }
+                    send_proto(respond, batch);
                 } else {
-                    let resp = Response::builder()
-                        .status(200)
-                        .header("content-type", "application/json")
-                        .body(())
-                        .unwrap();
-                    if let Ok(mut send) = respond.send_response(resp, false) {
-                        let _ = send.send_data(
-                            Bytes::from_static(br#"{"tail":{"seq_num":1,"timestamp":500}}"#),
-                            true,
-                        );
-                    }
+                    send_tail_json(respond, 200, 1, 500);
                 }
             }
         }
     })
     .await;
 
-    let s2 = server.client(no_retry_config());
-    let stream = s2.basin(basin_name).stream(stream_name);
+    let stream = server.stream(no_retry_config());
 
     // D1 + A1 + C10: arbitrary non-UTF-8 binary body and ordered duplicate binary headers.
     let mut raw_body = vec![0x00, 0xff, 0xfe, 0x80, 0x42];
@@ -1601,7 +1309,7 @@ async fn spec_c13b_http2_keepalive_ping_timeout_maps_to_connection_lost_and_spil
         let release_first = release_first.clone();
         let first_arrived = first_arrived.clone();
         let req_conns = req_conns.clone();
-        move |conn_id, _req, mut respond| {
+        move |conn_id, _req, respond| {
             let release_first = release_first.clone();
             let first_arrived = first_arrived.clone();
             let req_conns = req_conns.clone();
@@ -1615,36 +1323,16 @@ async fn spec_c13b_http2_keepalive_ping_timeout_maps_to_connection_lost_and_spil
                     first_arrived.notify_one();
                     release_first.notified().await;
                 }
-                let resp = Response::builder()
-                    .status(200)
-                    .header("content-type", "application/json")
-                    .body(())
-                    .unwrap();
-                if let Ok(mut send) = respond.send_response(resp, false) {
-                    let _ = send.send_data(
-                        Bytes::from_static(br#"{"tail":{"seq_num":0,"timestamp":0}}"#),
-                        true,
-                    );
-                }
+                send_tail_json(respond, 200, 0, 0);
             }
         }
     })
     .await;
 
-    let ep = pool_server.endpoint_url();
-    let endpoints = S2Endpoints::new(
-        AccountEndpoint::new(&ep).unwrap(),
-        BasinEndpoint::new(&ep).unwrap(),
-    )
-    .unwrap();
-    let s2 = S2::new(
-        S2Config::new("test-token")
-            .with_endpoints(endpoints)
-            .with_http2(Http2Config::new().with_max_concurrent_requests(1).unwrap())
-            .with_retry(no_retry_config()),
-    )
-    .unwrap();
-    let stream = s2.basin(basin_name.clone()).stream(stream_name.clone());
+    let stream = pool_server.stream_with(|cfg| {
+        cfg.with_http2(Http2Config::new().with_max_concurrent_requests(1).unwrap())
+            .with_retry(no_retry_config())
+    });
 
     let req1 = tokio::spawn({
         let stream = stream.clone();
@@ -1721,12 +1409,7 @@ async fn spec_c13b_http2_keepalive_ping_timeout_maps_to_connection_lost_and_spil
         }
     });
 
-    let raw_ep = format!("http://{addr}");
-    let raw_endpoints = S2Endpoints::new(
-        AccountEndpoint::new(&raw_ep).unwrap(),
-        BasinEndpoint::new(&raw_ep).unwrap(),
-    )
-    .unwrap();
+    let raw_endpoints = S2Endpoints::for_endpoint(&format!("http://{addr}")).unwrap();
     let ping_client = S2::new(
         S2Config::new("test-token")
             .with_endpoints(raw_endpoints)
@@ -1745,9 +1428,7 @@ async fn spec_c13b_http2_keepalive_ping_timeout_maps_to_connection_lost_and_spil
 
     // Advance Tokio's clock past hyper's 20s keep-alive PING interval (C13b), then resume so
     // real TCP I/O delivers the PING frame without auto-advance interference.
-    tokio::time::pause();
-    tokio::time::advance(Duration::from_secs(21)).await;
-    tokio::time::resume();
+    advance_virtual_time(Duration::from_secs(21)).await;
 
     if saw_ping_count.load(Ordering::SeqCst) == 0 {
         tokio::time::timeout(Duration::from_secs(3), saw_ping.notified())
@@ -1760,9 +1441,7 @@ async fn spec_c13b_http2_keepalive_ping_timeout_maps_to_connection_lost_and_spil
     );
 
     // Advance Tokio's clock past the 10s keep-alive PING timeout (C13b).
-    tokio::time::pause();
-    tokio::time::advance(Duration::from_secs(11)).await;
-    tokio::time::resume();
+    advance_virtual_time(Duration::from_secs(11)).await;
 
     let err = tokio::time::timeout(Duration::from_secs(3), call)
         .await
@@ -1781,11 +1460,7 @@ async fn spec_c13b_http2_keepalive_ping_timeout_maps_to_connection_lost_and_spil
 #[tokio::test]
 async fn spec_t2_t7_t7b_m1_retry_safety_request_tokens_and_timeouts() {
     let (basin_name, stream_name) = test_basin_and_stream();
-    let fast_retry_3 = RetryConfig::new()
-        .with_max_attempts(3)
-        .unwrap()
-        .with_min_base_delay(Duration::ZERO)
-        .with_max_base_delay(Duration::ZERO);
+    let fast_retry_3 = fast_retry_config(3);
 
     // 1. T2b + M1: create_basin and create_stream reuse identical s2-request-token across retries;
     //    T2a: check_tail and delete_stream retry indefinite 503.
@@ -1799,7 +1474,7 @@ async fn spec_t2_t7_t7b_m1_retry_safety_request_tokens_and_timeouts() {
         let stream_tokens = stream_tokens.clone();
         let delete_attempts = delete_attempts.clone();
         let tail_attempts = tail_attempts.clone();
-        move |_conn_id, req, mut respond| {
+        move |_conn_id, req, respond| {
             let basin_tokens = basin_tokens.clone();
             let stream_tokens = stream_tokens.clone();
             let delete_attempts = delete_attempts.clone();
@@ -1807,15 +1482,8 @@ async fn spec_t2_t7_t7b_m1_retry_safety_request_tokens_and_timeouts() {
             async move {
                 let method = req.method().clone();
                 let path = req.uri().path().to_owned();
-                let req_token = req
-                    .headers()
-                    .get("s2-request-token")
-                    .and_then(|v| v.to_str().ok())
-                    .map(str::to_owned);
-                let mut body = req.into_body();
-                while let Some(Ok(chunk)) = body.data().await {
-                    let _ = body.flow_control().release_capacity(chunk.len());
-                }
+                let req_token = header_str(&req, "s2-request-token").map(str::to_owned);
+                let _ = drain_body(&mut req.into_body()).await;
 
                 let (status, payload): (u16, &[u8]) = if method == http::Method::POST
                     && path == "/v1/basins"
@@ -1857,16 +1525,7 @@ async fn spec_t2_t7_t7b_m1_retry_safety_request_tokens_and_timeouts() {
                     (404, br#"{"code":"not_found","message":"unexpected"}"#)
                 };
 
-                let resp = Response::builder()
-                    .status(status)
-                    .header("content-type", "application/json")
-                    .body(())
-                    .unwrap();
-                if payload.is_empty() {
-                    let _ = respond.send_response(resp, true);
-                } else if let Ok(mut send) = respond.send_response(resp, false) {
-                    let _ = send.send_data(Bytes::copy_from_slice(payload), true);
-                }
+                send_json(respond, status, payload);
             }
         }
     })
@@ -1886,7 +1545,7 @@ async fn spec_t2_t7_t7b_m1_retry_safety_request_tokens_and_timeouts() {
         "T2b: create_basin must reuse s2-request-token"
     );
 
-    let basin = s2.basin(basin_name.clone());
+    let basin = s2.basin(basin_name);
     let created_stream = basin
         .create_stream(CreateStreamInput::new(stream_name.clone()))
         .await
@@ -1910,7 +1569,7 @@ async fn spec_t2_t7_t7b_m1_retry_safety_request_tokens_and_timeouts() {
         7
     );
     assert_eq!(tail_attempts.load(Ordering::SeqCst), 2);
-    basin.delete_stream(stream_name.clone()).await.unwrap();
+    basin.delete_stream(stream_name).await.unwrap();
     assert_eq!(delete_attempts.load(Ordering::SeqCst), 2);
 
     // 2. T7 + T7b: per-attempt request_timeout (unary succeeds on retry when attempt 1 times out,
@@ -1918,14 +1577,11 @@ async fn spec_t2_t7_t7b_m1_retry_safety_request_tokens_and_timeouts() {
     let attempt_counter = Arc::new(AtomicUsize::new(0));
     let timeout_server = MockH2Server::start({
         let attempt_counter = attempt_counter.clone();
-        move |_conn_id, req, mut respond| {
+        move |_conn_id, req, respond| {
             let attempt_counter = attempt_counter.clone();
             async move {
                 let path = req.uri().path().to_owned();
-                let is_s2s = req
-                    .headers()
-                    .get("content-type")
-                    .is_some_and(|v| v == "s2s/proto");
+                let is_s2s = header_str(&req, "content-type") == Some("s2s/proto");
                 let params = query_pairs(req.uri());
                 if is_s2s {
                     // Stall response headers so ReadSession hits T7b request_timeout.
@@ -1937,52 +1593,24 @@ async fn spec_t2_t7_t7b_m1_retry_safety_request_tokens_and_timeouts() {
                         let _keep = respond;
                         std::future::pending::<()>().await;
                     } else {
-                        let resp = Response::builder()
-                            .status(200)
-                            .header("content-type", "application/json")
-                            .body(())
-                            .unwrap();
-                        if let Ok(mut send) = respond.send_response(resp, false) {
-                            let _ = send.send_data(
-                                Bytes::from_static(br#"{"tail":{"seq_num":9,"timestamp":900}}"#),
-                                true,
-                            );
-                        }
+                        send_tail_json(respond, 200, 9, 900);
                     }
                 } else if params.get("wait").map(String::as_str) == Some("1") {
                     // Respond at 350ms: exceeds request_timeout (150ms) alone, but well within
                     // request_timeout + wait (1150ms)!
                     tokio::time::sleep(Duration::from_millis(350)).await;
-                    let batch = proto_read_batch_records(&[0], Some(1));
-                    let resp = Response::builder()
-                        .status(200)
-                        .header("content-type", "application/protobuf")
-                        .body(())
-                        .unwrap();
-                    if let Ok(mut send) = respond.send_response(resp, false) {
-                        let _ = send.send_data(Bytes::from(batch), true);
-                    }
+                    send_proto(respond, proto_read_batch_records(&[0], Some(1)));
                 }
             }
         }
     })
     .await;
 
-    let ep = timeout_server.endpoint_url();
-    let endpoints = S2Endpoints::new(
-        AccountEndpoint::new(&ep).unwrap(),
-        BasinEndpoint::new(&ep).unwrap(),
-    )
-    .unwrap();
-    let s2_t = S2::new(
-        S2Config::new("test-token")
-            .with_endpoints(endpoints.clone())
-            .with_request_timeout(Duration::from_millis(150))
+    let stream_t = timeout_server.stream_with(|cfg| {
+        cfg.with_request_timeout(Duration::from_millis(150))
             .unwrap()
-            .with_retry(fast_retry_3),
-    )
-    .unwrap();
-    let stream_t = s2_t.basin(basin_name.clone()).stream(stream_name.clone());
+            .with_retry(fast_retry_3)
+    });
 
     // Attempt 1 times out, attempt 2 succeeds -> proves timeout is per-attempt (T7).
     assert_eq!(stream_t.check_tail().await.unwrap().seq_num, 9);
@@ -2001,17 +1629,12 @@ async fn spec_t2_t7_t7b_m1_retry_safety_request_tokens_and_timeouts() {
     assert_eq!(batch.records.len(), 1);
 
     // Session open headers stall past request_timeout -> fails with TimeoutError (T7b).
-    let s2_no_retry = S2::new(
-        S2Config::new("test-token")
-            .with_endpoints(endpoints)
-            .with_request_timeout(Duration::from_millis(150))
-            .unwrap()
-            .with_retry(no_retry_config()),
-    )
-    .unwrap();
-    let mut sess = s2_no_retry
-        .basin(basin_name)
-        .stream(stream_name)
+    let mut sess = timeout_server
+        .stream_with(|cfg| {
+            cfg.with_request_timeout(Duration::from_millis(150))
+                .unwrap()
+                .with_retry(no_retry_config())
+        })
         .read_session(ReadInput::new(), ReadSessionConfig::default())
         .unwrap();
     let err = sess.next().await.unwrap().unwrap_err();
@@ -2079,63 +1702,33 @@ async fn spec_e4_e8_l1_l2_l3_logging_levels_secret_redaction_and_unobserved_erro
     let enc_key_b64 = base64ct::Base64::encode_string(RAW_ENC_KEY);
 
     let (basin_name, stream_name) = test_basin_and_stream();
-    let server = MockH2Server::start(|_conn_id, req, mut respond| async move {
+    let server = MockH2Server::start(|_conn_id, req, respond| async move {
         let method = req.method().clone();
         let path = req.uri().path().to_owned();
-        let is_s2s = req
-            .headers()
-            .get("content-type")
-            .is_some_and(|v| v == "s2s/proto");
-        let mut body = req.into_body();
-        if !is_s2s {
-            while let Some(Ok(chunk)) = body.data().await {
-                let _ = body.flow_control().release_capacity(chunk.len());
-            }
+        if header_str(&req, "content-type") != Some("s2s/proto") {
+            let _ = drain_body(&mut req.into_body()).await;
         }
         if method == http::Method::POST && path == "/v1/access-tokens" {
-            let resp = Response::builder()
-                .status(200)
-                .header("content-type", "application/json")
-                .body(())
-                .unwrap();
-            if let Ok(mut send) = respond.send_response(resp, false) {
-                let _ = send.send_data(
-                    Bytes::from(format!(r#"{{"access_token":"{ISSUED_TOKEN}"}}"#)),
-                    true,
-                );
-            }
+            send_json(
+                respond,
+                200,
+                format!(r#"{{"access_token":"{ISSUED_TOKEN}"}}"#),
+            );
             return;
         }
         // Fail everything else with 503 so retries + terminal errors exercise SDK debug logging.
-        let resp = Response::builder()
-            .status(503)
-            .header("content-type", "application/json")
-            .body(())
-            .unwrap();
-        if let Ok(mut send) = respond.send_response(resp, false) {
-            let _ = send.send_data(
-                Bytes::from_static(br#"{"code":"unavailable","message":"transient"}"#),
-                true,
-            );
-        }
+        send_json(
+            respond,
+            503,
+            r#"{"code":"unavailable","message":"transient"}"#,
+        );
     })
     .await;
 
-    let ep = server.endpoint_url();
-    let endpoints = S2Endpoints::new(
-        AccountEndpoint::new(&ep).unwrap(),
-        BasinEndpoint::new(&ep).unwrap(),
-    )
-    .unwrap();
+    let endpoints = S2Endpoints::for_endpoint(&server.endpoint_url()).unwrap();
     let config = S2Config::new(CLIENT_TOKEN)
         .with_endpoints(endpoints)
-        .with_retry(
-            RetryConfig::new()
-                .with_max_attempts(2)
-                .unwrap()
-                .with_min_base_delay(Duration::ZERO)
-                .with_max_base_delay(Duration::ZERO),
-        );
+        .with_retry(fast_retry_config(2));
     let s2 = S2::new(config.clone()).unwrap();
     let basin = s2.basin(basin_name);
     let stream = basin
@@ -2268,11 +1861,10 @@ async fn spec_e4_e8_l1_l2_l3_logging_levels_secret_redaction_and_unobserved_erro
 // spec: r1 T3
 #[tokio::test]
 async fn spec_t3_retry_backoff_delivers_bounded_exponential_delay() {
-    let (basin_name, stream_name) = test_basin_and_stream();
     let attempt_times = Arc::new(Mutex::new(Vec::<std::time::Instant>::new()));
     let server = MockH2Server::start({
         let attempt_times = attempt_times.clone();
-        move |_conn_id, _req, mut respond| {
+        move |_conn_id, _req, respond| {
             let attempt_times = attempt_times.clone();
             async move {
                 let n = {
@@ -2281,29 +1873,9 @@ async fn spec_t3_retry_backoff_delivers_bounded_exponential_delay() {
                     times.len()
                 };
                 if n < 3 {
-                    let resp = Response::builder()
-                        .status(503)
-                        .header("content-type", "application/json")
-                        .body(())
-                        .unwrap();
-                    if let Ok(mut send) = respond.send_response(resp, false) {
-                        let _ = send.send_data(
-                            Bytes::from_static(br#"{"code":"unavailable","message":"busy"}"#),
-                            true,
-                        );
-                    }
+                    send_json(respond, 503, r#"{"code":"unavailable","message":"busy"}"#);
                 } else {
-                    let resp = Response::builder()
-                        .status(200)
-                        .header("content-type", "application/json")
-                        .body(())
-                        .unwrap();
-                    if let Ok(mut send) = respond.send_response(resp, false) {
-                        let _ = send.send_data(
-                            Bytes::from_static(br#"{"tail":{"seq_num":0,"timestamp":0}}"#),
-                            true,
-                        );
-                    }
+                    send_tail_json(respond, 200, 0, 0);
                 }
             }
         }
@@ -2315,13 +1887,7 @@ async fn spec_t3_retry_backoff_delivers_bounded_exponential_delay() {
         .unwrap()
         .with_min_base_delay(Duration::from_millis(40))
         .with_max_base_delay(Duration::from_millis(200));
-    server
-        .client(retry)
-        .basin(basin_name)
-        .stream(stream_name)
-        .check_tail()
-        .await
-        .unwrap();
+    server.stream(retry).check_tail().await.unwrap();
 
     let times = attempt_times.lock().unwrap().clone();
     assert_eq!(times.len(), 3);
