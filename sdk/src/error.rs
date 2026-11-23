@@ -1779,6 +1779,9 @@ pub(crate) fn classify_http_error<E: TransportError>(
         client::HttpError::ResponseCompression(message) => {
             ProtocolError::new(format!("response compression: {message}"), context).into()
         }
+        client::HttpError::ResponseTooLarge(limit) => {
+            ProtocolError::new(format!("response exceeded {limit} byte limit"), context).into()
+        }
         client::HttpError::ResponseDecode(error) => {
             ProtocolError::new(format!("response decode: {error}"), context).into()
         }
@@ -1881,6 +1884,13 @@ mod tests {
                 ErrorContext::default()
             ),
             RequestError::Protocol(ProtocolError { message, .. }) if message.contains("corrupt")
+        ));
+        assert!(matches!(
+            classify_http_error::<RequestError>(
+                client::HttpError::ResponseTooLarge(1024),
+                ErrorContext::default()
+            ),
+            RequestError::Protocol(ProtocolError { message, .. }) if message.contains("1024")
         ));
         let json_error = serde_json::from_slice::<serde_json::Value>(b"{")
             .expect_err("invalid JSON should fail");

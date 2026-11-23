@@ -12,7 +12,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use flate2::{Compression as FlateCompression, read::MultiGzDecoder, write::GzEncoder};
 use futures_core::Stream;
 use futures_util::StreamExt;
@@ -50,7 +50,8 @@ const DEFAULT_MAX_CONCURRENT_REQUESTS_PER_CONNECTION: usize = 50;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(20);
 const KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(10);
-const MAX_DECOMPRESSED_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_ERROR_RESPONSE_BYTES: usize = 1024 * 1024;
 
 pub(crate) type BoxError = Box<dyn std::error::Error + Send + Sync>;
 type BoxBody = UnsyncBoxBody<Bytes, BoxError>;
@@ -112,6 +113,8 @@ pub(crate) enum HttpError {
     RequestCompression(String),
     #[error("response compression error: {0}")]
     ResponseCompression(String),
+    #[error("response exceeded {0} byte limit")]
+    ResponseTooLarge(usize),
 }
 
 enum BodyInner {
@@ -572,6 +575,67 @@ impl StreamingResponse {
     }
 }
 
+enum CollectBodyError<E> {
+    Timeout,
+    TooLarge,
+    Transport(E),
+}
+
+async fn collect_bounded_body<B>(
+    mut body: B,
+    limit: usize,
+    deadline: Option<Instant>,
+) -> Result<Bytes, CollectBodyError<B::Error>>
+where
+    B: http_body::Body<Data = Bytes> + Unpin,
+{
+    if body.size_hint().lower() > limit as u64 {
+        return Err(CollectBodyError::TooLarge);
+    }
+
+    let collect = async {
+        let mut first: Option<Bytes> = None;
+        let mut buf: Option<BytesMut> = None;
+        let mut total: usize = 0;
+
+        while let Some(frame) = body.frame().await {
+            let frame = frame.map_err(CollectBodyError::Transport)?;
+            let Ok(data) = frame.into_data() else {
+                continue;
+            };
+            if data.is_empty() {
+                continue;
+            }
+            if data.len() > limit - total {
+                return Err(CollectBodyError::TooLarge);
+            }
+            total += data.len();
+            if let Some(buf) = buf.as_mut() {
+                buf.extend_from_slice(&data);
+            } else if let Some(prev) = first.take() {
+                let mut combined = BytesMut::with_capacity(total);
+                combined.extend_from_slice(&prev);
+                combined.extend_from_slice(&data);
+                buf = Some(combined);
+            } else {
+                first = Some(data);
+            }
+        }
+
+        Ok(match buf {
+            Some(buf) => buf.freeze(),
+            None => first.unwrap_or_default(),
+        })
+    };
+
+    match deadline {
+        Some(dl) => timeout_at(dl, collect)
+            .await
+            .unwrap_or(Err(CollectBodyError::Timeout)),
+        None => collect.await,
+    }
+}
+
 async fn collect_and_decompress_error_body(
     status: StatusCode,
     headers: &HeaderMap,
@@ -579,25 +643,27 @@ async fn collect_and_decompress_error_body(
     deadline: Option<Instant>,
     poison_handle: &PoisonHandle,
 ) -> Bytes {
-    let collect_res = match deadline {
-        Some(dl) => match timeout_at(dl, body.collect()).await {
-            Ok(res) => res,
-            Err(_) => {
-                // Dropping `body` resets the HTTP/2 stream; retiring the connection prevents
-                // reusing a stalled peer while preserving the already-received HTTP status.
-                tracing::debug!(
-                    status = status.as_u16(),
-                    "timed out reading non-2xx error body; preserving HTTP status"
-                );
-                poison_handle.poison();
-                return Bytes::new();
-            }
-        },
-        None => body.collect().await,
-    };
-    let bytes = match collect_res {
-        Ok(collected) => collected.to_bytes(),
-        Err(err) => {
+    let bytes = match collect_bounded_body(body, MAX_ERROR_RESPONSE_BYTES, deadline).await {
+        Ok(bytes) => bytes,
+        Err(CollectBodyError::Timeout) => {
+            // Dropping `body` resets the HTTP/2 stream; retiring the connection prevents
+            // reusing a stalled peer while preserving the already-received HTTP status.
+            tracing::debug!(
+                status = status.as_u16(),
+                "timed out reading non-2xx error body; preserving HTTP status"
+            );
+            poison_handle.poison();
+            return Bytes::new();
+        }
+        Err(CollectBodyError::TooLarge) => {
+            tracing::debug!(
+                status = status.as_u16(),
+                limit = MAX_ERROR_RESPONSE_BYTES,
+                "non-2xx error body exceeded size limit; preserving HTTP status"
+            );
+            return Bytes::new();
+        }
+        Err(CollectBodyError::Transport(err)) => {
             tracing::debug!(
                 status = status.as_u16(),
                 error = %format_error_chain(&err),
@@ -609,7 +675,7 @@ async fn collect_and_decompress_error_body(
             return Bytes::new();
         }
     };
-    match decompress_body(headers, bytes) {
+    match decompress_body(headers, bytes, MAX_ERROR_RESPONSE_BYTES) {
         Ok(bytes) => bytes,
         Err(err) => {
             tracing::debug!(
@@ -810,29 +876,27 @@ fn compress_body(
     }
 }
 
-fn read_bounded(reader: impl std::io::Read) -> Result<Bytes, HttpError> {
-    let limit = (MAX_DECOMPRESSED_RESPONSE_BYTES as u64) + 1;
+fn read_bounded(reader: impl std::io::Read, max_bytes: usize) -> Result<Bytes, HttpError> {
+    let limit = (max_bytes as u64) + 1;
     let mut decompressed = Vec::new();
     reader
         .take(limit)
         .read_to_end(&mut decompressed)
         .map_err(|e| HttpError::ResponseCompression(e.to_string()))?;
-    if decompressed.len() > MAX_DECOMPRESSED_RESPONSE_BYTES {
-        return Err(HttpError::ResponseCompression(format!(
-            "decompressed response exceeds {MAX_DECOMPRESSED_RESPONSE_BYTES} byte limit"
-        )));
+    if decompressed.len() > max_bytes {
+        return Err(HttpError::ResponseTooLarge(max_bytes));
     }
     Ok(Bytes::from(decompressed))
 }
 
-fn decompress_single(encoding: &str, bytes: Bytes) -> Result<Bytes, HttpError> {
+fn decompress_single(encoding: &str, bytes: Bytes, max_bytes: usize) -> Result<Bytes, HttpError> {
     match encoding {
         "" | "identity" => Ok(bytes),
-        "gzip" => read_bounded(MultiGzDecoder::new(bytes.as_ref())),
+        "gzip" => read_bounded(MultiGzDecoder::new(bytes.as_ref()), max_bytes),
         "zstd" => {
             let decoder = zstd::stream::Decoder::new(bytes.as_ref())
                 .map_err(|e| HttpError::ResponseCompression(e.to_string()))?;
-            read_bounded(decoder)
+            read_bounded(decoder, max_bytes)
         }
         other => Err(HttpError::ResponseCompression(format!(
             "unsupported content-encoding: {other}"
@@ -840,7 +904,11 @@ fn decompress_single(encoding: &str, bytes: Bytes) -> Result<Bytes, HttpError> {
     }
 }
 
-fn decompress_body(headers: &HeaderMap, mut bytes: Bytes) -> Result<Bytes, HttpError> {
+fn decompress_body(
+    headers: &HeaderMap,
+    mut bytes: Bytes,
+    max_bytes: usize,
+) -> Result<Bytes, HttpError> {
     let mut encodings = Vec::new();
     for raw in headers.get_all(CONTENT_ENCODING) {
         let s = raw.to_str().map_err(|e| {
@@ -854,7 +922,7 @@ fn decompress_body(headers: &HeaderMap, mut bytes: Bytes) -> Result<Bytes, HttpE
         }
     }
     for encoding in encodings.into_iter().rev() {
-        bytes = decompress_single(&encoding, bytes)?;
+        bytes = decompress_single(&encoding, bytes, max_bytes)?;
     }
     Ok(bytes)
 }
@@ -1630,21 +1698,19 @@ async fn execute_unary_with(
 
     let (parts, body) = response.into_parts();
     let bytes = if parts.status.is_success() {
-        let collect = match deadline {
-            Some(dl) => timeout_at(dl, body.collect())
-                .await
-                .map_err(|_| HttpError::Timeout)?,
-            None => body.collect().await,
-        };
-        let bytes = collect
-            .map_err(|err| {
-                if is_dead_connection_hyper_error(&err) {
-                    poison_handle.poison();
+        let bytes = collect_bounded_body(body, MAX_RESPONSE_BYTES, deadline)
+            .await
+            .map_err(|err| match err {
+                CollectBodyError::Timeout => HttpError::Timeout,
+                CollectBodyError::TooLarge => HttpError::ResponseTooLarge(MAX_RESPONSE_BYTES),
+                CollectBodyError::Transport(hyper_err) => {
+                    if is_dead_connection_hyper_error(&hyper_err) {
+                        poison_handle.poison();
+                    }
+                    HttpError::Transport(hyper_err)
                 }
-                HttpError::Transport(err)
-            })?
-            .to_bytes();
-        decompress_body(&parts.headers, bytes)?
+            })?;
+        decompress_body(&parts.headers, bytes, MAX_RESPONSE_BYTES)?
     } else {
         // Non-2xx headers already received (`E2`): preserve HTTP status even if collecting
         // or decompressing the error body stalls or fails.
@@ -2223,8 +2289,50 @@ mod tests {
             let mut headers = HeaderMap::new();
             headers.insert(CONTENT_ENCODING, enc);
             let raw = Bytes::copy_from_slice(compressed.as_bytes().unwrap());
-            let decoded = decompress_body(&headers, raw).unwrap();
+            let decoded = decompress_body(&headers, raw.clone(), MAX_RESPONSE_BYTES).unwrap();
             assert_eq!(decoded.as_ref(), payload.as_slice());
+
+            let err = decompress_body(&headers, raw, payload.len() - 1).unwrap_err();
+            assert!(matches!(err, HttpError::ResponseTooLarge(n) if n == payload.len() - 1));
         }
+    }
+
+    #[tokio::test]
+    async fn collect_bounded_body_enforces_limit_across_single_and_multiple_frames() {
+        // Empty body.
+        let empty = collect_bounded_body(Empty::<Bytes>::new(), 8, None)
+            .await
+            .ok()
+            .unwrap();
+        assert!(empty.is_empty());
+
+        // Single-frame exact boundary succeeds; one byte over fails immediately via size_hint.
+        let exact = collect_bounded_body(Full::new(Bytes::from_static(b"12345678")), 8, None)
+            .await
+            .ok()
+            .unwrap();
+        assert_eq!(exact.as_ref(), b"12345678");
+        assert!(matches!(
+            collect_bounded_body(Full::new(Bytes::from_static(b"123456789")), 8, None).await,
+            Err(CollectBodyError::TooLarge)
+        ));
+
+        // Multi-frame stream with unknown size_hint: exact limit succeeds, +1 byte fails.
+        let ok_stream = StreamBody::new(futures_util::stream::iter([
+            Ok::<_, Infallible>(Frame::data(Bytes::from_static(b"abcd"))),
+            Ok(Frame::data(Bytes::new())),
+            Ok(Frame::data(Bytes::from_static(b"efgh"))),
+        ]));
+        let combined = collect_bounded_body(ok_stream, 8, None).await.ok().unwrap();
+        assert_eq!(combined.as_ref(), b"abcdefgh");
+
+        let over_stream = StreamBody::new(futures_util::stream::iter([
+            Ok::<_, Infallible>(Frame::data(Bytes::from_static(b"abcd"))),
+            Ok(Frame::data(Bytes::from_static(b"efghi"))),
+        ]));
+        assert!(matches!(
+            collect_bounded_body(over_stream, 8, None).await,
+            Err(CollectBodyError::TooLarge)
+        ));
     }
 }
