@@ -1035,9 +1035,7 @@ mod tests {
     use hyper_util::client::legacy::connect::HttpConnector;
 
     use super::*;
-    #[cfg(feature = "_hidden")]
-    use crate::error::RequestError;
-    use crate::error::{AppendError, ServerError};
+    use crate::error::{AppendError, RequestError, ServerError};
 
     #[cfg(feature = "_hidden")]
     #[derive(Default)]

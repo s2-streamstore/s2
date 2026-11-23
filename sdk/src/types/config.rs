@@ -741,11 +741,12 @@ impl RetryConfig {
 /// Overrides for the HTTP/2 transport used by pooled connections.
 ///
 /// Unset knobs keep the SDK defaults: 50 concurrent requests per connection,
-/// 4 MiB per-stream receive window, and 256 MiB connection receive window (so
-/// paused read sessions on a shared connection cannot exhaust the connection
-/// window and stall sibling appends or unary calls). Receive windows bound
-/// unconsumed server-to-client DATA only; they do not affect append throughput,
-/// which is governed by the server's receive windows.
+/// 4 MiB per-stream receive window, and a connection receive window of at least
+/// 256 MiB (automatically scaled up to `max_concurrent_requests × stream_receive_window`,
+/// capped at [`Self::MAX_RECEIVE_WINDOW`], when left unset so paused read sessions on a
+/// shared connection cannot exhaust the connection window and stall sibling appends or
+/// unary calls). Receive windows bound unconsumed server-to-client DATA only; they do not
+/// affect append throughput, which is governed by the server's receive windows.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 #[must_use]
 pub struct Http2Config {

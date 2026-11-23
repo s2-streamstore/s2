@@ -1443,6 +1443,22 @@ where
     }
 }
 
+fn effective_receive_windows(http2_config: Http2Config) -> (u32, u32) {
+    let stream_window = http2_config
+        .stream_receive_window
+        .unwrap_or(DEFAULT_STREAM_RECEIVE_WINDOW);
+    let max_concurrent = http2_config
+        .max_concurrent_requests
+        .unwrap_or(DEFAULT_MAX_CONCURRENT_REQUESTS_PER_CONNECTION);
+    let conn_window = http2_config.connection_receive_window.unwrap_or_else(|| {
+        let min_for_streams = (max_concurrent as u64)
+            .saturating_mul(u64::from(stream_window))
+            .min(u64::from(Http2Config::MAX_RECEIVE_WINDOW)) as u32;
+        DEFAULT_CONNECTION_RECEIVE_WINDOW.max(min_for_streams)
+    });
+    (stream_window, conn_window)
+}
+
 async fn dial_http2<C: Connect>(
     mut connector: C,
     origin_uri: Uri,
@@ -1464,21 +1480,14 @@ async fn dial_http2<C: Connect>(
             .call(origin_uri)
             .await
             .map_err(|e| format_error_chain(e.into().as_ref()))?;
+        let (stream_window, conn_window) = effective_receive_windows(http2_config);
         let mut builder = http2::Builder::new(ShutdownExecutor(shutdown.clone()));
         builder
             .timer(TokioTimer::new())
             .keep_alive_interval(KEEP_ALIVE_INTERVAL)
             .keep_alive_timeout(KEEP_ALIVE_TIMEOUT)
-            .initial_stream_window_size(
-                http2_config
-                    .stream_receive_window
-                    .unwrap_or(DEFAULT_STREAM_RECEIVE_WINDOW),
-            )
-            .initial_connection_window_size(
-                http2_config
-                    .connection_receive_window
-                    .unwrap_or(DEFAULT_CONNECTION_RECEIVE_WINDOW),
-            );
+            .initial_stream_window_size(stream_window)
+            .initial_connection_window_size(conn_window);
         builder
             .handshake(io)
             .await
@@ -2585,5 +2594,48 @@ mod tests {
         let config = crate::types::S2Config::new("test-token");
         assert!(config.rustls_crypto_provider.is_none());
         assert!(resolve_rustls_crypto_provider(config.rustls_crypto_provider).is_ok());
+    }
+
+    // spec: r1 C13d
+    #[test]
+    fn effective_receive_windows_auto_scale_unset_connection_window() {
+        const MIB: u32 = 1024 * 1024;
+
+        // Defaults stay 4 MiB stream / 256 MiB connection.
+        assert_eq!(
+            effective_receive_windows(Http2Config::new()),
+            (4 * MIB, 256 * MIB)
+        );
+
+        // Raising max_concurrent_requests without setting connection_receive_window scales up.
+        let cfg = Http2Config::new()
+            .with_max_concurrent_requests(100)
+            .unwrap();
+        assert_eq!(effective_receive_windows(cfg), (4 * MIB, 400 * MIB));
+
+        // Raising stream_receive_window without setting connection_receive_window scales up.
+        let cfg = Http2Config::new()
+            .with_stream_receive_window(16 * MIB)
+            .unwrap();
+        assert_eq!(effective_receive_windows(cfg), (16 * MIB, 800 * MIB));
+
+        // Scaling clamps to HTTP/2's 2^31 - 1 ceiling without overflowing.
+        let cfg = Http2Config::new()
+            .with_max_concurrent_requests(100)
+            .unwrap()
+            .with_stream_receive_window(64 * MIB)
+            .unwrap();
+        assert_eq!(
+            effective_receive_windows(cfg),
+            (64 * MIB, Http2Config::MAX_RECEIVE_WINDOW)
+        );
+
+        // Explicit connection_receive_window override is always honored verbatim.
+        let cfg = Http2Config::new()
+            .with_max_concurrent_requests(100)
+            .unwrap()
+            .with_connection_receive_window(64 * MIB)
+            .unwrap();
+        assert_eq!(effective_receive_windows(cfg), (4 * MIB, 64 * MIB));
     }
 }
