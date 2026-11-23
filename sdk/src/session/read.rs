@@ -1022,10 +1022,15 @@ impl ReadDriver {
                 }
                 Ok(Some(Err(err))) => Err(err),
                 Ok(None) => Ok(None),
-                Err(_) => Err(ReadSessionError::Timeout(TimeoutError::new(
-                    "heartbeat timeout",
-                    self.context.clone(),
-                ))),
+                Err(_) => {
+                    if let Some(active) = self.active.as_ref() {
+                        active.stream.poison_connection();
+                    }
+                    Err(ReadSessionError::Timeout(TimeoutError::new(
+                        "heartbeat timeout",
+                        self.context.clone(),
+                    )))
+                }
             };
 
             match item {

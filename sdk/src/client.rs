@@ -47,6 +47,8 @@ use crate::{
 
 const APPLICATION_JSON: HeaderValue = HeaderValue::from_static("application/json");
 const DEFAULT_MAX_CONCURRENT_REQUESTS_PER_CONNECTION: usize = 50;
+const DEFAULT_STREAM_RECEIVE_WINDOW: u32 = 16 * 1024 * 1024;
+const DEFAULT_CONNECTION_RECEIVE_WINDOW: u32 = 32 * 1024 * 1024;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(20);
 const KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -1364,16 +1366,17 @@ async fn dial_http2<C: Connect>(
         builder
             .timer(TokioTimer::new())
             .keep_alive_interval(KEEP_ALIVE_INTERVAL)
-            .keep_alive_timeout(KEEP_ALIVE_TIMEOUT);
-        if http2_config.stream_receive_window.is_none()
-            && http2_config.connection_receive_window.is_none()
-        {
-            builder.adaptive_window(true);
-        } else {
-            builder
-                .initial_stream_window_size(http2_config.stream_receive_window)
-                .initial_connection_window_size(http2_config.connection_receive_window);
-        }
+            .keep_alive_timeout(KEEP_ALIVE_TIMEOUT)
+            .initial_stream_window_size(
+                http2_config
+                    .stream_receive_window
+                    .unwrap_or(DEFAULT_STREAM_RECEIVE_WINDOW),
+            )
+            .initial_connection_window_size(
+                http2_config
+                    .connection_receive_window
+                    .unwrap_or(DEFAULT_CONNECTION_RECEIVE_WINDOW),
+            );
         builder
             .handshake(io)
             .await
@@ -1572,9 +1575,13 @@ where
 
             let deadline = request_timeout.map(|d| Instant::now() + d);
             let ready_res = match deadline {
-                Some(dl) => timeout_at(dl, sender.ready())
-                    .await
-                    .map_err(|_| HttpError::Timeout)?,
+                Some(dl) => match timeout_at(dl, sender.ready()).await {
+                    Ok(res) => res,
+                    Err(_) => {
+                        pool.remove(id);
+                        return Err(HttpError::Timeout);
+                    }
+                },
                 None => sender.ready().await,
             };
 
@@ -1678,9 +1685,13 @@ async fn send_http_request(
 
     let send_fut = sender.send_request(http_request);
     match deadline {
-        Some(dl) => timeout_at(dl, send_fut)
-            .await
-            .map_err(|_| HttpError::Timeout)?,
+        Some(dl) => match timeout_at(dl, send_fut).await {
+            Ok(res) => res,
+            Err(_) => {
+                poison_handle.poison();
+                return Err(HttpError::Timeout);
+            }
+        },
         None => send_fut.await,
     }
     .map_err(|err| {
@@ -1708,7 +1719,10 @@ async fn execute_unary_with(
         let bytes = collect_bounded_body(body, MAX_RESPONSE_BYTES, deadline)
             .await
             .map_err(|err| match err {
-                CollectBodyError::Timeout => HttpError::Timeout,
+                CollectBodyError::Timeout => {
+                    poison_handle.poison();
+                    HttpError::Timeout
+                }
                 CollectBodyError::TooLarge => HttpError::ResponseTooLarge(MAX_RESPONSE_BYTES),
                 CollectBodyError::Transport(hyper_err) => {
                     if is_dead_connection_hyper_error(&hyper_err) {
@@ -1879,10 +1893,27 @@ mod tests {
                         active: active_connections,
                         closed: conn_closed,
                     };
-                    while let Some(Ok((_req, mut respond))) = conn.accept().await {
+                    while let Some(Ok((req, mut respond))) = conn.accept().await {
+                        let path = req.uri().path();
                         if stall_error_body {
                             let resp = http::Response::builder()
                                 .status(StatusCode::PRECONDITION_FAILED)
+                                .body(())
+                                .unwrap();
+                            if let Ok(mut send) = respond.send_response(resp, false) {
+                                tokio::spawn(async move {
+                                    let _ = std::future::poll_fn(|cx| send.poll_reset(cx)).await;
+                                });
+                            }
+                        } else if path == "/stall-headers" {
+                            // Never send response headers (simulates silent blackhole).
+                            tokio::spawn(async move {
+                                let _keep_open = respond;
+                                std::future::pending::<()>().await;
+                            });
+                        } else if path == "/stall-ok-body" {
+                            let resp = http::Response::builder()
+                                .status(StatusCode::OK)
                                 .body(())
                                 .unwrap();
                             if let Ok(mut send) = respond.send_response(resp, false) {
@@ -2243,6 +2274,51 @@ mod tests {
         assert_eq!(stream_resp.status(), StatusCode::PRECONDITION_FAILED);
         let (bytes, _poison) = stream_resp.into_bytes_with_poison_handle().await;
         assert!(bytes.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn request_timeout_retires_stalled_connection_so_next_request_redials() {
+        for stall_path in ["/stall-headers", "/stall-ok-body"] {
+            let connector = DuplexH2Connector::new();
+            let pool = test_pool_with(connector.clone(), Http2Config::new());
+
+            // Warm connection #1.
+            let ok_req = RequestBuilder::get("http://localhost:8080/ok".parse().unwrap())
+                .timeout(Duration::from_millis(50))
+                .build()
+                .unwrap();
+            assert_eq!(
+                pool.execute_unary(ok_req).await.unwrap().status(),
+                StatusCode::OK
+            );
+            assert_eq!(connector.dials.load(Ordering::SeqCst), 1);
+            assert_eq!(host_connection_count(&pool, TEST_ORIGIN), 1);
+
+            // Timed-out request on connection #1 must retire it from the pool.
+            let stalled_req = RequestBuilder::get(
+                format!("http://localhost:8080{stall_path}")
+                    .parse()
+                    .unwrap(),
+            )
+            .timeout(Duration::from_millis(50))
+            .build()
+            .unwrap();
+            let err = pool.execute_unary(stalled_req).await.err().unwrap();
+            assert!(matches!(err, HttpError::Timeout), "{stall_path}: {err:?}");
+            assert_eq!(host_connection_count(&pool, TEST_ORIGIN), 0);
+
+            // Subsequent request must dial a fresh connection (#2) instead of reusing #1.
+            let retry_req = RequestBuilder::get("http://localhost:8080/ok".parse().unwrap())
+                .timeout(Duration::from_millis(50))
+                .build()
+                .unwrap();
+            assert_eq!(
+                pool.execute_unary(retry_req).await.unwrap().status(),
+                StatusCode::OK
+            );
+            assert_eq!(connector.dials.load(Ordering::SeqCst), 2);
+            pool.close();
+        }
     }
 
     #[test]

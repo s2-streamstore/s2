@@ -1,4 +1,9 @@
-use std::{pin::Pin, sync::Arc, time::Duration};
+use std::{
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+    time::Duration,
+};
 
 use async_stream::try_stream;
 use bytes::BytesMut;
@@ -51,7 +56,24 @@ pub(crate) struct S2sFrame<T> {
     pub(crate) reconnect_advised: bool,
 }
 
-pub(crate) type Streaming<R, E> = Pin<Box<dyn Send + Stream<Item = Result<S2sFrame<R>, E>>>>;
+pub(crate) struct Streaming<R, E> {
+    stream: Pin<Box<dyn Send + Stream<Item = Result<S2sFrame<R>, E>>>>,
+    poison_handle: client::PoisonHandle,
+}
+
+impl<R, E> Streaming<R, E> {
+    pub(crate) fn poison_connection(&self) {
+        self.poison_handle.poison();
+    }
+}
+
+impl<R, E> Stream for Streaming<R, E> {
+    type Item = Result<S2sFrame<R>, E>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.stream.as_mut().poll_next(cx)
+    }
+}
 
 pub(crate) fn basin_path(name: &BasinName) -> String {
     format!("v1/basins/{}", urlencoding::encode(name))
@@ -820,12 +842,13 @@ impl BasinClient {
         }
 
         let (mut bytes_stream, poison_handle) = response.into_stream();
+        let stream_poison = poison_handle.clone();
         let auth_client = self.base.clone();
 
         let mut buffer = BytesMut::new();
         let mut decoder = FrameDecoder;
 
-        Ok(Box::pin(try_stream! {
+        let stream = Box::pin(try_stream! {
             while let Some(chunk) = bytes_stream.next().await {
                 let chunk = chunk.map_err(|e| E::from_http(e, ctx.clone()))?;
                 buffer.extend_from_slice(&chunk);
@@ -835,7 +858,7 @@ impl BasinClient {
                         Ok(Some(SessionMessage::Regular(msg))) => {
                             let reconnect_advised = msg.reconnect_advised();
                             if reconnect_advised {
-                                poison_handle.poison();
+                                stream_poison.poison();
                             }
                             let decoded = msg.try_into_proto().map_err(|e| {
                                 E::from(ProtocolError::new(
@@ -851,7 +874,7 @@ impl BasinClient {
                         Ok(Some(SessionMessage::Terminal(msg))) => {
                             let error = E::from_terminal_message(msg, ctx.clone());
                             if error.should_retire_connection() {
-                                poison_handle.poison();
+                                stream_poison.poison();
                             }
                             auth_client.invalidate_access_token_if_rejected(
                                 &error,
@@ -877,7 +900,11 @@ impl BasinClient {
                     ctx.clone(),
                 )))?;
             }
-        }))
+        });
+        Ok(Streaming {
+            stream,
+            poison_handle,
+        })
     }
 
     pub(crate) async fn append_session<I>(

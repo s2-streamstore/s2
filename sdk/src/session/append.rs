@@ -1606,6 +1606,7 @@ impl AppendSessionTask {
                 }
 
                 _ = &mut ack_timer, if timer_kind.is_some() => {
+                    acks.poison_connection();
                     let unacked_sent =
                         finish_attempt_gate(&send_gate, acked_in_attempt, &mut self.state);
                     if self.state.inflight_appends.is_empty() {
