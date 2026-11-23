@@ -1098,3 +1098,200 @@ async fn regression_read_session_r11d_caught_up_and_count_exhausted() {
         "must not reconnect with count=0 after limit exhausted"
     );
 }
+
+// spec: r1 T5a, R9, R9a, R9c, R9d, R10
+#[tokio::test]
+async fn spec_t5a_empty_frame_does_not_reset_budget_and_r9_close_boundary() {
+    // 1. T5a: an empty ReadBatch frame with no records and no tail is NOT a heartbeat and must NOT
+    //    reset retry budget (so a budgeted session still gives up after max_attempts).
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let empty_server = MockH2Server::start({
+        let attempts = attempts.clone();
+        move |_conn_id, _req, respond| {
+            let attempts = attempts.clone();
+            async move {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                if let Some(mut s2s) = S2sResponder::open(respond) {
+                    // Empty frame: records=[], tail=None.
+                    s2s.send_regular(&proto_read_batch_records(&[], None), false, false);
+                    s2s.send_terminal(
+                        503,
+                        r#"{"code":"unavailable","message":"transient"}"#.as_bytes(),
+                    );
+                }
+            }
+        }
+    })
+    .await;
+
+    let mut empty_sess = empty_server
+        .stream(fast_retry_config(2))
+        .read_session(
+            ReadInput::new().with_start(ReadStart::SeqNum(0)),
+            ReadSessionConfig::default(),
+        )
+        .unwrap();
+    let err = empty_sess
+        .next()
+        .await
+        .expect("must fail after budget exhausted")
+        .unwrap_err();
+    assert!(
+        matches!(err, ReadSessionError::Server(ref e) if e.status == 503),
+        "T5a: expected 503 after max_attempts=2, got {err:?}"
+    );
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        2,
+        "T5a: empty non-heartbeat frame must not reset retry budget"
+    );
+
+    // 2. R9c with zero buffered records: terminal error closes immediately (resolving caught_up()
+    //    before next() is polled), and a subsequent client.close() has no effect on either
+    //    caught_up() or next().
+    let err_server = MockH2Server::start(|_conn_id, _req, respond| async move {
+        if let Some(mut s2s) = S2sResponder::open(respond) {
+            s2s.send_terminal(
+                404,
+                r#"{"code":"stream_not_found","message":"missing"}"#.as_bytes(),
+            );
+        }
+    })
+    .await;
+    let err_client = err_server.client(no_retry_config());
+    let (basin, stream) = test_basin_and_stream();
+    let mut err_sess = err_client
+        .basin(basin)
+        .stream(stream)
+        .read_session(
+            ReadInput::new().with_start(ReadStart::SeqNum(0)),
+            ReadSessionConfig::default(),
+        )
+        .unwrap();
+    let cu_err = tokio::time::timeout(Duration::from_secs(2), err_sess.caught_up())
+        .await
+        .expect("R9c: caught_up must fail immediately when no records are buffered")
+        .unwrap_err();
+    assert!(
+        matches!(cu_err, ReadSessionError::Server(ref e) if e.status == 404),
+        "R9c: expected 404 on caught_up, got {cu_err:?}"
+    );
+    // Session already closed under R9c -> client.close() must have no effect.
+    err_client.close();
+    let next_err = err_sess
+        .next()
+        .await
+        .expect("must still yield terminal 404 once")
+        .unwrap_err();
+    assert!(
+        matches!(next_err, ReadSessionError::Server(ref e) if e.status == 404),
+        "R9: post-close client.close() must not overwrite R9c failure, got {next_err:?}"
+    );
+    assert!(err_sess.next().await.is_none());
+
+    // 3. R9a with zero buffered records: clean stop closes immediately (failing caught_up() with
+    //    SessionClosedError), and a subsequent client.close() has no effect.
+    let eof_server = MockH2Server::start(|_conn_id, _req, respond| async move {
+        if let Some(mut s2s) = S2sResponder::open(respond) {
+            s2s.send_eof();
+        }
+    })
+    .await;
+    let eof_client = eof_server.client(no_retry_config());
+    let (basin, stream) = test_basin_and_stream();
+    let mut eof_sess = eof_client
+        .basin(basin)
+        .stream(stream)
+        .read_session(
+            ReadInput::new()
+                .with_start(ReadStart::SeqNum(0))
+                .with_count(1),
+            ReadSessionConfig::default(),
+        )
+        .unwrap();
+    let cu_eof = tokio::time::timeout(Duration::from_secs(2), eof_sess.caught_up())
+        .await
+        .expect("R9a: caught_up must fail immediately when clean stop has no buffered records")
+        .unwrap_err();
+    assert!(
+        matches!(cu_eof, ReadSessionError::SessionClosed(ref e) if e.failure().is_none()),
+        "R9a: expected clean SessionClosedError on caught_up, got {cu_eof:?}"
+    );
+    eof_client.close();
+    assert!(
+        eof_sess.next().await.is_none(),
+        "R9: post-close client.close() must not turn clean R9a close into AbortedError"
+    );
+
+    // 4. R9c with buffered records: abort while record 1 is still buffered wins over the queued 404
+    //    on BOTH caught_up() and next(); once all buffered records are delivered, R9c closes
+    //    immediately and a later client.close() is a no-op.
+    let buffered_server = MockH2Server::start(|_conn_id, _req, respond| async move {
+        if let Some(mut s2s) = S2sResponder::open(respond) {
+            s2s.send_regular(&proto_read_batch_records(&[0, 1], Some(5)), false, false);
+            s2s.send_terminal(
+                404,
+                r#"{"code":"stream_not_found","message":"gone"}"#.as_bytes(),
+            );
+        }
+    })
+    .await;
+    // 4a: abort while record 1 is still buffered -> both caught_up() and next() get AbortedError.
+    let c1 = buffered_server.client(no_retry_config());
+    let (basin, stream) = test_basin_and_stream();
+    let mut s1 = c1
+        .basin(basin)
+        .stream(stream)
+        .read_session(
+            ReadInput::new().with_start(ReadStart::SeqNum(0)),
+            ReadSessionConfig::default(),
+        )
+        .unwrap();
+    let cu1 = s1.caught_up();
+    assert_eq!(s1.next().await.unwrap().unwrap().seq_num, 0);
+    // Give the driver time to observe the 404 behind the buffered batch.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    c1.close();
+    assert!(
+        matches!(cu1.await, Err(ReadSessionError::Aborted(_))),
+        "R9d: abort while records remain buffered must fail caught_up with AbortedError"
+    );
+    let next1 = s1
+        .next()
+        .await
+        .expect("must yield AbortedError")
+        .unwrap_err();
+    assert!(
+        matches!(next1, ReadSessionError::Aborted(_)),
+        "R9d: abort while records remain buffered must fail next() with AbortedError, got {next1:?}"
+    );
+
+    // 4b: drain both buffered records -> R9c closes immediately, later client.close() is a no-op.
+    let c2 = buffered_server.client(no_retry_config());
+    let (basin, stream) = test_basin_and_stream();
+    let mut s2 = c2
+        .basin(basin)
+        .stream(stream)
+        .read_session(
+            ReadInput::new().with_start(ReadStart::SeqNum(0)),
+            ReadSessionConfig::default(),
+        )
+        .unwrap();
+    let cu2 = s2.caught_up();
+    assert_eq!(s2.next().await.unwrap().unwrap().seq_num, 0);
+    assert_eq!(s2.next().await.unwrap().unwrap().seq_num, 1);
+    let cu2_err = tokio::time::timeout(Duration::from_secs(2), cu2)
+        .await
+        .expect("R9c: caught_up must fail as soon as buffered records finish draining")
+        .unwrap_err();
+    assert!(
+        matches!(cu2_err, ReadSessionError::Server(ref e) if e.status == 404),
+        "R9c: expected 404 on caught_up after drain, got {cu2_err:?}"
+    );
+    c2.close();
+    let next2 = s2.next().await.expect("must yield 404").unwrap_err();
+    assert!(
+        matches!(next2, ReadSessionError::Server(ref e) if e.status == 404),
+        "R9: post-drain client.close() must not overwrite R9c 404, got {next2:?}"
+    );
+}

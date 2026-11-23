@@ -224,11 +224,28 @@ impl CatchUpSlot {
     }
 }
 
+#[derive(Debug, Clone)]
+enum TerminalClose {
+    Clean,
+    Error(ReadSessionError),
+}
+
+enum PendingClose {
+    Clean { final_tail: Option<StreamPosition> },
+    Error(ReadSessionError),
+}
+
 struct ReadStateInner {
     next_seq_num: Option<u64>,
     last_observed_tail: Option<StreamPosition>,
     phase: RequestPhase,
     catch_up: CatchUpSlot,
+    buffered_records: usize,
+    pending_close: Option<PendingClose>,
+    /// Locked-in session close reason (`R9`). Once set, later aborts or closes have no effect.
+    /// When `Clean` is reached while already caught up, `phase` stays `Open` until iteration
+    /// returns `None` so `is_caught_up()` stays `true` per `R7c` without racing the driver.
+    closed: Option<TerminalClose>,
     context: ErrorContext,
 }
 
@@ -239,6 +256,9 @@ impl ReadStateInner {
             last_observed_tail: None,
             phase: RequestPhase::Connecting,
             catch_up: CatchUpSlot::pending(),
+            buffered_records: 0,
+            pending_close: None,
+            closed: None,
             context,
         }
     }
@@ -300,10 +320,12 @@ impl ReadStateInner {
         &mut self,
         first_record_seq: Option<u64>,
         tail: Option<StreamPosition>,
+        record_count: usize,
     ) -> bool {
-        if self.phase == RequestPhase::Ended {
+        if self.phase == RequestPhase::Ended || self.closed.is_some() {
             return false;
         }
+        self.buffered_records = self.buffered_records.saturating_add(record_count);
         self.phase = RequestPhase::Open { latest_tail: tail };
         if let Some(tail) = tail {
             self.update_observed_tail(tail);
@@ -318,16 +340,28 @@ impl ReadStateInner {
     }
 
     fn on_disconnected(&mut self) {
-        if self.phase == RequestPhase::Ended {
+        if self.phase == RequestPhase::Ended || self.closed.is_some() {
             return;
         }
         self.phase = RequestPhase::Connecting;
         self.recompute_caught_up();
     }
 
-    fn on_clean_stop(&mut self, tail: Option<StreamPosition>) {
-        if self.phase == RequestPhase::Ended {
-            return;
+    fn apply_clean_close(&mut self, final_tail: Option<StreamPosition>) {
+        if let Some(tail) = final_tail {
+            self.on_heartbeat_delivered(tail);
+        }
+        self.closed = Some(TerminalClose::Clean);
+        if !self.catch_up.is_caught_up() {
+            self.on_ended(None);
+        }
+    }
+
+    /// Record a clean stop (`R9a`). Returns `true` if the session closed immediately (no
+    /// undelivered records remain).
+    fn on_clean_stop(&mut self, tail: Option<StreamPosition>) -> bool {
+        if self.closed.is_some() || self.phase == RequestPhase::Ended {
+            return true;
         }
         let latest_tail = tail.or(match self.phase {
             RequestPhase::Open { latest_tail } => latest_tail,
@@ -337,13 +371,60 @@ impl ReadStateInner {
         if let Some(tail) = tail {
             self.update_observed_tail(tail);
         }
-        self.recompute_caught_up();
+        if self.buffered_records == 0 {
+            self.apply_clean_close(tail);
+            true
+        } else {
+            self.pending_close = Some(PendingClose::Clean { final_tail: tail });
+            self.recompute_caught_up();
+            false
+        }
     }
 
-    fn on_record_delivered(&mut self, seq_num: u64) {
-        self.next_seq_num = Some(seq_num.saturating_add(1));
+    /// Record a terminal error (`R9c`). Returns `true` if the session closed immediately (no
+    /// undelivered records remain).
+    fn on_terminal_error(&mut self, err: ReadSessionError) -> bool {
+        if self.closed.is_some() || self.phase == RequestPhase::Ended {
+            return true;
+        }
+        if self.buffered_records == 0 {
+            self.closed = Some(TerminalClose::Error(err.clone()));
+            self.on_ended(Some(err));
+            true
+        } else {
+            self.pending_close = Some(PendingClose::Error(err));
+            false
+        }
+    }
+
+    fn on_aborted(&mut self, err: AbortedError) -> bool {
+        if self.closed.is_some() || self.phase == RequestPhase::Ended {
+            return false;
+        }
+        self.pending_close = None;
+        let err = ReadSessionError::Aborted(err);
+        self.closed = Some(TerminalClose::Error(err.clone()));
+        self.on_ended(Some(err));
+        true
+    }
+
+    fn on_records_delivered(&mut self, last_seq_num: u64, count: usize) {
+        self.next_seq_num = Some(last_seq_num.saturating_add(1));
+        self.buffered_records = self.buffered_records.saturating_sub(count);
         if self.phase != RequestPhase::Ended {
             self.recompute_caught_up();
+        }
+        if self.buffered_records == 0
+            && self.closed.is_none()
+            && let Some(pending) = self.pending_close.take()
+        {
+            match pending {
+                PendingClose::Clean { final_tail } => self.apply_clean_close(final_tail),
+                PendingClose::Error(err) => {
+                    self.closed = Some(TerminalClose::Error(err.clone()));
+                    self.on_ended(Some(err));
+                }
+            }
         }
     }
 
@@ -453,12 +534,9 @@ impl ReadSessionState {
     /// up.
     pub fn caught_up(&self) -> CaughtUp {
         let mut inner = self.inner.lock().unwrap();
-        if self.shutdown.is_cancelled() && inner.phase != RequestPhase::Ended {
-            let err = ReadSessionError::Aborted(AbortedError::new_with_context(
-                "client closed",
-                inner.context.clone(),
-            ));
-            inner.on_ended(Some(err));
+        if self.shutdown.is_cancelled() && inner.closed.is_none() {
+            let err = AbortedError::new_with_context("client closed", inner.context.clone());
+            inner.on_aborted(err);
         }
         CaughtUp {
             inner: inner.catch_up.future(),
@@ -470,35 +548,39 @@ impl ReadSessionState {
         &self,
         first_record_seq: Option<u64>,
         tail: Option<StreamPosition>,
+        record_count: usize,
     ) -> bool {
         self.inner
             .lock()
             .unwrap()
-            .on_message_fetched(first_record_seq, tail)
+            .on_message_fetched(first_record_seq, tail, record_count)
     }
 
     fn on_disconnected(&self) {
         self.inner.lock().unwrap().on_disconnected();
     }
 
-    fn on_clean_stop(&self, tail: Option<StreamPosition>) {
-        self.inner.lock().unwrap().on_clean_stop(tail);
+    fn on_clean_stop(&self, tail: Option<StreamPosition>) -> bool {
+        self.inner.lock().unwrap().on_clean_stop(tail)
     }
 
-    fn on_record_delivered(&self, seq_num: u64) {
-        self.inner.lock().unwrap().on_record_delivered(seq_num);
+    fn on_terminal_error(&self, err: ReadSessionError) -> bool {
+        self.inner.lock().unwrap().on_terminal_error(err)
+    }
+
+    fn on_records_delivered(&self, last_seq_num: u64, count: usize) {
+        self.inner
+            .lock()
+            .unwrap()
+            .on_records_delivered(last_seq_num, count);
     }
 
     fn on_heartbeat_delivered(&self, tail: StreamPosition) {
         self.inner.lock().unwrap().on_heartbeat_delivered(tail);
     }
 
-    fn on_ended(&self, error: Option<ReadSessionError>) {
-        self.inner.lock().unwrap().on_ended(error);
-    }
-
-    fn on_aborted(&self, err: AbortedError) {
-        self.on_ended(Some(ReadSessionError::Aborted(err)));
+    fn on_aborted(&self, err: AbortedError) -> bool {
+        self.inner.lock().unwrap().on_aborted(err)
     }
 }
 
@@ -568,15 +650,36 @@ impl ReadSessionCore {
         }
     }
 
-    fn abort_now(&mut self) -> ReadSessionError {
+    fn finalize_closed(
+        &mut self,
+        closed: TerminalClose,
+    ) -> Option<Result<ReadBatch, ReadSessionError>> {
         self.terminated = true;
         self.rx.close();
-        let err = ReadSessionError::Aborted(AbortedError::new_with_context(
-            "client closed",
-            self.context.clone(),
-        ));
-        self.state.on_ended(Some(err.clone()));
-        err
+        match closed {
+            TerminalClose::Clean => {
+                self.state.inner.lock().unwrap().on_ended(None);
+                None
+            }
+            TerminalClose::Error(err) => {
+                self.state.inner.lock().unwrap().on_ended(Some(err.clone()));
+                Some(Err(err))
+            }
+        }
+    }
+
+    /// If the session has already closed (`R9`) or client shutdown (`C12`/`R9d`) is active,
+    /// finalize and return the terminal result.
+    fn take_closed_or_abort(&mut self) -> Option<Option<Result<ReadBatch, ReadSessionError>>> {
+        let closed = {
+            let mut inner = self.state.inner.lock().unwrap();
+            if inner.closed.is_none() && self.shutdown.is_cancelled() {
+                let err = AbortedError::new_with_context("client closed", self.context.clone());
+                inner.on_aborted(err);
+            }
+            inner.closed.clone()
+        };
+        closed.map(|c| self.finalize_closed(c))
     }
 
     fn poll_next_batch(
@@ -587,10 +690,8 @@ impl ReadSessionCore {
             return Poll::Ready(None);
         }
         loop {
-            // `ReadDriver` wakes `self.rx` by dropping `tx` upon `shutdown.cancelled()`, so
-            // checking `is_cancelled()` here handles both immediate and parked aborts (`C12`).
-            if self.shutdown.is_cancelled() {
-                return Poll::Ready(Some(Err(self.abort_now())));
+            if let Some(outcome) = self.take_closed_or_abort() {
+                return Poll::Ready(outcome);
             }
             match self.rx.poll_recv(cx) {
                 Poll::Pending => return Poll::Pending,
@@ -603,32 +704,49 @@ impl ReadSessionCore {
                     self.state.on_heartbeat_delivered(tail);
                 }
                 Poll::Ready(Some(DriverEvent::CleanEnd)) => {
-                    if self.shutdown.is_cancelled() {
-                        return Poll::Ready(Some(Err(self.abort_now())));
-                    }
-                    self.terminated = true;
-                    self.rx.close();
-                    self.state.on_ended(None);
-                    return Poll::Ready(None);
+                    let closed = {
+                        let mut inner = self.state.inner.lock().unwrap();
+                        if inner.closed.is_none() {
+                            if self.shutdown.is_cancelled() {
+                                let err = AbortedError::new_with_context(
+                                    "client closed",
+                                    self.context.clone(),
+                                );
+                                inner.on_aborted(err);
+                            } else {
+                                inner.closed = Some(TerminalClose::Clean);
+                            }
+                        }
+                        inner.closed.clone().expect("closed set above")
+                    };
+                    return Poll::Ready(self.finalize_closed(closed));
                 }
                 Poll::Ready(None) => {
-                    if self.shutdown.is_cancelled() {
-                        return Poll::Ready(Some(Err(self.abort_now())));
+                    if let Some(outcome) = self.take_closed_or_abort() {
+                        return Poll::Ready(outcome);
                     }
                     let err = ReadSessionError::Aborted(AbortedError::new_with_context(
                         "read session task ended unexpectedly",
                         self.context.clone(),
                     ));
+                    {
+                        let mut inner = self.state.inner.lock().unwrap();
+                        inner.closed = Some(TerminalClose::Error(err.clone()));
+                        inner.on_ended(Some(err.clone()));
+                    }
                     self.terminated = true;
                     self.rx.close();
-                    self.state.on_ended(Some(err.clone()));
                     return Poll::Ready(Some(Err(err)));
                 }
                 Poll::Ready(Some(DriverEvent::Error(err))) => {
-                    self.terminated = true;
-                    self.rx.close();
-                    self.state.on_ended(Some(err.clone()));
-                    return Poll::Ready(Some(Err(err)));
+                    let closed = {
+                        let mut inner = self.state.inner.lock().unwrap();
+                        if inner.closed.is_none() {
+                            inner.closed = Some(TerminalClose::Error(err.clone()));
+                        }
+                        inner.closed.clone().expect("closed set above")
+                    };
+                    return Poll::Ready(self.finalize_closed(closed));
                 }
             }
         }
@@ -637,13 +755,18 @@ impl ReadSessionCore {
 
 impl Drop for ReadSessionCore {
     fn drop(&mut self) {
-        if self.shutdown.is_cancelled() {
-            self.state.on_aborted(AbortedError::new_with_context(
-                "client closed",
-                self.context.clone(),
-            ));
+        let mut inner = self.state.inner.lock().unwrap();
+        if inner.closed.is_none() {
+            inner.pending_close = None;
+            if self.shutdown.is_cancelled() {
+                let err = AbortedError::new_with_context("client closed", self.context.clone());
+                inner.on_aborted(err);
+            } else {
+                inner.closed = Some(TerminalClose::Clean);
+                inner.on_ended(None);
+            }
         } else {
-            self.state.on_ended(None);
+            inner.on_ended(None);
         }
     }
 }
@@ -728,14 +851,18 @@ impl Stream for ReadSession {
         if this.core.terminated {
             return Poll::Ready(None);
         }
-        // R9d / C12: client close aborts immediately, dropping fetched-but-undelivered records.
-        if this.core.shutdown.is_cancelled() {
+        // R9 / R9d / C12: if already closed or aborted by client close, finalize immediately
+        // (dropping any buffered records on abort, and ignoring late aborts after R9a/R9c close).
+        if let Some(outcome) = this.core.take_closed_or_abort() {
             this.current_batch.clear();
-            return Poll::Ready(Some(Err(this.core.abort_now())));
+            return Poll::Ready(outcome.map(|res| match res {
+                Err(e) => Err(e),
+                Ok(_) => unreachable!("take_closed_or_abort never returns Ok"),
+            }));
         }
 
         if let Some(record) = this.current_batch.pop_front() {
-            this.core.state.on_record_delivered(record.seq_num);
+            this.core.state.on_records_delivered(record.seq_num, 1);
             return Poll::Ready(Some(Ok(record)));
         }
 
@@ -746,7 +873,7 @@ impl Stream for ReadSession {
                     .current_batch
                     .pop_front()
                     .expect("poll_next_batch filters empty batches");
-                this.core.state.on_record_delivered(record.seq_num);
+                this.core.state.on_records_delivered(record.seq_num, 1);
                 Poll::Ready(Some(Ok(record)))
             }
             Poll::Ready(Some(Err(err))) => Poll::Ready(Some(Err(err))),
@@ -837,7 +964,9 @@ impl Stream for ReadBatchSession {
                     .records
                     .last()
                     .expect("poll_next_batch filters empty batches");
-                this.core.state.on_record_delivered(last.seq_num);
+                this.core
+                    .state
+                    .on_records_delivered(last.seq_num, batch.records.len());
                 Poll::Ready(Some(Ok(batch)))
             }
             other => other,
@@ -927,13 +1056,13 @@ impl ReadDriver {
         ));
     }
 
-    /// Enqueue a terminal event and stay parked until the consumer consumes it (closing `rx`) or
-    /// the client shuts down, so any pending `caught_up()` future still wakes immediately on
-    /// `S2::close()` while records or a terminal event sit buffered (`C12`, `R8d`).
-    async fn send_terminal_event(&mut self, event: DriverEvent) {
+    /// Enqueue a terminal event. If buffered records remain (`!already_closed`), stay parked
+    /// until the consumer consumes them (closing `rx`) or the client shuts down, so any pending
+    /// `caught_up()` future still wakes immediately on `S2::close()` (`C12`, `R8d`, `R9`).
+    async fn send_terminal_event(&mut self, event: DriverEvent, already_closed: bool) {
         tokio::select! {
             biased;
-            _ = self.shutdown.cancelled() => {
+            _ = self.shutdown.cancelled(), if !already_closed => {
                 self.abort();
                 return;
             }
@@ -942,6 +1071,9 @@ impl ReadDriver {
                     return;
                 }
             }
+        }
+        if already_closed {
+            return;
         }
         tokio::select! {
             biased;
@@ -964,24 +1096,21 @@ impl ReadDriver {
         }
     }
 
+    async fn finish_clean_stop(&mut self, tail: Option<StreamPosition>) {
+        let already_closed = self.state.on_clean_stop(tail);
+        self.send_terminal_event(DriverEvent::CleanEnd, already_closed)
+            .await;
+    }
+
+    async fn finish_terminal_error(&mut self, err: ReadSessionError) {
+        let already_closed = self.state.on_terminal_error(err.clone());
+        self.send_terminal_event(DriverEvent::Error(err), already_closed)
+            .await;
+    }
+
     async fn finish_resumed_unwritten_stop(&mut self, tail: Option<StreamPosition>) {
         debug!(?tail, "read session reached tail on resumed stop condition");
-        self.state.on_clean_stop(tail);
-        if let Some(tail) = tail.filter(|_| !self.state.is_caught_up()) {
-            tokio::select! {
-                biased;
-                _ = self.shutdown.cancelled() => {
-                    self.abort();
-                    return;
-                }
-                res = self.tx.send(DriverEvent::Heartbeat(tail)) => {
-                    if res.is_err() {
-                        return;
-                    }
-                }
-            }
-        }
-        self.send_terminal_event(DriverEvent::CleanEnd).await;
+        self.finish_clean_stop(tail).await;
     }
 
     /// Retry `err` according to `retry_policy`, or deliver the terminal error to the consumer.
@@ -997,8 +1126,7 @@ impl ReadDriver {
             return !self.sleep_or_stop(backoff).await;
         }
         let final_err = err.with_context(&self.context.clone().with_attempts(attempts));
-        self.send_terminal_event(DriverEvent::Error(final_err))
-            .await;
+        self.finish_terminal_error(final_err).await;
         false
     }
 
@@ -1135,51 +1263,64 @@ impl ReadDriver {
                             drop(permit);
                             self.active = None;
                             self.state.on_disconnected();
-                            self.send_terminal_event(DriverEvent::Error(err)).await;
+                            self.finish_terminal_error(err).await;
                             return;
                         }
                     }
 
-                    let attempt = self.active.as_mut().expect("active stream must be Some");
-                    attempt.made_progress = true;
-                    self.has_received_response = true;
-                    self.retry_backoff.reset();
+                    // T5a: only a non-empty batch or a heartbeat (carrying a tail) counts as
+                    // progress and resets the retry budget; ignore malformed empty frames.
+                    let has_records = !batch.records.is_empty();
+                    let has_tail = batch.tail.is_some();
+                    let is_progress = has_records || has_tail;
 
-                    // R11c: restart idle clock only when a record is fetched; if no record has
-                    // been fetched yet, start the clock the first time we learn we are at the tail.
-                    // Heartbeats never restart this clock.
-                    if !batch.records.is_empty() {
-                        attempt.fetched_record = true;
-                        self.idle_since = Some(Instant::now());
-                    } else if self.last_fetched_seq.is_none() && batch.tail.is_some() {
-                        self.idle_since.get_or_insert_with(Instant::now);
-                    }
+                    if is_progress {
+                        let attempt = self.active.as_mut().expect("active stream must be Some");
+                        attempt.made_progress = true;
+                        self.has_received_response = true;
+                        self.retry_backoff.reset();
 
-                    update_resume_start(&mut self.start, &batch);
-                    if let Some(count) = self.end.count.as_mut() {
-                        *count = count.saturating_sub(batch.records.len() as u64);
-                    }
-                    if let Some(bytes) = self.end.bytes.as_mut() {
-                        *bytes = bytes.saturating_sub(
-                            batch
-                                .records
-                                .iter()
-                                .map(|r| r.metered_bytes() as u64)
-                                .sum::<u64>(),
+                        // R11c: restart idle clock only when a record is fetched; if no record has
+                        // been fetched yet, start the clock the first time we learn we are at the
+                        // tail. Heartbeats never restart this clock.
+                        if has_records {
+                            attempt.fetched_record = true;
+                            self.idle_since = Some(Instant::now());
+                        } else if self.last_fetched_seq.is_none() && has_tail {
+                            self.idle_since.get_or_insert_with(Instant::now);
+                        }
+
+                        update_resume_start(&mut self.start, &batch);
+                        if let Some(count) = self.end.count.as_mut() {
+                            *count = count.saturating_sub(batch.records.len() as u64);
+                        }
+                        if let Some(bytes) = self.end.bytes.as_mut() {
+                            *bytes = bytes.saturating_sub(
+                                batch
+                                    .records
+                                    .iter()
+                                    .map(|r| r.metered_bytes() as u64)
+                                    .sum::<u64>(),
+                            );
+                        }
+
+                        let first_record_seq = batch.records.first().map(|r| r.seq_num);
+                        let tail = batch.tail;
+                        let heartbeat_already_at_tail = self.state.on_message_fetched(
+                            first_record_seq,
+                            tail,
+                            batch.records.len(),
                         );
-                    }
 
-                    let first_record_seq = batch.records.first().map(|r| r.seq_num);
-                    let tail = batch.tail;
-                    let heartbeat_already_at_tail =
-                        self.state.on_message_fetched(first_record_seq, tail);
-
-                    if !batch.records.is_empty() {
-                        permit.send(DriverEvent::Batch(batch));
-                    } else if let Some(tail) = tail
-                        && !heartbeat_already_at_tail
-                    {
-                        permit.send(DriverEvent::Heartbeat(tail));
+                        if has_records {
+                            permit.send(DriverEvent::Batch(batch));
+                        } else if let Some(tail) = tail
+                            && !heartbeat_already_at_tail
+                        {
+                            permit.send(DriverEvent::Heartbeat(tail));
+                        } else {
+                            drop(permit);
+                        }
                     } else {
                         drop(permit);
                     }
@@ -1189,8 +1330,7 @@ impl ReadDriver {
                         self.active = None;
                         if read_limits_exhausted(&self.end) {
                             debug!("read session limits exhausted on advised reconnect");
-                            self.state.on_clean_stop(None);
-                            self.send_terminal_event(DriverEvent::CleanEnd).await;
+                            self.finish_clean_stop(None).await;
                             return;
                         }
                         self.advised_reconnects.record();
@@ -1223,8 +1363,7 @@ impl ReadDriver {
                             continue;
                         }
                         debug!("read session ended cleanly on stop condition");
-                        self.state.on_clean_stop(None);
-                        self.send_terminal_event(DriverEvent::CleanEnd).await;
+                        self.finish_clean_stop(None).await;
                         return;
                     }
                     let err =
@@ -1261,8 +1400,7 @@ impl ReadDriver {
                     // with count=0/bytes=0.
                     if self.has_received_response && read_limits_exhausted(&self.end) {
                         debug!("read session limits exhausted after stream error");
-                        self.state.on_clean_stop(None);
-                        self.send_terminal_event(DriverEvent::CleanEnd).await;
+                        self.finish_clean_stop(None).await;
                         return;
                     }
 
@@ -1520,7 +1658,7 @@ mod tests {
         let cu = session.caught_up();
 
         let b = batch(vec![record(0), record(1)], Some(position(2)));
-        state.on_message_fetched(Some(0), Some(position(2)));
+        state.on_message_fetched(Some(0), Some(position(2)), 2);
         tx.send(DriverEvent::Batch(b)).await.unwrap();
         state.on_clean_stop(None);
         tx.send(DriverEvent::CleanEnd).await.unwrap();
@@ -1550,10 +1688,10 @@ mod tests {
         let cu = session.caught_up();
 
         let b = batch(vec![record(0)], None);
-        state.on_message_fetched(Some(0), None);
+        state.on_message_fetched(Some(0), None, 1);
         tx.send(DriverEvent::Batch(b)).await.unwrap();
 
-        assert!(!state.on_message_fetched(None, Some(position(5))));
+        assert!(!state.on_message_fetched(None, Some(position(5)), 0));
         tx.send(DriverEvent::Heartbeat(position(5))).await.unwrap();
 
         assert_eq!(session.next().await.unwrap().unwrap().seq_num, 0);
@@ -1587,7 +1725,7 @@ mod tests {
     async fn read_error_rejects_wait_and_preserves_prior_resolved_future() {
         let (mut session, tx, state, _shutdown) = test_session_parts(Some(0));
 
-        state.on_message_fetched(Some(0), Some(position(1)));
+        state.on_message_fetched(Some(0), Some(position(1)), 1);
         tx.send(DriverEvent::Batch(batch(
             vec![record(0)],
             Some(position(1)),
@@ -1662,7 +1800,7 @@ mod tests {
         assert!(!cu.is_terminated());
         assert!(poll!(Pin::new(&mut cu)).is_pending());
 
-        state.on_message_fetched(Some(0), Some(position(1)));
+        state.on_message_fetched(Some(0), Some(position(1)), 1);
         tx.send(DriverEvent::Batch(batch(
             vec![record(0)],
             Some(position(1)),
