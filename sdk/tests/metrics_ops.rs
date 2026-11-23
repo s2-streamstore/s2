@@ -270,31 +270,17 @@ async fn basin_metrics(stream: &S2Stream) -> Result<(), Box<dyn std::error::Erro
         assert!(metrics_have_data(&storage));
     }
 
-    let sets = [
-        (
-            BasinMetricSet::AppendOps(time_range_and_interval(1, None)),
-            MetricUnit::Operations,
-        ),
-        (
-            BasinMetricSet::ReadOps(time_range_and_interval(1, None)),
-            MetricUnit::Operations,
-        ),
-        (
-            BasinMetricSet::ReadThroughput(time_range_and_interval(1, None)),
-            MetricUnit::Bytes,
-        ),
-        (
-            BasinMetricSet::AppendThroughput(time_range_and_interval(1, None)),
-            MetricUnit::Bytes,
-        ),
-        (
-            BasinMetricSet::BasinOps(time_range_and_interval(1, None)),
-            MetricUnit::Operations,
-        ),
+    type MakeBasinSet = fn(TimeRangeAndInterval) -> BasinMetricSet;
+    let sets: [(MakeBasinSet, MetricUnit); 5] = [
+        (BasinMetricSet::AppendOps, MetricUnit::Operations),
+        (BasinMetricSet::ReadOps, MetricUnit::Operations),
+        (BasinMetricSet::ReadThroughput, MetricUnit::Bytes),
+        (BasinMetricSet::AppendThroughput, MetricUnit::Bytes),
+        (BasinMetricSet::BasinOps, MetricUnit::Operations),
     ];
-    for (set, expected_unit) in sets {
+    for (make_set, expected_unit) in sets {
         let metrics = poll_fast_metrics("basin", || {
-            client.get_basin_metrics(basin.clone(), set.clone())
+            client.get_basin_metrics(basin.clone(), make_set(time_range_and_interval(1, None)))
         })
         .await?;
         assert!(

@@ -1,45 +1,126 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
+use std::{
+    io,
+    sync::{
+        Arc,
+        atomic::{AtomicU8, Ordering},
+    },
+    task::{Context, Poll},
 };
 
 use http_body::{Body, Frame};
 use pin_project_lite::pin_project;
 
-/// An atomic flag that tracks whether any body frame has been yielded.
+use crate::client::BoxError;
+
+const UNSENT: u8 = 0;
+const SENT: u8 = 1;
+const STOPPED_UNSENT: u8 = 2;
+const STOPPED_SENT: u8 = 3;
+
+fn attempt_ended_error() -> BoxError {
+    Box::new(io::Error::new(
+        io::ErrorKind::ConnectionAborted,
+        "attempt ended",
+    ))
+}
+
+/// Race-free atomic gate tracking whether a unary request body has yielded any frame (`Terms:
+/// Sent`, `T10`).
 ///
-/// When used with [`RequestFrameMonitorBody`], the signal is set to `true`
-/// the first time `poll_frame()` produces a frame. At error time, an unset
-/// signal proves the request data never left the process, making retry safe.
+/// Paired with [`RequestFrameMonitorBody`], the first yielded frame transitions `UNSENT -> SENT`.
+/// Calling [`stop`](Self::stop) when an attempt ends atomically seals the gate: if the state was
+/// still `UNSENT`, it transitions to `STOPPED_UNSENT` and any subsequent body poll fails with
+/// `ConnectionAborted` without yielding a frame, guaranteeing that an attempt classified as unsent
+/// can never send bytes afterward.
 #[derive(Debug, Clone)]
-pub(crate) struct FrameSignal(Arc<AtomicBool>);
+pub(crate) struct FrameSignal(Arc<AtomicU8>);
 
 impl FrameSignal {
-    /// Create a new unsignalled [`FrameSignal`].
+    /// Create a new unsent [`FrameSignal`].
     pub(crate) fn new() -> Self {
-        Self(Arc::new(AtomicBool::new(false)))
+        Self(Arc::new(AtomicU8::new(UNSENT)))
     }
 
-    /// Returns `true` if the signal has been set.
+    /// Returns `true` if at least one body frame passed the gate.
     pub(crate) fn is_signalled(&self) -> bool {
-        self.0.load(Ordering::Acquire)
+        matches!(self.0.load(Ordering::Acquire), SENT | STOPPED_SENT)
     }
 
-    /// Set the signal to signalled.
-    pub(crate) fn signal(&self) {
-        self.0.store(true, Ordering::Release);
+    fn is_stopped(&self) -> bool {
+        matches!(
+            self.0.load(Ordering::Acquire),
+            STOPPED_UNSENT | STOPPED_SENT
+        )
+    }
+
+    /// Atomically allow a frame to be yielded, marking the request as sent.
+    ///
+    /// Returns `false` if the attempt has already been stopped.
+    pub(crate) fn try_mark_sent(&self) -> bool {
+        loop {
+            match self.0.load(Ordering::Acquire) {
+                UNSENT => {
+                    if self
+                        .0
+                        .compare_exchange(UNSENT, SENT, Ordering::AcqRel, Ordering::Acquire)
+                        .is_ok()
+                    {
+                        return true;
+                    }
+                }
+                SENT => return true,
+                STOPPED_UNSENT | STOPPED_SENT => return false,
+                _ => unreachable!("invalid FrameSignal state"),
+            }
+        }
+    }
+
+    /// Stop the attempt so no further frames can be yielded.
+    ///
+    /// Returns `true` if and only if no frame was ever yielded before stopping.
+    pub(crate) fn stop(&self) -> bool {
+        loop {
+            match self.0.load(Ordering::Acquire) {
+                UNSENT => {
+                    if self
+                        .0
+                        .compare_exchange(
+                            UNSENT,
+                            STOPPED_UNSENT,
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                        )
+                        .is_ok()
+                    {
+                        return true;
+                    }
+                }
+                SENT => {
+                    if self
+                        .0
+                        .compare_exchange(SENT, STOPPED_SENT, Ordering::AcqRel, Ordering::Acquire)
+                        .is_ok()
+                    {
+                        return false;
+                    }
+                }
+                STOPPED_UNSENT => return true,
+                STOPPED_SENT => return false,
+                _ => unreachable!("invalid FrameSignal state"),
+            }
+        }
     }
 }
 
 pin_project! {
-    /// A body wrapper that signals a [`FrameSignal`] when a frame is yielded.
+    /// A body wrapper that gates frame emission through a [`FrameSignal`].
     ///
-    /// Wraps a non-empty `B: http_body::Body` and delegates all operations to the inner
-    /// body. On each successful `poll_frame()` that yields a frame, the
-    /// associated [`FrameSignal`] is set to signalled.
+    /// Wraps a non-empty `B: http_body::Body` and delegates all operations to the inner body while
+    /// the attempt is active. Once [`FrameSignal::stop`] is called, any further `poll_frame()`
+    /// fails immediately without yielding frames.
     ///
     /// Note: an empty body yields no frames and therefore never signals; callers must only
-    /// rely on `!signal.is_signalled()` as proof of an unsent request when the request has
+    /// rely on `signal.stop() == true` as proof of an unsent request when the request has
     /// a non-empty body (such as JSON or protobuf payloads).
     pub(crate) struct RequestFrameMonitorBody<B> {
         #[pin]
@@ -49,7 +130,7 @@ pin_project! {
 }
 
 impl<B> RequestFrameMonitorBody<B> {
-    /// Wrap an inner body with frame monitoring.
+    /// Wrap an inner body with frame monitoring and stop gating.
     pub(crate) fn new(inner: B, signal: FrameSignal) -> Self {
         Self { inner, signal }
     }
@@ -58,24 +139,41 @@ impl<B> RequestFrameMonitorBody<B> {
 impl<B> Body for RequestFrameMonitorBody<B>
 where
     B: Body,
+    B::Error: Into<BoxError>,
 {
     type Data = B::Data;
-    type Error = B::Error;
+    type Error = BoxError;
 
     fn poll_frame(
         self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
         let this = self.project();
-        let poll = this.inner.poll_frame(cx);
-        if let std::task::Poll::Ready(Some(Ok(_))) = &poll {
-            this.signal.signal();
+        if this.signal.is_stopped() {
+            return Poll::Ready(Some(Err(attempt_ended_error())));
         }
-        poll
+        match this.inner.poll_frame(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(None) => {
+                if this.signal.is_stopped() {
+                    Poll::Ready(Some(Err(attempt_ended_error())))
+                } else {
+                    Poll::Ready(None)
+                }
+            }
+            Poll::Ready(Some(Ok(frame))) => {
+                if this.signal.try_mark_sent() {
+                    Poll::Ready(Some(Ok(frame)))
+                } else {
+                    Poll::Ready(Some(Err(attempt_ended_error())))
+                }
+            }
+            Poll::Ready(Some(Err(err))) => Poll::Ready(Some(Err(err.into()))),
+        }
     }
 
     fn is_end_stream(&self) -> bool {
-        self.inner.is_end_stream()
+        !self.signal.is_stopped() && self.inner.is_end_stream()
     }
 
     fn size_hint(&self) -> http_body::SizeHint {
@@ -86,7 +184,7 @@ where
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
-    use http_body_util::{BodyExt, Empty, Full};
+    use http_body_util::{BodyExt, Empty, Full, StreamBody};
 
     use super::*;
 
@@ -102,5 +200,55 @@ mod tests {
             RequestFrameMonitorBody::new(Full::new(Bytes::from("hello")), full_signal.clone());
         assert_eq!(full.collect().await.unwrap().to_bytes().as_ref(), b"hello");
         assert!(full_signal.is_signalled());
+        assert!(!full_signal.stop());
+    }
+
+    // spec: r1 T10
+    #[tokio::test]
+    async fn stop_before_poll_blocks_body_and_preserves_unsent_state() {
+        let signal = FrameSignal::new();
+        let mut body =
+            RequestFrameMonitorBody::new(Full::new(Bytes::from_static(b"payload")), signal.clone());
+
+        assert!(signal.stop(), "stopped before any poll must report unsent");
+        assert!(!signal.is_signalled());
+        assert!(!body.is_end_stream());
+
+        let err = body
+            .frame()
+            .await
+            .expect("must yield abort error")
+            .expect_err("stopped body must never yield data");
+        assert!(err.to_string().contains("attempt ended"), "{err}");
+        assert!(
+            !signal.is_signalled(),
+            "late poll after stop must never flip unsent to sent"
+        );
+    }
+
+    // spec: r1 T10
+    #[tokio::test]
+    async fn stop_after_first_frame_blocks_subsequent_frames_and_preserves_sent_state() {
+        let signal = FrameSignal::new();
+        let stream = StreamBody::new(futures_util::stream::iter([
+            Ok::<_, io::Error>(Frame::data(Bytes::from_static(b"chunk-1"))),
+            Ok(Frame::data(Bytes::from_static(b"chunk-2"))),
+        ]));
+        let mut body = RequestFrameMonitorBody::new(stream, signal.clone());
+
+        let first = body.frame().await.unwrap().unwrap().into_data().unwrap();
+        assert_eq!(first.as_ref(), b"chunk-1");
+        assert!(signal.is_signalled());
+
+        assert!(!signal.stop(), "already sent must report was_unsent=false");
+        assert!(signal.is_signalled());
+
+        let err = body
+            .frame()
+            .await
+            .expect("must yield abort error on next frame")
+            .expect_err("stopped body must not yield chunk-2");
+        assert!(err.to_string().contains("attempt ended"), "{err}");
+        assert!(signal.is_signalled());
     }
 }

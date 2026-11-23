@@ -76,10 +76,11 @@ pub(crate) struct SubmitTicket<T> {
     lifecycle: Arc<SessionLifecycle>,
     context: ErrorContext,
     dropped_msg: &'static str,
+    outcome: Option<Result<T, AppendSessionError>>,
     done: bool,
 }
 
-impl<T> SubmitTicket<T> {
+impl<T: Clone> SubmitTicket<T> {
     pub(crate) fn new(
         rx: oneshot::Receiver<Result<T, AppendSessionError>>,
         lifecycle: Arc<SessionLifecycle>,
@@ -91,6 +92,7 @@ impl<T> SubmitTicket<T> {
             lifecycle,
             context,
             dropped_msg,
+            outcome: None,
             done: false,
         }
     }
@@ -111,36 +113,46 @@ impl<T> SubmitTicket<T> {
         match self.rx.try_recv() {
             Ok(res) => {
                 self.done = true;
+                self.outcome = Some(res.clone());
                 Some(res)
             }
             Err(oneshot::error::TryRecvError::Closed) => {
+                let res = Err(self.closed_err());
                 self.done = true;
-                Some(Err(self.closed_err()))
+                self.outcome = Some(res.clone());
+                Some(res)
             }
             Err(oneshot::error::TryRecvError::Empty) => None,
         }
     }
 }
 
-impl<T> Future for SubmitTicket<T> {
+impl<T: Clone + Unpin> Future for SubmitTicket<T> {
     type Output = Result<T, AppendSessionError>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if let Some(res) = self.outcome.clone() {
+            self.done = true;
+            return Poll::Ready(res);
+        }
         match Pin::new(&mut self.rx).poll(cx) {
             Poll::Ready(Ok(res)) => {
                 self.done = true;
+                self.outcome = Some(res.clone());
                 Poll::Ready(res)
             }
             Poll::Ready(Err(_)) => {
+                let res = Err(self.closed_err());
                 self.done = true;
-                Poll::Ready(Err(self.closed_err()))
+                self.outcome = Some(res.clone());
+                Poll::Ready(res)
             }
             Poll::Pending => Poll::Pending,
         }
     }
 }
 
-impl<T> FusedFuture for SubmitTicket<T> {
+impl<T: Clone + Unpin> FusedFuture for SubmitTicket<T> {
     fn is_terminated(&self) -> bool {
         self.done
     }

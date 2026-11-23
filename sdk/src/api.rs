@@ -508,18 +508,27 @@ impl<'a> UnaryCall<'a> {
             .and_then(client::Request::compress)
             .map_err(|e| E::from_http(e, self.scope.context(1)))?;
 
-        let monitor_frames = matches!(
-            self.retry_safety,
-            RetrySafety::DefiniteOnly | RetrySafety::Append(_)
-        );
+        struct StopOnDrop<'a>(Option<&'a FrameSignal>);
+        impl Drop for StopOnDrop<'_> {
+            fn drop(&mut self) {
+                if let Some(signal) = self.0 {
+                    signal.stop();
+                }
+            }
+        }
+
+        // Monitor any non-read-only unary request with a non-empty body so pre-send
+        // `ConnectionLostError` is accurately classified as definite (`E3`) and ended attempts
+        // cannot transmit bytes after error/cancellation (`T10`).
+        let monitor_frames = !self.scope.read_only && request.has_non_empty_body();
 
         let mut retry_backoff = RetryBackoff::from_config(&self.client.retry_config());
         let mut prior_uncertainty = false;
 
         loop {
             let attempts = retry_backoff.attempt_number();
-            // Fresh per-attempt signal so a lingering poll on a prior timed-out body cannot
-            // taint the next attempt's unsent check.
+            // Fresh per-attempt gate so an ended/timed-out attempt cannot send frames after
+            // error classification or taint the next attempt (`T10`).
             let frame_signal = monitor_frames.then(FrameSignal::new);
 
             let attempt_request = {
@@ -532,10 +541,12 @@ impl<'a> UnaryCall<'a> {
                 r
             };
 
-            let response = self
-                .client
-                .send_attempt::<E>(attempt_request, self.scope, attempts)
-                .await;
+            let response = {
+                let _stop_on_drop = StopOnDrop(frame_signal.as_ref());
+                self.client
+                    .send_attempt::<E>(attempt_request, self.scope, attempts)
+                    .await
+            };
 
             let (err, retry_after, access_token) = match response {
                 Ok((mut resp, access_token)) => {
@@ -560,7 +571,9 @@ impl<'a> UnaryCall<'a> {
                 Err(err) => (err, None, None),
             };
 
-            let unsent = frame_signal.as_ref().is_some_and(|s| !s.is_signalled());
+            // Atomically seal the send gate before checking unsent/retry predicates so a parked
+            // hyper body task cannot emit frames after this point (`T10`, `Terms: Sent`).
+            let unsent = frame_signal.as_ref().is_some_and(FrameSignal::stop);
             let err = err.mark_unsent_connection_lost(unsent);
 
             let refreshable_auth = self.client.refreshes_tokens() && err.is_authentication_error();
@@ -1361,7 +1374,7 @@ mod tests {
         ));
 
         // Signalled body: only definite errors remain safe.
-        signal.signal();
+        assert!(signal.try_mark_sent());
         assert!(!is_safe_to_retry(
             &indefinite,
             RetrySafety::Append(AppendRetryPolicy::NoSideEffects),

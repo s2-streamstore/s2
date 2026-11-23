@@ -785,6 +785,7 @@ mod tests {
 
     use super::*;
 
+    // spec: r1 A5, A5b
     #[tokio::test]
     async fn batches_respect_count_limit_and_advance_match_seq_num() -> Result<(), ValidationError>
     {
@@ -844,6 +845,7 @@ mod tests {
         Ok(())
     }
 
+    // spec: r1 A5, A5b
     #[tokio::test(start_paused = true)]
     async fn batches_flush_after_linger_when_stream_remains_open() -> Result<(), ValidationError> {
         let records: Vec<_> = (0..2)
@@ -862,6 +864,7 @@ mod tests {
         Ok(())
     }
 
+    // spec: r1 A5b
     #[tokio::test]
     async fn oversized_record_drops_partial_batch_and_errors_immediately()
     -> Result<(), ValidationError> {
@@ -887,6 +890,7 @@ mod tests {
         Ok(())
     }
 
+    // spec: r1 A5b
     #[tokio::test]
     async fn batcher_does_not_read_input_while_completed_batch_waits() -> Result<(), ValidationError>
     {
@@ -916,6 +920,7 @@ mod tests {
         Ok(())
     }
 
+    // spec: r1 A5, A5b
     #[tokio::test]
     async fn match_seq_num_overflow_flushes_valid_batch_then_errors() -> Result<(), ValidationError>
     {
@@ -953,6 +958,7 @@ mod tests {
         Ok(())
     }
 
+    // spec: r1 A5b
     #[tokio::test]
     async fn try_batcher_drops_partial_batch_on_input_error() -> Result<(), ValidationError> {
         let items: Vec<Result<AppendRecord, &'static str>> =

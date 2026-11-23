@@ -27,10 +27,7 @@ use hyper::{
     rt::{Read as HyperRead, Write as HyperWrite},
 };
 use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
-use hyper_util::{
-    client::legacy::connect::HttpConnector,
-    rt::{TokioExecutor, TokioTimer},
-};
+use hyper_util::{client::legacy::connect::HttpConnector, rt::TokioTimer};
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::{
     sync::{Notify, watch},
@@ -47,8 +44,11 @@ use crate::{
 
 const APPLICATION_JSON: HeaderValue = HeaderValue::from_static("application/json");
 const DEFAULT_MAX_CONCURRENT_REQUESTS_PER_CONNECTION: usize = 50;
-const DEFAULT_STREAM_RECEIVE_WINDOW: u32 = 16 * 1024 * 1024;
-const DEFAULT_CONNECTION_RECEIVE_WINDOW: u32 = 32 * 1024 * 1024;
+// 50 concurrent streams × 4 MiB = 200 MiB < 256 MiB, so paused read sessions on a shared
+// connection cannot exhaust the connection-level flow-control window and stall sibling appends
+// or unary calls.
+const DEFAULT_STREAM_RECEIVE_WINDOW: u32 = 4 * 1024 * 1024;
+const DEFAULT_CONNECTION_RECEIVE_WINDOW: u32 = 256 * 1024 * 1024;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(20);
 const KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -207,6 +207,10 @@ pub(crate) struct Request {
 impl Request {
     pub(crate) fn headers_mut(&mut self) -> &mut HeaderMap {
         &mut self.headers
+    }
+
+    pub(crate) fn has_non_empty_body(&self) -> bool {
+        matches!(&self.body.0, BodyInner::Full(bytes) if !bytes.is_empty())
     }
 
     pub(crate) fn with_monitored_body(self, signal: FrameSignal) -> Self {
@@ -1416,6 +1420,29 @@ where
     }
 }
 
+/// Hyper executor that aborts every spawned HTTP/2 connection and body-pumping task immediately
+/// when client shutdown fires (`C12`), so sockets and flow-control-blocked streams do not outlive
+/// `S2::close()`.
+#[derive(Clone)]
+struct ShutdownExecutor(CancellationToken);
+
+impl<F> hyper::rt::Executor<F> for ShutdownExecutor
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    fn execute(&self, fut: F) {
+        let shutdown = self.0.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => {}
+                _ = fut => {}
+            }
+        });
+    }
+}
+
 async fn dial_http2<C: Connect>(
     mut connector: C,
     origin_uri: Uri,
@@ -1425,7 +1452,7 @@ async fn dial_http2<C: Connect>(
 ) -> Result<
     (
         http2::SendRequest<BoxBody>,
-        http2::Connection<C::Io, BoxBody, TokioExecutor>,
+        http2::Connection<C::Io, BoxBody, ShutdownExecutor>,
     ),
     DialError,
 > {
@@ -1437,7 +1464,7 @@ async fn dial_http2<C: Connect>(
             .call(origin_uri)
             .await
             .map_err(|e| format_error_chain(e.into().as_ref()))?;
-        let mut builder = http2::Builder::new(TokioExecutor::new());
+        let mut builder = http2::Builder::new(ShutdownExecutor(shutdown.clone()));
         builder
             .timer(TokioTimer::new())
             .keep_alive_interval(KEEP_ALIVE_INTERVAL)

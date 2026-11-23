@@ -602,7 +602,7 @@ impl ReadSessionCore {
                 Poll::Ready(Some(DriverEvent::Heartbeat(tail))) => {
                     self.state.on_heartbeat_delivered(tail);
                 }
-                Poll::Ready(Some(DriverEvent::CleanEnd)) | Poll::Ready(None) => {
+                Poll::Ready(Some(DriverEvent::CleanEnd)) => {
                     if self.shutdown.is_cancelled() {
                         return Poll::Ready(Some(Err(self.abort_now())));
                     }
@@ -610,6 +610,19 @@ impl ReadSessionCore {
                     self.rx.close();
                     self.state.on_ended(None);
                     return Poll::Ready(None);
+                }
+                Poll::Ready(None) => {
+                    if self.shutdown.is_cancelled() {
+                        return Poll::Ready(Some(Err(self.abort_now())));
+                    }
+                    let err = ReadSessionError::Aborted(AbortedError::new_with_context(
+                        "read session task ended unexpectedly",
+                        self.context.clone(),
+                    ));
+                    self.terminated = true;
+                    self.rx.close();
+                    self.state.on_ended(Some(err.clone()));
+                    return Poll::Ready(Some(Err(err)));
                 }
                 Poll::Ready(Some(DriverEvent::Error(err))) => {
                     self.terminated = true;
@@ -1695,5 +1708,21 @@ mod tests {
             validate_read_batch_order(&backward_within, last, &ctx),
             Err(ReadSessionError::Protocol(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn unexpected_driver_exit_surfaces_aborted_rather_than_clean_end() {
+        let (mut session, tx, _state, _shutdown) = test_session_parts(Some(0));
+        let cu = session.caught_up();
+        drop(tx);
+
+        let err = session
+            .next()
+            .await
+            .expect("must not appear as clean stop")
+            .unwrap_err();
+        assert!(matches!(err, ReadSessionError::Aborted(_)), "{err:?}");
+        assert!(session.next().await.is_none());
+        assert!(matches!(cu.await, Err(ReadSessionError::Aborted(_))));
     }
 }

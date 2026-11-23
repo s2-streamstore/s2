@@ -1733,6 +1733,12 @@ async fn session_abort_try_ack_fused_and_validation_context() {
         ticket_err,
         AppendSessionError::Aborted(_) | AppendSessionError::SessionClosed(_)
     ));
+    // Awaiting after `try_ack()` returned `Some` returns the cached outcome without panicking.
+    let awaited_err = ticket.await.unwrap_err();
+    assert!(matches!(
+        awaited_err,
+        AppendSessionError::Aborted(_) | AppendSessionError::SessionClosed(_)
+    ));
 
     // Same for Producer: E7 validation context + explicit abort() + try_ack() / FusedFuture.
     let producer = stream
@@ -1773,6 +1779,11 @@ async fn session_abort_try_ack_fused_and_validation_context() {
     assert!(rec_ticket.try_ack().is_none());
     assert!(matches!(
         rec_err,
+        AppendSessionError::Aborted(_) | AppendSessionError::SessionClosed(_)
+    ));
+    let awaited_rec_err = rec_ticket.await.unwrap_err();
+    assert!(matches!(
+        awaited_rec_err,
         AppendSessionError::Aborted(_) | AppendSessionError::SessionClosed(_)
     ));
 }

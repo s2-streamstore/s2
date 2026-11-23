@@ -442,6 +442,7 @@ impl<'a> IntoIterator for &'a AppendRecordBatch {
 
 /// Command to signal an operation on a stream.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Command {
     /// Fence operation.
     Fence {
