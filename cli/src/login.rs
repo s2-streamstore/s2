@@ -46,7 +46,7 @@ use crate::{
 
 mod destination;
 
-use destination::validate_endpoint_binding;
+use destination::{canonical_endpoints, validate_endpoint_binding};
 pub(crate) use destination::{
     destination_label, effective_endpoints, uses_default_endpoints, uses_loopback_endpoints,
 };
@@ -293,9 +293,15 @@ impl ResolvedCredential {
         let Some(session) = self.oauth_session.as_ref() else {
             return Ok(());
         };
-        let (account_endpoint, basin_endpoint) = effective_endpoints(config);
-        if account_endpoint != session.account_endpoint || basin_endpoint != session.basin_endpoint
-        {
+        let Some((account_endpoint, basin_endpoint)) = effective_endpoints(config) else {
+            return Err(LoginError::UnsafeBrowserDestination);
+        };
+        let Some((session_account, session_basin)) =
+            canonical_endpoints(&session.account_endpoint, &session.basin_endpoint)
+        else {
+            return Err(LoginError::UnsafeBrowserDestination);
+        };
+        if account_endpoint != session_account || basin_endpoint != session_basin {
             return Err(LoginError::UnsafeBrowserDestination);
         }
         validate_endpoint_binding(
@@ -511,7 +517,9 @@ pub(crate) fn browser_login_available(config: &CliConfig) -> bool {
     let Ok(issuer) = oauth_issuer(None) else {
         return false;
     };
-    let (account_endpoint, basin_endpoint) = effective_endpoints(config);
+    let Some((account_endpoint, basin_endpoint)) = effective_endpoints(config) else {
+        return false;
+    };
     validate_endpoint_binding(
         issuer.as_str(),
         &account_endpoint,
@@ -530,7 +538,8 @@ pub async fn login(args: &LoginArgs) -> Result<(), LoginError> {
         CredentialStore::Keyring
     };
     let destination_config = load_cli_config()?;
-    let (account_endpoint, basin_endpoint) = effective_endpoints(&destination_config);
+    let (account_endpoint, basin_endpoint) =
+        effective_endpoints(&destination_config).ok_or(LoginError::UnsafeBrowserDestination)?;
     validate_endpoint_binding(
         issuer.as_str(),
         &account_endpoint,
@@ -603,7 +612,8 @@ pub async fn login(args: &LoginArgs) -> Result<(), LoginError> {
     let mut config = load_config_file()?;
     prepare_login_store(&mut config, credential_store).await?;
     let current_destination_config = load_cli_config()?;
-    let (account_endpoint, basin_endpoint) = effective_endpoints(&current_destination_config);
+    let (account_endpoint, basin_endpoint) = effective_endpoints(&current_destination_config)
+        .ok_or(LoginError::UnsafeBrowserDestination)?;
     validate_endpoint_binding(
         issuer.as_str(),
         &account_endpoint,

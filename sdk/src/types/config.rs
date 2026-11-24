@@ -181,15 +181,17 @@ fn parse_endpoint_scheme_and_rest<'a>(
 ) -> Result<(Scheme, &'a str), ValidationError> {
     let (scheme, rest) = match s.find("://") {
         Some(idx) => {
-            let scheme: Scheme = s[..idx]
-                .parse()
-                .map_err(|_| format!("invalid {kind} endpoint scheme"))?;
-            if scheme != Scheme::HTTP && scheme != Scheme::HTTPS {
+            let raw_scheme = &s[..idx];
+            let scheme = if raw_scheme.eq_ignore_ascii_case("http") {
+                Scheme::HTTP
+            } else if raw_scheme.eq_ignore_ascii_case("https") {
+                Scheme::HTTPS
+            } else {
                 return Err(format!(
                     "invalid {kind} endpoint scheme: only http and https are supported"
                 )
                 .into());
-            }
+            };
             (scheme, &s[idx + 3..])
         }
         None => (Scheme::HTTPS, s),

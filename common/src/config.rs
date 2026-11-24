@@ -86,6 +86,15 @@ impl DeleteOnEmptyConfig {
     pub fn min_age(&self) -> Option<Duration> {
         Some(self.min_age).filter(|age| !age.is_zero())
     }
+
+    pub fn validate(self) -> Result<Self, ValidationError> {
+        if self.min_age.subsec_nanos() != 0 {
+            return Err(ValidationError(
+                "delete_on_empty.min_age must be a whole number of seconds".to_string(),
+            ));
+        }
+        Ok(self)
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -166,6 +175,17 @@ pub struct OptionalDeleteOnEmptyConfig {
 }
 
 impl OptionalDeleteOnEmptyConfig {
+    pub fn validate(self) -> Result<Self, ValidationError> {
+        if let Some(min_age) = self.min_age
+            && min_age.subsec_nanos() != 0
+        {
+            return Err(ValidationError(
+                "delete_on_empty.min_age must be a whole number of seconds".to_string(),
+            ));
+        }
+        Ok(self)
+    }
+
     pub fn reconfigure(mut self, reconfiguration: DeleteOnEmptyReconfiguration) -> Self {
         if let Maybe::Specified(min_age) = reconfiguration.min_age {
             self.min_age = min_age;
@@ -208,6 +228,7 @@ impl OptionalStreamConfig {
         if let Some(retention_policy) = self.retention_policy {
             retention_policy.validate()?;
         }
+        self.delete_on_empty.validate()?;
         Ok(())
     }
 
@@ -351,7 +372,9 @@ mod tests {
 
     use rstest::rstest;
 
-    use super::RetentionPolicy;
+    use super::{
+        DeleteOnEmptyConfig, OptionalDeleteOnEmptyConfig, OptionalStreamConfig, RetentionPolicy,
+    };
 
     #[rstest]
     #[case::one_second(Duration::from_secs(1))]
@@ -366,5 +389,34 @@ mod tests {
     #[case::fractional_seconds(Duration::from_millis(1500))]
     fn retention_policy_age_invalid(#[case] age: Duration) {
         assert!(RetentionPolicy::Age(age).validate().is_err());
+    }
+
+    #[rstest]
+    #[case::unset(None)]
+    #[case::zero(Some(Duration::ZERO))]
+    #[case::whole_seconds(Some(Duration::from_secs(60)))]
+    fn delete_on_empty_min_age_valid(#[case] min_age: Option<Duration>) {
+        let config = OptionalStreamConfig {
+            delete_on_empty: OptionalDeleteOnEmptyConfig { min_age },
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+        if let Some(min_age) = min_age {
+            assert!(DeleteOnEmptyConfig { min_age }.validate().is_ok());
+        }
+    }
+
+    #[rstest]
+    #[case::sub_second(Duration::from_millis(500))]
+    #[case::fractional_seconds(Duration::from_millis(1500))]
+    fn delete_on_empty_min_age_invalid(#[case] min_age: Duration) {
+        let config = OptionalStreamConfig {
+            delete_on_empty: OptionalDeleteOnEmptyConfig {
+                min_age: Some(min_age),
+            },
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+        assert!(DeleteOnEmptyConfig { min_age }.validate().is_err());
     }
 }

@@ -321,17 +321,8 @@ pub fn validate(spec: &Resources) -> Result<(), String> {
 }
 
 fn validate_stream_config(config: &StreamConfig, context: &str, errors: &mut Vec<String>) {
-    if let Some(retention_policy) = config.retention_policy
-        && let Err(err) = retention_policy.0.validate()
-    {
+    if let Err(err) = s2_common::config::OptionalStreamConfig::from(config.clone()).validate() {
         errors.push(format!("{context}: {err}"));
-    }
-    if let Some(min_age) = config.delete_on_empty.as_ref().and_then(|d| d.min_age)
-        && min_age.0.subsec_nanos() != 0
-    {
-        errors.push(format!(
-            "{context}: delete_on_empty.min_age must be a whole number of seconds"
-        ));
     }
 }
 
