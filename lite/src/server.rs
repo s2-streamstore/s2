@@ -650,6 +650,21 @@ const FIRST_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 // Hyper also reuses `header_read_timeout` as the idle timeout between HTTP/1.1
 // keep-alive requests, so keep it generous enough for connection pooling.
 const HTTP1_HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
+// Fixed HTTP/2 receive windows instead of hyper's `adaptive_window(true)`:
+// adaptive mode resets both windows to 64 KiB initially (adding multi-RTT
+// cold-start penalties on 1 MiB appends), backs off BDP probing up to 25.6s on
+// pooled connections mixing small requests with streaming appends, and still
+// grows irreversibly up to 16 MiB anyway. Fixed 4 MiB stream / 16 MiB
+// connection windows fit full 1 MiB / 2.5 MiB append batches in 1 RTT and
+// sustain 100 MiB/s same-region appends with ample RTT headroom while keeping
+// the same 16 MiB worst-case per-connection receive buffer cap under storage
+// backpressure (`h2` allocates lazily, so idle connections don't reserve window
+// RAM).
+const HTTP2_INITIAL_STREAM_WINDOW_SIZE: u32 = 4 * 1024 * 1024;
+const HTTP2_INITIAL_CONNECTION_WINDOW_SIZE: u32 = 16 * 1024 * 1024;
+// Above hyper's 400 KiB server default so 1 MiB catchup `ReadBatch`es do not
+// stall mid-batch.
+const HTTP2_MAX_SEND_BUF_SIZE: usize = 2 * 1024 * 1024;
 const HTTP2_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(20);
 const HTTP2_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(10);
 const TCP_KEEPALIVE_TIME: Duration = Duration::from_secs(30);
@@ -685,7 +700,9 @@ fn configure_server<Acc>(
     server
         .http_builder()
         .http2()
-        .adaptive_window(true)
+        .initial_stream_window_size(HTTP2_INITIAL_STREAM_WINDOW_SIZE)
+        .initial_connection_window_size(HTTP2_INITIAL_CONNECTION_WINDOW_SIZE)
+        .max_send_buf_size(HTTP2_MAX_SEND_BUF_SIZE)
         .keep_alive_interval(HTTP2_KEEP_ALIVE_INTERVAL)
         .keep_alive_timeout(HTTP2_KEEP_ALIVE_TIMEOUT);
     server
