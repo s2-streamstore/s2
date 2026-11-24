@@ -241,6 +241,7 @@ struct ReadStateInner {
     phase: RequestPhase,
     catch_up: CatchUpSlot,
     buffered_records: usize,
+    pending_heartbeats: usize,
     pending_close: Option<PendingClose>,
     /// Locked-in session close reason (`R9`). Once set, later aborts or closes have no effect.
     /// When `Clean` is reached while already caught up, `phase` stays `Open` until iteration
@@ -257,10 +258,15 @@ impl ReadStateInner {
             phase: RequestPhase::Connecting,
             catch_up: CatchUpSlot::pending(),
             buffered_records: 0,
+            pending_heartbeats: 0,
             pending_close: None,
             closed: None,
             context,
         }
+    }
+
+    fn has_pending_deliveries(&self) -> bool {
+        self.buffered_records > 0 || self.pending_heartbeats > 0
     }
 
     fn compute_caught_up_tail(&self) -> Option<StreamPosition> {
@@ -323,7 +329,7 @@ impl ReadStateInner {
         record_count: usize,
     ) -> bool {
         if self.phase == RequestPhase::Ended || self.closed.is_some() {
-            return false;
+            return true;
         }
         self.buffered_records = self.buffered_records.saturating_add(record_count);
         self.phase = RequestPhase::Open { latest_tail: tail };
@@ -336,7 +342,12 @@ impl ReadStateInner {
         self.recompute_caught_up();
         // Returns true if this was a heartbeat and `next_seq_num` is already at `tail.seq_num`,
         // meaning there are no earlier undelivered records waiting to advance past.
-        first_record_seq.is_none() && tail.is_some_and(|t| self.next_seq_num == Some(t.seq_num))
+        let heartbeat_already_at_tail = first_record_seq.is_none()
+            && tail.is_some_and(|t| self.next_seq_num == Some(t.seq_num));
+        if first_record_seq.is_none() && tail.is_some() && !heartbeat_already_at_tail {
+            self.pending_heartbeats = self.pending_heartbeats.saturating_add(1);
+        }
+        heartbeat_already_at_tail
     }
 
     fn on_disconnected(&mut self) {
@@ -347,9 +358,21 @@ impl ReadStateInner {
         self.recompute_caught_up();
     }
 
+    fn apply_heartbeat_tail(&mut self, tail: StreamPosition) {
+        if self.phase == RequestPhase::Ended {
+            return;
+        }
+        self.update_observed_tail(tail);
+        self.next_seq_num = Some(
+            self.next_seq_num
+                .map_or(tail.seq_num, |prev| prev.max(tail.seq_num)),
+        );
+        self.recompute_caught_up();
+    }
+
     fn apply_clean_close(&mut self, final_tail: Option<StreamPosition>) {
         if let Some(tail) = final_tail {
-            self.on_heartbeat_delivered(tail);
+            self.apply_heartbeat_tail(tail);
         }
         self.closed = Some(TerminalClose::Clean);
         if !self.catch_up.is_caught_up() {
@@ -357,64 +380,8 @@ impl ReadStateInner {
         }
     }
 
-    /// Record a clean stop (`R9a`). Returns `true` if the session closed immediately (no
-    /// undelivered records remain).
-    fn on_clean_stop(&mut self, tail: Option<StreamPosition>) -> bool {
-        if self.closed.is_some() || self.phase == RequestPhase::Ended {
-            return true;
-        }
-        let latest_tail = tail.or(match self.phase {
-            RequestPhase::Open { latest_tail } => latest_tail,
-            RequestPhase::Connecting | RequestPhase::Ended => None,
-        });
-        self.phase = RequestPhase::Open { latest_tail };
-        if let Some(tail) = tail {
-            self.update_observed_tail(tail);
-        }
-        if self.buffered_records == 0 {
-            self.apply_clean_close(tail);
-            true
-        } else {
-            self.pending_close = Some(PendingClose::Clean { final_tail: tail });
-            self.recompute_caught_up();
-            false
-        }
-    }
-
-    /// Record a terminal error (`R9c`). Returns `true` if the session closed immediately (no
-    /// undelivered records remain).
-    fn on_terminal_error(&mut self, err: ReadSessionError) -> bool {
-        if self.closed.is_some() || self.phase == RequestPhase::Ended {
-            return true;
-        }
-        if self.buffered_records == 0 {
-            self.closed = Some(TerminalClose::Error(err.clone()));
-            self.on_ended(Some(err));
-            true
-        } else {
-            self.pending_close = Some(PendingClose::Error(err));
-            false
-        }
-    }
-
-    fn on_aborted(&mut self, err: AbortedError) -> bool {
-        if self.closed.is_some() || self.phase == RequestPhase::Ended {
-            return false;
-        }
-        self.pending_close = None;
-        let err = ReadSessionError::Aborted(err);
-        self.closed = Some(TerminalClose::Error(err.clone()));
-        self.on_ended(Some(err));
-        true
-    }
-
-    fn on_records_delivered(&mut self, last_seq_num: u64, count: usize) {
-        self.next_seq_num = Some(last_seq_num.saturating_add(1));
-        self.buffered_records = self.buffered_records.saturating_sub(count);
-        if self.phase != RequestPhase::Ended {
-            self.recompute_caught_up();
-        }
-        if self.buffered_records == 0
+    fn maybe_apply_pending_close(&mut self) {
+        if !self.has_pending_deliveries()
             && self.closed.is_none()
             && let Some(pending) = self.pending_close.take()
         {
@@ -428,16 +395,71 @@ impl ReadStateInner {
         }
     }
 
-    fn on_heartbeat_delivered(&mut self, tail: StreamPosition) {
-        if self.phase == RequestPhase::Ended {
-            return;
+    /// Record a clean stop (`R9a`). Returns `true` if the session closed immediately (no
+    /// undelivered records or heartbeats remain).
+    fn on_clean_stop(&mut self, tail: Option<StreamPosition>) -> bool {
+        if self.closed.is_some() || self.phase == RequestPhase::Ended {
+            return true;
         }
-        self.update_observed_tail(tail);
-        self.next_seq_num = Some(
-            self.next_seq_num
-                .map_or(tail.seq_num, |prev| prev.max(tail.seq_num)),
-        );
-        self.recompute_caught_up();
+        let latest_tail = tail.or(match self.phase {
+            RequestPhase::Open { latest_tail } => latest_tail,
+            RequestPhase::Connecting | RequestPhase::Ended => None,
+        });
+        self.phase = RequestPhase::Open { latest_tail };
+        if let Some(tail) = tail {
+            self.update_observed_tail(tail);
+        }
+        if !self.has_pending_deliveries() {
+            self.apply_clean_close(tail);
+            true
+        } else {
+            self.pending_close = Some(PendingClose::Clean { final_tail: tail });
+            self.recompute_caught_up();
+            false
+        }
+    }
+
+    /// Record a terminal error (`R9c`). Returns `true` if the session closed immediately (no
+    /// undelivered records or heartbeats remain).
+    fn on_terminal_error(&mut self, err: ReadSessionError) -> bool {
+        if self.closed.is_some() || self.phase == RequestPhase::Ended {
+            return true;
+        }
+        if !self.has_pending_deliveries() {
+            self.closed = Some(TerminalClose::Error(err.clone()));
+            self.on_ended(Some(err));
+            true
+        } else {
+            self.pending_close = Some(PendingClose::Error(err));
+            false
+        }
+    }
+
+    fn on_aborted(&mut self, err: AbortedError) -> bool {
+        if self.closed.is_some() || self.phase == RequestPhase::Ended {
+            return false;
+        }
+        self.pending_heartbeats = 0;
+        self.pending_close = None;
+        let err = ReadSessionError::Aborted(err);
+        self.closed = Some(TerminalClose::Error(err.clone()));
+        self.on_ended(Some(err));
+        true
+    }
+
+    fn on_records_delivered(&mut self, last_seq_num: u64, count: usize) {
+        self.next_seq_num = Some(last_seq_num.saturating_add(1));
+        self.buffered_records = self.buffered_records.saturating_sub(count);
+        if self.phase != RequestPhase::Ended {
+            self.recompute_caught_up();
+        }
+        self.maybe_apply_pending_close();
+    }
+
+    fn on_heartbeat_delivered(&mut self, tail: StreamPosition) {
+        self.pending_heartbeats = self.pending_heartbeats.saturating_sub(1);
+        self.apply_heartbeat_tail(tail);
+        self.maybe_apply_pending_close();
     }
 
     fn on_ended(&mut self, error: Option<ReadSessionError>) {
@@ -763,6 +785,7 @@ impl Drop for ReadSessionCore {
     fn drop(&mut self) {
         let mut inner = self.state.inner.lock().unwrap();
         if inner.closed.is_none() {
+            inner.pending_heartbeats = 0;
             inner.pending_close = None;
             if self.shutdown.is_cancelled() {
                 let err = AbortedError::new_with_context("client closed", self.context.clone());
@@ -1070,9 +1093,10 @@ impl ReadDriver {
         ));
     }
 
-    /// Enqueue a terminal event. If buffered records remain (`!already_closed`), stay parked
-    /// until the consumer consumes them (closing `rx`) or the client shuts down, so any pending
-    /// `caught_up()` future still wakes immediately on `S2::close()` (`C12`, `R8d`, `R9`).
+    /// Enqueue a terminal event. If buffered records or heartbeats remain (`!already_closed`),
+    /// stay parked until the consumer consumes them (closing `rx`) or the client shuts down, so
+    /// any pending `caught_up()` future still wakes immediately on `S2::close()` (`C12`, `R8d`,
+    /// `R9`).
     async fn send_terminal_event(&mut self, event: DriverEvent, already_closed: bool) {
         tokio::select! {
             biased;
@@ -1731,6 +1755,54 @@ mod tests {
         assert_eq!(session.next_seq_num(), Some(5));
         assert!(session.is_caught_up());
         assert_eq!(cu.await.unwrap(), position(5));
+    }
+
+    #[tokio::test]
+    async fn clean_stop_racing_pending_heartbeat_preserves_progress_and_catch_up() {
+        let (mut session, tx, state, _shutdown) = test_session_parts(Some(0));
+        let cu = session.caught_up();
+
+        // Driver fetches a heartbeat advancing past a trimmed gap and enqueues it.
+        assert!(!state.on_message_fetched(None, Some(position(5)), 0));
+        tx.send(DriverEvent::Heartbeat(position(5))).await.unwrap();
+
+        // Simulate the driver observing clean EOF before the consumer delivers the heartbeat.
+        assert!(!state.on_clean_stop(None));
+        tx.send(DriverEvent::CleanEnd).await.unwrap();
+
+        assert!(session.next().await.is_none());
+        assert_eq!(session.next_seq_num(), Some(5));
+        assert_eq!(session.last_observed_tail(), Some(position(5)));
+        assert!(!session.is_caught_up());
+        assert_eq!(cu.await.unwrap(), position(5));
+        assert!(matches!(
+            session.caught_up().await,
+            Err(ReadSessionError::SessionClosed(e)) if e.failure().is_none()
+        ));
+    }
+
+    #[tokio::test]
+    async fn terminal_error_racing_pending_heartbeat_preserves_next_seq_num() {
+        let (mut session, tx, state, _shutdown) = test_session_parts(Some(0));
+        let cu = session.caught_up();
+
+        assert!(!state.on_message_fetched(None, Some(position(5)), 0));
+        tx.send(DriverEvent::Heartbeat(position(5))).await.unwrap();
+
+        let err = ReadSessionError::Timeout(TimeoutError::new_with_context(
+            "heartbeat timeout",
+            ErrorContext::default().into_read_only(),
+        ));
+        state.on_disconnected();
+        assert!(!state.on_terminal_error(err.clone()));
+        tx.send(DriverEvent::Error(err)).await.unwrap();
+
+        let delivered_err = session.next().await.unwrap().unwrap_err();
+        assert!(matches!(delivered_err, ReadSessionError::Timeout(_)));
+        assert_eq!(session.next_seq_num(), Some(5));
+        assert_eq!(session.last_observed_tail(), Some(position(5)));
+        assert!(!session.is_caught_up());
+        assert!(matches!(cu.await, Err(ReadSessionError::Timeout(_))));
     }
 
     #[tokio::test]
