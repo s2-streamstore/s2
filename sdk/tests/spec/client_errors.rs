@@ -2021,6 +2021,7 @@ fn public_error_fixture_constructors_preserve_predicates_and_upcasts() {
             AbortedError, ClientClosedError, ConnectError, ConnectionLostError, ErrorCode,
             FencingTokenMismatchError, IndefiniteAppendError, ProtocolError, ReadUnwrittenError,
             SeqNumMismatchError, ServerError, SessionClosedError, StatusCode, TimeoutError,
+            ValidationError,
         },
         types::StreamPosition,
     };
@@ -2034,20 +2035,19 @@ fn public_error_fixture_constructors_preserve_predicates_and_upcasts() {
         unwritten.server_error().status,
         StatusCode::RANGE_NOT_SATISFIABLE
     );
-    assert!(!unwritten.is_retryable());
-    assert!(unwritten.has_no_side_effects());
     assert!(unwritten.server_error().has_no_side_effects());
     let read_unwritten: ReadError = unwritten.clone().into();
+    assert!(!read_unwritten.is_retryable() && read_unwritten.has_no_side_effects());
     assert_eq!(
         read_unwritten.server_error().unwrap().status,
         StatusCode::RANGE_NOT_SATISFIABLE
     );
     let read_sess_unwritten: ReadSessionError = unwritten.into();
+    assert!(!read_sess_unwritten.is_retryable() && read_sess_unwritten.has_no_side_effects());
+    let s2_unwritten = S2Error::from(read_sess_unwritten);
+    assert!(!s2_unwritten.is_retryable() && s2_unwritten.has_no_side_effects());
     assert_eq!(
-        S2Error::from(read_sess_unwritten)
-            .server_error()
-            .unwrap()
-            .status,
+        s2_unwritten.server_error().unwrap().status,
         StatusCode::RANGE_NOT_SATISFIABLE
     );
 
@@ -2057,13 +2057,14 @@ fn public_error_fixture_constructors_preserve_predicates_and_upcasts() {
         seq_mismatch.server_error().status,
         StatusCode::PRECONDITION_FAILED
     );
-    assert!(!seq_mismatch.is_retryable());
-    assert!(seq_mismatch.has_no_side_effects());
     let append_seq: AppendError = seq_mismatch.into();
+    assert!(!append_seq.is_retryable() && append_seq.has_no_side_effects());
     assert_eq!(
         append_seq.server_error().unwrap().status,
         StatusCode::PRECONDITION_FAILED
     );
+    let s2_seq = S2Error::from(append_seq);
+    assert!(!s2_seq.is_retryable() && s2_seq.has_no_side_effects());
 
     let fence_mismatch = FencingTokenMismatchError::new("tok-1".parse().unwrap());
     assert_eq!(&*fence_mismatch.current_fencing_token, "tok-1");
@@ -2071,18 +2072,23 @@ fn public_error_fixture_constructors_preserve_predicates_and_upcasts() {
         fence_mismatch.server_error().status,
         StatusCode::PRECONDITION_FAILED
     );
-    assert!(!fence_mismatch.is_retryable());
-    assert!(fence_mismatch.has_no_side_effects());
     let sess_fence: AppendSessionError = fence_mismatch.into();
+    assert!(!sess_fence.is_retryable() && sess_fence.has_no_side_effects());
+    let s2_fence = S2Error::from(sess_fence);
+    assert!(!s2_fence.is_retryable() && s2_fence.has_no_side_effects());
     assert_eq!(
-        S2Error::from(sess_fence).server_error().unwrap().status,
+        s2_fence.server_error().unwrap().status,
         StatusCode::PRECONDITION_FAILED
     );
 
     // 2. Leaf SDK errors: predicates and read-only upcasts.
-    let connect = ConnectError::new("dns failed");
+    let validation = S2Error::from(ValidationError::new("bad input"));
+    assert!(!validation.is_retryable() && validation.has_no_side_effects());
+
+    let connect = RequestError::from(ConnectError::new("dns failed"));
     assert!(connect.is_retryable() && connect.has_no_side_effects());
-    assert!(RequestError::from(connect).has_no_side_effects());
+    let s2_connect = S2Error::from(connect);
+    assert!(s2_connect.is_retryable() && s2_connect.has_no_side_effects());
 
     let lost_indef = ConnectionLostError::new("reset");
     assert!(lost_indef.is_retryable() && !lost_indef.has_no_side_effects());
@@ -2109,8 +2115,9 @@ fn public_error_fixture_constructors_preserve_predicates_and_upcasts() {
 
     let closed = ClientClosedError::new();
     let closed_default = ClientClosedError::default();
-    assert!(!closed.is_retryable() && closed.has_no_side_effects());
     assert_eq!(closed.to_string(), closed_default.to_string());
+    let s2_closed = S2Error::from(closed);
+    assert!(!s2_closed.is_retryable() && s2_closed.has_no_side_effects());
 
     let aborted = AbortedError::new("client closed");
     assert!(!aborted.is_retryable() && !aborted.has_no_side_effects());
@@ -2136,20 +2143,23 @@ fn public_error_fixture_constructors_preserve_predicates_and_upcasts() {
     assert!(s2_indef.server_error().is_none());
 
     let clean_closed = SessionClosedError::<AppendSessionError>::new(None);
-    assert!(!clean_closed.is_retryable() && clean_closed.has_no_side_effects());
     assert!(clean_closed.source().is_none());
+    let clean_closed_err = AppendSessionError::from(clean_closed);
+    assert!(!clean_closed_err.is_retryable() && clean_closed_err.has_no_side_effects());
 
     let read_closed = SessionClosedError::new(Some(ReadSessionError::Timeout(TimeoutError::new(
         "heartbeat timeout",
     ))));
-    assert!(!read_closed.is_retryable() && read_closed.has_no_side_effects());
     assert!(
         read_closed
             .source()
             .and_then(|s| s.downcast_ref::<ReadSessionError>())
             .is_some()
     );
-    let s2_read_closed: S2Error = ReadSessionError::from(read_closed).into();
+    let read_closed_err = ReadSessionError::from(read_closed);
+    assert!(!read_closed_err.is_retryable() && read_closed_err.has_no_side_effects());
+    let s2_read_closed: S2Error = read_closed_err.into();
+    assert!(!s2_read_closed.is_retryable() && s2_read_closed.has_no_side_effects());
     assert!(s2_read_closed.failure().unwrap().has_no_side_effects());
 }
 

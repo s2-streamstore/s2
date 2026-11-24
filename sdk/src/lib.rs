@@ -107,7 +107,7 @@ Every operation returns the narrowest flat error enum for its surface:
 * [`ClientClosedError`](error::ClientClosedError) — returned synchronously by session/producer openers when the client has been closed via [`S2::close`]
 * [`ValidationError`](error::ValidationError) — returned by client constructors, [`with_retry`](S2::with_retry), and validated type builders
 
-Every operation error converts into [`S2Error`] and provides
+All of these convert into [`S2Error`]; [`S2Error`] and the five operation error enums expose
 [`is_retryable`](S2Error::is_retryable),
 [`has_no_side_effects`](S2Error::has_no_side_effects),
 [`server_error`](S2Error::server_error), [`known_code`](S2Error::known_code), and

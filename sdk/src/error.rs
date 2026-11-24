@@ -7,9 +7,12 @@
 //! [`AppendError`], [`AppendSessionError`], or [`ReadSessionError`]), and every operation error
 //! converts into the catch-all [`S2Error`].
 //!
-//! Every error exposes [`is_retryable`](S2Error::is_retryable) (whether repeating the operation may
-//! succeed) and [`has_no_side_effects`](S2Error::has_no_side_effects) (whether the failed attempt
-//! certainly had no side effects).
+//! [`S2Error`], the five operation error enums, and leaf error types whose classification varies
+//! per instance ([`ServerError`], [`ConnectionLostError`], [`TimeoutError`], [`ProtocolError`],
+//! [`AbortedError`], and [`IndefiniteAppendError`]) expose
+//! [`is_retryable`](S2Error::is_retryable) (whether repeating the operation may succeed) and
+//! [`has_no_side_effects`](S2Error::has_no_side_effects) (whether the failed attempt certainly had
+//! no side effects).
 
 use std::{fmt, sync::Arc};
 
@@ -453,18 +456,6 @@ impl SeqNumMismatchError {
     pub fn server_error(&self) -> &ServerError {
         &self.server
     }
-
-    /// Whether retrying the request may succeed (always `false`).
-    #[must_use]
-    pub fn is_retryable(&self) -> bool {
-        false
-    }
-
-    /// Whether the failed attempt certainly had no side effects (always `true`).
-    #[must_use]
-    pub fn has_no_side_effects(&self) -> bool {
-        true
-    }
 }
 
 impl fmt::Display for SeqNumMismatchError {
@@ -535,18 +526,6 @@ impl FencingTokenMismatchError {
     pub fn server_error(&self) -> &ServerError {
         &self.server
     }
-
-    /// Whether retrying the request may succeed (always `false`).
-    #[must_use]
-    pub fn is_retryable(&self) -> bool {
-        false
-    }
-
-    /// Whether the failed attempt certainly had no side effects (always `true`).
-    #[must_use]
-    pub fn has_no_side_effects(&self) -> bool {
-        true
-    }
 }
 
 impl fmt::Display for FencingTokenMismatchError {
@@ -615,18 +594,6 @@ impl ReadUnwrittenError {
     pub fn server_error(&self) -> &ServerError {
         &self.server
     }
-
-    /// Whether retrying the request may succeed (always `false`).
-    #[must_use]
-    pub fn is_retryable(&self) -> bool {
-        false
-    }
-
-    /// Whether the failed attempt certainly had no side effects (always `true`).
-    #[must_use]
-    pub fn has_no_side_effects(&self) -> bool {
-        true
-    }
 }
 
 impl fmt::Display for ReadUnwrittenError {
@@ -646,12 +613,10 @@ macro_rules! define_message_error {
         pub struct $name:ident {
             field_doc: $field_doc:literal,
             prefix: $prefix:literal,
-            retryable: $retryable:expr,
-            retryable_doc: $retryable_doc:literal,
-            no_side_effects: |$self_ident:ident| $no_side_effects:expr,
-            no_side_effects_doc: $no_side_effects_doc:literal,
-            debug_no_side_effects: $debug_nse:expr,
-            $(into_read_only: $into_ro:ident,)?
+            $(
+                retryable: $retryable:expr,
+                retryable_doc: $retryable_doc:literal,
+            )?
         }
     ) => {
         $(#[$meta])*
@@ -667,9 +632,10 @@ macro_rules! define_message_error {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 let mut ds = f.debug_struct(stringify!($name));
                 ds.field("message", &self.message);
-                if $debug_nse {
+                $(
+                    let _: bool = $retryable;
                     ds.field("has_no_side_effects", &self.has_no_side_effects());
-                }
+                )?
                 self.context.debug_fields(&mut ds);
                 ds.finish()
             }
@@ -709,24 +675,23 @@ macro_rules! define_message_error {
                     self
                 }
 
-                pub(crate) fn $into_ro(mut self) -> Self {
+                pub(crate) fn into_read_only(mut self) -> Self {
                     self.context.set_read_only();
                     self
                 }
+
+                #[doc = $retryable_doc]
+                #[must_use]
+                pub fn is_retryable(&self) -> bool {
+                    $retryable
+                }
+
+                /// Whether the failed attempt certainly had no side effects.
+                #[must_use]
+                pub fn has_no_side_effects(&self) -> bool {
+                    self.context.is_read_only()
+                }
             )?
-
-            #[doc = $retryable_doc]
-            #[must_use]
-            pub fn is_retryable(&self) -> bool {
-                $retryable
-            }
-
-            #[doc = $no_side_effects_doc]
-            #[must_use]
-            pub fn has_no_side_effects(&self) -> bool {
-                let $self_ident = self;
-                $no_side_effects
-            }
         }
 
         impl fmt::Display for $name {
@@ -745,11 +710,6 @@ define_message_error! {
     pub struct ConnectError {
         field_doc: "Diagnostic detail describing the connection failure.",
         prefix: "connect",
-        retryable: true,
-        retryable_doc: "Whether retrying the request may succeed (always `true`).",
-        no_side_effects: |_this| true,
-        no_side_effects_doc: "Whether the failed attempt certainly had no side effects (always `true`).",
-        debug_no_side_effects: false,
     }
 }
 
@@ -848,10 +808,6 @@ define_message_error! {
         prefix: "timeout",
         retryable: true,
         retryable_doc: "Whether retrying the request may succeed (always `true`).",
-        no_side_effects: |this| this.context.is_read_only(),
-        no_side_effects_doc: "Whether the failed attempt certainly had no side effects.",
-        debug_no_side_effects: true,
-        into_read_only: into_read_only,
     }
 }
 
@@ -983,18 +939,6 @@ impl ClientClosedError {
         self.context.merge_missing(context);
         self
     }
-
-    /// Whether retrying the request may succeed (always `false`).
-    #[must_use]
-    pub fn is_retryable(&self) -> bool {
-        false
-    }
-
-    /// Whether the failed attempt certainly had no side effects (always `true`).
-    #[must_use]
-    pub fn has_no_side_effects(&self) -> bool {
-        true
-    }
 }
 
 impl fmt::Display for ClientClosedError {
@@ -1013,10 +957,6 @@ define_message_error! {
         prefix: "aborted",
         retryable: false,
         retryable_doc: "Whether retrying the request may succeed (always `false`).",
-        no_side_effects: |this| this.context.is_read_only(),
-        no_side_effects_doc: "Whether the failed attempt certainly had no side effects.",
-        debug_no_side_effects: true,
-        into_read_only: into_read_only,
     }
 }
 
@@ -1160,18 +1100,6 @@ impl<E> SessionClosedError<E> {
         self.failure.map(|e| *e)
     }
 
-    /// Whether retrying the operation on this closed session may succeed (always `false`).
-    #[must_use]
-    pub fn is_retryable(&self) -> bool {
-        false
-    }
-
-    /// Whether the rejected call certainly had no side effects (always `true`).
-    #[must_use]
-    pub fn has_no_side_effects(&self) -> bool {
-        true
-    }
-
     pub(crate) fn map<U>(self, f: impl FnOnce(E) -> U) -> SessionClosedError<U> {
         SessionClosedError {
             failure: self.failure.map(|e| Box::new(f(*e))),
@@ -1223,21 +1151,75 @@ impl<E: std::error::Error + 'static> std::error::Error for SessionClosedError<E>
 
 macro_rules! delegate_is_retryable {
     ($self:expr, [$($variant:ident),* $(,)?]) => {
+        delegate_is_retryable!(@build $self; $($variant,)* ; )
+    };
+    (@build $self:expr; ; $($arms:tt)*) => {
         match $self {
-            $(Self::$variant(e) => e.is_retryable(),)*
+            $($arms)*
             #[cfg(feature = "_hidden")]
             Self::AccessTokenProvider(e) => e.is_retryable(),
         }
+    };
+    (@build $self:expr; Connect, $($rest:ident,)* ; $($arms:tt)*) => {
+        delegate_is_retryable!(@build $self; $($rest,)* ; $($arms)* Self::Connect(_) => true,)
+    };
+    (@build $self:expr; SeqNumMismatch, $($rest:ident,)* ; $($arms:tt)*) => {
+        delegate_is_retryable!(@build $self; $($rest,)* ; $($arms)* Self::SeqNumMismatch(_) => false,)
+    };
+    (@build $self:expr; FencingTokenMismatch, $($rest:ident,)* ; $($arms:tt)*) => {
+        delegate_is_retryable!(@build $self; $($rest,)* ; $($arms)* Self::FencingTokenMismatch(_) => false,)
+    };
+    (@build $self:expr; ReadUnwritten, $($rest:ident,)* ; $($arms:tt)*) => {
+        delegate_is_retryable!(@build $self; $($rest,)* ; $($arms)* Self::ReadUnwritten(_) => false,)
+    };
+    (@build $self:expr; SessionClosed, $($rest:ident,)* ; $($arms:tt)*) => {
+        delegate_is_retryable!(@build $self; $($rest,)* ; $($arms)* Self::SessionClosed(_) => false,)
+    };
+    (@build $self:expr; Validation, $($rest:ident,)* ; $($arms:tt)*) => {
+        delegate_is_retryable!(@build $self; $($rest,)* ; $($arms)* Self::Validation(_) => false,)
+    };
+    (@build $self:expr; ClientClosed, $($rest:ident,)* ; $($arms:tt)*) => {
+        delegate_is_retryable!(@build $self; $($rest,)* ; $($arms)* Self::ClientClosed(_) => false,)
+    };
+    (@build $self:expr; $variant:ident, $($rest:ident,)* ; $($arms:tt)*) => {
+        delegate_is_retryable!(@build $self; $($rest,)* ; $($arms)* Self::$variant(e) => e.is_retryable(),)
     };
 }
 
 macro_rules! delegate_has_no_side_effects {
     ($self:expr, [$($variant:ident),* $(,)?]) => {
+        delegate_has_no_side_effects!(@build $self; $($variant,)* ; )
+    };
+    (@build $self:expr; ; $($arms:tt)*) => {
         match $self {
-            $(Self::$variant(e) => e.has_no_side_effects(),)*
+            $($arms)*
             #[cfg(feature = "_hidden")]
             Self::AccessTokenProvider(_) => true,
         }
+    };
+    (@build $self:expr; SeqNumMismatch, $($rest:ident,)* ; $($arms:tt)*) => {
+        delegate_has_no_side_effects!(@build $self; $($rest,)* ; $($arms)* Self::SeqNumMismatch(_) => true,)
+    };
+    (@build $self:expr; FencingTokenMismatch, $($rest:ident,)* ; $($arms:tt)*) => {
+        delegate_has_no_side_effects!(@build $self; $($rest,)* ; $($arms)* Self::FencingTokenMismatch(_) => true,)
+    };
+    (@build $self:expr; ReadUnwritten, $($rest:ident,)* ; $($arms:tt)*) => {
+        delegate_has_no_side_effects!(@build $self; $($rest,)* ; $($arms)* Self::ReadUnwritten(_) => true,)
+    };
+    (@build $self:expr; SessionClosed, $($rest:ident,)* ; $($arms:tt)*) => {
+        delegate_has_no_side_effects!(@build $self; $($rest,)* ; $($arms)* Self::SessionClosed(_) => true,)
+    };
+    (@build $self:expr; Validation, $($rest:ident,)* ; $($arms:tt)*) => {
+        delegate_has_no_side_effects!(@build $self; $($rest,)* ; $($arms)* Self::Validation(_) => true,)
+    };
+    (@build $self:expr; Connect, $($rest:ident,)* ; $($arms:tt)*) => {
+        delegate_has_no_side_effects!(@build $self; $($rest,)* ; $($arms)* Self::Connect(_) => true,)
+    };
+    (@build $self:expr; ClientClosed, $($rest:ident,)* ; $($arms:tt)*) => {
+        delegate_has_no_side_effects!(@build $self; $($rest,)* ; $($arms)* Self::ClientClosed(_) => true,)
+    };
+    (@build $self:expr; $variant:ident, $($rest:ident,)* ; $($arms:tt)*) => {
+        delegate_has_no_side_effects!(@build $self; $($rest,)* ; $($arms)* Self::$variant(e) => e.has_no_side_effects(),)
     };
 }
 
