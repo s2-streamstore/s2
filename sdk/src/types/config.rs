@@ -200,57 +200,56 @@ fn parse_endpoint_scheme_and_rest<'a>(
     Ok((scheme, rest))
 }
 
-fn parse_endpoint_authority(authority: &str, kind: &str) -> Result<Authority, String> {
+fn parse_endpoint_authority(authority: &str, kind: &str) -> Result<Authority, ValidationError> {
     if authority.is_empty() {
-        return Err(format!("invalid {kind} endpoint authority: empty"));
+        return Err(format!("invalid {kind} endpoint authority: empty").into());
     }
     if authority.contains('@') {
-        return Err(format!(
-            "invalid {kind} endpoint authority: user info is not allowed"
-        ));
+        return Err(format!("invalid {kind} endpoint authority: user info is not allowed").into());
     }
     if authority.ends_with(':') {
-        return Err(format!(
-            "invalid {kind} endpoint authority: port cannot be empty"
-        ));
+        return Err(format!("invalid {kind} endpoint authority: port cannot be empty").into());
     }
     let parsed: Authority = authority.parse().map_err(|e| {
         // A bare IPv6 address has several colons, which `Authority` cannot tell
         // apart from the port separator.
         if !authority.contains('[') && authority.matches(':').count() > 1 {
-            format!(
+            ValidationError(format!(
                 "invalid {kind} endpoint authority: {e}; IPv6 addresses must be enclosed in \
                  brackets, e.g. [::1]:8080"
-            )
+            ))
         } else {
-            format!("invalid {kind} endpoint authority: {e}")
+            ValidationError(format!("invalid {kind} endpoint authority: {e}"))
         }
     })?;
     if parsed.host().is_empty() {
-        return Err(format!("invalid {kind} endpoint authority: empty host"));
+        return Err(format!("invalid {kind} endpoint authority: empty host").into());
     }
     // Userinfo (`@`) is already rejected above, so any suffix beyond `host()` is a `:port`.
     // `Authority::port_u16()` returns `None` for out-of-range ports (e.g. `:99999`), so require a
     // parsed non-zero `u16` whenever a port suffix is present (`C3`).
     if parsed.as_str().len() != parsed.host().len() && !parsed.port_u16().is_some_and(|p| p != 0) {
-        return Err(format!(
-            "invalid {kind} endpoint authority: port must be between 1 and 65535"
-        ));
+        return Err(
+            format!("invalid {kind} endpoint authority: port must be between 1 and 65535").into(),
+        );
     }
     validate_endpoint_host(parsed.host(), kind)?;
     Ok(parsed)
 }
 
-fn validate_endpoint_host(host: &str, kind: &str) -> Result<(), String> {
+fn validate_endpoint_host(host: &str, kind: &str) -> Result<(), ValidationError> {
     if host.starts_with('[') || host.ends_with(']') {
         let Some(inner) = host.strip_prefix('[').and_then(|s| s.strip_suffix(']')) else {
             return Err(format!(
                 "invalid {kind} endpoint host `{host}`: malformed bracketed IPv6 literal"
-            ));
+            )
+            .into());
         };
-        inner
-            .parse::<Ipv6Addr>()
-            .map_err(|_| format!("invalid {kind} endpoint host `{host}`: invalid IPv6 address"))?;
+        inner.parse::<Ipv6Addr>().map_err(|_| {
+            ValidationError(format!(
+                "invalid {kind} endpoint host `{host}`: invalid IPv6 address"
+            ))
+        })?;
         return Ok(());
     }
     if host.parse::<Ipv4Addr>().is_ok() {
@@ -259,9 +258,7 @@ fn validate_endpoint_host(host: &str, kind: &str) -> Result<(), String> {
     if is_valid_dns_name(host) {
         return Ok(());
     }
-    Err(format!(
-        "invalid {kind} endpoint host `{host}`: must be a DNS name or IP address"
-    ))
+    Err(format!("invalid {kind} endpoint host `{host}`: must be a DNS name or IP address").into())
 }
 
 fn is_valid_dns_name(host: &str) -> bool {
@@ -352,6 +349,12 @@ impl fmt::Display for AccountEndpoint {
     }
 }
 
+impl From<AccountEndpoint> for String {
+    fn from(value: AccountEndpoint) -> Self {
+        value.to_string()
+    }
+}
+
 /// Basin endpoint.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[must_use]
@@ -418,6 +421,12 @@ impl fmt::Display for BasinEndpoint {
             BasinAuthority::ParentZone(zone) => write!(f, "{}://{{basin}}.{zone}", self.scheme),
             BasinAuthority::Direct(authority) => write!(f, "{}://{authority}", self.scheme),
         }
+    }
+}
+
+impl From<BasinEndpoint> for String {
+    fn from(value: BasinEndpoint) -> Self {
+        value.to_string()
     }
 }
 
@@ -601,14 +610,37 @@ impl Compression {
     }
 }
 
+impl AsRef<str> for Compression {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl FromStr for Compression {
+    type Err = ValidationError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "none" => Ok(Self::None),
+            "gzip" => Ok(Self::Gzip),
+            "zstd" => Ok(Self::Zstd),
+            _ => Err(ValidationError(format!(
+                "invalid compression `{s}`: expected `none`, `gzip`, or `zstd`"
+            ))),
+        }
+    }
+}
+
 impl fmt::Display for Compression {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
 }
 
-/// Retry policy for [`append`](crate::S2Stream::append) and
-/// [`append_session`](crate::S2Stream::append_session) operations.
+/// Retry policy for [`append`](crate::S2Stream::append),
+/// [`append_with_stream_config`](crate::S2Stream::append_with_stream_config),
+/// [`append_session`](crate::S2Stream::append_session), and
+/// [`producer`](crate::S2Stream::producer) operations.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AppendRetryPolicy {
     /// Retry all appends. Use when duplicate records on the stream are acceptable.
@@ -629,6 +661,26 @@ impl AppendRetryPolicy {
         match self {
             Self::All => "all",
             Self::NoSideEffects => "no_side_effects",
+        }
+    }
+}
+
+impl AsRef<str> for AppendRetryPolicy {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl FromStr for AppendRetryPolicy {
+    type Err = ValidationError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "all" => Ok(Self::All),
+            "no_side_effects" => Ok(Self::NoSideEffects),
+            _ => Err(ValidationError(format!(
+                "invalid append retry policy `{s}`: expected `all` or `no_side_effects`"
+            ))),
         }
     }
 }
@@ -737,8 +789,10 @@ impl RetryConfig {
         }
     }
 
-    /// Set the retry policy for [`append`](crate::S2Stream::append) and
-    /// [`append_session`](crate::S2Stream::append_session) operations.
+    /// Set the retry policy for [`append`](crate::S2Stream::append),
+    /// [`append_with_stream_config`](crate::S2Stream::append_with_stream_config),
+    /// [`append_session`](crate::S2Stream::append_session), and
+    /// [`producer`](crate::S2Stream::producer) operations.
     ///
     /// Defaults to [`AppendRetryPolicy::All`].
     pub fn with_append_retry_policy(self, append_retry_policy: AppendRetryPolicy) -> Self {
@@ -1032,6 +1086,12 @@ impl S2Config {
     #[must_use]
     pub fn insecure_skip_cert_verification(&self) -> bool {
         self.insecure_skip_cert_verification
+    }
+
+    /// Return the explicitly configured rustls crypto provider, if set.
+    #[must_use]
+    pub fn rustls_crypto_provider(&self) -> Option<&Arc<CryptoProvider>> {
+        self.rustls_crypto_provider.as_ref()
     }
 
     pub(crate) fn validate(&self) -> Result<(), ValidationError> {

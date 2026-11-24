@@ -9,7 +9,7 @@ use std::{
     pin::Pin,
     sync::{
         Arc, Mutex as StdMutex,
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     task::{Context, Poll},
     time::Duration,
@@ -26,11 +26,10 @@ use crate::{
         BatchAccumulator, Linger, MatchSeqState, validate_max_batch_bytes,
         validate_max_batch_records, validate_record_size,
     },
-    client::CancellationToken,
     error::{AbortedError, AppendSessionError, ErrorContext, SessionClosedError, ValidationError},
     session::{
         AppendPermit, AppendPermits, AppendSessionCore, BatchSubmitTicket, FinishOnDrop,
-        SessionLifecycle, StreamHeaders, SubmitTicket, validate_max_unacked_bytes,
+        SessionAbort, SessionLifecycle, StreamHeaders, SubmitTicket, validate_max_unacked_bytes,
         validate_reserve_bytes,
     },
     types::{
@@ -45,6 +44,9 @@ const DROPPED_ABORT_MSG: &str = "producer dropped without calling close";
 type RecordAckTx = oneshot::Sender<Result<RecordAck, AppendSessionError>>;
 
 /// A [`Future`] that resolves to a [`RecordAck`] once the record is appended.
+///
+/// Once resolved, re-polling returns the same outcome without panicking, and
+/// [`try_ack`](Self::try_ack) returns `None`.
 pub struct RecordSubmitTicket(SubmitTicket<RecordAck>);
 
 impl RecordSubmitTicket {
@@ -276,10 +278,8 @@ struct ProducerShared {
     acked_through_id: AtomicU64,
     lifecycle: Arc<SessionLifecycle>,
     session_lifecycle: Arc<SessionLifecycle>,
-    client_shutdown: CancellationToken,
-    /// Child token of `client_shutdown`; cancelled on either client close or producer drop/abort.
-    abort: CancellationToken,
-    explicit_abort: AtomicBool,
+    /// Cancelled on client close or producer drop/abort; its child cancels the owned session.
+    abort: SessionAbort,
     flush_partial_notify: Notify,
     context: ErrorContext,
 }
@@ -292,16 +292,6 @@ impl ProducerShared {
         self.lifecycle.is_closing_or_closed() || self.session_lifecycle.terminal_err().is_some()
     }
 
-    fn abort_reason(&self) -> &'static str {
-        if self.client_shutdown.is_cancelled() {
-            "client closed"
-        } else if self.explicit_abort.load(Ordering::Acquire) {
-            EXPLICIT_ABORT_MSG
-        } else {
-            DROPPED_ABORT_MSG
-        }
-    }
-
     fn session_closed_err(&self, has_unacked_work: bool) -> AppendSessionError {
         let failure = self
             .lifecycle
@@ -310,7 +300,7 @@ impl ProducerShared {
             .or_else(|| {
                 (has_unacked_work && self.abort.is_cancelled()).then(|| {
                     AppendSessionError::Aborted(AbortedError::new_with_context(
-                        self.abort_reason(),
+                        self.abort.reason(),
                         self.context.clone(),
                     ))
                 })
@@ -361,8 +351,11 @@ impl Producer {
     ) -> Self {
         let basin = client.name.clone();
         let context = ErrorContext::stream("producer", basin.as_ref(), stream.as_ref(), false);
-        let client_shutdown = client.shutdown_token();
-        let abort = client_shutdown.child_token();
+        let abort = SessionAbort::new(
+            client.shutdown_token(),
+            EXPLICIT_ABORT_MSG,
+            DROPPED_ABORT_MSG,
+        );
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let permits = AppendPermits::new(None, config.max_unacked_bytes);
         let max_batch_bytes = config.max_batch_bytes;
@@ -372,13 +365,12 @@ impl Producer {
             last_accepted_id: 0,
         });
         let lifecycle = Arc::new(SessionLifecycle::new());
-        let session = AppendSessionCore::new(
+        let session = AppendSessionCore::new_with_abort(
             client,
             stream.clone(),
             headers,
             "producer",
-            EXPLICIT_ABORT_MSG,
-            DROPPED_ABORT_MSG,
+            abort.child(),
         );
         let session_lifecycle = session.lifecycle().clone();
 
@@ -394,14 +386,12 @@ impl Producer {
             acked_through_id: AtomicU64::new(0),
             lifecycle,
             session_lifecycle,
-            client_shutdown,
             abort,
-            explicit_abort: AtomicBool::new(false),
             flush_partial_notify: Notify::new(),
             context,
         });
 
-        let span = debug_span!("producer", basin = %basin, stream = %stream);
+        let span = debug_span!("producer", op = "producer", basin = %basin, stream = %stream);
         let task = ProducerTask::new(shared.clone(), session, config, cmd_rx);
         tokio::spawn(task.run().instrument(span));
         Self { shared }
@@ -455,7 +445,7 @@ impl Producer {
             .check_available()
             .map_err(|e| self.shared.context.format_validation(e))?;
         let permit = self.reserve(bytes).await?;
-        permit.submit(record)
+        permit.submit_validated(record, bytes)
     }
 
     /// Reserve capacity for a record of up to `bytes` metered bytes to be submitted.
@@ -624,8 +614,7 @@ impl Producer {
     /// closed is a no-op.
     pub fn abort(&self) {
         if !self.shared.lifecycle.is_closed() {
-            self.shared.explicit_abort.store(true, Ordering::Release);
-            self.shared.abort.cancel();
+            self.shared.abort.cancel_explicit();
         }
     }
 }
@@ -633,7 +622,7 @@ impl Producer {
 impl Drop for Producer {
     fn drop(&mut self) {
         if !self.shared.lifecycle.is_closed() {
-            self.shared.abort.cancel();
+            self.shared.abort.cancel_dropped();
         }
     }
 }
@@ -672,7 +661,7 @@ impl RecordSubmitPermit {
     /// overflow `u64`. Fails with [`SessionClosedError`] if the producer closed or began closing
     /// after the permit was reserved.
     pub fn submit(
-        mut self,
+        self,
         record: impl Into<AppendRecord>,
     ) -> Result<RecordSubmitTicket, AppendSessionError> {
         let record = record.into();
@@ -682,6 +671,14 @@ impl RecordSubmitPermit {
             .validate_for_write()
             .map_err(|e| self.shared.context.format_validation(e))?;
         let metered = record.metered_bytes();
+        self.submit_validated(record, metered)
+    }
+
+    fn submit_validated(
+        mut self,
+        record: AppendRecord,
+        metered: usize,
+    ) -> Result<RecordSubmitTicket, AppendSessionError> {
         if metered > self.reserved_bytes {
             return Err(AppendSessionError::Validation(
                 self.shared.context.format_validation(format!(
@@ -820,7 +817,7 @@ impl ProducerTask {
             self.shared
                 .lifecycle
                 .set_terminal_err(AppendSessionError::Aborted(AbortedError::new_with_context(
-                    self.shared.abort_reason(),
+                    self.shared.abort.reason(),
                     self.shared.context.clone(),
                 )));
         } else if !self.shared.abort.is_cancelled() {
@@ -957,7 +954,7 @@ impl ProducerTask {
                 continue;
             }
 
-            let linger_active = !self.partial_batch.is_empty() && self.linger.prepare_sleep();
+            let linger_active = !self.partial_batch.is_empty() && self.linger.is_armed();
 
             tokio::select! {
                 biased;
@@ -983,7 +980,7 @@ impl ProducerTask {
                 }
 
                 _ = abort.cancelled() => {
-                    let reason = self.shared.abort_reason();
+                    let reason = self.shared.abort.reason();
                     self.abort(reason).await;
                     return;
                 }
@@ -1111,7 +1108,7 @@ impl ProducerTask {
             self.shared.lifecycle.mark_closing();
             drain_queued_commands(&mut self.cmd_rx)
         };
-        debug!(ok = session_close_res.is_ok(), "producer closed cleanly");
+        debug!(ok = session_close_res.is_ok(), "producer closed");
         self.settle_remaining(None, queued_cmds, session_close_res);
     }
 
@@ -1136,13 +1133,13 @@ impl ProducerTask {
                     "owned session closed cleanly without abort while terminating producer"
                 );
                 AppendSessionError::Aborted(AbortedError::new_with_context(
-                    self.shared.abort_reason(),
+                    self.shared.abort.reason(),
                     self.shared.context.clone(),
                 ))
             }
         };
 
-        debug!(%session_failure, "terminating producer on session failure");
+        debug!(err = %session_failure, "terminating producer on session failure");
         let queued_cmds = {
             let _gate = self.shared.gate.lock().unwrap();
             self.shared
@@ -1186,13 +1183,10 @@ impl ProducerTask {
             "aborting producer"
         );
 
-        // Abort the owned append session immediately (A3b, A8c) and forward its exact outcomes
-        // (A6d).
-        if self.shared.explicit_abort.load(Ordering::Acquire) {
-            self.session.abort_explicit();
-        } else {
-            self.session.abort_dropped();
-        }
+        // Ensure the owned session is aborted (already cancelled via child token on normal
+        // abort/drop/shutdown paths; defensive for the `cmd_rx == None` fallback) and forward its
+        // exact outcomes (`A3b`, `A6d`, `A8c`).
+        self.session.abort_dropped();
         self.drain_pending_batch_acks().await;
         let session_res = self.session.close().await;
 

@@ -8,7 +8,7 @@ use s2_common::network_policy::{
 use super::Page;
 
 /// Input for [`list_network_policies`](crate::S2::list_network_policies) operation.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 #[must_use]
 pub struct ListNetworkPoliciesInput {
     prefix: NetworkPolicySlugPrefix,
@@ -76,7 +76,7 @@ impl ListNetworkPoliciesInput {
 }
 
 /// Input for [`list_all_network_policies`](crate::S2::list_all_network_policies) operation.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 #[must_use]
 pub struct ListAllNetworkPoliciesInput {
     prefix: NetworkPolicySlugPrefix,
@@ -123,7 +123,7 @@ impl ListAllNetworkPoliciesInput {
 }
 
 /// Input for [`create_network_policy`](crate::S2::create_network_policy) operation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[must_use]
 pub struct CreateNetworkPolicyInput {
     slug: NetworkPolicySlug,
@@ -167,6 +167,12 @@ pub enum PublicNetPolicy {
 }
 
 impl PublicNetPolicy {
+    /// Construct a [`PublicNetPolicy::Cidrs`] from an iterator of CIDRs (between 1 and 32).
+    #[must_use]
+    pub fn cidrs(cidrs: impl IntoIterator<Item = Cidr>) -> Self {
+        Self::Cidrs(cidrs.into_iter().collect())
+    }
+
     pub(crate) fn from_api(value: MaybeKnown<api::network_policy::PublicNetPolicy>) -> Self {
         match value {
             MaybeKnown::Known(api::network_policy::PublicNetPolicy::Cidrs(cidrs)) => {
@@ -310,7 +316,7 @@ impl NetworkPolicy {
 }
 
 /// Network policy information.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct NetworkPolicyInfo {
     /// Full reference, `<slug>.<nonce>`, which access tokens are bound to.

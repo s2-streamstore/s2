@@ -1,4 +1,9 @@
-use std::{fmt, ops::Deref, str::FromStr};
+use std::{
+    fmt,
+    hash::{Hash, Hasher},
+    ops::Deref,
+    str::FromStr,
+};
 
 use bytes::Bytes;
 use rand::RngExt;
@@ -345,6 +350,12 @@ impl PartialEq for AppendRecordBatch {
 
 impl Eq for AppendRecordBatch {}
 
+impl Hash for AppendRecordBatch {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.records.hash(state);
+    }
+}
+
 impl From<AppendRecord> for AppendRecordBatch {
     fn from(record: AppendRecord) -> Self {
         let metered_bytes = record.metered_bytes();
@@ -576,7 +587,7 @@ impl From<CommandRecord> for AppendRecord {
 /// Input for [`append`](crate::S2Stream::append),
 /// [`append_with_stream_config`](crate::S2Stream::append_with_stream_config), and
 /// [`AppendSession::submit`](crate::append_session::AppendSession::submit).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[must_use]
 pub struct AppendInput {
     records: AppendRecordBatch,
@@ -766,7 +777,7 @@ pub enum ReadStart {
 
 /// Input for [`read`](crate::S2Stream::read), [`read_session`](crate::S2Stream::read_session),
 /// and [`read_batch_session`](crate::S2Stream::read_batch_session) operations.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 #[must_use]
 pub struct ReadInput {
     start: Option<ReadStart>,
@@ -861,7 +872,7 @@ impl ReadInput {
 
     /// Set the limit on total metered bytes of records.
     ///
-    /// Defaults to `1MiB` for non-streaming [`read`](crate::S2Stream::read).
+    /// Defaults to `1 MiB` for non-streaming [`read`](crate::S2Stream::read).
     pub fn with_bytes(self, bytes: u64) -> Self {
         Self {
             bytes: Some(bytes),
@@ -885,10 +896,12 @@ impl ReadInput {
     ///
     /// Defaults to:
     /// - `0` (no wait) for [`read`](crate::S2Stream::read).
-    /// - `0` (no wait) for [`read_session`](crate::S2Stream::read_session) if `count`, `bytes`, or
+    /// - `0` (no wait) for [`read_session`](crate::S2Stream::read_session) and
+    ///   [`read_batch_session`](crate::S2Stream::read_batch_session) if `count`, `bytes`, or
     ///   `until` is specified.
-    /// - Infinite wait for [`read_session`](crate::S2Stream::read_session) if none of `count`,
-    ///   `bytes`, or `until` is specified.
+    /// - Infinite wait for [`read_session`](crate::S2Stream::read_session) and
+    ///   [`read_batch_session`](crate::S2Stream::read_batch_session) if none of `count`, `bytes`,
+    ///   or `until` is specified.
     pub fn with_wait_secs(self, wait_secs: u32) -> Self {
         Self {
             wait_secs: Some(wait_secs),
@@ -1021,7 +1034,7 @@ impl MeteredBytes for SequencedRecord {
 
 /// Batch of records returned by [`read`](crate::S2Stream::read) or streamed by
 /// [`read_batch_session`](crate::S2Stream::read_batch_session).
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct ReadBatch {
     /// Records that are durably sequenced on the stream.

@@ -10,14 +10,16 @@ use s2_sdk::{
     producer::ProducerConfig,
     read_session::ReadSessionConfig,
     types::{
-        AppendInput, AppendRecord, AppendRecordBatch, BasinName, ReadInput, ReadStart, StreamName,
-        Timestamp,
+        AppendRecord, AppendRecordBatch, BasinName, CreateStreamInput, ReadInput, ReadStart,
+        StreamName, Timestamp,
     },
 };
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let basin_name: BasinName = std::env::var("S2_BASIN")?.parse()?;
+    let basin_name: BasinName = std::env::var("S2_BASIN")
+        .map_err(|_| "S2_BASIN env var not set")?
+        .parse()?;
 
     let client = S2::from_env()?;
     let basin = client.basin(basin_name);
@@ -26,17 +28,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stream_name: StreamName =
         format!("docs-streams-{}", Timestamp::now().as_millisecond()).parse()?;
     basin
-        .create_stream(s2_sdk::types::CreateStreamInput::new(stream_name.clone()))
+        .create_stream(CreateStreamInput::new(stream_name.clone()))
         .await?;
 
     // ANCHOR: simple-append
     let stream = basin.stream(stream_name.clone());
 
     let ack = stream
-        .append(AppendInput::new(AppendRecordBatch::try_from_iter([
+        .append(AppendRecordBatch::try_from_iter([
             AppendRecord::new("first event")?,
             AppendRecord::new("second event")?,
-        ])?))
+        ])?)
         .await?;
 
     // ack tells us where the records landed
@@ -69,7 +71,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         AppendRecord::new("event-1")?,
         AppendRecord::new("event-2")?,
     ])?;
-    let ticket = session.submit(AppendInput::new(records)).await?;
+    let ticket = session.submit(records).await?;
 
     // Wait for durability
     let ack = ticket.await?;

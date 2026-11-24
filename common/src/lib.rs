@@ -22,6 +22,12 @@ mod strings;
 pub struct ValidationError(pub String);
 
 impl ValidationError {
+    /// Create a new [`ValidationError`] with the given message.
+    #[must_use]
+    pub fn new(message: impl Into<String>) -> Self {
+        Self(message.into())
+    }
+
     /// Return the human-readable validation error message.
     #[must_use]
     pub fn message(&self) -> &str {

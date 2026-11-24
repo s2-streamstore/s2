@@ -13,7 +13,9 @@ use s2_sdk::{
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let basin_name: BasinName = std::env::var("S2_BASIN")?.parse()?;
+    let basin_name: BasinName = std::env::var("S2_BASIN")
+        .map_err(|_| "S2_BASIN env var not set")?
+        .parse()?;
 
     let client = S2::from_env()?;
 
@@ -97,6 +99,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ))
         .await?;
     // ANCHOR_END: access-token-restricted
+    client
+        .revoke_access_token("restricted-token".parse()?)
+        .await?;
 
     // Pagination examples - not executed by default
     if false {

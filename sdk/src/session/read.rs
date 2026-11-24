@@ -2,13 +2,15 @@ use std::{
     collections::VecDeque,
     fmt,
     future::Future,
-    pin::Pin,
+    ops::ControlFlow,
+    pin::{Pin, pin},
+    str::FromStr,
     sync::{Arc, Mutex as StdMutex},
     task::{Context, Poll},
     time::Duration,
 };
 
-use futures_core::{FusedFuture, Stream};
+use futures_core::{FusedFuture, FusedStream, Stream};
 use futures_util::{
     StreamExt,
     future::{FutureExt, Shared},
@@ -17,7 +19,7 @@ use http::StatusCode;
 use s2_api::v1::stream::{ReadEnd, ReadStart, proto};
 use tokio::{
     sync::{mpsc, oneshot},
-    time::{Instant, timeout},
+    time::{Instant, Sleep},
 };
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{Instrument, debug, debug_span};
@@ -27,12 +29,12 @@ use crate::{
     client::CancellationToken,
     error::{
         AbortedError, ConnectionLostError, ErrorContext, ProtocolError, ReadSessionError,
-        SessionClosedError, TimeoutError, TransportError,
+        SessionClosedError, TimeoutError, TransportError, ValidationError,
     },
     reconnect::AdvisedReconnects,
     retry::RetryBackoff,
     session::StreamHeaders,
-    types::{ReadBatch, ReadInput, SequencedRecord, StreamName, StreamPosition},
+    types::{BasinName, ReadBatch, ReadInput, SequencedRecord, StreamName, StreamPosition},
 };
 
 /// Retry policy for a continuous read session.
@@ -45,7 +47,8 @@ pub enum ReadSessionRetryPolicy {
     /// Keep retrying retryable failures after the configured retry budget is exhausted.
     ///
     /// This also applies to the initial attempt, so iteration may remain pending through
-    /// retryable failures until it connects or the session is dropped or aborted.
+    /// retryable failures until it connects, the session is dropped, or
+    /// [`S2::close`](crate::S2::close) is called.
     ///
     /// Retries are silent to the caller and logged only at `debug` level. If your application
     /// needs per-outage error callbacks or disconnected/unhealthy status reporting, prefer
@@ -61,6 +64,26 @@ impl ReadSessionRetryPolicy {
         match self {
             Self::Budgeted => "budgeted",
             Self::Unbounded => "unbounded",
+        }
+    }
+}
+
+impl AsRef<str> for ReadSessionRetryPolicy {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl FromStr for ReadSessionRetryPolicy {
+    type Err = ValidationError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "budgeted" => Ok(Self::Budgeted),
+            "unbounded" => Ok(Self::Unbounded),
+            _ => Err(ValidationError(format!(
+                "invalid read session retry policy `{s}`: expected `budgeted` or `unbounded`"
+            ))),
         }
     }
 }
@@ -504,7 +527,7 @@ impl fmt::Debug for ReadSessionState {
             .field("next_seq_num", &inner.next_seq_num)
             .field("last_observed_tail", &inner.last_observed_tail)
             .field("is_caught_up", &caught_up)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -620,10 +643,15 @@ enum DriverEvent {
 }
 
 struct ReadSessionCore {
+    basin: BasinName,
+    stream: StreamName,
     rx: mpsc::Receiver<DriverEvent>,
     state: ReadSessionState,
     shutdown: CancellationToken,
     context: ErrorContext,
+    /// True once no more items will be produced (subsequent polls yield `None`).
+    exhausted: bool,
+    /// True once `Stream::poll_next` has returned `Poll::Ready(None)` (`FusedStream` contract).
     terminated: bool,
     _driver: AbortOnDropHandle<()>,
 }
@@ -655,7 +683,7 @@ impl ReadSessionCore {
         let span = debug_span!("read_session", op = op_name, basin = %basin, stream = %name);
         let driver = ReadDriver::new(
             client,
-            name,
+            name.clone(),
             headers,
             start,
             end,
@@ -669,36 +697,37 @@ impl ReadSessionCore {
         let handle = tokio::spawn(driver.run().instrument(span));
 
         Self {
+            basin,
+            stream: name,
             rx,
             state,
             shutdown,
             context,
+            exhausted: false,
             terminated: false,
             _driver: AbortOnDropHandle::new(handle),
         }
     }
 
-    fn finalize_closed(
-        &mut self,
-        closed: TerminalClose,
-    ) -> Option<Result<ReadBatch, ReadSessionError>> {
-        self.terminated = true;
+    fn finalize_closed(&mut self, closed: TerminalClose) -> Option<ReadSessionError> {
+        self.exhausted = true;
         self.rx.close();
         match closed {
             TerminalClose::Clean => {
+                self.terminated = true;
                 self.state.inner.lock().unwrap().on_ended(None);
                 None
             }
             TerminalClose::Error(err) => {
                 self.state.inner.lock().unwrap().on_ended(Some(err.clone()));
-                Some(Err(err))
+                Some(err)
             }
         }
     }
 
     /// If the session has already closed (`R9`) or client shutdown (`C12`/`R9d`) is active,
-    /// finalize and return the terminal result.
-    fn take_closed_or_abort(&mut self) -> Option<Option<Result<ReadBatch, ReadSessionError>>> {
+    /// finalize and return `Some(None)` on clean close or `Some(Some(err))` on error.
+    fn take_closed_or_abort(&mut self) -> Option<Option<ReadSessionError>> {
         let closed = {
             let mut inner = self.state.inner.lock().unwrap();
             if inner.closed.is_none() && self.shutdown.is_cancelled() {
@@ -714,12 +743,13 @@ impl ReadSessionCore {
         &mut self,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<ReadBatch, ReadSessionError>>> {
-        if self.terminated {
+        if self.exhausted {
+            self.terminated = true;
             return Poll::Ready(None);
         }
         loop {
             if let Some(outcome) = self.take_closed_or_abort() {
-                return Poll::Ready(outcome);
+                return Poll::Ready(outcome.map(Err));
             }
             match self.rx.poll_recv(cx) {
                 Poll::Pending => return Poll::Pending,
@@ -747,11 +777,11 @@ impl ReadSessionCore {
                         }
                         inner.closed.clone().expect("closed set above")
                     };
-                    return Poll::Ready(self.finalize_closed(closed));
+                    return Poll::Ready(self.finalize_closed(closed).map(Err));
                 }
                 Poll::Ready(None) => {
                     if let Some(outcome) = self.take_closed_or_abort() {
-                        return Poll::Ready(outcome);
+                        return Poll::Ready(outcome.map(Err));
                     }
                     let err = ReadSessionError::Aborted(AbortedError::new_with_context(
                         "read session task ended unexpectedly",
@@ -762,7 +792,7 @@ impl ReadSessionCore {
                         inner.closed = Some(TerminalClose::Error(err.clone()));
                         inner.on_ended(Some(err.clone()));
                     }
-                    self.terminated = true;
+                    self.exhausted = true;
                     self.rx.close();
                     return Poll::Ready(Some(Err(err)));
                 }
@@ -774,7 +804,7 @@ impl ReadSessionCore {
                         }
                         inner.closed.clone().expect("closed set above")
                     };
-                    return Poll::Ready(self.finalize_closed(closed));
+                    return Poll::Ready(self.finalize_closed(closed).map(Err));
                 }
             }
         }
@@ -804,7 +834,7 @@ impl Drop for ReadSessionCore {
 ///
 /// Yields individual [`SequencedRecord`]s in sequence-number order. Dropping the session closes it
 /// immediately. Use [`state`](Self::state) to observe progress concurrently from other tasks.
-#[must_use = "sessions do nothing unless polled"]
+#[must_use = "read sessions close immediately when dropped"]
 pub struct ReadSession {
     core: ReadSessionCore,
     current_batch: VecDeque<SequencedRecord>,
@@ -813,6 +843,8 @@ pub struct ReadSession {
 impl fmt::Debug for ReadSession {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ReadSession")
+            .field("basin", &self.core.basin)
+            .field("stream", &self.core.stream)
             .field("state", &self.core.state)
             .finish_non_exhaustive()
     }
@@ -881,17 +913,15 @@ impl Stream for ReadSession {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
-        if this.core.terminated {
+        if this.core.exhausted {
+            this.core.terminated = true;
             return Poll::Ready(None);
         }
         // R9 / R9d / C12: if already closed or aborted by client close, finalize immediately
         // (dropping any buffered records on abort, and ignoring late aborts after R9a/R9c close).
         if let Some(outcome) = this.core.take_closed_or_abort() {
             this.current_batch.clear();
-            return Poll::Ready(outcome.map(|res| match res {
-                Err(e) => Err(e),
-                Ok(_) => unreachable!("take_closed_or_abort never returns Ok"),
-            }));
+            return Poll::Ready(outcome.map(Err));
         }
 
         if let Some(record) = this.current_batch.pop_front() {
@@ -916,11 +946,17 @@ impl Stream for ReadSession {
     }
 }
 
+impl FusedStream for ReadSession {
+    fn is_terminated(&self) -> bool {
+        self.core.terminated
+    }
+}
+
 /// A continuous stream of non-empty read batches.
 ///
 /// Delivers each server batch whole, skips empty heartbeat frames while updating session state,
 /// and follows all read-session rules per batch. Dropping the session closes it immediately.
-#[must_use = "sessions do nothing unless polled"]
+#[must_use = "read sessions close immediately when dropped"]
 pub struct ReadBatchSession {
     core: ReadSessionCore,
 }
@@ -928,6 +964,8 @@ pub struct ReadBatchSession {
 impl fmt::Debug for ReadBatchSession {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ReadBatchSession")
+            .field("basin", &self.core.basin)
+            .field("stream", &self.core.stream)
             .field("state", &self.core.state)
             .finish_non_exhaustive()
     }
@@ -1008,6 +1046,28 @@ impl Stream for ReadBatchSession {
             }
             other => other,
         }
+    }
+}
+
+impl FusedStream for ReadBatchSession {
+    fn is_terminated(&self) -> bool {
+        self.core.terminated
+    }
+}
+
+/// Ensures pending [`CaughtUp`] waiters wake with [`AbortedError`] if [`ReadDriver::run`] panics
+/// or is cancelled unexpectedly while the session is still open.
+struct ReadFinishOnDrop {
+    state: ReadSessionState,
+    context: ErrorContext,
+}
+
+impl Drop for ReadFinishOnDrop {
+    fn drop(&mut self) {
+        self.state.on_aborted(AbortedError::new_with_context(
+            "read session task ended unexpectedly",
+            self.context.clone(),
+        ));
     }
 }
 
@@ -1155,20 +1215,299 @@ impl ReadDriver {
     /// Returns `true` if the driver should continue retrying, or `false` to exit.
     async fn retry_or_fail(&mut self, err: ReadSessionError) -> bool {
         let attempts = self.retry_backoff.attempt_number();
+        let err = err.with_context(&self.context.clone().with_attempts(attempts));
         if let Some(backoff) = retry_delay(
             &err,
+            attempts,
             &mut self.retry_backoff,
             self.retry_policy,
             self.refreshes_tokens,
         ) {
             return !self.sleep_or_stop(backoff).await;
         }
-        let final_err = err.with_context(&self.context.clone().with_attempts(attempts));
-        self.finish_terminal_error(final_err).await;
+        self.finish_terminal_error(err).await;
         false
     }
 
+    async fn open_attempt(&mut self) -> ControlFlow<()> {
+        self.end.wait = remaining_wait(self.baseline_wait, self.idle_since);
+        let attempt_num = self.retry_backoff.attempt_number();
+        debug!(
+            attempt = attempt_num,
+            next_seq_num = ?self.start.seq_num,
+            "opening read session request"
+        );
+
+        let open_res = tokio::select! {
+            biased;
+            _ = self.shutdown.cancelled() => {
+                self.abort();
+                return ControlFlow::Break(());
+            }
+            _ = self.tx.closed() => return ControlFlow::Break(()),
+            res = self.client.read_session(
+                self.op_name,
+                &self.name,
+                self.start.clone(),
+                self.end.clone(),
+                &self.headers,
+                attempt_num,
+            ) => res,
+        };
+
+        if self.shutdown.is_cancelled() {
+            self.abort();
+            return ControlFlow::Break(());
+        }
+
+        match open_res {
+            Ok(stream) => {
+                self.active = Some(ActiveAttempt {
+                    stream,
+                    made_progress: false,
+                    fetched_record: false,
+                });
+                ControlFlow::Continue(())
+            }
+            Err(err) => {
+                // R11d: once the start has been resolved by a prior response, a resumed
+                // request with no wait remaining that receives 416 with `tail >= resume`
+                // has reached the tail on a stop condition.
+                if let Some(tail) = resumed_unwritten_stop_tail(
+                    self.has_received_response,
+                    &self.start,
+                    &self.end,
+                    &err,
+                ) {
+                    self.finish_resumed_unwritten_stop(tail).await;
+                    return ControlFlow::Break(());
+                }
+                if self.retry_or_fail(err).await {
+                    ControlFlow::Continue(())
+                } else {
+                    ControlFlow::Break(())
+                }
+            }
+        }
+    }
+
+    async fn recv_next_item(
+        &mut self,
+        mut heartbeat_sleep: Pin<&mut Sleep>,
+    ) -> ControlFlow<(), Result<Option<(ReadBatch, bool)>, ReadSessionError>> {
+        heartbeat_sleep
+            .as_mut()
+            .reset(Instant::now() + HEARTBEAT_TIMEOUT);
+        let attempt = self.active.as_mut().expect("active stream must be Some");
+        let item = tokio::select! {
+            biased;
+            _ = self.shutdown.cancelled() => {
+                self.abort();
+                return ControlFlow::Break(());
+            }
+            _ = self.tx.closed() => return ControlFlow::Break(()),
+            res = attempt.stream.next() => match res {
+                Some(Ok(frame)) => Ok(Some((
+                    ReadBatch::from_proto(frame.msg),
+                    frame.reconnect_advised,
+                ))),
+                Some(Err(err)) => Err(err),
+                None => Ok(None),
+            },
+            _ = heartbeat_sleep.as_mut() => {
+                attempt.stream.retire_connection();
+                Err(ReadSessionError::Timeout(TimeoutError::new_with_context(
+                    "heartbeat timeout",
+                    self.context.clone(),
+                )))
+            }
+        };
+
+        if self.shutdown.is_cancelled() {
+            self.abort();
+            return ControlFlow::Break(());
+        }
+        ControlFlow::Continue(item)
+    }
+
+    async fn handle_batch(
+        &mut self,
+        batch: ReadBatch,
+        reconnect_advised: bool,
+        permit: mpsc::OwnedPermit<DriverEvent>,
+    ) -> ControlFlow<()> {
+        // R6: verify records arrive in strictly increasing seq_num order.
+        match validate_read_batch_order(&batch, self.last_fetched_seq, &self.context) {
+            Ok(new_last) => self.last_fetched_seq = new_last,
+            Err(err) => {
+                drop(permit);
+                self.active = None;
+                self.state.on_disconnected();
+                self.finish_terminal_error(err).await;
+                return ControlFlow::Break(());
+            }
+        }
+
+        // T5a: only a non-empty batch or a heartbeat (carrying a tail) counts as
+        // progress and resets the retry budget; ignore malformed empty frames.
+        let has_records = !batch.records.is_empty();
+        let has_tail = batch.tail.is_some();
+        let is_progress = has_records || has_tail;
+
+        if is_progress {
+            let attempt = self.active.as_mut().expect("active stream must be Some");
+            attempt.made_progress = true;
+            self.has_received_response = true;
+            self.retry_backoff.reset();
+
+            // R11c: restart idle clock only when a record is fetched; if no record has
+            // been fetched yet, start the clock the first time we learn we are at the
+            // tail. Heartbeats never restart this clock.
+            if has_records {
+                attempt.fetched_record = true;
+                self.idle_since = Some(Instant::now());
+            } else if self.last_fetched_seq.is_none() && has_tail {
+                self.idle_since.get_or_insert_with(Instant::now);
+            }
+
+            update_resume_start(&mut self.start, &batch);
+            if let Some(count) = self.end.count.as_mut() {
+                *count = count.saturating_sub(batch.records.len() as u64);
+            }
+            if let Some(bytes) = self.end.bytes.as_mut() {
+                *bytes = bytes.saturating_sub(
+                    batch
+                        .records
+                        .iter()
+                        .map(|r| r.metered_bytes() as u64)
+                        .sum::<u64>(),
+                );
+            }
+
+            let first_record_seq = batch.records.first().map(|r| r.seq_num);
+            let tail = batch.tail;
+            let heartbeat_already_at_tail =
+                self.state
+                    .on_message_fetched(first_record_seq, tail, batch.records.len());
+
+            if has_records {
+                permit.send(DriverEvent::Batch(batch));
+                if read_limits_exhausted(&self.end) {
+                    debug!("read session count/bytes limit exhausted");
+                    self.active = None;
+                    self.finish_clean_stop(None).await;
+                    return ControlFlow::Break(());
+                }
+            } else if let Some(tail) = tail
+                && !heartbeat_already_at_tail
+            {
+                permit.send(DriverEvent::Heartbeat(tail));
+            } else {
+                drop(permit);
+            }
+        } else {
+            drop(permit);
+        }
+
+        // T6a: act on reconnect advice immediately (at most once per cooldown window).
+        if reconnect_advised && self.advised_reconnects.should_reconnect() {
+            self.active = None;
+            if read_limits_exhausted(&self.end) {
+                debug!("read session limits exhausted on advised reconnect");
+                self.finish_clean_stop(None).await;
+                return ControlFlow::Break(());
+            }
+            self.advised_reconnects.record();
+            debug!(
+                next_seq_num = ?self.start.seq_num,
+                advised_reconnects = self.advised_reconnects.total(),
+                "reconnecting read session on server advice"
+            );
+            self.state.on_disconnected();
+        }
+        ControlFlow::Continue(())
+    }
+
+    async fn handle_eof(&mut self) -> ControlFlow<()> {
+        // T9 / R9a: clean EOF ends iteration cleanly ONLY when a stop option was set;
+        // otherwise it is a ConnectionLostError and retried per retry_policy.
+        let fetched_record = self.active.take().is_some_and(|a| a.fetched_record);
+        if self.has_stop_option {
+            // R11c: if this attempt ran with a reduced `wait` budget and fetched new
+            // records (restarting the idle clock), reconnect with the refreshed wait
+            // rather than stopping prematurely when the server's shorter timer expires.
+            if fetched_record
+                && !read_limits_exhausted(&self.end)
+                && let (Some(base_w), Some(sent_w)) = (self.baseline_wait, self.end.wait)
+                && sent_w < base_w
+                && remaining_wait(self.baseline_wait, self.idle_since).is_some_and(|w| w > 0)
+            {
+                self.state.on_disconnected();
+                return ControlFlow::Continue(());
+            }
+            debug!("read session ended cleanly on stop condition");
+            self.finish_clean_stop(None).await;
+            return ControlFlow::Break(());
+        }
+        let err = ReadSessionError::ConnectionLost(ConnectionLostError::new_with_context(
+            "read stream ended cleanly without a stop condition",
+            true,
+            self.context.clone(),
+        ));
+        self.state.on_disconnected();
+        if self.retry_or_fail(err).await {
+            ControlFlow::Continue(())
+        } else {
+            ControlFlow::Break(())
+        }
+    }
+
+    async fn handle_stream_error(&mut self, err: ReadSessionError) -> ControlFlow<()> {
+        // T10: drop underlying attempt stream immediately.
+        let made_progress = self.active.take().is_some_and(|a| a.made_progress);
+
+        // R11d: 416 on a resumed request with no remaining wait is a clean stop unless
+        // the reported tail regressed below our resume position.
+        if let Some(tail) =
+            resumed_unwritten_stop_tail(self.has_received_response, &self.start, &self.end, &err)
+        {
+            self.finish_resumed_unwritten_stop(tail).await;
+            return ControlFlow::Break(());
+        }
+
+        // If `count` or `bytes` is already exhausted after receiving data, all
+        // requested records have been fetched; end cleanly rather than reconnecting
+        // with count=0/bytes=0.
+        if self.has_received_response && read_limits_exhausted(&self.end) {
+            debug!("read session limits exhausted after stream error");
+            self.finish_clean_stop(None).await;
+            return ControlFlow::Break(());
+        }
+
+        self.state.on_disconnected();
+
+        if err.is_server_draining() && made_progress {
+            debug!(
+                next_seq_num = ?self.start.seq_num,
+                "reconnecting read session while server drains"
+            );
+            return ControlFlow::Continue(());
+        }
+
+        if self.retry_or_fail(err).await {
+            ControlFlow::Continue(())
+        } else {
+            ControlFlow::Break(())
+        }
+    }
+
     async fn run(mut self) {
+        let _finish_guard = ReadFinishOnDrop {
+            state: self.state.clone(),
+            context: self.context.clone(),
+        };
+        let mut heartbeat_sleep = pin!(tokio::time::sleep(HEARTBEAT_TIMEOUT));
+
         loop {
             if self.shutdown.is_cancelled() {
                 self.abort();
@@ -1179,290 +1518,52 @@ impl ReadDriver {
             }
 
             if self.active.is_none() {
-                self.end.wait = remaining_wait(self.baseline_wait, self.idle_since);
-                let attempt_num = self.retry_backoff.attempt_number();
-                debug!(
-                    attempt = attempt_num,
-                    resume_seq_num = ?self.start.seq_num,
-                    "opening read session request"
-                );
-
-                let open_res = tokio::select! {
-                    biased;
-                    _ = self.shutdown.cancelled() => {
-                        self.abort();
-                        return;
-                    }
-                    _ = self.tx.closed() => return,
-                    res = self.client.read_session(
-                        self.op_name,
-                        &self.name,
-                        self.start.clone(),
-                        self.end.clone(),
-                        &self.headers,
-                        attempt_num,
-                    ) => res,
-                };
-
-                if self.shutdown.is_cancelled() {
-                    self.abort();
+                if self.open_attempt().await.is_break() {
                     return;
                 }
-
-                match open_res {
-                    Ok(stream) => {
-                        self.active = Some(ActiveAttempt {
-                            stream,
-                            made_progress: false,
-                            fetched_record: false,
-                        });
-                    }
-                    Err(err) => {
-                        // R11d: once the start has been resolved by a prior response, a resumed
-                        // request with no wait remaining that receives 416 with `tail >= resume`
-                        // has reached the tail on a stop condition.
-                        if let Some(tail) = resumed_unwritten_stop_tail(
-                            self.has_received_response,
-                            &self.start,
-                            &self.end,
-                            &err,
-                        ) {
-                            self.finish_resumed_unwritten_stop(tail).await;
-                            return;
-                        }
-                        if self.retry_or_fail(err).await {
-                            continue;
-                        }
-                        return;
-                    }
+                if self.active.is_none() {
+                    continue;
                 }
             }
 
             // R6b + T7d: wait for channel capacity BEFORE reading the next message so we decode at
             // most 1 batch ahead and do not count caller backpressure against the heartbeat
             // timeout.
-            let tx = self.tx.clone();
             let permit = tokio::select! {
                 biased;
                 _ = self.shutdown.cancelled() => {
                     self.abort();
                     return;
                 }
-                res = tx.reserve() => match res {
+                res = self.tx.clone().reserve_owned() => match res {
                     Ok(permit) => permit,
                     Err(_) => return,
                 },
             };
 
-            let Some(next_res) = ({
-                let attempt = self.active.as_mut().expect("active stream must be Some");
-                tokio::select! {
-                    biased;
-                    _ = self.shutdown.cancelled() => None,
-                    _ = self.tx.closed() => return,
-                    res = timeout(HEARTBEAT_TIMEOUT, attempt.stream.next()) => Some(res),
-                }
-            }) else {
-                drop(permit);
-                self.abort();
-                return;
-            };
-
-            if self.shutdown.is_cancelled() {
-                drop(permit);
-                self.abort();
-                return;
-            }
-
-            let item = match next_res {
-                Ok(Some(Ok(frame))) => Ok(Some((
-                    ReadBatch::from_proto(frame.msg),
-                    frame.reconnect_advised,
-                ))),
-                Ok(Some(Err(err))) => Err(err),
-                Ok(None) => Ok(None),
-                Err(_) => {
-                    if let Some(active) = self.active.as_ref() {
-                        active.stream.poison_connection();
-                    }
-                    Err(ReadSessionError::Timeout(TimeoutError::new_with_context(
-                        "heartbeat timeout",
-                        self.context.clone(),
-                    )))
+            let item = match self.recv_next_item(heartbeat_sleep.as_mut()).await {
+                ControlFlow::Continue(item) => item,
+                ControlFlow::Break(()) => {
+                    drop(permit);
+                    return;
                 }
             };
 
-            match item {
+            let flow = match item {
                 Ok(Some((batch, reconnect_advised))) => {
-                    // R6: verify records arrive in strictly increasing seq_num order.
-                    match validate_read_batch_order(&batch, self.last_fetched_seq, &self.context) {
-                        Ok(new_last) => self.last_fetched_seq = new_last,
-                        Err(err) => {
-                            drop(permit);
-                            self.active = None;
-                            self.state.on_disconnected();
-                            self.finish_terminal_error(err).await;
-                            return;
-                        }
-                    }
-
-                    // T5a: only a non-empty batch or a heartbeat (carrying a tail) counts as
-                    // progress and resets the retry budget; ignore malformed empty frames.
-                    let has_records = !batch.records.is_empty();
-                    let has_tail = batch.tail.is_some();
-                    let is_progress = has_records || has_tail;
-
-                    if is_progress {
-                        let attempt = self.active.as_mut().expect("active stream must be Some");
-                        attempt.made_progress = true;
-                        self.has_received_response = true;
-                        self.retry_backoff.reset();
-
-                        // R11c: restart idle clock only when a record is fetched; if no record has
-                        // been fetched yet, start the clock the first time we learn we are at the
-                        // tail. Heartbeats never restart this clock.
-                        if has_records {
-                            attempt.fetched_record = true;
-                            self.idle_since = Some(Instant::now());
-                        } else if self.last_fetched_seq.is_none() && has_tail {
-                            self.idle_since.get_or_insert_with(Instant::now);
-                        }
-
-                        update_resume_start(&mut self.start, &batch);
-                        if let Some(count) = self.end.count.as_mut() {
-                            *count = count.saturating_sub(batch.records.len() as u64);
-                        }
-                        if let Some(bytes) = self.end.bytes.as_mut() {
-                            *bytes = bytes.saturating_sub(
-                                batch
-                                    .records
-                                    .iter()
-                                    .map(|r| r.metered_bytes() as u64)
-                                    .sum::<u64>(),
-                            );
-                        }
-
-                        let first_record_seq = batch.records.first().map(|r| r.seq_num);
-                        let tail = batch.tail;
-                        let heartbeat_already_at_tail = self.state.on_message_fetched(
-                            first_record_seq,
-                            tail,
-                            batch.records.len(),
-                        );
-
-                        if has_records {
-                            permit.send(DriverEvent::Batch(batch));
-                            if read_limits_exhausted(&self.end) {
-                                debug!("read session count/bytes limit exhausted");
-                                self.active = None;
-                                self.finish_clean_stop(None).await;
-                                return;
-                            }
-                        } else if let Some(tail) = tail
-                            && !heartbeat_already_at_tail
-                        {
-                            permit.send(DriverEvent::Heartbeat(tail));
-                        } else {
-                            drop(permit);
-                        }
-                    } else {
-                        drop(permit);
-                    }
-
-                    // T6a: act on reconnect advice immediately (at most once per cooldown window).
-                    if reconnect_advised && self.advised_reconnects.should_reconnect() {
-                        self.active = None;
-                        if read_limits_exhausted(&self.end) {
-                            debug!("read session limits exhausted on advised reconnect");
-                            self.finish_clean_stop(None).await;
-                            return;
-                        }
-                        self.advised_reconnects.record();
-                        debug!(
-                            next_seq_num = ?self.start.seq_num,
-                            advised_reconnects = self.advised_reconnects.total(),
-                            "reconnecting read session on server advice"
-                        );
-                        self.state.on_disconnected();
-                    }
+                    self.handle_batch(batch, reconnect_advised, permit).await
                 }
                 Ok(None) => {
                     drop(permit);
-                    // T9 / R9a: clean EOF ends iteration cleanly ONLY when a stop option was set;
-                    // otherwise it is a ConnectionLostError and retried per retry_policy.
-                    let fetched_record = self.active.take().is_some_and(|a| a.fetched_record);
-                    if self.has_stop_option {
-                        // R11c: if this attempt ran with a reduced `wait` budget and fetched new
-                        // records (restarting the idle clock), reconnect with the refreshed wait
-                        // rather than stopping prematurely when the server's shorter timer expires.
-                        if fetched_record
-                            && !read_limits_exhausted(&self.end)
-                            && let (Some(base_w), Some(sent_w)) =
-                                (self.baseline_wait, self.end.wait)
-                            && sent_w < base_w
-                            && remaining_wait(self.baseline_wait, self.idle_since)
-                                .is_some_and(|w| w > 0)
-                        {
-                            self.state.on_disconnected();
-                            continue;
-                        }
-                        debug!("read session ended cleanly on stop condition");
-                        self.finish_clean_stop(None).await;
-                        return;
-                    }
-                    let err =
-                        ReadSessionError::ConnectionLost(ConnectionLostError::new_with_context(
-                            "read stream ended cleanly without a stop condition",
-                            true,
-                            self.context.clone(),
-                        ));
-                    self.state.on_disconnected();
-                    if self.retry_or_fail(err).await {
-                        continue;
-                    }
-                    return;
+                    self.handle_eof().await
                 }
                 Err(err) => {
                     drop(permit);
-                    // T10: drop underlying attempt stream immediately.
-                    let made_progress = self.active.take().is_some_and(|a| a.made_progress);
-
-                    // R11d: 416 on a resumed request with no remaining wait is a clean stop unless
-                    // the reported tail regressed below our resume position.
-                    if let Some(tail) = resumed_unwritten_stop_tail(
-                        self.has_received_response,
-                        &self.start,
-                        &self.end,
-                        &err,
-                    ) {
-                        self.finish_resumed_unwritten_stop(tail).await;
-                        return;
-                    }
-
-                    // If `count` or `bytes` is already exhausted after receiving data, all
-                    // requested records have been fetched; end cleanly rather than reconnecting
-                    // with count=0/bytes=0.
-                    if self.has_received_response && read_limits_exhausted(&self.end) {
-                        debug!("read session limits exhausted after stream error");
-                        self.finish_clean_stop(None).await;
-                        return;
-                    }
-
-                    self.state.on_disconnected();
-
-                    if err.is_server_draining() && made_progress {
-                        debug!(
-                            next_seq_num = ?self.start.seq_num,
-                            "reconnecting read session while server drains"
-                        );
-                        continue;
-                    }
-
-                    if self.retry_or_fail(err).await {
-                        continue;
-                    }
-                    return;
+                    self.handle_stream_error(err).await
                 }
+            };
+            if flow.is_break() {
+                return;
             }
         }
     }
@@ -1579,14 +1680,16 @@ fn remaining_wait(baseline_wait: Option<u32>, idle_since: Option<Instant>) -> Op
 
 fn retry_delay(
     err: &ReadSessionError,
+    attempt: u32,
     backoffs: &mut RetryBackoff,
     retry_policy: ReadSessionRetryPolicy,
     refreshes_tokens: bool,
 ) -> Option<Duration> {
-    let is_retryable = err.is_retryable() || (refreshes_tokens && err.is_authentication_error());
+    let is_retryable = err.is_retryable_or_auth_refresh(refreshes_tokens);
     if !is_retryable {
         debug!(
-            %err,
+            err = %err,
+            attempt,
             is_retryable = false,
             retries_exhausted = backoffs.is_exhausted(),
             "not retrying read session"
@@ -1604,8 +1707,9 @@ fn retry_delay(
             ReadSessionRetryPolicy::Unbounded => None,
         };
         debug!(
-            %err,
-            ?backoff,
+            err = %err,
+            attempt,
+            delay = ?backoff,
             ?retry_policy,
             ?retries_remaining,
             "retrying read session"
@@ -1613,7 +1717,8 @@ fn retry_delay(
         Some(backoff)
     } else {
         debug!(
-            %err,
+            err = %err,
+            attempt,
             is_retryable,
             retries_exhausted = backoffs.is_exhausted(),
             "not retrying read session"
@@ -1690,10 +1795,13 @@ mod tests {
         let driver = tokio::spawn(std::future::pending::<()>());
         let session = ReadSession {
             core: ReadSessionCore {
+                basin: "test-basin".parse().unwrap(),
+                stream: "test-stream".parse().unwrap(),
                 rx,
                 state: state.clone(),
                 shutdown: shutdown.clone(),
                 context,
+                exhausted: false,
                 terminated: false,
                 _driver: AbortOnDropHandle::new(driver),
             },
@@ -1952,13 +2060,16 @@ mod tests {
         let cu = session.caught_up();
         drop(tx);
 
+        assert!(!session.is_terminated());
         let err = session
             .next()
             .await
             .expect("must not appear as clean stop")
             .unwrap_err();
         assert!(matches!(err, ReadSessionError::Aborted(_)), "{err:?}");
+        assert!(!session.is_terminated());
         assert!(session.next().await.is_none());
+        assert!(session.is_terminated());
         assert!(matches!(cu.await, Err(ReadSessionError::Aborted(_))));
     }
 }

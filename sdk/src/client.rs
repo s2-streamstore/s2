@@ -38,7 +38,8 @@ use tokio_util::task::AbortOnDropHandle;
 use tower_service::Service;
 
 use crate::{
-    frame_signal::{FrameSignal, RequestFrameMonitorBody},
+    error::find_source_err,
+    send_gate::{GatedRequestBody, SendGate},
     types::{Compression, Http2Config},
 };
 
@@ -141,27 +142,27 @@ impl Body {
         Self(BodyInner::Streaming(BoxBody::new(stream_body)))
     }
 
-    pub(crate) fn monitored(self, signal: FrameSignal) -> Self {
-        let boxed = match self.0 {
-            BodyInner::Empty => {
+    fn gated(self, gate: SendGate) -> Self {
+        match self.0 {
+            BodyInner::Full(bytes) => {
+                debug_assert!(
+                    !bytes.is_empty(),
+                    "gated body should be non-empty so SendGate can observe frames"
+                );
+                let boxed = BoxBody::new(GatedRequestBody::new(
+                    Full::new(bytes).map_err(|e: Infallible| match e {}),
+                    gate,
+                ));
+                Self(BodyInner::Streaming(boxed))
+            }
+            other => {
                 debug_assert!(
                     false,
-                    "monitored body should be non-empty so FrameSignal can observe frames"
+                    "gated body is only used for non-empty unary full bodies"
                 );
-                BoxBody::new(RequestFrameMonitorBody::new(
-                    Empty::new().map_err(|e: Infallible| match e {}),
-                    signal,
-                ))
+                Self(other)
             }
-            BodyInner::Full(bytes) => BoxBody::new(RequestFrameMonitorBody::new(
-                Full::new(bytes).map_err(|e: Infallible| match e {}),
-                signal,
-            )),
-            BodyInner::Streaming(stream) => {
-                BoxBody::new(RequestFrameMonitorBody::new(stream, signal))
-            }
-        };
-        Self(BodyInner::Streaming(boxed))
+        }
     }
 
     fn as_bytes(&self) -> Option<&[u8]> {
@@ -201,7 +202,6 @@ pub(crate) struct Request {
     headers: HeaderMap,
     body: Body,
     timeout: Option<Duration>,
-    compression: Compression,
 }
 
 impl Request {
@@ -213,15 +213,15 @@ impl Request {
         matches!(&self.body.0, BodyInner::Full(bytes) if !bytes.is_empty())
     }
 
-    pub(crate) fn with_monitored_body(self, signal: FrameSignal) -> Self {
+    pub(crate) fn with_gated_body(self, gate: SendGate) -> Self {
         Self {
-            body: self.body.monitored(signal),
+            body: self.body.gated(gate),
             ..self
         }
     }
 
-    pub(crate) fn compress(self) -> Result<Self, HttpError> {
-        let (body, content_encoding) = compress_body(self.body, self.compression)?;
+    pub(crate) fn compress(self, compression: Compression) -> Result<Self, HttpError> {
+        let (body, content_encoding) = compress_body(self.body, compression)?;
         let mut headers = self.headers;
         if let Some(encoding) = content_encoding {
             headers.insert(CONTENT_ENCODING, encoding);
@@ -229,12 +229,11 @@ impl Request {
         Ok(Self {
             body,
             headers,
-            compression: Compression::None,
             ..self
         })
     }
 
-    pub(crate) fn origin(&self) -> String {
+    fn origin(&self) -> String {
         let scheme = self
             .uri
             .scheme_str()
@@ -264,7 +263,6 @@ impl Request {
             headers: self.headers.clone(),
             body,
             timeout: self.timeout,
-            compression: self.compression,
         })
     }
 }
@@ -275,19 +273,17 @@ pub(crate) struct RequestBuilder {
     headers: HeaderMap,
     body: Option<Body>,
     timeout: Option<Duration>,
-    compression: Compression,
     error: Option<HttpError>,
 }
 
 impl RequestBuilder {
-    pub(crate) fn new(method: Method, uri: Uri) -> Self {
+    fn new(method: Method, uri: Uri) -> Self {
         Self {
             method,
             uri,
             headers: HeaderMap::new(),
             body: None,
             timeout: None,
-            compression: Compression::None,
             error: None,
         }
     }
@@ -389,11 +385,6 @@ impl RequestBuilder {
         self
     }
 
-    pub(crate) fn compression(mut self, compression: Compression) -> Self {
-        self.compression = compression;
-        self
-    }
-
     pub(crate) fn build(self) -> Result<Request, HttpError> {
         if let Some(e) = self.error {
             return Err(e);
@@ -405,7 +396,6 @@ impl RequestBuilder {
             headers: self.headers,
             body: self.body.unwrap_or_default(),
             timeout: self.timeout,
-            compression: self.compression,
         })
     }
 }
@@ -414,7 +404,7 @@ pub(crate) struct UnaryResponse {
     status: StatusCode,
     headers: HeaderMap,
     bytes: Bytes,
-    poison_handle: Option<PoisonHandle>,
+    retire_handle: Option<RetireHandle>,
 }
 
 impl UnaryResponse {
@@ -424,7 +414,7 @@ impl UnaryResponse {
             status,
             headers: HeaderMap::new(),
             bytes: bytes.into(),
-            poison_handle: None,
+            retire_handle: None,
         }
     }
 
@@ -436,8 +426,8 @@ impl UnaryResponse {
         &self.headers
     }
 
-    pub(crate) fn take_poison_handle(&mut self) -> Option<PoisonHandle> {
-        self.poison_handle.take()
+    pub(crate) fn take_retire_handle(&mut self) -> Option<RetireHandle> {
+        self.retire_handle.take()
     }
 
     pub(crate) fn into_bytes(self) -> Bytes {
@@ -461,44 +451,37 @@ impl ConnectionId {
     }
 }
 
-trait PoisonTarget: Send + Sync {
-    fn poison(&self, id: ConnectionId);
+trait RetireTarget: Send + Sync {
+    fn retire(&self, id: ConnectionId);
 }
 
 /// Grants its holder the ability to retire the pooled HTTP/2 connection a response
 /// arrived on so no new request reuses it while in-flight requests finish (`T6`, `C13`).
 ///
-/// Poisoning is idempotent and allocates nothing per request.
+/// Retirement is idempotent and allocates nothing per request.
 #[derive(Clone)]
-pub(crate) struct PoisonHandle {
-    target: Weak<dyn PoisonTarget>,
+pub(crate) struct RetireHandle {
+    target: Weak<dyn RetireTarget>,
     id: ConnectionId,
 }
 
-impl PoisonHandle {
-    fn new(target: Weak<dyn PoisonTarget>, id: ConnectionId) -> Self {
+impl RetireHandle {
+    fn new(target: Weak<dyn RetireTarget>, id: ConnectionId) -> Self {
         Self { target, id }
     }
 
-    pub(crate) fn poison(&self) {
+    pub(crate) fn retire(&self) {
         if let Some(target) = self.target.upgrade() {
-            target.poison(self.id);
+            target.retire(self.id);
         }
     }
 }
 
 fn is_dead_connection_hyper_error(err: &hyper::Error) -> bool {
-    if err.is_timeout() || err.is_closed() {
-        return true;
-    }
-    let mut source: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(err);
-    while let Some(cur) = source {
-        if let Some(h2_err) = cur.downcast_ref::<h2::Error>() {
-            return h2_err.is_io() || h2_err.is_go_away();
-        }
-        source = cur.source();
-    }
-    false
+    err.is_timeout()
+        || err.is_closed()
+        || find_source_err::<h2::Error>(err)
+            .is_some_and(|h2_err| h2_err.is_io() || h2_err.is_go_away())
 }
 
 pub(crate) struct StreamingResponse {
@@ -506,7 +489,7 @@ pub(crate) struct StreamingResponse {
     headers: HeaderMap,
     body: Incoming,
     permit: RequestPermit,
-    poison_handle: PoisonHandle,
+    retire_handle: RetireHandle,
     deadline: Option<Instant>,
 }
 
@@ -516,7 +499,7 @@ impl StreamingResponse {
         headers: HeaderMap,
         body: Incoming,
         permit: RequestPermit,
-        poison_handle: PoisonHandle,
+        retire_handle: RetireHandle,
         deadline: Option<Instant>,
     ) -> Self {
         Self {
@@ -524,7 +507,7 @@ impl StreamingResponse {
             headers,
             body,
             permit,
-            poison_handle,
+            retire_handle,
             deadline,
         }
     }
@@ -535,49 +518,49 @@ impl StreamingResponse {
 
     /// Collect the body of a non-2xx streaming response (`E2`).
     ///
-    /// Once non-2xx headers have arrived, a timeout or body read/decompression failure poisons
-    /// the connection/stream and falls back to empty bytes so
+    /// Once non-2xx headers have arrived, a timeout or body read/decompression failure retires
+    /// the connection and falls back to empty bytes so
     /// [`ServerError`](crate::error::ServerError) preserves the HTTP status instead of turning e.g.
     /// `404` or `412` into a retryable timeout.
-    pub(crate) async fn into_bytes_with_poison_handle(self) -> (Bytes, PoisonHandle) {
+    pub(crate) async fn into_bytes_with_retire_handle(self) -> (Bytes, RetireHandle) {
         let Self {
             status,
             headers,
             body,
             permit,
-            poison_handle,
+            retire_handle,
             deadline,
         } = self;
         let bytes =
-            collect_and_decompress_error_body(status, &headers, body, deadline, &poison_handle)
+            collect_and_decompress_error_body(status, &headers, body, deadline, &retire_handle)
                 .await;
         drop(permit);
-        (bytes, poison_handle)
+        (bytes, retire_handle)
     }
 
     pub(crate) fn into_stream(
         self,
-    ) -> (impl Stream<Item = Result<Bytes, HttpError>>, PoisonHandle) {
+    ) -> (impl Stream<Item = Result<Bytes, HttpError>>, RetireHandle) {
         let Self {
             body,
             permit,
-            poison_handle,
+            retire_handle,
             ..
         } = self;
-        let stream_poison = poison_handle.clone();
+        let stream_retire = retire_handle.clone();
         let stream = http_body_util::BodyStream::new(body).filter_map(move |result| {
             let _ = &permit;
             std::future::ready(match result {
                 Ok(frame) => frame.into_data().ok().map(Ok),
                 Err(e) => {
                     if is_dead_connection_hyper_error(&e) {
-                        stream_poison.poison();
+                        stream_retire.retire();
                     }
                     Some(Err(HttpError::Transport(e)))
                 }
             })
         });
-        (stream, poison_handle)
+        (stream, retire_handle)
     }
 }
 
@@ -647,7 +630,7 @@ async fn collect_and_decompress_error_body(
     headers: &HeaderMap,
     body: Incoming,
     deadline: Option<Instant>,
-    poison_handle: &PoisonHandle,
+    retire_handle: &RetireHandle,
 ) -> Bytes {
     let bytes = match collect_bounded_body(body, MAX_ERROR_RESPONSE_BYTES, deadline).await {
         Ok(bytes) => bytes,
@@ -658,7 +641,7 @@ async fn collect_and_decompress_error_body(
                 status = status.as_u16(),
                 "timed out reading non-2xx error body; preserving HTTP status"
             );
-            poison_handle.poison();
+            retire_handle.retire();
             return Bytes::new();
         }
         Err(CollectBodyError::TooLarge) => {
@@ -672,11 +655,11 @@ async fn collect_and_decompress_error_body(
         Err(CollectBodyError::Transport(err)) => {
             tracing::debug!(
                 status = status.as_u16(),
-                error = %format_error_chain(&err),
+                err = %format_error_chain(&err),
                 "failed reading non-2xx error body; preserving HTTP status"
             );
             if is_dead_connection_hyper_error(&err) {
-                poison_handle.poison();
+                retire_handle.retire();
             }
             return Bytes::new();
         }
@@ -736,7 +719,7 @@ pub(crate) fn default_connector(
                 .with_no_client_auth(),
         );
         return Ok(builder
-            .https_or_http()
+            .https_only()
             .enable_http2()
             .wrap_connector(connector));
     }
@@ -755,7 +738,7 @@ fn build_https_connector_with_roots(
         Ok(builder) => builder,
         Err(native_err) => {
             tracing::debug!(
-                error = %native_err,
+                err = %native_err,
                 "native root certificates unavailable; falling back to webpki-roots"
             );
             HttpsConnectorBuilder::new()
@@ -787,7 +770,7 @@ fn build_https_connector_with_roots(
 
     #[cfg(any(feature = "rustls-native-roots", feature = "rustls-webpki-roots"))]
     Ok(builder
-        .https_or_http()
+        .https_only()
         .enable_http2()
         .wrap_connector(connector))
 }
@@ -1144,7 +1127,7 @@ enum Checkout {
 struct CheckedOutSender {
     sender: http2::SendRequest<BoxBody>,
     permit: RequestPermit,
-    poison_handle: PoisonHandle,
+    retire_handle: RetireHandle,
     deadline: Option<Instant>,
 }
 
@@ -1164,24 +1147,27 @@ struct HostPool<C> {
     reaper_notify: Arc<Notify>,
 }
 
-impl<C> PoisonTarget for HostPool<C>
+impl<C> RetireTarget for HostPool<C>
 where
     C: Send + Sync,
 {
-    fn poison(&self, id: ConnectionId) {
-        let removed = {
-            let mut state = self.state.write().unwrap();
-            let before = state.connections.len();
-            state.connections.retain(|conn| conn.id != id);
-            before - state.connections.len()
-        };
-        if removed > 0 {
+    fn retire(&self, id: ConnectionId) {
+        if self.remove(id) {
             tracing::debug!(
                 origin = %self.origin,
-                connection = ?id,
+                connection = id.0,
                 "retired pooled connection"
             );
         }
+    }
+}
+
+impl<C> HostPool<C> {
+    fn remove(&self, id: ConnectionId) -> bool {
+        let mut state = self.state.write().unwrap();
+        let before = state.connections.len();
+        state.connections.retain(|conn| conn.id != id);
+        state.connections.len() < before
     }
 }
 
@@ -1333,8 +1319,8 @@ where
                 Err(DialError::Connect(msg)) => {
                     tracing::debug!(
                         origin = %origin,
-                        connection = ?id,
-                        error = %msg,
+                        connection = id.0,
+                        err = %msg,
                         "HTTP/2 dial failed"
                     );
                     let _ = tx.send(DialOutcome::Failed(Arc::new(msg)));
@@ -1369,8 +1355,8 @@ where
                     if let Err(err) = res {
                         tracing::debug!(
                             origin = %origin,
-                            connection = ?id,
-                            error = %format_error_chain(&err),
+                            connection = id.0,
+                            err = %format_error_chain(&err),
                             "HTTP/2 connection closed"
                         );
                     }
@@ -1384,11 +1370,6 @@ where
         if let Some(entry) = state.connections.iter_mut().find(|c| c.id == id) {
             entry.conn = ConnectionState::Ready(sender);
         }
-    }
-
-    fn remove(&self, id: ConnectionId) {
-        let mut state = self.state.write().unwrap();
-        state.connections.retain(|c| c.id != id);
     }
 
     fn clear_and_detach(&self) {
@@ -1743,7 +1724,7 @@ where
                 Some(dl) => match timeout_at(dl, sender.ready()).await {
                     Ok(res) => res,
                     Err(_) => {
-                        pool.remove(id);
+                        pool.retire(id);
                         return Err(HttpError::Timeout);
                     }
                 },
@@ -1752,13 +1733,13 @@ where
 
             match ready_res {
                 Ok(()) => {
-                    let weak: Weak<dyn PoisonTarget> =
-                        Arc::downgrade(&(pool as Arc<dyn PoisonTarget>));
-                    let poison_handle = PoisonHandle::new(weak, id);
+                    let weak: Weak<dyn RetireTarget> =
+                        Arc::downgrade(&(pool as Arc<dyn RetireTarget>));
+                    let retire_handle = RetireHandle::new(weak, id);
                     return Ok(CheckedOutSender {
                         sender,
                         permit,
-                        poison_handle,
+                        retire_handle,
                         deadline,
                     });
                 }
@@ -1768,8 +1749,8 @@ where
                     if reused {
                         tracing::debug!(
                             origin = %origin,
-                            connection = ?id,
-                            error = %format_error_chain(&err),
+                            connection = id.0,
+                            err = %format_error_chain(&err),
                             "evicted stale pooled HTTP/2 connection; redialing"
                         );
                         continue;
@@ -1837,7 +1818,7 @@ fn reap_idle_connections<C: Connect>(
 async fn send_http_request(
     mut sender: http2::SendRequest<BoxBody>,
     request: Request,
-    poison_handle: &PoisonHandle,
+    retire_handle: &RetireHandle,
     deadline: Option<Instant>,
 ) -> Result<http::Response<Incoming>, HttpError> {
     let http_request = build_http_request(
@@ -1852,7 +1833,7 @@ async fn send_http_request(
         Some(dl) => match timeout_at(dl, send_fut).await {
             Ok(res) => res,
             Err(_) => {
-                poison_handle.poison();
+                retire_handle.retire();
                 return Err(HttpError::Timeout);
             }
         },
@@ -1860,7 +1841,7 @@ async fn send_http_request(
     }
     .map_err(|err| {
         if is_dead_connection_hyper_error(&err) {
-            poison_handle.poison();
+            retire_handle.retire();
         }
         HttpError::Transport(err)
     })
@@ -1873,10 +1854,10 @@ async fn execute_unary_with(
     let CheckedOutSender {
         sender,
         permit: _permit,
-        poison_handle,
+        retire_handle,
         deadline,
     } = checked_out;
-    let response = send_http_request(sender, request, &poison_handle, deadline).await?;
+    let response = send_http_request(sender, request, &retire_handle, deadline).await?;
 
     let (parts, body) = response.into_parts();
     let bytes = if parts.status.is_success() {
@@ -1884,13 +1865,13 @@ async fn execute_unary_with(
             .await
             .map_err(|err| match err {
                 CollectBodyError::Timeout => {
-                    poison_handle.poison();
+                    retire_handle.retire();
                     HttpError::Timeout
                 }
                 CollectBodyError::TooLarge => HttpError::ResponseTooLarge(MAX_RESPONSE_BYTES),
                 CollectBodyError::Transport(hyper_err) => {
                     if is_dead_connection_hyper_error(&hyper_err) {
-                        poison_handle.poison();
+                        retire_handle.retire();
                     }
                     HttpError::Transport(hyper_err)
                 }
@@ -1904,7 +1885,7 @@ async fn execute_unary_with(
             &parts.headers,
             body,
             deadline,
-            &poison_handle,
+            &retire_handle,
         )
         .await
     };
@@ -1913,7 +1894,7 @@ async fn execute_unary_with(
         status: parts.status,
         headers: parts.headers,
         bytes,
-        poison_handle: Some(poison_handle),
+        retire_handle: Some(retire_handle),
     })
 }
 
@@ -1924,10 +1905,10 @@ async fn init_streaming_with(
     let CheckedOutSender {
         sender,
         permit,
-        poison_handle,
+        retire_handle,
         deadline,
     } = checked_out;
-    let response = send_http_request(sender, request, &poison_handle, deadline).await?;
+    let response = send_http_request(sender, request, &retire_handle, deadline).await?;
 
     let (parts, body) = response.into_parts();
     Ok(StreamingResponse::new(
@@ -1935,7 +1916,7 @@ async fn init_streaming_with(
         parts.headers,
         body,
         permit,
-        poison_handle,
+        retire_handle,
         deadline,
     ))
 }
@@ -2309,7 +2290,7 @@ mod tests {
 
     // spec: r1 C13
     #[tokio::test]
-    async fn poison_evicts_only_targeted_connection_preserving_siblings() {
+    async fn retire_evicts_only_targeted_connection_preserving_siblings() {
         let http2 = Http2Config::new().with_max_concurrent_requests(1).unwrap();
         let connector = DuplexH2Connector::new();
         let pool = test_pool_with(connector.clone(), http2);
@@ -2321,7 +2302,7 @@ mod tests {
 
         let uri: Uri = TEST_ORIGIN.parse().unwrap();
         let host_pool = pool.get_or_create_host_pool(TEST_ORIGIN, &uri).unwrap();
-        host_pool.poison(id1);
+        host_pool.retire(id1);
         assert_eq!(host_connection_count(&pool, TEST_ORIGIN), 1);
 
         // Dropping the retired connection's last permit/sender closes its underlying socket.
@@ -2428,7 +2409,7 @@ mod tests {
             .unwrap();
         let stream_resp = pool.init_streaming(stream_req).await.unwrap();
         assert_eq!(stream_resp.status(), StatusCode::PRECONDITION_FAILED);
-        let (bytes, _poison) = stream_resp.into_bytes_with_poison_handle().await;
+        let (bytes, _retire) = stream_resp.into_bytes_with_retire_handle().await;
         assert!(bytes.is_empty());
     }
 

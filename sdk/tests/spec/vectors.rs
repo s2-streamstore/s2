@@ -1314,17 +1314,11 @@ async fn spec_f2_f3_open_enums_tagged_unions_and_closed_request_enums() {
             .ops()
             .contains(&Operation::Unknown("future-op".to_owned()))
     );
-    assert_eq!(
-        scope.basins(),
-        Some(&BasinMatcher::Unknown("glob".to_owned()))
-    );
-    assert_eq!(
-        scope.streams(),
-        Some(&StreamMatcher::Unknown("regex".to_owned()))
-    );
+    assert_eq!(scope.basins(), &BasinMatcher::Unknown("glob".to_owned()));
+    assert_eq!(scope.streams(), &StreamMatcher::Unknown("regex".to_owned()));
     assert_eq!(
         scope.access_tokens(),
-        Some(&AccessTokenMatcher::Unknown("tag".to_owned()))
+        &AccessTokenMatcher::Unknown("tag".to_owned())
     );
 
     // F3: Client-sent-only enums are closed (verified by exhaustive match with no wildcard and no

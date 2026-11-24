@@ -17,32 +17,33 @@ const SENT: u8 = 1;
 const STOPPED_UNSENT: u8 = 2;
 const STOPPED_SENT: u8 = 3;
 
+pub(crate) fn attempt_ended_io_error() -> io::Error {
+    io::Error::new(io::ErrorKind::ConnectionAborted, "attempt ended")
+}
+
 fn attempt_ended_error() -> BoxError {
-    Box::new(io::Error::new(
-        io::ErrorKind::ConnectionAborted,
-        "attempt ended",
-    ))
+    Box::new(attempt_ended_io_error())
 }
 
 /// Race-free atomic gate tracking whether a unary request body has yielded any frame (`Terms:
 /// Sent`, `T10`).
 ///
-/// Paired with [`RequestFrameMonitorBody`], the first yielded frame transitions `UNSENT -> SENT`.
+/// Paired with [`GatedRequestBody`], the first yielded frame transitions `UNSENT -> SENT`.
 /// Calling [`stop`](Self::stop) when an attempt ends atomically seals the gate: if the state was
 /// still `UNSENT`, it transitions to `STOPPED_UNSENT` and any subsequent body poll fails with
 /// `ConnectionAborted` without yielding a frame, guaranteeing that an attempt classified as unsent
 /// can never send bytes afterward.
 #[derive(Debug, Clone)]
-pub(crate) struct FrameSignal(Arc<AtomicU8>);
+pub(crate) struct SendGate(Arc<AtomicU8>);
 
-impl FrameSignal {
-    /// Create a new unsent [`FrameSignal`].
+impl SendGate {
+    /// Create a new unsent [`SendGate`].
     pub(crate) fn new() -> Self {
         Self(Arc::new(AtomicU8::new(UNSENT)))
     }
 
     /// Returns `true` if at least one body frame passed the gate.
-    pub(crate) fn is_signalled(&self) -> bool {
+    pub(crate) fn was_sent(&self) -> bool {
         matches!(self.0.load(Ordering::Acquire), SENT | STOPPED_SENT)
     }
 
@@ -70,7 +71,7 @@ impl FrameSignal {
                 }
                 SENT => return true,
                 STOPPED_UNSENT | STOPPED_SENT => return false,
-                _ => unreachable!("invalid FrameSignal state"),
+                _ => unreachable!("invalid SendGate state"),
             }
         }
     }
@@ -106,37 +107,37 @@ impl FrameSignal {
                 }
                 STOPPED_UNSENT => return true,
                 STOPPED_SENT => return false,
-                _ => unreachable!("invalid FrameSignal state"),
+                _ => unreachable!("invalid SendGate state"),
             }
         }
     }
 }
 
 pin_project! {
-    /// A body wrapper that gates frame emission through a [`FrameSignal`].
+    /// A body wrapper that gates frame emission through a [`SendGate`].
     ///
     /// Wraps a non-empty `B: http_body::Body` and delegates all operations to the inner body while
-    /// the attempt is active. Once [`FrameSignal::stop`] is called, any further `poll_frame()`
+    /// the attempt is active. Once [`SendGate::stop`] is called, any further `poll_frame()`
     /// fails immediately without yielding frames.
     ///
-    /// Note: an empty body yields no frames and therefore never signals; callers must only
-    /// rely on `signal.stop() == true` as proof of an unsent request when the request has
+    /// Note: an empty body yields no frames and therefore never marks sent; callers must only
+    /// rely on `gate.stop() == true` as proof of an unsent request when the request has
     /// a non-empty body (such as JSON or protobuf payloads).
-    pub(crate) struct RequestFrameMonitorBody<B> {
+    pub(crate) struct GatedRequestBody<B> {
         #[pin]
         inner: B,
-        signal: FrameSignal,
+        gate: SendGate,
     }
 }
 
-impl<B> RequestFrameMonitorBody<B> {
+impl<B> GatedRequestBody<B> {
     /// Wrap an inner body with frame monitoring and stop gating.
-    pub(crate) fn new(inner: B, signal: FrameSignal) -> Self {
-        Self { inner, signal }
+    pub(crate) fn new(inner: B, gate: SendGate) -> Self {
+        Self { inner, gate }
     }
 }
 
-impl<B> Body for RequestFrameMonitorBody<B>
+impl<B> Body for GatedRequestBody<B>
 where
     B: Body,
     B::Error: Into<BoxError>,
@@ -149,20 +150,20 @@ where
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
         let this = self.project();
-        if this.signal.is_stopped() {
+        if this.gate.is_stopped() {
             return Poll::Ready(Some(Err(attempt_ended_error())));
         }
         match this.inner.poll_frame(cx) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(None) => {
-                if this.signal.is_stopped() {
+                if this.gate.is_stopped() {
                     Poll::Ready(Some(Err(attempt_ended_error())))
                 } else {
                     Poll::Ready(None)
                 }
             }
             Poll::Ready(Some(Ok(frame))) => {
-                if this.signal.try_mark_sent() {
+                if this.gate.try_mark_sent() {
                     Poll::Ready(Some(Ok(frame)))
                 } else {
                     Poll::Ready(Some(Err(attempt_ended_error())))
@@ -173,7 +174,7 @@ where
     }
 
     fn is_end_stream(&self) -> bool {
-        !self.signal.is_stopped() && self.inner.is_end_stream()
+        !self.gate.is_stopped() && self.inner.is_end_stream()
     }
 
     fn size_hint(&self) -> http_body::SizeHint {
@@ -189,29 +190,28 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn monitor_body_signals_only_when_frame_yielded() {
-        let empty_signal = FrameSignal::new();
-        let empty = RequestFrameMonitorBody::new(Empty::<Bytes>::new(), empty_signal.clone());
+    async fn gated_body_marks_sent_only_when_frame_yielded() {
+        let empty_gate = SendGate::new();
+        let empty = GatedRequestBody::new(Empty::<Bytes>::new(), empty_gate.clone());
         assert!(empty.collect().await.unwrap().to_bytes().is_empty());
-        assert!(!empty_signal.is_signalled());
+        assert!(!empty_gate.was_sent());
 
-        let full_signal = FrameSignal::new();
-        let full =
-            RequestFrameMonitorBody::new(Full::new(Bytes::from("hello")), full_signal.clone());
+        let full_gate = SendGate::new();
+        let full = GatedRequestBody::new(Full::new(Bytes::from("hello")), full_gate.clone());
         assert_eq!(full.collect().await.unwrap().to_bytes().as_ref(), b"hello");
-        assert!(full_signal.is_signalled());
-        assert!(!full_signal.stop());
+        assert!(full_gate.was_sent());
+        assert!(!full_gate.stop());
     }
 
     // spec: r1 T10
     #[tokio::test]
     async fn stop_before_poll_blocks_body_and_preserves_unsent_state() {
-        let signal = FrameSignal::new();
+        let gate = SendGate::new();
         let mut body =
-            RequestFrameMonitorBody::new(Full::new(Bytes::from_static(b"payload")), signal.clone());
+            GatedRequestBody::new(Full::new(Bytes::from_static(b"payload")), gate.clone());
 
-        assert!(signal.stop(), "stopped before any poll must report unsent");
-        assert!(!signal.is_signalled());
+        assert!(gate.stop(), "stopped before any poll must report unsent");
+        assert!(!gate.was_sent());
         assert!(!body.is_end_stream());
 
         let err = body
@@ -221,7 +221,7 @@ mod tests {
             .expect_err("stopped body must never yield data");
         assert!(err.to_string().contains("attempt ended"), "{err}");
         assert!(
-            !signal.is_signalled(),
+            !gate.was_sent(),
             "late poll after stop must never flip unsent to sent"
         );
     }
@@ -229,19 +229,19 @@ mod tests {
     // spec: r1 T10
     #[tokio::test]
     async fn stop_after_first_frame_blocks_subsequent_frames_and_preserves_sent_state() {
-        let signal = FrameSignal::new();
+        let gate = SendGate::new();
         let stream = StreamBody::new(futures_util::stream::iter([
             Ok::<_, io::Error>(Frame::data(Bytes::from_static(b"chunk-1"))),
             Ok(Frame::data(Bytes::from_static(b"chunk-2"))),
         ]));
-        let mut body = RequestFrameMonitorBody::new(stream, signal.clone());
+        let mut body = GatedRequestBody::new(stream, gate.clone());
 
         let first = body.frame().await.unwrap().unwrap().into_data().unwrap();
         assert_eq!(first.as_ref(), b"chunk-1");
-        assert!(signal.is_signalled());
+        assert!(gate.was_sent());
 
-        assert!(!signal.stop(), "already sent must report was_unsent=false");
-        assert!(signal.is_signalled());
+        assert!(!gate.stop(), "already sent must report was_unsent=false");
+        assert!(gate.was_sent());
 
         let err = body
             .frame()
@@ -249,6 +249,6 @@ mod tests {
             .expect("must yield abort error on next frame")
             .expect_err("stopped body must not yield chunk-2");
         assert!(err.to_string().contains("attempt ended"), "{err}");
-        assert!(signal.is_signalled());
+        assert!(gate.was_sent());
     }
 }

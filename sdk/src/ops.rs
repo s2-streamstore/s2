@@ -4,13 +4,14 @@ use http::{
     HeaderValue, Uri,
     header::{ACCEPT, CONTENT_TYPE},
 };
-use s2_api::v1::{self as api, config::STREAM_CONFIG_HEADER};
-use s2_common::encryption::S2_ENCRYPTION_KEY_HEADER;
+use s2_api::v1 as api;
+use s2_common::resources::REQUEST_TOKEN_HEADER;
 
 use crate::{
     api::{
-        APPLICATION_PROTOBUF, BaseClient, BasinClient, S2_REQUEST_TOKEN, basin_path,
-        network_policy_path, set_header_opt, stream_path, stream_records_path, token_path,
+        APPLICATION_PROTOBUF, BaseClient, BasinClient, basin_path, metrics_basin_path,
+        metrics_stream_path, network_policy_path, stream_path, stream_records_path,
+        stream_tail_path, token_path,
     },
     client,
     error::{
@@ -30,8 +31,8 @@ use crate::{
         ListAllBasinsInput, ListAllNetworkPoliciesInput, ListAllStreamsInput, ListBasinsInput,
         ListNetworkPoliciesInput, ListStream, ListStreamsInput, LocationInfo, LocationName, Metric,
         NetworkPolicyInfo, NetworkPolicySelector, Page, ReadBatch, ReadInput, RetryConfig,
-        S2Config, StreamConfig, StreamInfo, StreamMetricSet, StreamName, StreamPosition,
-        StreamReconfiguration, request_token,
+        S2Config, S2Endpoints, StreamConfig, StreamInfo, StreamMetricSet, StreamName,
+        StreamPosition, StreamReconfiguration, request_token,
     },
 };
 
@@ -54,18 +55,13 @@ where
     Cursor: Clone + Send + 'static,
     Fetch: Fn(Cursor) -> Fut + Send + 'static,
     Fut: Future<Output = Result<Page<Item>, RequestError>> + Send + 'static,
-    Advance: Fn(&mut Cursor, &Item) + Send + 'static,
+    Advance: Fn(&mut Cursor, &Page<Item>) -> bool + Send + 'static,
     Keep: Fn(&Item) -> bool + Send + 'static,
 {
     ListStream::new(async_stream::try_stream! {
         loop {
             let page = fetch(cursor.clone()).await?;
-            let has_last = if let Some(last) = page.values.last() {
-                advance(&mut cursor, last);
-                true
-            } else {
-                false
-            };
+            let continue_paging = page.has_more && advance(&mut cursor, &page);
 
             for item in page.values {
                 if keep(&item) {
@@ -73,7 +69,7 @@ where
                 }
             }
 
-            if !page.has_more || !has_last {
+            if !continue_paging {
                 break;
             }
         }
@@ -84,7 +80,7 @@ where
 /// An S2 account.
 pub struct S2 {
     base: BaseClient,
-    config: Arc<S2Config>,
+    endpoints: Arc<S2Endpoints>,
     base_url: Uri,
 }
 
@@ -98,6 +94,11 @@ impl fmt::Debug for S2 {
 
 impl S2 {
     /// Create a new [`S2`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ValidationError`] if the configuration (such as the access token, retry delays,
+    /// or TLS setup) is invalid.
     pub fn new(config: S2Config) -> Result<Self, ValidationError> {
         Self::init_with_op(config, "S2::new")
     }
@@ -106,6 +107,11 @@ impl S2 {
     ///
     /// Reads `S2_ACCESS_TOKEN`, and optionally `S2_ACCOUNT_ENDPOINT` and `S2_BASIN_ENDPOINT`
     /// (empty endpoint variables are treated as unset; if one is set, both must be set).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ValidationError`] if `S2_ACCESS_TOKEN` is missing/invalid, only one endpoint
+    /// variable is set, an endpoint is malformed, or TLS initialization fails.
     pub fn from_env() -> Result<Self, ValidationError> {
         let config = S2Config::from_env().map_err(|e| init_error(e, "S2::from_env"))?;
         Self::init_with_op(config, "S2::from_env")
@@ -113,18 +119,17 @@ impl S2 {
 
     fn init_with_op(config: S2Config, op: &'static str) -> Result<Self, ValidationError> {
         let base = BaseClient::init(&config).map_err(|e| init_error(e, op))?;
-        Ok(Self::from_parts(config, base))
+        Ok(Self::from_parts(config.endpoints, base))
     }
 
-    fn from_parts(config: S2Config, base: BaseClient) -> Self {
-        let base_url = config
-            .endpoints
+    fn from_parts(endpoints: S2Endpoints, base: BaseClient) -> Self {
+        let base_url = endpoints
             .account_origin()
             .parse()
             .expect("valid account URI");
         Self {
             base,
-            config: Arc::new(config),
+            endpoints: Arc::new(endpoints),
             base_url,
         }
     }
@@ -140,14 +145,34 @@ impl S2 {
     {
         let base = BaseClient::init_with_connector(&config, connector)
             .map_err(|e| init_error(e, "S2::new_with_connector"))?;
-        Ok(Self::from_parts(config, base))
+        Ok(Self::from_parts(config.endpoints, base))
     }
 
     fn uri(&self, path: impl AsRef<str>) -> Uri {
         client::uri_with_path(&self.base_url, path)
     }
 
-    /// Return a copy of this client using a different [`RetryConfig`] while sharing the same
+    fn get(&self, path: impl AsRef<str>) -> client::RequestBuilder {
+        self.base.get(self.uri(path))
+    }
+
+    fn post(&self, path: impl AsRef<str>) -> client::RequestBuilder {
+        self.base.post(self.uri(path))
+    }
+
+    fn put(&self, path: impl AsRef<str>) -> client::RequestBuilder {
+        self.base.put(self.uri(path))
+    }
+
+    fn patch(&self, path: impl AsRef<str>) -> client::RequestBuilder {
+        self.base.patch(self.uri(path))
+    }
+
+    fn delete(&self, path: impl AsRef<str>) -> client::RequestBuilder {
+        self.base.delete(self.uri(path))
+    }
+
+    /// Return this client configured with a different [`RetryConfig`] while sharing the same
     /// underlying connection pool and [`close`](Self::close) lifecycle.
     ///
     /// Handles and sessions subsequently opened from the returned client inherit `retry`; sibling
@@ -157,7 +182,10 @@ impl S2 {
     ///
     /// Returns [`ValidationError`] if `retry.min_base_delay() > retry.max_base_delay()`.
     pub fn with_retry(self, retry: RetryConfig) -> Result<Self, ValidationError> {
-        let base = self.base.with_retry(retry)?;
+        let base = self
+            .base
+            .with_retry(retry)
+            .map_err(|e| init_error(e, "S2::with_retry"))?;
         Ok(Self { base, ..self })
     }
 
@@ -177,13 +205,13 @@ impl S2 {
     #[must_use]
     pub fn basin(&self, name: BasinName) -> S2Basin {
         S2Basin {
-            client: BasinClient::init(name, self.config.clone(), self.base.clone()),
+            client: BasinClient::init(name, &self.endpoints, self.base.clone()),
         }
     }
 
     /// List a page of basins.
     ///
-    /// See [`list_all_basins`](crate::S2::list_all_basins) for automatic pagination.
+    /// See [`list_all_basins`](Self::list_all_basins) for automatic pagination.
     pub async fn list_basins(
         &self,
         input: ListBasinsInput,
@@ -192,7 +220,7 @@ impl S2 {
         let response: api::basin::ListBasinsResponse = self
             .base
             .unary(
-                self.base.get(self.uri("v1/basins")).query(&req).build(),
+                self.get("v1/basins").query(&req).build(),
                 OpScope::account("list_basins", true),
             )
             .send_json()
@@ -205,6 +233,9 @@ impl S2 {
     }
 
     /// List all basins, paginating automatically.
+    ///
+    /// Excludes basins that are pending deletion unless
+    /// [`ListAllBasinsInput::with_include_deleted`] is set to `true`.
     pub fn list_all_basins(&self, input: ListAllBasinsInput) -> ListStream<BasinInfo> {
         let s2 = self.clone();
         let (initial, include_deleted) = input.into_parts();
@@ -214,7 +245,14 @@ impl S2 {
                 let s2 = s2.clone();
                 async move { s2.list_basins(req).await }
             },
-            |req, last| req.set_start_after(last.name.clone().into()),
+            |req, page| {
+                if let Some(next) = page.next_start_after() {
+                    req.set_start_after(next);
+                    true
+                } else {
+                    false
+                }
+            },
             move |info| include_deleted || info.deleted_at.is_none(),
         )
     }
@@ -226,9 +264,8 @@ impl S2 {
         let info: api::basin::BasinInfo = self
             .base
             .unary(
-                self.base
-                    .post(self.uri("v1/basins"))
-                    .header(S2_REQUEST_TOKEN, request_token())
+                self.post("v1/basins")
+                    .header(REQUEST_TOKEN_HEADER.clone(), request_token())
                     .json(&req)
                     .build(),
                 OpScope::basin("create_basin", basin_name.as_ref(), false),
@@ -254,10 +291,10 @@ impl S2 {
         input: EnsureBasinInput,
     ) -> Result<EnsureOutput<BasinInfo>, RequestError> {
         let (name, body) = input.into_parts();
-        let url = self.uri(basin_path(&name));
+        let path = basin_path(&name);
         let req = match body {
-            Some(body) => self.base.put(url).json(&body).build(),
-            None => self.base.put(url).build(),
+            Some(body) => self.put(path).json(&body).build(),
+            None => self.put(path).build(),
         };
         let result = self
             .base
@@ -267,44 +304,26 @@ impl S2 {
         Ok(result.map(BasinInfo::from_api))
     }
 
-    async fn get_basin_config_raw(
-        &self,
-        name: BasinName,
-    ) -> Result<api::config::BasinConfig, RequestError> {
-        let url = self.uri(basin_path(&name));
-        self.base
+    /// Get basin configuration.
+    pub async fn get_basin_config(&self, name: BasinName) -> Result<BasinConfig, RequestError> {
+        let config: api::config::BasinConfig = self
+            .base
             .unary(
-                self.base.get(url).build(),
+                self.get(basin_path(&name)).build(),
                 OpScope::basin("get_basin_config", name.as_ref(), true),
             )
             .send_json()
-            .await
-    }
-
-    /// Get basin configuration.
-    pub async fn get_basin_config(&self, name: BasinName) -> Result<BasinConfig, RequestError> {
-        Ok(BasinConfig::from_api(
-            self.get_basin_config_raw(name).await?,
-        ))
-    }
-
-    #[doc(hidden)]
-    #[cfg(feature = "_hidden")]
-    pub async fn get_basin_config_api(
-        &self,
-        name: BasinName,
-    ) -> Result<api::config::BasinConfig, RequestError> {
-        self.get_basin_config_raw(name).await
+            .await?;
+        Ok(BasinConfig::from_api(config))
     }
 
     /// Delete a basin.
     ///
     /// Succeeds if the basin is already being deleted or does not exist.
     pub async fn delete_basin(&self, name: BasinName) -> Result<(), RequestError> {
-        let url = self.uri(basin_path(&name));
         self.base
             .unary(
-                self.base.delete(url).build(),
+                self.delete(basin_path(&name)).build(),
                 OpScope::basin("delete_basin", name.as_ref(), false),
             )
             .send_delete(ErrorCode::BasinNotFound)
@@ -318,11 +337,10 @@ impl S2 {
         config: BasinReconfiguration,
     ) -> Result<BasinConfig, RequestError> {
         let req = config.into_api();
-        let url = self.uri(basin_path(&name));
         let config: api::config::BasinConfig = self
             .base
             .unary(
-                self.base.patch(url).json(&req).build(),
+                self.patch(basin_path(&name)).json(&req).build(),
                 OpScope::basin("reconfigure_basin", name.as_ref(), false),
             )
             .send_json()
@@ -330,45 +348,27 @@ impl S2 {
         Ok(BasinConfig::from_api(config))
     }
 
-    async fn list_access_tokens_raw(
-        &self,
-        input: ListAccessTokensInput,
-    ) -> Result<api::access::ListAccessTokensResponse, RequestError> {
-        let req = input.into_api();
-        self.base
-            .unary(
-                self.base
-                    .get(self.uri("v1/access-tokens"))
-                    .query(&req)
-                    .build(),
-                OpScope::account("list_access_tokens", true),
-            )
-            .send_json()
-            .await
-    }
-
     /// List a page of access tokens.
     ///
-    /// See [`list_all_access_tokens`](crate::S2::list_all_access_tokens) for automatic pagination.
+    /// See [`list_all_access_tokens`](Self::list_all_access_tokens) for automatic pagination.
     pub async fn list_access_tokens(
         &self,
         input: ListAccessTokensInput,
     ) -> Result<Page<AccessTokenInfo>, RequestError> {
-        let response = self.list_access_tokens_raw(input).await?;
+        let req = input.into_api();
+        let response: api::access::ListAccessTokensResponse = self
+            .base
+            .unary(
+                self.get("v1/access-tokens").query(&req).build(),
+                OpScope::account("list_access_tokens", true),
+            )
+            .send_json()
+            .await?;
         Ok(Page::from_api(
             response.access_tokens,
             response.has_more,
             AccessTokenInfo::from_api,
         ))
-    }
-
-    #[doc(hidden)]
-    #[cfg(feature = "_hidden")]
-    pub async fn list_access_tokens_api(
-        &self,
-        input: ListAccessTokensInput,
-    ) -> Result<api::access::ListAccessTokensResponse, RequestError> {
-        self.list_access_tokens_raw(input).await
     }
 
     /// List all access tokens, paginating automatically.
@@ -384,7 +384,14 @@ impl S2 {
                 let s2 = s2.clone();
                 async move { s2.list_access_tokens(req).await }
             },
-            |req, last| req.set_start_after(last.id.clone().into()),
+            |req, page| {
+                if let Some(next) = page.next_start_after() {
+                    req.set_start_after(next);
+                    true
+                } else {
+                    false
+                }
+            },
             |_| true,
         )
     }
@@ -398,10 +405,7 @@ impl S2 {
         let response: api::access::IssueAccessTokenResponse = self
             .base
             .unary(
-                self.base
-                    .post(self.uri("v1/access-tokens"))
-                    .json(&req)
-                    .build(),
+                self.post("v1/access-tokens").json(&req).build(),
                 OpScope::account("issue_access_token", false),
             )
             .definite_retries_only()
@@ -414,10 +418,9 @@ impl S2 {
     ///
     /// Succeeds if the access token does not exist.
     pub async fn revoke_access_token(&self, id: AccessTokenId) -> Result<(), RequestError> {
-        let url = self.uri(token_path(&id));
         self.base
             .unary(
-                self.base.delete(url).build(),
+                self.delete(token_path(&id)).build(),
                 OpScope::account("revoke_access_token", false),
             )
             .send_delete(ErrorCode::AccessTokenNotFound)
@@ -426,7 +429,7 @@ impl S2 {
 
     /// List a page of network policies.
     ///
-    /// See [`list_all_network_policies`](crate::S2::list_all_network_policies) for automatic
+    /// See [`list_all_network_policies`](Self::list_all_network_policies) for automatic
     /// pagination.
     pub async fn list_network_policies(
         &self,
@@ -436,10 +439,7 @@ impl S2 {
         let response: api::network_policy::ListNetworkPoliciesResponse = self
             .base
             .unary(
-                self.base
-                    .get(self.uri("v1/network-policies"))
-                    .query(&req)
-                    .build(),
+                self.get("v1/network-policies").query(&req).build(),
                 OpScope::account("list_network_policies", true),
             )
             .send_json()
@@ -464,7 +464,14 @@ impl S2 {
                 let s2 = s2.clone();
                 async move { s2.list_network_policies(req).await }
             },
-            |req, last| req.set_start_after(last.id.slug().clone().into()),
+            |req, page| {
+                if let Some(next) = page.next_start_after() {
+                    req.set_start_after(next);
+                    true
+                } else {
+                    false
+                }
+            },
             |_| true,
         )
     }
@@ -478,10 +485,7 @@ impl S2 {
         let response: api::network_policy::NetworkPolicyInfo = self
             .base
             .unary(
-                self.base
-                    .post(self.uri("v1/network-policies"))
-                    .json(&req)
-                    .build(),
+                self.post("v1/network-policies").json(&req).build(),
                 OpScope::account("create_network_policy", false),
             )
             .definite_retries_only()
@@ -499,11 +503,10 @@ impl S2 {
         selector: impl Into<NetworkPolicySelector>,
     ) -> Result<NetworkPolicyInfo, RequestError> {
         let selector = selector.into();
-        let url = self.uri(network_policy_path(&selector));
         let response: api::network_policy::NetworkPolicyInfo = self
             .base
             .unary(
-                self.base.get(url).build(),
+                self.get(network_policy_path(&selector)).build(),
                 OpScope::account("get_network_policy", true),
             )
             .send_json()
@@ -523,10 +526,9 @@ impl S2 {
         selector: impl Into<NetworkPolicySelector>,
     ) -> Result<(), RequestError> {
         let selector = selector.into();
-        let url = self.uri(network_policy_path(&selector));
         self.base
             .unary(
-                self.base.delete(url).build(),
+                self.delete(network_policy_path(&selector)).build(),
                 OpScope::account("delete_network_policy", false),
             )
             .send_delete(ErrorCode::NetworkPolicyNotFound)
@@ -538,7 +540,7 @@ impl S2 {
         let response: Vec<api::location::LocationInfo> = self
             .base
             .unary(
-                self.base.get(self.uri("v1/locations")).build(),
+                self.get("v1/locations").build(),
                 OpScope::account("list_locations", true),
             )
             .send_json()
@@ -551,7 +553,7 @@ impl S2 {
         let response: api::location::LocationInfo = self
             .base
             .unary(
-                self.base.get(self.uri("v1/locations/default")).build(),
+                self.get("v1/locations/default").build(),
                 OpScope::account("get_default_location", true),
             )
             .send_json()
@@ -567,10 +569,7 @@ impl S2 {
         let response: api::location::LocationInfo = self
             .base
             .unary(
-                self.base
-                    .put(self.uri("v1/locations/default"))
-                    .json(&location)
-                    .build(),
+                self.put("v1/locations/default").json(&location).build(),
                 OpScope::account("set_default_location", false),
             )
             .send_json()
@@ -587,7 +586,7 @@ impl S2 {
         let response: api::metrics::MetricSetResponse = self
             .base
             .unary(
-                self.base.get(self.uri("v1/metrics")).query(&req).build(),
+                self.get("v1/metrics").query(&req).build(),
                 OpScope::account("get_account_metrics", true),
             )
             .send_json()
@@ -602,11 +601,10 @@ impl S2 {
         set: BasinMetricSet,
     ) -> Result<Vec<Metric>, RequestError> {
         let req = set.into_api();
-        let url = self.uri(format!("v1/metrics/{}", urlencoding::encode(&basin)));
         let response: api::metrics::MetricSetResponse = self
             .base
             .unary(
-                self.base.get(url).query(&req).build(),
+                self.get(metrics_basin_path(&basin)).query(&req).build(),
                 OpScope::basin("get_basin_metrics", basin.as_ref(), true),
             )
             .send_json()
@@ -622,15 +620,12 @@ impl S2 {
         set: StreamMetricSet,
     ) -> Result<Vec<Metric>, RequestError> {
         let req = set.into_api();
-        let url = self.uri(format!(
-            "v1/metrics/{}/{}",
-            urlencoding::encode(&basin),
-            urlencoding::encode(&stream)
-        ));
         let response: api::metrics::MetricSetResponse = self
             .base
             .unary(
-                self.base.get(url).query(&req).build(),
+                self.get(metrics_stream_path(&basin, &stream))
+                    .query(&req)
+                    .build(),
                 OpScope::stream("get_stream_metrics", basin.as_ref(), stream.as_ref(), true),
             )
             .send_json()
@@ -651,6 +646,7 @@ impl fmt::Debug for S2Basin {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("S2Basin")
             .field("name", &self.client.name)
+            .field("base_url", self.client.base_url())
             .finish_non_exhaustive()
     }
 }
@@ -662,7 +658,7 @@ impl S2Basin {
         &self.client.name
     }
 
-    /// Return a copy of this basin handle using a different [`RetryConfig`] while sharing the same
+    /// Return this basin handle configured with a different [`RetryConfig`] while sharing the same
     /// underlying connection pool and [`S2::close`] lifecycle.
     ///
     /// Stream handles and sessions subsequently opened from the returned handle inherit `retry`;
@@ -672,7 +668,14 @@ impl S2Basin {
     ///
     /// Returns [`ValidationError`] if `retry.min_base_delay() > retry.max_base_delay()`.
     pub fn with_retry(self, retry: RetryConfig) -> Result<Self, ValidationError> {
-        let client = self.client.with_retry(retry)?;
+        let scope = self
+            .client
+            .basin_scope("S2Basin::with_retry", true)
+            .context(1);
+        let client = self
+            .client
+            .with_retry(retry)
+            .map_err(|e| scope.format_validation(e))?;
         Ok(Self { client })
     }
 
@@ -688,7 +691,7 @@ impl S2Basin {
 
     /// List a page of streams.
     ///
-    /// See [`list_all_streams`](crate::S2Basin::list_all_streams) for automatic pagination.
+    /// See [`list_all_streams`](Self::list_all_streams) for automatic pagination.
     pub async fn list_streams(
         &self,
         input: ListStreamsInput,
@@ -710,6 +713,9 @@ impl S2Basin {
     }
 
     /// List all streams, paginating automatically.
+    ///
+    /// Excludes streams that are pending deletion unless
+    /// [`ListAllStreamsInput::with_include_deleted`] is set to `true`.
     pub fn list_all_streams(&self, input: ListAllStreamsInput) -> ListStream<StreamInfo> {
         let basin = self.clone();
         let (initial, include_deleted) = input.into_parts();
@@ -719,7 +725,14 @@ impl S2Basin {
                 let basin = basin.clone();
                 async move { basin.list_streams(req).await }
             },
-            |req, last| req.set_start_after(last.name.clone().into()),
+            |req, page| {
+                if let Some(next) = page.next_start_after() {
+                    req.set_start_after(next);
+                    true
+                } else {
+                    false
+                }
+            },
             move |info| include_deleted || info.deleted_at.is_none(),
         )
     }
@@ -736,7 +749,7 @@ impl S2Basin {
             .unary(
                 self.client
                     .post("v1/streams")
-                    .header(S2_REQUEST_TOKEN, request_token())
+                    .header(REQUEST_TOKEN_HEADER.clone(), request_token())
                     .json(&req)
                     .build(),
                 self.client
@@ -776,33 +789,17 @@ impl S2Basin {
         Ok(result.map(StreamInfo::from_api))
     }
 
-    async fn get_stream_config_raw(
-        &self,
-        name: StreamName,
-    ) -> Result<api::config::StreamConfig, RequestError> {
-        self.client
+    /// Get stream configuration.
+    pub async fn get_stream_config(&self, name: StreamName) -> Result<StreamConfig, RequestError> {
+        let config: api::config::StreamConfig = self
+            .client
             .unary(
                 self.client.get(stream_path(&name)).build(),
                 self.client.stream_scope("get_stream_config", &name, true),
             )
             .send_json()
-            .await
-    }
-
-    /// Get stream configuration.
-    pub async fn get_stream_config(&self, name: StreamName) -> Result<StreamConfig, RequestError> {
-        Ok(StreamConfig::from_api(
-            self.get_stream_config_raw(name).await?,
-        ))
-    }
-
-    #[doc(hidden)]
-    #[cfg(feature = "_hidden")]
-    pub async fn get_stream_config_api(
-        &self,
-        name: StreamName,
-    ) -> Result<api::config::StreamConfig, RequestError> {
-        self.get_stream_config_raw(name).await
+            .await?;
+        Ok(StreamConfig::from_api(config))
     }
 
     /// Delete a stream.
@@ -870,7 +867,11 @@ impl S2Stream {
         &self.client.name
     }
 
-    /// Set the encryption key for this stream handle.
+    /// Return this stream handle configured with an [`EncryptionKey`] for record data-plane calls
+    /// (`append`, `append_with_stream_config`, `read`, and sessions opened from this handle).
+    ///
+    /// Sibling handles and already-opened sessions are unaffected. `check_tail` never sends an
+    /// encryption key header.
     #[must_use]
     pub fn with_encryption_key(self, encryption: EncryptionKey) -> Self {
         Self {
@@ -879,8 +880,8 @@ impl S2Stream {
         }
     }
 
-    /// Return a copy of this stream handle using a different [`RetryConfig`] while sharing the same
-    /// underlying connection pool and [`S2::close`] lifecycle.
+    /// Return this stream handle configured with a different [`RetryConfig`] while sharing the
+    /// same underlying connection pool and [`S2::close`] lifecycle.
     ///
     /// Operations and sessions subsequently opened from the returned handle use `retry`; sibling
     /// handles and already-opened sessions keep their own retry settings.
@@ -889,7 +890,14 @@ impl S2Stream {
     ///
     /// Returns [`ValidationError`] if `retry.min_base_delay() > retry.max_base_delay()`.
     pub fn with_retry(self, retry: RetryConfig) -> Result<Self, ValidationError> {
-        let client = self.client.with_retry(retry)?;
+        let scope = self
+            .client
+            .stream_scope("S2Stream::with_retry", &self.name, true)
+            .context(1);
+        let client = self
+            .client
+            .with_retry(retry)
+            .map_err(|e| scope.format_validation(e))?;
         Ok(Self { client, ..self })
     }
 
@@ -917,9 +925,7 @@ impl S2Stream {
         let response: api::stream::TailResponse = self
             .client
             .unary(
-                self.client
-                    .get(format!("{}/tail", stream_records_path(&self.name)))
-                    .build(),
+                self.client.get(stream_tail_path(&self.name)).build(),
                 self.client.stream_scope("check_tail", &self.name, true),
             )
             .send_json_as::<_, ReadError>()
@@ -937,7 +943,7 @@ impl S2Stream {
     /// [`append_with_stream_config`](Self::append_with_stream_config). (`stream_config` is kept
     /// off [`AppendInput`] because [`AppendInput`] is also submitted to
     /// [`AppendSession::submit`], where `stream_config` is configured once per session on
-    /// [`AppendSessionConfig`].)
+    /// [`AppendSessionConfig::with_stream_config`].)
     pub async fn append(&self, input: impl Into<AppendInput>) -> Result<AppendAck, AppendError> {
         self.append_inner(input.into(), None).await
     }
@@ -953,14 +959,13 @@ impl S2Stream {
         input: impl Into<AppendInput>,
         stream_config: StreamConfig,
     ) -> Result<AppendAck, AppendError> {
-        let header = encode_stream_config(&stream_config);
-        self.append_inner(input.into(), Some(&header)).await
+        self.append_inner(input.into(), Some(&stream_config)).await
     }
 
     async fn append_inner(
         &self,
         input: AppendInput,
-        stream_config: Option<&HeaderValue>,
+        stream_config: Option<&StreamConfig>,
     ) -> Result<AppendAck, AppendError> {
         use prost::Message as _;
 
@@ -970,6 +975,7 @@ impl S2Stream {
             .map_err(|e| scope.context(1).format_validation(e))?;
         let expected_records = input.records().len() as u64;
         let proto_input = input.into_proto();
+        let headers = self.headers(stream_config);
         let req = self
             .client
             .post(stream_records_path(&self.name))
@@ -978,18 +984,13 @@ impl S2Stream {
             .body(proto_input.encode_to_vec())
             .build()
             .map(|mut req| {
-                set_header_opt(
-                    &mut req,
-                    &S2_ENCRYPTION_KEY_HEADER,
-                    self.encryption.as_ref(),
-                );
-                set_header_opt(&mut req, &STREAM_CONFIG_HEADER, stream_config);
+                headers.apply(&mut req);
                 req
             });
         let (ack, attempts): (api::stream::proto::AppendAck, u32) = self
             .client
             .unary(req, scope)
-            .append_retry_policy(self.client.base().retry_config().append_retry_policy)
+            .append_retry_policy()
             .send_proto::<_, AppendError>()
             .await?;
         Ok(AppendAck::try_from_proto(
@@ -1004,7 +1005,7 @@ impl S2Stream {
     /// Accepts a [`ReadInput`] or a [`ReadStart`](crate::types::ReadStart).
     pub async fn read(&self, input: impl Into<ReadInput>) -> Result<ReadBatch, ReadError> {
         let (start, end, stream_config) = input.into().into_api_parts();
-        let stream_config = stream_config.as_ref().map(encode_stream_config);
+        let headers = self.headers(stream_config.as_ref());
         let scope = self.client.stream_scope("read", &self.name, true);
         let mut builder = self
             .client
@@ -1021,12 +1022,7 @@ impl S2Stream {
             );
         }
         let req = builder.build().map(|mut req| {
-            set_header_opt(
-                &mut req,
-                &S2_ENCRYPTION_KEY_HEADER,
-                self.encryption.as_ref(),
-            );
-            set_header_opt(&mut req, &STREAM_CONFIG_HEADER, stream_config.as_ref());
+            headers.apply(&mut req);
             req
         });
         let (batch, _): (api::stream::proto::ReadBatch, u32) = self

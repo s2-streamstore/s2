@@ -50,7 +50,7 @@ rustls = { workspace = true }
 s2-api = { workspace = true }
 s2-common = { workspace = true }
 secrecy = { workspace = true }
-serde = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 serde_urlencoded = "0.7"
 thiserror = { workspace = true }
@@ -74,6 +74,32 @@ tokio-shared-rt = "0.1"
 # `doc-scrape-examples` requires *any* one example to specify the option.
 name = "create_basin"
 doc-scrape-examples = true
+
+# Docs snippet harnesses contain `// ANCHOR:` markers and are rendered on s2.dev rather than scraped
+# into rustdoc pages.
+[[example]]
+name = "docs_account_and_basins"
+doc-scrape-examples = false
+
+[[example]]
+name = "docs_configuration"
+doc-scrape-examples = false
+
+[[example]]
+name = "docs_encryption"
+doc-scrape-examples = false
+
+[[example]]
+name = "docs_metrics"
+doc-scrape-examples = false
+
+[[example]]
+name = "docs_overview"
+doc-scrape-examples = false
+
+[[example]]
+name = "docs_streams"
+doc-scrape-examples = false
 
 [[test]]
 name = "conformance"

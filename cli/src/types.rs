@@ -1051,12 +1051,9 @@ pub struct AccessTokenScope {
 impl From<sdk::types::AccessTokenScope> for AccessTokenScope {
     fn from(scope: sdk::types::AccessTokenScope) -> Self {
         AccessTokenScope {
-            basins: scope.basins().cloned().and_then(BasinMatcher::from_sdk),
-            streams: scope.streams().cloned().and_then(StreamMatcher::from_sdk),
-            access_tokens: scope
-                .access_tokens()
-                .cloned()
-                .and_then(AccessTokenMatcher::from_sdk),
+            basins: BasinMatcher::from_sdk(scope.basins().clone()),
+            streams: StreamMatcher::from_sdk(scope.streams().clone()),
+            access_tokens: AccessTokenMatcher::from_sdk(scope.access_tokens().clone()),
             op_group_perms: scope.op_group_perms().map(Into::into),
             ops: scope.ops().iter().cloned().map(Operation::from).collect(),
         }

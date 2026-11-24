@@ -1,10 +1,6 @@
 use std::time::Duration;
 
 use futures::{Stream, StreamExt, TryStreamExt, stream::FuturesOrdered};
-use s2_api::v1::{
-    access::AccessTokenInfo as ApiAccessTokenInfo,
-    config::{BasinConfig as ApiBasinConfig, StreamConfig as ApiStreamConfig},
-};
 use s2_sdk::{
     self as sdk, S2, S2Stream,
     producer::{ProducerConfig, RecordAck},
@@ -122,12 +118,6 @@ pub async fn get_basin_config(
         .map_err(|e| CliError::op(OpKind::GetBasinConfig, e))
 }
 
-pub async fn get_basin_config_api(s2: &S2, basin: &BasinName) -> Result<ApiBasinConfig, CliError> {
-    s2.get_basin_config_api(basin.clone())
-        .await
-        .map_err(|e| CliError::op(OpKind::GetBasinConfig, e))
-}
-
 pub async fn reconfigure_basin(
     s2: &S2,
     args: ReconfigureBasinArgs,
@@ -212,12 +202,9 @@ pub async fn list_access_tokens(
     }
 }
 
-pub async fn get_access_token_api(
-    s2: &S2,
-    id: AccessTokenId,
-) -> Result<ApiAccessTokenInfo, CliError> {
+pub async fn get_access_token(s2: &S2, id: AccessTokenId) -> Result<AccessTokenInfo, CliError> {
     let page = s2
-        .list_access_tokens_api(
+        .list_access_tokens(
             ListAccessTokensInput::new()
                 .with_prefix(id.clone().into())
                 .with_limit(1),
@@ -225,7 +212,7 @@ pub async fn get_access_token_api(
         .await
         .map_err(|e| CliError::op(OpKind::ListAccessTokens, e))?;
 
-    page.access_tokens
+    page.values
         .into_iter()
         .find(|info| info.id == id)
         .ok_or_else(|| CliError::AccessTokenNotFound(id.to_string()))
@@ -608,17 +595,6 @@ pub async fn get_stream_config(
         .map_err(|e| CliError::op(OpKind::GetStreamConfig, e))
 }
 
-pub async fn get_stream_config_api(
-    s2: &S2,
-    uri: S2BasinAndStreamUri,
-) -> Result<ApiStreamConfig, CliError> {
-    let basin = s2.basin(uri.basin);
-    basin
-        .get_stream_config_api(uri.stream)
-        .await
-        .map_err(|e| CliError::op(OpKind::GetStreamConfig, e))
-}
-
 pub async fn reconfigure_stream(
     s2: &S2,
     args: ReconfigureStreamArgs,
@@ -678,8 +654,6 @@ pub fn read(
     args: &ReadArgs,
     encryption_key: Option<&EncryptionKey>,
 ) -> Result<ReadBatchSession, CliError> {
-    use std::time::SystemTime;
-
     let stream = stream_with_encryption(s2, args.uri.clone(), encryption_key);
 
     let from = match (args.seq_num, args.timestamp, args.tail_offset, args.ago) {
@@ -687,12 +661,9 @@ pub fn read(
         (None, Some(ts), None, None) => ReadStart::Timestamp(ts),
         (None, None, Some(offset), None) => ReadStart::TailOffset(offset),
         (None, None, None, Some(ago)) => {
-            let ts = SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap()
-                .as_millis()
-                .saturating_sub(ago.as_millis()) as u64;
-            ReadStart::Timestamp(ts)
+            let now_ms = Timestamp::now().as_millisecond().max(0) as u64;
+            let ago_ms = u64::try_from(ago.as_millis()).unwrap_or(u64::MAX);
+            ReadStart::Timestamp(now_ms.saturating_sub(ago_ms))
         }
         (None, None, None, None) => ReadStart::TailOffset(0),
         _ => unreachable!("clap ensures only one start option"),

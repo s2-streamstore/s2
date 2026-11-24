@@ -102,8 +102,10 @@ Choose the append surface that matches your workload:
 Every operation returns the narrowest flat error enum for its surface:
 
 * [`RequestError`](error::RequestError) — account, basin, stream-management, and metrics ops
-* [`ReadError`](error::ReadError) / [`ReadSessionError`](error::ReadSessionError) — unary and streaming reads
+* [`ReadError`](error::ReadError) / [`ReadSessionError`](error::ReadSessionError) — `check_tail`, unary reads, and continuous read sessions
 * [`AppendError`](error::AppendError) / [`AppendSessionError`](error::AppendSessionError) — unary appends, append sessions, and producers
+* [`ClientClosedError`](error::ClientClosedError) — returned synchronously by session/producer openers when the client has been closed via [`S2::close`]
+* [`ValidationError`](error::ValidationError) — returned by client constructors, [`with_retry`](S2::with_retry), and validated type builders
 
 Every operation error converts into [`S2Error`] and provides
 [`is_retryable`](S2Error::is_retryable),
@@ -150,14 +152,14 @@ store). Optional features:
 * Provider resolution order for HTTPS endpoints:
   1. An explicit provider set on [`S2Config`] (`with_rustls_crypto_provider`,
      `with_rustls_aws_lc_rs_crypto_provider`, or `with_rustls_ring_crypto_provider`).
-  2. Rustls's process-global default installed via `CryptoProvider::install_default()` (for
+  2. Rustls's process-global default installed via [`CryptoProvider::install_default`](types::CryptoProvider::install_default) (for
      example, a FIPS-validated provider).
   3. Compile-time feature fallback (`rustls-aws-lc-rs`, then `rustls-ring`).
 
   Plaintext `http://` endpoints do not require a TLS provider. When building with
   `default-features = false`, enable at least one root-store feature (`rustls-native-roots` or
   `rustls-webpki-roots`) for HTTPS endpoints, plus a crypto provider (via feature,
-  `CryptoProvider::install_default()`, or [`S2Config::with_rustls_crypto_provider`]).
+  [`CryptoProvider::install_default`](types::CryptoProvider::install_default), or [`S2Config::with_rustls_crypto_provider`]).
 
 # Integration tests with s2-lite
 
@@ -191,8 +193,8 @@ issue.
 
 mod api;
 mod client;
-mod frame_signal;
 mod reconnect;
+mod send_gate;
 mod session;
 
 pub mod batching;
@@ -213,7 +215,10 @@ pub mod append_session {
         AppendSession, AppendSessionConfig, BatchSubmitPermit, BatchSubmitTicket,
     };
 }
-/// Continuous read sessions.
+/// Continuous read sessions for streaming records or batches with automatic reconnect.
+///
+/// See [`ReadSession`](read_session::ReadSession) and
+/// [`ReadBatchSession`](read_session::ReadBatchSession).
 pub mod read_session {
     pub use crate::session::read::{
         CaughtUp, ReadBatchSession, ReadSession, ReadSessionConfig, ReadSessionRetryPolicy,

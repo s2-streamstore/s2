@@ -1,10 +1,11 @@
 //! Errors returned by the SDK.
 //!
-//! Client construction (`S2::new`, `S2::from_env`) returns [`ValidationError`], and synchronous
-//! session openers (`append_session`, `producer`, `read_session`, `read_batch_session`) return
-//! [`ClientClosedError`]. Every other operation returns the narrowest error enum for its surface
-//! ([`RequestError`], [`ReadError`], [`AppendError`], [`AppendSessionError`], or
-//! [`ReadSessionError`]), and every operation error converts into the catch-all [`S2Error`].
+//! Client construction and retry overrides (`S2::new`, `S2::from_env`, `with_retry`) return
+//! [`ValidationError`], and synchronous session openers (`append_session`, `producer`,
+//! `read_session`, `read_batch_session`) return [`ClientClosedError`]. Every other operation
+//! returns the narrowest error enum for its surface ([`RequestError`], [`ReadError`],
+//! [`AppendError`], [`AppendSessionError`], or [`ReadSessionError`]), and every operation error
+//! converts into the catch-all [`S2Error`].
 //!
 //! Every error exposes [`is_retryable`](S2Error::is_retryable) (whether repeating the operation may
 //! succeed) and [`has_no_side_effects`](S2Error::has_no_side_effects) (whether the failed attempt
@@ -110,13 +111,17 @@ impl ErrorContext {
         )
     }
 
-    pub(crate) fn is_read_only(&self) -> bool {
+    fn is_read_only(&self) -> bool {
         self.0.as_ref().is_some_and(|inner| inner.read_only)
     }
 
-    pub(crate) fn set_read_only(&mut self) {
-        if !self.is_read_only() {
-            self.inner_mut().read_only = true;
+    fn set_read_only(&mut self) {
+        self.set_read_only_flag(true);
+    }
+
+    fn set_read_only_flag(&mut self, read_only: bool) {
+        if self.is_read_only() != read_only {
+            self.inner_mut().read_only = read_only;
         }
     }
 
@@ -136,7 +141,7 @@ impl ErrorContext {
         self
     }
 
-    pub(crate) fn merge_missing(&mut self, other: &ErrorContext) {
+    fn merge_missing(&mut self, other: &ErrorContext) {
         let Some(other_inner) = other.0.as_deref() else {
             return;
         };
@@ -168,11 +173,7 @@ impl ErrorContext {
         inner.read_only = inner.read_only || other_inner.read_only;
     }
 
-    pub(crate) fn format_with(
-        &self,
-        f: &mut fmt::Formatter<'_>,
-        detail: impl fmt::Display,
-    ) -> fmt::Result {
+    fn format_with(&self, f: &mut fmt::Formatter<'_>, detail: impl fmt::Display) -> fmt::Result {
         if let Some(inner) = self.0.as_deref()
             && let Some(op) = inner.operation
         {
@@ -251,7 +252,8 @@ impl fmt::Debug for ServerError {
         let mut ds = f.debug_struct("ServerError");
         ds.field("status", &self.status)
             .field("code", &self.code)
-            .field("message", &self.message);
+            .field("message", &self.message)
+            .field("has_no_side_effects", &self.has_no_side_effects());
         self.context.debug_fields(&mut ds);
         ds.finish()
     }
@@ -299,20 +301,6 @@ impl ServerError {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn new_for_test(
-        status: StatusCode,
-        code: Option<&str>,
-        message: impl Into<String>,
-    ) -> Self {
-        Self {
-            status,
-            code: code.map(str::to_owned),
-            message: message.into(),
-            context: ErrorContext::default(),
-        }
-    }
-
     pub(crate) fn with_context(mut self, context: &ErrorContext) -> Self {
         self.context.merge_missing(context);
         self
@@ -346,9 +334,6 @@ impl ServerError {
     /// Whether retrying the request may succeed.
     #[must_use]
     pub fn is_retryable(&self) -> bool {
-        if self.status == StatusCode::PRECONDITION_FAILED {
-            return false;
-        }
         if let Some(known) = self.known_code() {
             return known.is_retryable();
         }
@@ -373,19 +358,19 @@ impl ServerError {
                 .is_some_and(ErrorCode::has_no_side_effects)
     }
 
-    pub(crate) fn is_authentication_error(&self) -> bool {
+    fn is_authentication_error(&self) -> bool {
         self.has_error_code(ErrorCode::Authn)
     }
 
-    pub(crate) fn is_server_draining(&self) -> bool {
+    fn is_server_draining(&self) -> bool {
         self.has_error_code(ErrorCode::ServerDraining)
     }
 
-    pub(crate) fn is_hot_server(&self) -> bool {
+    fn is_hot_server(&self) -> bool {
         self.has_error_code(ErrorCode::HotServer)
     }
 
-    pub(crate) fn should_retire_connection(&self) -> bool {
+    fn should_retire_connection(&self) -> bool {
         self.is_server_draining() || self.is_hot_server()
     }
 }
@@ -417,12 +402,22 @@ impl std::error::Error for ServerError {}
 
 /// A `412` append error indicating that `match_seq_num` did not match the stream's next sequence
 /// number.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[non_exhaustive]
 pub struct SeqNumMismatchError {
     /// The sequence number the stream will assign next.
     pub assignable_seq_num: u64,
     server: Box<ServerError>,
+}
+
+impl fmt::Debug for SeqNumMismatchError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut ds = f.debug_struct("SeqNumMismatchError");
+        ds.field("assignable_seq_num", &self.assignable_seq_num)
+            .field("status", &self.server.status);
+        self.server.context.debug_fields(&mut ds);
+        ds.finish()
+    }
 }
 
 impl SeqNumMismatchError {
@@ -449,7 +444,7 @@ impl SeqNumMismatchError {
     }
 
     pub(crate) fn with_context(mut self, context: &ErrorContext) -> Self {
-        *self.server = (*self.server).with_context(context);
+        self.server.context.merge_missing(context);
         self
     }
 
@@ -488,12 +483,22 @@ impl std::error::Error for SeqNumMismatchError {}
 
 /// A `412` append error indicating that `fencing_token` did not match the stream's current fencing
 /// token.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[non_exhaustive]
 pub struct FencingTokenMismatchError {
     /// The stream's current fencing token.
     pub current_fencing_token: FencingToken,
     server: Box<ServerError>,
+}
+
+impl fmt::Debug for FencingTokenMismatchError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut ds = f.debug_struct("FencingTokenMismatchError");
+        ds.field("current_fencing_token", &self.current_fencing_token)
+            .field("status", &self.server.status);
+        self.server.context.debug_fields(&mut ds);
+        ds.finish()
+    }
 }
 
 impl FencingTokenMismatchError {
@@ -521,7 +526,7 @@ impl FencingTokenMismatchError {
     }
 
     pub(crate) fn with_context(mut self, context: &ErrorContext) -> Self {
-        *self.server = (*self.server).with_context(context);
+        self.server.context.merge_missing(context);
         self
     }
 
@@ -559,12 +564,22 @@ impl fmt::Display for FencingTokenMismatchError {
 impl std::error::Error for FencingTokenMismatchError {}
 
 /// A `416` read error indicating that the requested position has not been written.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[non_exhaustive]
 pub struct ReadUnwrittenError {
     /// The stream's current tail position.
     pub tail: StreamPosition,
     server: Box<ServerError>,
+}
+
+impl fmt::Debug for ReadUnwrittenError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut ds = f.debug_struct("ReadUnwrittenError");
+        ds.field("tail", &self.tail)
+            .field("status", &self.server.status);
+        self.server.context.debug_fields(&mut ds);
+        ds.finish()
+    }
 }
 
 impl ReadUnwrittenError {
@@ -591,7 +606,7 @@ impl ReadUnwrittenError {
     }
 
     pub(crate) fn with_context(mut self, context: &ErrorContext) -> Self {
-        *self.server = (*self.server).with_context(context).into_read_only();
+        self.server.context.merge_missing(context);
         self
     }
 
@@ -685,6 +700,15 @@ macro_rules! define_message_error {
             }
 
             $(
+                /// Mark whether the failure occurred on a read-only operation with no side effects.
+                ///
+                /// Intended for building fixtures in downstream tests.
+                #[must_use]
+                pub fn with_no_side_effects(mut self, no_side_effects: bool) -> Self {
+                    self.context.set_read_only_flag(no_side_effects);
+                    self
+                }
+
                 pub(crate) fn $into_ro(mut self) -> Self {
                     self.context.set_read_only();
                     self
@@ -764,6 +788,9 @@ impl ConnectionLostError {
     #[must_use]
     pub fn with_no_side_effects(mut self, no_side_effects: bool) -> Self {
         self.no_side_effects = no_side_effects;
+        if !no_side_effects {
+            self.context.set_read_only_flag(false);
+        }
         self
     }
 
@@ -863,6 +890,9 @@ impl ProtocolError {
     #[must_use]
     pub fn with_no_side_effects(mut self, no_side_effects: bool) -> Self {
         self.no_side_effects = no_side_effects;
+        if !no_side_effects {
+            self.context.set_read_only_flag(false);
+        }
         self
     }
 
@@ -1094,7 +1124,9 @@ impl<E: fmt::Debug> fmt::Debug for SessionClosedError<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut ds = f.debug_struct("SessionClosedError");
         ds.field("failure", &self.failure);
-        self.context.debug_fields(&mut ds);
+        if self.failure.is_none() {
+            self.context.debug_fields(&mut ds);
+        }
         ds.finish()
     }
 }
@@ -1146,6 +1178,18 @@ impl<E> SessionClosedError<E> {
             context: self.context,
         }
     }
+
+    pub(crate) fn with_context(
+        mut self,
+        context: &ErrorContext,
+        map_failure: impl FnOnce(E, &ErrorContext) -> E,
+    ) -> Self {
+        self.context.merge_missing(context);
+        self.failure = self
+            .failure
+            .map(|failure| Box::new(map_failure(*failure, context)));
+        self
+    }
 }
 
 impl From<SessionClosedError<AppendSessionError>> for S2Error {
@@ -1181,7 +1225,6 @@ macro_rules! delegate_is_retryable {
     ($self:expr, [$($variant:ident),* $(,)?]) => {
         match $self {
             $(Self::$variant(e) => e.is_retryable(),)*
-            Self::Validation(_) => false,
             #[cfg(feature = "_hidden")]
             Self::AccessTokenProvider(e) => e.is_retryable(),
         }
@@ -1192,18 +1235,33 @@ macro_rules! delegate_has_no_side_effects {
     ($self:expr, [$($variant:ident),* $(,)?]) => {
         match $self {
             $(Self::$variant(e) => e.has_no_side_effects(),)*
-            Self::Validation(_) => true,
             #[cfg(feature = "_hidden")]
             Self::AccessTokenProvider(_) => true,
         }
     };
 }
 
+macro_rules! impl_read_only_from {
+    ($dst:ident { $($variant:ident($ty:ty)),* $(,)? }) => {
+        $(
+            impl From<$ty> for $dst {
+                fn from(error: $ty) -> Self {
+                    Self::$variant(error.into_read_only())
+                }
+            }
+        )*
+    };
+}
+
+// Both `impl_read_only_from!` and `read_only` arms below mark read-origin leaf errors as
+// definite: `From<Leaf>` covers SDK/builder conversions, while `read_only` covers values
+// constructed directly via public tuple variants (e.g.
+// `ReadError::Timeout(TimeoutError::new(..))`).
 macro_rules! impl_error_upcast {
     (
         $src:ident => $dst:ident {
             direct: [$($direct:ident),* $(,)?],
-            read_only: [$($ro:ident),* $(,)?],
+            $(read_only: [$($ro:ident),* $(,)?],)?
             mapped: [$($mapped:ident),* $(,)?],
         }
     ) => {
@@ -1211,7 +1269,7 @@ macro_rules! impl_error_upcast {
             fn from(error: $src) -> Self {
                 match error {
                     $($src::$direct(e) => Self::$direct(e),)*
-                    $($src::$ro(e) => Self::$ro(e.into_read_only()),)*
+                    $($($src::$ro(e) => Self::$ro(e.into_read_only()),)*)?
                     $($src::$mapped(e) => Self::$mapped(e.map($dst::from)),)*
                     #[cfg(feature = "_hidden")]
                     $src::AccessTokenProvider(e) => Self::AccessTokenProvider(e),
@@ -1267,7 +1325,7 @@ pub enum S2Error {
     #[cfg(feature = "_hidden")]
     #[doc(hidden)]
     #[error("access token provider failed: {0}")]
-    AccessTokenProvider(crate::types::AccessTokenProviderError),
+    AccessTokenProvider(#[source] crate::types::AccessTokenProviderError),
 }
 
 impl S2Error {
@@ -1283,6 +1341,7 @@ impl S2Error {
                 ReadUnwritten,
                 IndefiniteAppend,
                 SessionClosed,
+                Validation,
                 Connect,
                 ConnectionLost,
                 Timeout,
@@ -1305,6 +1364,7 @@ impl S2Error {
                 ReadUnwritten,
                 IndefiniteAppend,
                 SessionClosed,
+                Validation,
                 Connect,
                 ConnectionLost,
                 Timeout,
@@ -1395,7 +1455,7 @@ pub enum RequestError {
     #[cfg(feature = "_hidden")]
     #[doc(hidden)]
     #[error("access token provider failed: {0}")]
-    AccessTokenProvider(crate::types::AccessTokenProviderError),
+    AccessTokenProvider(#[source] crate::types::AccessTokenProviderError),
 }
 
 impl RequestError {
@@ -1406,6 +1466,7 @@ impl RequestError {
             self,
             [
                 Server,
+                Validation,
                 Connect,
                 ConnectionLost,
                 Timeout,
@@ -1423,6 +1484,7 @@ impl RequestError {
             self,
             [
                 Server,
+                Validation,
                 Connect,
                 ConnectionLost,
                 Timeout,
@@ -1458,7 +1520,6 @@ impl RequestError {
 
 impl_error_upcast!(RequestError => S2Error {
     direct: [Server, Validation, Connect, ConnectionLost, Timeout, Protocol, ClientClosed, Aborted],
-    read_only: [],
     mapped: [],
 });
 
@@ -1468,7 +1529,7 @@ impl_error_upcast!(RequestError => S2Error {
 pub enum ReadError {
     /// A non-2xx HTTP response from the server.
     #[error(transparent)]
-    Server(#[from] ServerError),
+    Server(ServerError),
     /// The requested read position has not been written.
     #[error(transparent)]
     ReadUnwritten(#[from] ReadUnwrittenError),
@@ -1480,24 +1541,32 @@ pub enum ReadError {
     Connect(#[from] ConnectError),
     /// A request or connection broke, or a response ended prematurely.
     #[error(transparent)]
-    ConnectionLost(#[from] ConnectionLostError),
+    ConnectionLost(ConnectionLostError),
     /// The request timed out.
     #[error(transparent)]
-    Timeout(#[from] TimeoutError),
+    Timeout(TimeoutError),
     /// A successful response violated protocol checks.
     #[error(transparent)]
-    Protocol(#[from] ProtocolError),
+    Protocol(ProtocolError),
     /// A call was made on a closed client.
     #[error(transparent)]
     ClientClosed(#[from] ClientClosedError),
     /// The in-flight read was aborted (for example by client `close()`).
     #[error(transparent)]
-    Aborted(#[from] AbortedError),
+    Aborted(AbortedError),
     #[cfg(feature = "_hidden")]
     #[doc(hidden)]
     #[error("access token provider failed: {0}")]
-    AccessTokenProvider(crate::types::AccessTokenProviderError),
+    AccessTokenProvider(#[source] crate::types::AccessTokenProviderError),
 }
+
+impl_read_only_from!(ReadError {
+    Server(ServerError),
+    ConnectionLost(ConnectionLostError),
+    Timeout(TimeoutError),
+    Protocol(ProtocolError),
+    Aborted(AbortedError),
+});
 
 impl ReadError {
     /// Whether retrying the operation may succeed.
@@ -1508,6 +1577,7 @@ impl ReadError {
             [
                 Server,
                 ReadUnwritten,
+                Validation,
                 Connect,
                 ConnectionLost,
                 Timeout,
@@ -1594,7 +1664,7 @@ pub enum AppendError {
     #[cfg(feature = "_hidden")]
     #[doc(hidden)]
     #[error("access token provider failed: {0}")]
-    AccessTokenProvider(crate::types::AccessTokenProviderError),
+    AccessTokenProvider(#[source] crate::types::AccessTokenProviderError),
 }
 
 impl AppendError {
@@ -1608,6 +1678,7 @@ impl AppendError {
                 SeqNumMismatch,
                 FencingTokenMismatch,
                 IndefiniteAppend,
+                Validation,
                 Connect,
                 ConnectionLost,
                 Timeout,
@@ -1628,6 +1699,7 @@ impl AppendError {
                 SeqNumMismatch,
                 FencingTokenMismatch,
                 IndefiniteAppend,
+                Validation,
                 Connect,
                 ConnectionLost,
                 Timeout,
@@ -1677,7 +1749,6 @@ impl AppendError {
 
 impl_error_upcast!(AppendError => S2Error {
     direct: [Server, SeqNumMismatch, FencingTokenMismatch, Validation, Connect, ConnectionLost, Timeout, Protocol, ClientClosed, Aborted],
-    read_only: [],
     mapped: [IndefiniteAppend],
 });
 
@@ -1726,7 +1797,7 @@ pub enum AppendSessionError {
     #[cfg(feature = "_hidden")]
     #[doc(hidden)]
     #[error("access token provider failed: {0}")]
-    AccessTokenProvider(crate::types::AccessTokenProviderError),
+    AccessTokenProvider(#[source] crate::types::AccessTokenProviderError),
 }
 
 impl AppendSessionError {
@@ -1741,6 +1812,7 @@ impl AppendSessionError {
                 FencingTokenMismatch,
                 IndefiniteAppend,
                 SessionClosed,
+                Validation,
                 Connect,
                 ConnectionLost,
                 Timeout,
@@ -1762,6 +1834,7 @@ impl AppendSessionError {
                 FencingTokenMismatch,
                 IndefiniteAppend,
                 SessionClosed,
+                Validation,
                 Connect,
                 ConnectionLost,
                 Timeout,
@@ -1817,19 +1890,14 @@ impl AppendSessionError {
         }
     }
 
-    pub(crate) fn is_server_draining(&self) -> bool {
-        matches!(self, Self::Server(e) if e.is_server_draining())
-    }
-
     pub(crate) fn with_context(self, context: &ErrorContext) -> Self {
         match self {
             Self::Server(e) => Self::Server(e.with_context(context)),
             Self::SeqNumMismatch(e) => Self::SeqNumMismatch(e.with_context(context)),
             Self::FencingTokenMismatch(e) => Self::FencingTokenMismatch(e.with_context(context)),
             Self::IndefiniteAppend(e) => Self::IndefiniteAppend(e.map(|i| i.with_context(context))),
-            Self::SessionClosed(mut e) => {
-                e.context.merge_missing(context);
-                Self::SessionClosed(e)
+            Self::SessionClosed(e) => {
+                Self::SessionClosed(e.with_context(context, Self::with_context))
             }
             Self::Validation(e) => Self::Validation(e),
             Self::Connect(e) => Self::Connect(e.with_context(context)),
@@ -1846,13 +1914,11 @@ impl AppendSessionError {
 
 impl_error_upcast!(AppendError => AppendSessionError {
     direct: [Server, SeqNumMismatch, FencingTokenMismatch, Validation, Connect, ConnectionLost, Timeout, Protocol, ClientClosed, Aborted],
-    read_only: [],
     mapped: [IndefiniteAppend],
 });
 
 impl_error_upcast!(AppendSessionError => S2Error {
     direct: [Server, SeqNumMismatch, FencingTokenMismatch, Validation, Connect, ConnectionLost, Timeout, Protocol, ClientClosed, Aborted],
-    read_only: [],
     mapped: [IndefiniteAppend, SessionClosed],
 });
 
@@ -1864,7 +1930,7 @@ impl_error_upcast!(AppendSessionError => S2Error {
 pub enum ReadSessionError {
     /// A non-2xx HTTP response from the server (including session terminal frames).
     #[error(transparent)]
-    Server(#[from] ServerError),
+    Server(ServerError),
     /// The requested read position has not been written.
     #[error(transparent)]
     ReadUnwritten(#[from] ReadUnwrittenError),
@@ -1879,24 +1945,32 @@ pub enum ReadSessionError {
     Connect(#[from] ConnectError),
     /// The session stream or connection broke, or ended prematurely.
     #[error(transparent)]
-    ConnectionLost(#[from] ConnectionLostError),
+    ConnectionLost(ConnectionLostError),
     /// Request or heartbeat timeout elapsed.
     #[error(transparent)]
-    Timeout(#[from] TimeoutError),
+    Timeout(TimeoutError),
     /// A response or session frame violated protocol checks.
     #[error(transparent)]
-    Protocol(#[from] ProtocolError),
+    Protocol(ProtocolError),
     /// A call was made on a closed client.
     #[error(transparent)]
     ClientClosed(#[from] ClientClosedError),
     /// The session was aborted (for example by client `close()`).
     #[error(transparent)]
-    Aborted(#[from] AbortedError),
+    Aborted(AbortedError),
     #[cfg(feature = "_hidden")]
     #[doc(hidden)]
     #[error("access token provider failed: {0}")]
-    AccessTokenProvider(crate::types::AccessTokenProviderError),
+    AccessTokenProvider(#[source] crate::types::AccessTokenProviderError),
 }
+
+impl_read_only_from!(ReadSessionError {
+    Server(ServerError),
+    ConnectionLost(ConnectionLostError),
+    Timeout(TimeoutError),
+    Protocol(ProtocolError),
+    Aborted(AbortedError),
+});
 
 impl ReadSessionError {
     /// Whether retrying the operation may succeed.
@@ -1908,6 +1982,7 @@ impl ReadSessionError {
                 Server,
                 ReadUnwritten,
                 SessionClosed,
+                Validation,
                 Connect,
                 ConnectionLost,
                 Timeout,
@@ -1959,18 +2034,13 @@ impl ReadSessionError {
         }
     }
 
-    pub(crate) fn is_server_draining(&self) -> bool {
-        matches!(self, Self::Server(e) if e.is_server_draining())
-    }
-
     pub(crate) fn with_context(self, context: &ErrorContext) -> Self {
         let context = context.clone().into_read_only();
         match self {
             Self::Server(e) => Self::Server(e.with_context(&context)),
             Self::ReadUnwritten(e) => Self::ReadUnwritten(e.with_context(&context)),
-            Self::SessionClosed(mut e) => {
-                e.context.merge_missing(&context);
-                Self::SessionClosed(e)
+            Self::SessionClosed(e) => {
+                Self::SessionClosed(e.with_context(&context, Self::with_context))
             }
             Self::Validation(e) => Self::Validation(e),
             Self::Connect(e) => Self::Connect(e.with_context(&context)),
@@ -2062,6 +2132,15 @@ pub(crate) trait TransportError:
     fn is_authentication_error(&self) -> bool {
         self.server_error()
             .is_some_and(ServerError::is_authentication_error)
+    }
+
+    fn is_server_draining(&self) -> bool {
+        self.server_error()
+            .is_some_and(ServerError::is_server_draining)
+    }
+
+    fn is_retryable_or_auth_refresh(&self, refreshes_tokens: bool) -> bool {
+        self.is_retryable() || (refreshes_tokens && self.is_authentication_error())
     }
 
     fn should_retire_connection(&self) -> bool {
@@ -2229,7 +2308,7 @@ pub(crate) fn classify_http_error<E: TransportError>(
             if hyper_err.is_parse() {
                 return ProtocolError::new_with_context(detail, context).into();
             }
-            let refused = source_err::<h2::Error>(&hyper_err)
+            let refused = find_source_err::<h2::Error>(&hyper_err)
                 .is_some_and(|e| e.is_reset() && e.reason() == Some(h2::Reason::REFUSED_STREAM));
             ConnectionLostError::new_with_context(detail, refused, context).into()
         }
@@ -2254,7 +2333,9 @@ pub(crate) fn classify_http_error<E: TransportError>(
     }
 }
 
-fn source_err<T: std::error::Error + 'static>(err: &dyn std::error::Error) -> Option<&T> {
+pub(crate) fn find_source_err<'a, T: std::error::Error + 'static>(
+    err: &'a (dyn std::error::Error + 'static),
+) -> Option<&'a T> {
     let mut source = err.source();
     while let Some(err) = source {
         if let Some(err) = err.downcast_ref::<T>() {
@@ -2272,7 +2353,11 @@ mod tests {
     use super::*;
 
     fn response(status: StatusCode, code: Option<&str>) -> ServerError {
-        ServerError::new_for_test(status, code, "test")
+        let err = ServerError::new(status, "test");
+        match code {
+            Some(code) => err.with_code(code),
+            None => err,
+        }
     }
 
     // spec: r1 E3

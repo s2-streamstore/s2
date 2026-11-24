@@ -9,7 +9,7 @@ use std::{
     time::Duration,
 };
 
-use futures_core::Stream;
+use futures_core::{FusedStream, Stream};
 use pin_project_lite::pin_project;
 use s2_common::read_extent::CountOrBytes;
 use tokio::time::{Instant, Sleep};
@@ -401,6 +401,16 @@ where
     }
 }
 
+impl<S, R> FusedStream for Batcher<S>
+where
+    S: Stream<Item = R>,
+    R: Into<AppendRecord>,
+{
+    fn is_terminated(&self) -> bool {
+        self.core.terminated
+    }
+}
+
 pin_project! {
     /// A [`Stream`] that batches records from a fallible stream (`Result<R, E>`) into
     /// [`AppendInput`]s.
@@ -464,12 +474,22 @@ where
     }
 }
 
+impl<S, R, E> FusedStream for TryBatcher<S>
+where
+    S: Stream<Item = Result<R, E>>,
+    R: Into<AppendRecord>,
+{
+    fn is_terminated(&self) -> bool {
+        self.core.terminated
+    }
+}
+
 impl<S> fmt::Debug for Batcher<S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Batcher")
             .field("config", &self.core.config)
             .field("buffered_records", &self.core.acc.len())
-            .field("done", &self.core.done)
+            .field("terminated", &self.core.terminated)
             .finish_non_exhaustive()
     }
 }
@@ -479,7 +499,7 @@ impl<S> fmt::Debug for TryBatcher<S> {
         f.debug_struct("TryBatcher")
             .field("config", &self.core.config)
             .field("buffered_records", &self.core.acc.len())
-            .field("done", &self.core.done)
+            .field("terminated", &self.core.terminated)
             .finish_non_exhaustive()
     }
 }
@@ -624,16 +644,15 @@ impl Linger {
             .is_some_and(|sleep| sleep.poll(cx).is_ready())
     }
 
-    pub(crate) fn prepare_sleep(&mut self) -> bool {
-        self.ensure_sleep().is_some()
+    pub(crate) fn is_armed(&self) -> bool {
+        self.deadline.is_some()
     }
 
     pub(crate) async fn wait(&mut self) {
-        self.sleep
-            .as_mut()
-            .expect("Linger::prepare_sleep must return true before wait")
-            .as_mut()
-            .await
+        match self.ensure_sleep() {
+            Some(sleep) => sleep.await,
+            None => std::future::pending().await,
+        }
     }
 }
 
@@ -643,7 +662,8 @@ struct BatcherCore {
     match_seq: MatchSeqState,
     overflowed_record: Option<(AppendRecord, usize, Instant)>,
     linger: Linger,
-    done: bool,
+    exhausted: bool,
+    terminated: bool,
 }
 
 impl BatcherCore {
@@ -662,7 +682,8 @@ impl BatcherCore {
             match_seq,
             overflowed_record: None,
             linger,
-            done: false,
+            exhausted: false,
+            terminated: false,
         }
     }
 
@@ -688,7 +709,7 @@ impl BatcherCore {
         self.acc.clear();
         self.overflowed_record = None;
         self.linger.disarm();
-        self.done = true;
+        self.exhausted = true;
         Poll::Ready(Some(Err(err)))
     }
 
@@ -697,7 +718,8 @@ impl BatcherCore {
         cx: &mut Context<'_>,
         mut poll_input: impl FnMut(&mut Context<'_>) -> Poll<Option<Result<AppendRecord, E>>>,
     ) -> Poll<Option<Result<AppendInput, TryBatchError<E>>>> {
-        if self.done {
+        if self.exhausted {
+            self.terminated = true;
             return Poll::Ready(None);
         }
         if let Some(ref token) = self.config.fencing_token
@@ -767,10 +789,11 @@ impl BatcherCore {
                 }
                 Poll::Ready(None) => {
                     if !self.acc.is_empty() {
-                        self.done = true;
+                        self.exhausted = true;
                         return Poll::Ready(Some(Ok(self.take_batch())));
                     }
-                    self.done = true;
+                    self.exhausted = true;
+                    self.terminated = true;
                     return Poll::Ready(None);
                 }
                 Poll::Pending => {
@@ -977,11 +1000,14 @@ mod tests {
             vec![Ok(AppendRecord::new("ok")?), Err("boom")];
         let mut batcher = TryBatcher::new(futures_util::stream::iter(items), BatcherConfig::new());
 
+        assert!(!batcher.is_terminated());
         assert_matches!(
             batcher.next().await,
             Some(Err(TryBatchError::Input("boom")))
         );
+        assert!(!batcher.is_terminated());
         assert!(batcher.next().await.is_none());
+        assert!(batcher.is_terminated());
         Ok(())
     }
 

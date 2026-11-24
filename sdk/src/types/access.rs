@@ -13,7 +13,7 @@ use super::{Page, validate_rfc3339_timestamp};
 use crate::error::ValidationError;
 
 /// Input for [`list_access_tokens`](crate::S2::list_access_tokens) operation.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 #[must_use]
 pub struct ListAccessTokensInput {
     prefix: AccessTokenIdPrefix,
@@ -81,7 +81,7 @@ impl ListAccessTokensInput {
 }
 
 /// Input for [`list_all_access_tokens`](crate::S2::list_all_access_tokens) operation.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 #[must_use]
 pub struct ListAllAccessTokensInput {
     prefix: AccessTokenIdPrefix,
@@ -585,6 +585,12 @@ map_operations! {
     DeleteNetworkPolicy => (DeleteNetworkPolicy, "delete-network-policy"),
 }
 
+impl AsRef<str> for Operation {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
 impl fmt::Display for Operation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
@@ -644,9 +650,9 @@ impl_resource_matcher_conversions! {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 #[must_use]
 pub struct AccessTokenScope {
-    basins: Option<BasinMatcher>,
-    streams: Option<StreamMatcher>,
-    access_tokens: Option<AccessTokenMatcher>,
+    basins: BasinMatcher,
+    streams: StreamMatcher,
+    access_tokens: AccessTokenMatcher,
     op_group_perms: Option<OperationGroupPermissions>,
     ops: HashSet<Operation>,
 }
@@ -667,22 +673,22 @@ impl AccessTokenScope {
         Self::new().with_op_group_perms(op_group_perms)
     }
 
-    /// Return the permitted basins matcher, if any.
+    /// Return the permitted basins matcher (defaults to [`BasinMatcher::None`]).
     #[must_use]
-    pub fn basins(&self) -> Option<&BasinMatcher> {
-        self.basins.as_ref()
+    pub fn basins(&self) -> &BasinMatcher {
+        &self.basins
     }
 
-    /// Return the permitted streams matcher, if any.
+    /// Return the permitted streams matcher (defaults to [`StreamMatcher::None`]).
     #[must_use]
-    pub fn streams(&self) -> Option<&StreamMatcher> {
-        self.streams.as_ref()
+    pub fn streams(&self) -> &StreamMatcher {
+        &self.streams
     }
 
-    /// Return the permitted access tokens matcher, if any.
+    /// Return the permitted access tokens matcher (defaults to [`AccessTokenMatcher::None`]).
     #[must_use]
-    pub fn access_tokens(&self) -> Option<&AccessTokenMatcher> {
-        self.access_tokens.as_ref()
+    pub fn access_tokens(&self) -> &AccessTokenMatcher {
+        &self.access_tokens
     }
 
     /// Return the operation group permissions, if any.
@@ -715,39 +721,39 @@ impl AccessTokenScope {
 
     /// Set the permitted basins.
     ///
-    /// Defaults to no basins.
+    /// Defaults to [`BasinMatcher::None`].
     pub fn with_basins(self, basins: BasinMatcher) -> Self {
-        Self {
-            basins: Some(basins),
-            ..self
-        }
+        Self { basins, ..self }
     }
 
     /// Set the permitted streams.
     ///
-    /// Defaults to no streams.
+    /// Defaults to [`StreamMatcher::None`].
     pub fn with_streams(self, streams: StreamMatcher) -> Self {
-        Self {
-            streams: Some(streams),
-            ..self
-        }
+        Self { streams, ..self }
     }
 
     /// Set the permitted access tokens.
     ///
-    /// Defaults to no access tokens.
+    /// Defaults to [`AccessTokenMatcher::None`].
     pub fn with_access_tokens(self, access_tokens: AccessTokenMatcher) -> Self {
         Self {
-            access_tokens: Some(access_tokens),
+            access_tokens,
             ..self
         }
     }
 
     pub(crate) fn from_api(value: api::access::AccessTokenScope) -> Self {
         Self {
-            basins: value.basins.map(BasinMatcher::from_api),
-            streams: value.streams.map(StreamMatcher::from_api),
-            access_tokens: value.access_tokens.map(AccessTokenMatcher::from_api),
+            basins: value.basins.map(BasinMatcher::from_api).unwrap_or_default(),
+            streams: value
+                .streams
+                .map(StreamMatcher::from_api)
+                .unwrap_or_default(),
+            access_tokens: value
+                .access_tokens
+                .map(AccessTokenMatcher::from_api)
+                .unwrap_or_default(),
             op_group_perms: value.op_groups.map(OperationGroupPermissions::from_api),
             ops: value
                 .ops
@@ -758,9 +764,11 @@ impl AccessTokenScope {
 
     pub(crate) fn into_api(self) -> api::access::AccessTokenScope {
         api::access::AccessTokenScope {
-            basins: self.basins.map(BasinMatcher::into_api),
-            streams: self.streams.map(StreamMatcher::into_api),
-            access_tokens: self.access_tokens.map(AccessTokenMatcher::into_api),
+            basins: (!matches!(self.basins, BasinMatcher::None)).then(|| self.basins.into_api()),
+            streams: (!matches!(self.streams, StreamMatcher::None))
+                .then(|| self.streams.into_api()),
+            access_tokens: (!matches!(self.access_tokens, AccessTokenMatcher::None))
+                .then(|| self.access_tokens.into_api()),
             op_groups: self.op_group_perms.map(OperationGroupPermissions::into_api),
             ops: if self.ops.is_empty() {
                 None
@@ -840,7 +848,7 @@ impl IssueAccessTokenInput {
     /// Set the expiration time.
     ///
     /// Defaults to the expiration time of the requestor's access token passed via
-    /// [`S2Config::new`](crate::types::S2Config::new).
+    /// [`S2Config::new`](crate::S2Config::new).
     ///
     /// Accepts timestamps from `0000-01-01T00:00:00Z` through [`Timestamp::MAX`]
     /// (`9999-12-30T22:00:00.999999999Z`).

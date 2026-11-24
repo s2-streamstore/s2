@@ -99,9 +99,9 @@ fn open_enums_from_newer_service_preserve_unknown_wire_names() {
     }))
     .unwrap();
     let scope = AccessTokenScope::from_api(empty_matchers);
-    assert_eq!(scope.basins(), Some(&BasinMatcher::None));
-    assert_eq!(scope.streams(), Some(&StreamMatcher::None));
-    assert_eq!(scope.access_tokens(), Some(&AccessTokenMatcher::None));
+    assert_eq!(scope.basins(), &BasinMatcher::None);
+    assert_eq!(scope.streams(), &StreamMatcher::None);
+    assert_eq!(scope.access_tokens(), &AccessTokenMatcher::None);
 }
 
 #[test]

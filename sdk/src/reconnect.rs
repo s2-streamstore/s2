@@ -7,7 +7,7 @@ const ADVISED_RECONNECT_COOLDOWN: Duration = Duration::from_secs(60);
 
 /// Tracks advised reconnect cooldown so a session acts on server reconnect advice
 /// at most once per cooldown window and stays put if advised again sooner (`T6a`).
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 pub(crate) struct AdvisedReconnects {
     last: Option<Instant>,
     total_reconnects: u64,

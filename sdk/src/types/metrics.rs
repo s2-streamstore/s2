@@ -56,6 +56,12 @@ impl TimeseriesInterval {
     }
 }
 
+impl AsRef<str> for TimeseriesInterval {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
 impl fmt::Display for TimeseriesInterval {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
@@ -176,7 +182,7 @@ impl From<TimeRange> for TimeRangeAndInterval {
 }
 
 /// Account metric set to return.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum AccountMetricSet {
     /// Returns a [`LabelMetric`] representing all basins which had at least one stream within the
     /// specified time range.
@@ -248,7 +254,7 @@ impl AccountMetricSet {
 }
 
 /// Basin metric set to return.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum BasinMetricSet {
     /// Returns a [`GaugeMetric`] representing a timeseries of total stored bytes across all streams
     /// in the basin, with one observed value for each hour over the requested time range.
@@ -332,7 +338,7 @@ impl BasinMetricSet {
 }
 
 /// Stream metric set to return.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum StreamMetricSet {
     /// Returns a [`GaugeMetric`] representing a timeseries of total stored bytes for the stream,
     /// with one observed value for each minute over the requested time range.
@@ -388,6 +394,12 @@ impl MetricUnit {
             api::metrics::MetricUnit::Operations => Self::Operations,
             api::metrics::MetricUnit::Usd => Self::Usd,
         }
+    }
+}
+
+impl AsRef<str> for MetricUnit {
+    fn as_ref(&self) -> &str {
+        self.as_str()
     }
 }
 
@@ -487,7 +499,7 @@ impl GaugeMetric {
 }
 
 /// Set of string labels.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct LabelMetric {
     /// Label name.
@@ -510,7 +522,7 @@ impl LabelMetric {
 }
 
 /// Named set of string attributes observed at a point in time.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct RecordMetric {
     /// Record name.
@@ -556,6 +568,36 @@ pub enum Metric {
     Record(RecordMetric),
     /// A kind of metric this version of the SDK does not recognize, by its wire name.
     Unknown(String),
+}
+
+impl From<ScalarMetric> for Metric {
+    fn from(value: ScalarMetric) -> Self {
+        Self::Scalar(value)
+    }
+}
+
+impl From<AccumulationMetric> for Metric {
+    fn from(value: AccumulationMetric) -> Self {
+        Self::Accumulation(value)
+    }
+}
+
+impl From<GaugeMetric> for Metric {
+    fn from(value: GaugeMetric) -> Self {
+        Self::Gauge(value)
+    }
+}
+
+impl From<LabelMetric> for Metric {
+    fn from(value: LabelMetric) -> Self {
+        Self::Label(value)
+    }
+}
+
+impl From<RecordMetric> for Metric {
+    fn from(value: RecordMetric) -> Self {
+        Self::Record(value)
+    }
 }
 
 impl Metric {

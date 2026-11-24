@@ -4,7 +4,7 @@ use std::{
     task::{Context, Poll},
 };
 
-use futures_core::Stream;
+use futures_core::{FusedStream, Stream};
 use jiff::Timestamp;
 use s2_api::v1::{self as api, MaybeKnown};
 use s2_common::{
@@ -17,7 +17,7 @@ use s2_common::{
 use crate::error::RequestError;
 
 /// A page of values.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct Page<T> {
     /// Values in this page.
@@ -76,13 +76,19 @@ impl Page<StreamInfo> {
 /// Implements [`futures_core::Stream`] and provides an inherent [`next`](Self::next) method for
 /// iterating without importing `StreamExt`.
 #[must_use = "streams do nothing unless polled"]
-pub struct ListStream<T>(Pin<Box<dyn Send + Stream<Item = Result<T, RequestError>>>>);
+pub struct ListStream<T> {
+    inner: Pin<Box<dyn Send + Stream<Item = Result<T, RequestError>>>>,
+    terminated: bool,
+}
 
 impl<T> ListStream<T> {
     pub(crate) fn new(
         stream: impl Stream<Item = Result<T, RequestError>> + Send + 'static,
     ) -> Self {
-        Self(Box::pin(stream))
+        Self {
+            inner: Box::pin(stream),
+            terminated: false,
+        }
     }
 
     /// Return the next item from the stream, or `None` when pagination finishes.
@@ -97,7 +103,9 @@ impl<T> ListStream<T> {
 
 impl<T> fmt::Debug for ListStream<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ListStream").finish_non_exhaustive()
+        f.debug_struct("ListStream")
+            .field("terminated", &self.terminated)
+            .finish_non_exhaustive()
     }
 }
 
@@ -105,7 +113,20 @@ impl<T> Stream for ListStream<T> {
     type Item = Result<T, RequestError>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.0.as_mut().poll_next(cx)
+        if self.terminated {
+            return Poll::Ready(None);
+        }
+        let poll = self.inner.as_mut().poll_next(cx);
+        if matches!(poll, Poll::Ready(None)) {
+            self.terminated = true;
+        }
+        poll
+    }
+}
+
+impl<T> FusedStream for ListStream<T> {
+    fn is_terminated(&self) -> bool {
+        self.terminated
     }
 }
 
@@ -188,6 +209,12 @@ impl EncryptionAlgorithm {
             Self::Aes256Gcm => api::config::EncryptionAlgorithm::Aes256Gcm.into(),
             Self::Unknown(name) => MaybeKnown::Unknown(name),
         }
+    }
+}
+
+impl AsRef<str> for EncryptionAlgorithm {
+    fn as_ref(&self) -> &str {
+        self.as_str()
     }
 }
 
@@ -283,6 +310,12 @@ impl TimestampingMode {
             Self::Unknown(name) => return MaybeKnown::Unknown(name),
         };
         MaybeKnown::Known(known)
+    }
+}
+
+impl AsRef<str> for TimestampingMode {
+    fn as_ref(&self) -> &str {
+        self.as_str()
     }
 }
 
@@ -587,7 +620,7 @@ impl BasinConfig {
 }
 
 /// Input for [`create_basin`](crate::S2::create_basin) operation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[must_use]
 pub struct CreateBasinInput {
     name: BasinName,
@@ -649,7 +682,7 @@ impl CreateBasinInput {
 }
 
 /// Input for [`ensure_basin`](crate::S2::ensure_basin) operation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[must_use]
 pub struct EnsureBasinInput {
     name: BasinName,
@@ -716,7 +749,7 @@ impl EnsureBasinInput {
 
 /// Output for `ensure` operations ([`ensure_basin`](crate::S2::ensure_basin),
 /// [`ensure_stream`](crate::S2Basin::ensure_stream)).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum EnsureOutput<T> {
     /// Resource created.
     Created(T),
@@ -754,7 +787,7 @@ impl<T> EnsureOutput<T> {
 }
 
 /// Input for [`list_basins`](crate::S2::list_basins) operation.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 #[must_use]
 pub struct ListBasinsInput {
     prefix: BasinNamePrefix,
@@ -822,7 +855,7 @@ impl ListBasinsInput {
 }
 
 /// Input for [`list_all_basins`](crate::S2::list_all_basins) operation.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 #[must_use]
 pub struct ListAllBasinsInput {
     prefix: BasinNamePrefix,
@@ -887,7 +920,7 @@ impl ListAllBasinsInput {
 }
 
 /// Basin information.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct BasinInfo {
     /// Basin name.
@@ -1338,6 +1371,12 @@ pub enum PrivateNet {
     Unknown(String),
 }
 
+impl From<AwsPrivateNet> for PrivateNet {
+    fn from(aws: AwsPrivateNet) -> Self {
+        Self::Aws(aws)
+    }
+}
+
 impl PrivateNet {
     pub(crate) fn from_api(value: MaybeKnown<api::location::PrivateNet>) -> Self {
         match value {
@@ -1351,7 +1390,7 @@ impl PrivateNet {
 }
 
 /// Location information.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct LocationInfo {
     /// Location name.
@@ -1404,8 +1443,8 @@ impl LocationInfo {
 
     /// Set the private networking details for this location.
     #[must_use]
-    pub fn with_private_net(mut self, private_net: PrivateNet) -> Self {
-        self.private_net = Some(private_net);
+    pub fn with_private_net(mut self, private_net: impl Into<PrivateNet>) -> Self {
+        self.private_net = Some(private_net.into());
         self
     }
 
@@ -1421,7 +1460,7 @@ impl LocationInfo {
 }
 
 /// Input for [`list_streams`](crate::S2Basin::list_streams) operation.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 #[must_use]
 pub struct ListStreamsInput {
     prefix: StreamNamePrefix,
@@ -1489,7 +1528,7 @@ impl ListStreamsInput {
 }
 
 /// Input for [`list_all_streams`](crate::S2Basin::list_all_streams) operation.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 #[must_use]
 pub struct ListAllStreamsInput {
     prefix: StreamNamePrefix,
@@ -1554,7 +1593,7 @@ impl ListAllStreamsInput {
 }
 
 /// Stream information.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct StreamInfo {
     /// Stream name.
@@ -1606,7 +1645,7 @@ impl StreamInfo {
 }
 
 /// Input for [`create_stream`](crate::S2Basin::create_stream) operation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[must_use]
 pub struct CreateStreamInput {
     name: StreamName,
@@ -1648,7 +1687,7 @@ impl CreateStreamInput {
 }
 
 /// Input for [`ensure_stream`](crate::S2Basin::ensure_stream) operation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[must_use]
 pub struct EnsureStreamInput {
     name: StreamName,

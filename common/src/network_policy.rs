@@ -143,6 +143,53 @@ impl FromStr for NetworkPolicyNonce {
     }
 }
 
+impl TryFrom<&str> for NetworkPolicyNonce {
+    type Error = ValidationError;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        s.parse()
+    }
+}
+
+impl TryFrom<String> for NetworkPolicyNonce {
+    type Error = ValidationError;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        s.parse()
+    }
+}
+
+impl From<NetworkPolicyNonce> for String {
+    fn from(value: NetworkPolicyNonce) -> Self {
+        value.0.into()
+    }
+}
+
+impl AsRef<str> for NetworkPolicyNonce {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl serde::Serialize for NetworkPolicyNonce {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for NetworkPolicyNonce {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = CompactString::deserialize(deserializer)?;
+        s.parse().map_err(serde::de::Error::custom)
+    }
+}
+
 impl Deref for NetworkPolicyNonce {
     type Target = str;
 
@@ -254,6 +301,12 @@ impl<'de> serde::Deserialize<'de> for NetworkPolicyRef {
     }
 }
 
+impl From<NetworkPolicyRef> for String {
+    fn from(value: NetworkPolicyRef) -> Self {
+        value.to_string()
+    }
+}
+
 impl fmt::Debug for NetworkPolicyRef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(self, f)
@@ -268,7 +321,7 @@ impl fmt::Display for NetworkPolicyRef {
 
 /// How a request names a policy. A bare slug selects whichever policy currently holds it; a
 /// full reference selects only that version.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum NetworkPolicySelector {
     Slug(NetworkPolicySlug),
     Ref(NetworkPolicyRef),
@@ -349,6 +402,12 @@ impl TryFrom<String> for NetworkPolicySelector {
 
     fn try_from(s: String) -> Result<Self, Self::Error> {
         s.parse()
+    }
+}
+
+impl From<NetworkPolicySelector> for String {
+    fn from(value: NetworkPolicySelector) -> Self {
+        value.to_string()
     }
 }
 
@@ -499,6 +558,12 @@ impl TryFrom<String> for Cidr {
 
     fn try_from(s: String) -> Result<Self, Self::Error> {
         s.parse()
+    }
+}
+
+impl From<Cidr> for String {
+    fn from(value: Cidr) -> Self {
+        value.to_string()
     }
 }
 

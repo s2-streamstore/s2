@@ -11,7 +11,6 @@ use serde::{Deserialize, Serialize};
     Serialize,
     Deserialize,
     strum::Display,
-    strum::EnumString,
     strum::IntoStaticStr,
     strum::VariantArray,
 )]
@@ -218,6 +217,18 @@ impl ErrorCode {
             | Self::Unavailable
             | Self::UpstreamTimeout => false,
         }
+    }
+}
+
+impl std::str::FromStr for ErrorCode {
+    type Err = s2_common::ValidationError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|code| code.as_str() == s)
+            .ok_or_else(|| s2_common::ValidationError(format!("unknown error code: {s}")))
     }
 }
 

@@ -21,17 +21,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Created client with custom endpoints: {:?}", client);
     }
 
-    // Example: Endpoints from environment variables
-    if [
-        "S2_ACCESS_TOKEN",
-        "S2_ACCOUNT_ENDPOINT",
-        "S2_BASIN_ENDPOINT",
-    ]
-    .iter()
-    .all(|v| std::env::var(v).is_ok())
-    {
+    // Example: Configuration from environment variables
+    if std::env::var("S2_ACCESS_TOKEN").is_ok() {
         // ANCHOR: env-endpoints
-        // Reads S2_ACCESS_TOKEN, S2_ACCOUNT_ENDPOINT, and S2_BASIN_ENDPOINT.
+        // Reads S2_ACCESS_TOKEN and optional S2_ACCOUNT_ENDPOINT / S2_BASIN_ENDPOINT.
         let client = S2::from_env()?;
         // ANCHOR_END: env-endpoints
         println!("Created client from environment: {:?}", client);

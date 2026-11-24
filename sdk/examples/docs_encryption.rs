@@ -12,7 +12,9 @@ use s2_sdk::{
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let basin_name: BasinName = std::env::var("S2_BASIN")?.parse()?;
+    let basin_name: BasinName = std::env::var("S2_BASIN")
+        .map_err(|_| "S2_BASIN env var not set")?
+        .parse()?;
     let stream_name: StreamName =
         format!("docs-encryption-{}", Timestamp::now().as_millisecond()).parse()?;
 
@@ -58,6 +60,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Read {} encrypted record(s)", batch.records.len());
 
     basin.delete_stream(stream_name).await?;
+    client.delete_basin(basin_name).await?;
 
     Ok(())
 }
