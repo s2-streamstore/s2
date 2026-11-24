@@ -2320,11 +2320,8 @@ fn process_proto_ack(
         ));
     };
 
-    let ack = AppendAck::try_from_proto(
-        proto_ack,
-        corresponding_append.record_count,
-        context.clone(),
-    )?;
+    let ack = AppendAck::try_from_proto(proto_ack, corresponding_append.record_count)
+        .map_err(|e| e.with_context(context))?;
 
     if state
         .prev_ack_end

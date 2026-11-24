@@ -11,7 +11,7 @@ use s2_api::v1 as api;
 use s2_common::record::MAX_FENCING_TOKEN_LENGTH;
 
 use super::{RECORD_BATCH_MAX, StreamConfig};
-use crate::error::{ErrorContext, ProtocolError, ValidationError};
+use crate::error::{ProtocolError, ValidationError};
 
 /// Token for fencing appends to a stream.
 ///
@@ -725,40 +725,37 @@ impl AppendAck {
     pub(crate) fn try_from_proto(
         value: api::stream::proto::AppendAck,
         expected_records: u64,
-        context: ErrorContext,
     ) -> Result<Self, ProtocolError> {
-        let start = StreamPosition::from_proto(value.start.ok_or_else(|| {
-            ProtocolError::new_with_context("append ack missing start position", context.clone())
-        })?);
-        let end = StreamPosition::from_proto(value.end.ok_or_else(|| {
-            ProtocolError::new_with_context("append ack missing end position", context.clone())
-        })?);
-        let tail = StreamPosition::from_proto(value.tail.ok_or_else(|| {
-            ProtocolError::new_with_context("append ack missing tail position", context.clone())
-        })?);
+        let start = StreamPosition::from_proto(
+            value
+                .start
+                .ok_or_else(|| ProtocolError::new("append ack missing start position"))?,
+        );
+        let end = StreamPosition::from_proto(
+            value
+                .end
+                .ok_or_else(|| ProtocolError::new("append ack missing end position"))?,
+        );
+        let tail = StreamPosition::from_proto(
+            value
+                .tail
+                .ok_or_else(|| ProtocolError::new("append ack missing tail position"))?,
+        );
         let ack = Self { start, end, tail };
-        ack.validate_record_count(expected_records, &context)?;
+        ack.validate_record_count(expected_records)?;
         Ok(ack)
     }
 
-    pub(crate) fn validate_record_count(
-        &self,
-        expected_records: u64,
-        context: &ErrorContext,
-    ) -> Result<(), ProtocolError> {
+    pub(crate) fn validate_record_count(&self, expected_records: u64) -> Result<(), ProtocolError> {
         let Some(num_acked_records) = self.end.seq_num.checked_sub(self.start.seq_num) else {
-            return Err(ProtocolError::new_with_context(
+            return Err(ProtocolError::new(
                 "ack end seq_num should be greater than or equal to start seq_num",
-                context.clone(),
             ));
         };
         if num_acked_records != expected_records {
-            return Err(ProtocolError::new_with_context(
-                format!(
-                    "acked record count {num_acked_records} does not match submitted batch size {expected_records}"
-                ),
-                context.clone(),
-            ));
+            return Err(ProtocolError::new(format!(
+                "acked record count {num_acked_records} does not match submitted batch size {expected_records}"
+            )));
         }
         Ok(())
     }

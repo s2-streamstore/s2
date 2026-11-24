@@ -668,14 +668,14 @@ impl S2Basin {
     ///
     /// Returns [`ValidationError`] if `retry.min_base_delay() > retry.max_base_delay()`.
     pub fn with_retry(self, retry: RetryConfig) -> Result<Self, ValidationError> {
-        let scope = self
-            .client
-            .basin_scope("S2Basin::with_retry", true)
-            .context(1);
-        let client = self
-            .client
-            .with_retry(retry)
-            .map_err(|e| scope.format_validation(e))?;
+        if let Err(err) = retry.validate() {
+            return Err(self
+                .client
+                .basin_scope("S2Basin::with_retry", true)
+                .context(1)
+                .format_validation(err));
+        }
+        let client = self.client.with_retry(retry)?;
         Ok(Self { client })
     }
 
@@ -890,14 +890,14 @@ impl S2Stream {
     ///
     /// Returns [`ValidationError`] if `retry.min_base_delay() > retry.max_base_delay()`.
     pub fn with_retry(self, retry: RetryConfig) -> Result<Self, ValidationError> {
-        let scope = self
-            .client
-            .stream_scope("S2Stream::with_retry", &self.name, true)
-            .context(1);
-        let client = self
-            .client
-            .with_retry(retry)
-            .map_err(|e| scope.format_validation(e))?;
+        if let Err(err) = retry.validate() {
+            return Err(self
+                .client
+                .stream_scope("S2Stream::with_retry", &self.name, true)
+                .context(1)
+                .format_validation(err));
+        }
+        let client = self.client.with_retry(retry)?;
         Ok(Self { client, ..self })
     }
 
@@ -993,11 +993,8 @@ impl S2Stream {
             .append_retry_policy()
             .send_proto::<_, AppendError>()
             .await?;
-        Ok(AppendAck::try_from_proto(
-            ack,
-            expected_records,
-            scope.context(attempts),
-        )?)
+        Ok(AppendAck::try_from_proto(ack, expected_records)
+            .map_err(|e| e.with_context(&scope.context(attempts)))?)
     }
 
     /// Read records.

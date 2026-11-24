@@ -344,7 +344,7 @@ impl BaseClient {
             _ = shutdown.cancelled() => {
                 return Err(AbortedError::new_with_context("client closed", context).into());
             }
-            res = self.authorize::<E>(&mut request, &context) => res?,
+            res = self.authorize::<E>(&mut request, || context.clone()) => res?,
         };
         let response = self
             .inner
@@ -362,27 +362,26 @@ impl BaseClient {
         attempts: u32,
     ) -> Result<(UnaryResponse, Option<String>), E> {
         let shutdown = self.shutdown_token();
-        let context = scope.context(attempts);
         let access_token = tokio::select! {
             biased;
             _ = shutdown.cancelled() => {
-                return Err(AbortedError::new_with_context("client closed", context).into());
+                return Err(AbortedError::new_with_context("client closed", scope.context(attempts)).into());
             }
-            res = self.authorize::<E>(&mut request, &context) => res?,
+            res = self.authorize::<E>(&mut request, || scope.context(attempts)) => res?,
         };
         let response = self
             .inner
             .client
             .execute_unary(request)
             .await
-            .map_err(|e| E::from_http(e, context))?;
+            .map_err(|e| E::from_http(e, scope.context(attempts)))?;
         Ok((response, access_token))
     }
 
     async fn authorize<E: TransportError>(
         &self,
         _request: &mut client::Request,
-        _context: &ErrorContext,
+        _make_context: impl FnOnce() -> ErrorContext,
     ) -> Result<Option<String>, E> {
         #[cfg(feature = "_hidden")]
         if let Some(provider) = self.inner.access_token_provider.as_ref() {
@@ -390,8 +389,8 @@ impl BaseClient {
                 .access_token()
                 .await
                 .map_err(E::from_access_token_provider)?;
-            let header =
-                authorization_header(&access_token).map_err(|e| _context.format_validation(e))?;
+            let header = authorization_header(&access_token)
+                .map_err(|e| _make_context().format_validation(e))?;
             _request.headers_mut().insert(AUTHORIZATION, header);
             return Ok(Some(access_token));
         }
@@ -1380,12 +1379,10 @@ mod tests {
         let client = BaseClient::init_with_connector(&config, HttpConnector::new()).unwrap();
         let uri = "http://example.test/v1/basins".parse().unwrap();
         let mut request = client.get(uri).build().unwrap();
-        let ctx = ErrorContext::default();
-
         assert!(request.headers_mut().get(AUTHORIZATION).is_none());
 
         client
-            .authorize::<RequestError>(&mut request, &ctx)
+            .authorize::<RequestError>(&mut request, ErrorContext::default)
             .await
             .unwrap();
         let first = request.headers_mut().get(AUTHORIZATION).unwrap();
@@ -1393,7 +1390,7 @@ mod tests {
         assert!(first.is_sensitive());
 
         client
-            .authorize::<RequestError>(&mut request, &ctx)
+            .authorize::<RequestError>(&mut request, ErrorContext::default)
             .await
             .unwrap();
         let second = request.headers_mut().get(AUTHORIZATION).unwrap();

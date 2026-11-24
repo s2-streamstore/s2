@@ -238,8 +238,6 @@ fn append_ack_from_proto_requires_all_positions() {
             timestamp: 100,
         })
     };
-    let ctx = crate::error::ErrorContext::default();
-
     let ack = AppendAck::try_from_proto(
         api::stream::proto::AppendAck {
             start: pos(5),
@@ -247,7 +245,6 @@ fn append_ack_from_proto_requires_all_positions() {
             tail: pos(10),
         },
         3,
-        ctx.clone(),
     )
     .unwrap();
     assert_eq!(
@@ -297,7 +294,7 @@ fn append_ack_from_proto_requires_all_positions() {
             2,
         ),
     ] {
-        assert!(AppendAck::try_from_proto(raw, count, ctx.clone()).is_err());
+        assert!(AppendAck::try_from_proto(raw, count).is_err());
     }
 }
 
