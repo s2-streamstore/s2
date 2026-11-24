@@ -875,6 +875,22 @@ impl Http2Config {
             ..self
         })
     }
+
+    pub(crate) fn validate(&self) -> Result<(), ValidationError> {
+        let stream_window = self
+            .stream_receive_window
+            .unwrap_or(crate::client::DEFAULT_STREAM_RECEIVE_WINDOW);
+        if let Some(conn_window) = self.connection_receive_window
+            && conn_window < stream_window
+        {
+            return Err(format!(
+                "HTTP/2 connection receive window ({conn_window} bytes) must be at least \
+                 the stream receive window ({stream_window} bytes)"
+            )
+            .into());
+        }
+        Ok(())
+    }
 }
 
 /// Configuration for [`S2`](crate::S2).
@@ -1017,7 +1033,8 @@ impl S2Config {
     }
 
     pub(crate) fn validate(&self) -> Result<(), ValidationError> {
-        self.retry.validate()
+        self.retry.validate()?;
+        self.http2.validate()
     }
 
     #[cfg(feature = "_hidden")]

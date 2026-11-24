@@ -6,7 +6,7 @@ use std::{
     pin::pin,
     sync::{
         Arc, Mutex, OnceLock, RwLock as StdRwLock, Weak,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -47,7 +47,7 @@ const DEFAULT_MAX_CONCURRENT_REQUESTS_PER_CONNECTION: usize = 50;
 // 50 concurrent streams × 4 MiB = 200 MiB < 256 MiB, so paused read sessions on a shared
 // connection cannot exhaust the connection-level flow-control window and stall sibling appends
 // or unary calls.
-const DEFAULT_STREAM_RECEIVE_WINDOW: u32 = 4 * 1024 * 1024;
+pub(crate) const DEFAULT_STREAM_RECEIVE_WINDOW: u32 = 4 * 1024 * 1024;
 const DEFAULT_CONNECTION_RECEIVE_WINDOW: u32 = 256 * 1024 * 1024;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(20);
@@ -1057,6 +1057,7 @@ enum ConnectionState {
 struct PooledConnection {
     id: ConnectionId,
     max_concurrent_requests: usize,
+    peer_max_streams: Arc<AtomicUsize>,
     state: Arc<Mutex<PermitState>>,
     reaper_notify: Arc<Notify>,
     conn: ConnectionState,
@@ -1081,6 +1082,7 @@ impl PooledConnection {
             Self {
                 id,
                 max_concurrent_requests,
+                peer_max_streams: Arc::new(AtomicUsize::new(usize::MAX)),
                 state,
                 reaper_notify,
                 conn: ConnectionState::Connecting(rx),
@@ -1102,7 +1104,10 @@ impl PooledConnection {
 
     fn try_acquire_permit(&self) -> Option<RequestPermit> {
         let mut state = self.state.lock().unwrap();
-        if state.active_requests >= self.max_concurrent_requests {
+        let effective_limit = self
+            .max_concurrent_requests
+            .min(self.peer_max_streams.load(Ordering::Relaxed));
+        if state.active_requests >= effective_limit {
             return None;
         }
         state.active_requests += 1;
@@ -1209,9 +1214,7 @@ where
     }
 
     fn max_concurrent_requests(&self) -> usize {
-        self.http2
-            .max_concurrent_requests
-            .unwrap_or(DEFAULT_MAX_CONCURRENT_REQUESTS_PER_CONNECTION)
+        effective_max_concurrent_requests(self.http2)
     }
 
     fn try_checkout_existing(connections: &[PooledConnection]) -> Option<Checkout> {
@@ -1273,15 +1276,21 @@ where
             rx.clone(),
             self.reaper_notify.clone(),
         );
+        let peer_max_streams = pooled.peer_max_streams.clone();
         state.connections.push(pooled);
         drop(state);
 
-        self.spawn_connection(id, tx);
+        self.spawn_connection(id, tx, peer_max_streams);
 
         Some(Checkout::Connecting { id, rx, permit })
     }
 
-    fn spawn_connection(self: &Arc<Self>, id: ConnectionId, tx: watch::Sender<DialOutcome>) {
+    fn spawn_connection(
+        self: &Arc<Self>,
+        id: ConnectionId,
+        tx: watch::Sender<DialOutcome>,
+        peer_max_streams: Arc<AtomicUsize>,
+    ) {
         let weak_pool = Arc::downgrade(self);
         let connector = self.connector.clone();
         let origin = self.origin.clone();
@@ -1333,6 +1342,7 @@ where
                 }
             };
 
+            peer_max_streams.store(conn.current_max_send_streams(), Ordering::Relaxed);
             if let Some(pool) = weak_pool.upgrade() {
                 pool.promote_ready(id, sender.clone());
             }
@@ -1344,10 +1354,18 @@ where
 
             // Drive the HTTP/2 connection until all handles close, an error occurs, or
             // client shutdown fires (`C12`, dropping `conn` and its socket immediately).
+            // Refresh the peer's advertised `SETTINGS_MAX_CONCURRENT_STREAMS` after each poll so
+            // checkout spills over to a new connection when the peer advertises a lower cap
+            // (`C13a`).
+            let mut conn = pin!(conn);
             tokio::select! {
                 biased;
                 _ = shutdown.cancelled() => {}
-                res = conn => {
+                res = std::future::poll_fn(|cx| {
+                    let poll = conn.as_mut().poll(cx);
+                    peer_max_streams.store(conn.current_max_send_streams(), Ordering::Relaxed);
+                    poll
+                }) => {
                     if let Err(err) = res {
                         tracing::debug!(
                             origin = %origin,
@@ -1463,6 +1481,19 @@ fn effective_receive_windows(http2_config: Http2Config) -> (u32, u32) {
         DEFAULT_CONNECTION_RECEIVE_WINDOW.max(min_for_streams)
     });
     (stream_window, conn_window)
+}
+
+fn effective_max_concurrent_requests(http2_config: Http2Config) -> usize {
+    let configured = http2_config
+        .max_concurrent_requests
+        .unwrap_or(DEFAULT_MAX_CONCURRENT_REQUESTS_PER_CONNECTION);
+    if http2_config.connection_receive_window.is_none() {
+        let (stream_window, conn_window) = effective_receive_windows(http2_config);
+        let window_fit = (conn_window / stream_window).max(1) as usize;
+        configured.min(window_fit)
+    } else {
+        configured
+    }
 }
 
 async fn dial_http2<C: Connect>(
@@ -1960,6 +1991,7 @@ mod tests {
         server_handles: Arc<Mutex<Vec<tokio::task::AbortHandle>>>,
         dial_delay: Duration,
         stall_error_body: bool,
+        max_concurrent_streams: Option<u32>,
     }
 
     impl DuplexH2Connector {
@@ -1971,6 +2003,7 @@ mod tests {
                 server_handles: Arc::new(Mutex::new(Vec::new())),
                 dial_delay: Duration::ZERO,
                 stall_error_body: false,
+                max_concurrent_streams: None,
             }
         }
 
@@ -2020,6 +2053,7 @@ mod tests {
             let server_handles = self.server_handles.clone();
             let dial_delay = self.dial_delay;
             let stall_error_body = self.stall_error_body;
+            let max_concurrent_streams = self.max_concurrent_streams;
             Box::pin(async move {
                 dials.fetch_add(1, Ordering::SeqCst);
                 if !dial_delay.is_zero() {
@@ -2027,7 +2061,11 @@ mod tests {
                 }
                 let (client_io, server_io) = tokio::io::duplex(64 * 1024);
                 let task = tokio::spawn(async move {
-                    let Ok(mut conn) = h2::server::handshake(server_io).await else {
+                    let mut builder = h2::server::Builder::new();
+                    if let Some(limit) = max_concurrent_streams {
+                        builder.max_concurrent_streams(limit);
+                    }
+                    let Ok(mut conn) = builder.handshake(server_io).await else {
                         return;
                     };
                     active_connections.fetch_add(1, Ordering::SeqCst);
@@ -2644,7 +2682,8 @@ mod tests {
             .unwrap();
         assert_eq!(effective_receive_windows(cfg), (16 * MIB, 800 * MIB));
 
-        // Scaling clamps to HTTP/2's 2^31 - 1 ceiling without overflowing.
+        // Scaling clamps to HTTP/2's 2^31 - 1 ceiling without overflowing, and effective
+        // per-connection concurrency clamps to keep auto-sized windows isolated (`C13d`).
         let cfg = Http2Config::new()
             .with_max_concurrent_requests(100)
             .unwrap()
@@ -2654,6 +2693,7 @@ mod tests {
             effective_receive_windows(cfg),
             (64 * MIB, Http2Config::MAX_RECEIVE_WINDOW)
         );
+        assert_eq!(effective_max_concurrent_requests(cfg), 31);
 
         // Explicit connection_receive_window override is always honored verbatim.
         let cfg = Http2Config::new()
@@ -2662,6 +2702,94 @@ mod tests {
             .with_connection_receive_window(64 * MIB)
             .unwrap();
         assert_eq!(effective_receive_windows(cfg), (4 * MIB, 64 * MIB));
+        assert_eq!(effective_max_concurrent_requests(cfg), 100);
+    }
+
+    // spec: r1 C13a
+    #[tokio::test]
+    async fn pool_spills_over_when_peer_advertises_lower_max_concurrent_streams() {
+        let mut connector = DuplexH2Connector::new();
+        connector.max_concurrent_streams = Some(1);
+        let pool = Arc::new(test_pool_with(
+            connector.clone(),
+            Http2Config::new().with_max_concurrent_requests(50).unwrap(),
+        ));
+
+        // Complete one fast request so the first connection processes the server's initial
+        // SETTINGS(MAX_CONCURRENT_STREAMS = 1) frame.
+        let warmup = RequestBuilder::get("http://localhost:8080/test".parse().unwrap())
+            .build()
+            .unwrap();
+        assert_eq!(
+            pool.execute_unary(warmup).await.unwrap().status(),
+            StatusCode::OK
+        );
+        assert_eq!(connector.dials.load(Ordering::SeqCst), 1);
+
+        // Wait until the connection driver publishes peer_max_streams == 1.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let observed = {
+                    let hosts = pool.hosts.read().unwrap();
+                    hosts.map.get(TEST_ORIGIN).and_then(|host| {
+                        host.state
+                            .read()
+                            .unwrap()
+                            .connections
+                            .first()
+                            .map(|c| c.peer_max_streams.load(Ordering::Relaxed))
+                    })
+                };
+                if observed == Some(1) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("connection driver should observe peer SETTINGS_MAX_CONCURRENT_STREAMS=1");
+
+        // Occupy the single stream on connection 1 with a stalled request.
+        let stalled_pool = pool.clone();
+        let stalled_task = tokio::spawn(async move {
+            let req = RequestBuilder::get("http://localhost:8080/stall-headers".parse().unwrap())
+                .build()
+                .unwrap();
+            let _ = stalled_pool.execute_unary(req).await;
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let active = {
+                    let hosts = pool.hosts.read().unwrap();
+                    hosts.map.get(TEST_ORIGIN).and_then(|host| {
+                        host.state
+                            .read()
+                            .unwrap()
+                            .connections
+                            .first()
+                            .map(|c| c.state.lock().unwrap().active_requests)
+                    })
+                };
+                if active == Some(1) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("stalled request should occupy connection 1");
+
+        // A second concurrent request must spill over to a 2nd connection and succeed immediately.
+        let req2 = RequestBuilder::get("http://localhost:8080/test".parse().unwrap())
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap();
+        let resp2 = pool.execute_unary(req2).await.unwrap();
+        assert_eq!(resp2.status(), StatusCode::OK);
+        assert_eq!(connector.dials.load(Ordering::SeqCst), 2);
+
+        stalled_task.abort();
+        pool.close();
     }
 
     #[test]

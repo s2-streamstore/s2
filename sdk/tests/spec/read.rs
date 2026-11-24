@@ -1295,3 +1295,69 @@ async fn spec_t5a_empty_frame_does_not_reset_budget_and_r9_close_boundary() {
         "R9: post-drain client.close() must not overwrite R9c 404, got {next2:?}"
     );
 }
+
+// spec: r1 R7a, R9a, R11c
+#[tokio::test]
+async fn regression_read_session_stops_on_exhausted_count_and_rejects_u64_max_seq_num() {
+    // 1. R11c/R9a: When count=1 is exhausted on a server that keeps the stream open (sending a
+    //    heartbeat or extra batch), the session immediately enters clean stop after delivering the
+    //    requested record, preserving caught-up state and never yielding extra records.
+    let server = MockH2Server::start(|_conn_id, _req, respond| async move {
+        if let Some(mut s2s) = S2sResponder::open(respond) {
+            s2s.send_regular(&proto_read_batch_records(&[0], Some(1)), false, false);
+            // Keep the stream open and even send a heartbeat + an extra record past count=1.
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            s2s.send_regular(&proto_heartbeat(1), false, false);
+            s2s.send_regular(&proto_read_batch_records(&[1], Some(2)), false, false);
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+    })
+    .await;
+
+    let mut sess = server
+        .stream(no_retry_config())
+        .read_session(
+            ReadInput::new()
+                .with_start(ReadStart::SeqNum(0))
+                .with_count(1),
+            ReadSessionConfig::default(),
+        )
+        .unwrap();
+    let cu = sess.caught_up();
+    let rec = sess.next().await.unwrap().unwrap();
+    assert_eq!(rec.seq_num, 0);
+    assert_eq!(cu.await.unwrap().seq_num, 1);
+    let end = tokio::time::timeout(Duration::from_secs(2), sess.next())
+        .await
+        .expect("read session must close promptly once count=1 is exhausted");
+    assert!(
+        end.is_none(),
+        "expected clean end after count=1, got {end:?}"
+    );
+
+    // 2. R7a: A record at seq_num == u64::MAX has no representable successor `next_seq_num`, so the
+    //    session fails with ProtocolError before delivering it.
+    let overflow_server = MockH2Server::start(|_conn_id, _req, respond| async move {
+        if let Some(mut s2s) = S2sResponder::open(respond) {
+            s2s.send_regular(&proto_read_batch_records(&[u64::MAX], None), false, true);
+        }
+    })
+    .await;
+
+    let mut overflow_sess = overflow_server
+        .stream(no_retry_config())
+        .read_session(
+            ReadInput::new().with_start(ReadStart::SeqNum(u64::MAX)),
+            ReadSessionConfig::default(),
+        )
+        .unwrap();
+    let err = overflow_sess
+        .next()
+        .await
+        .expect("must yield ProtocolError")
+        .unwrap_err();
+    assert!(
+        matches!(err, ReadSessionError::Protocol(_)),
+        "expected ProtocolError on u64::MAX seq_num, got {err:?}"
+    );
+}

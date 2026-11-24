@@ -441,6 +441,9 @@ impl Producer {
         let record = record.into();
         FencingToken::validate_len(self.shared.fencing_token_len)
             .map_err(|e| self.shared.context.format_validation(e))?;
+        record
+            .validate_for_write()
+            .map_err(|e| self.shared.context.format_validation(e))?;
         let bytes = record.metered_bytes();
         validate_record_size(bytes, self.shared.max_batch_bytes)
             .map_err(|e| self.shared.context.format_validation(e))?;
@@ -674,6 +677,9 @@ impl RecordSubmitPermit {
     ) -> Result<RecordSubmitTicket, AppendSessionError> {
         let record = record.into();
         FencingToken::validate_len(self.shared.fencing_token_len)
+            .map_err(|e| self.shared.context.format_validation(e))?;
+        record
+            .validate_for_write()
             .map_err(|e| self.shared.context.format_validation(e))?;
         let metered = record.metered_bytes();
         if metered > self.reserved_bytes {
@@ -979,6 +985,14 @@ impl ProducerTask {
                 _ = abort.cancelled() => {
                     let reason = self.shared.abort_reason();
                     self.abort(reason).await;
+                    return;
+                }
+
+                // A8b / A9: if the owned append session fails while no batch is in flight (for
+                // example, a record is lingering in `partial_batch`), wake and settle immediately
+                // rather than waiting out `linger`.
+                _ = self.session.lifecycle().wait_closing_or_closed(), if !closing => {
+                    self.terminate(None).await;
                     return;
                 }
 

@@ -551,18 +551,31 @@ mod tests {
 
     #[test]
     fn issue_access_token_expires_at_enforces_rfc3339() {
-        let valid = serde_json::json!({
-            "id": "test-token",
-            "expires_at": "2030-01-01T00:00:00Z",
-            "scope": {}
-        });
-        let parsed: IssueAccessTokenRequest = serde_json::from_value(valid).unwrap();
-        assert!(parsed.expires_at.is_some());
+        for good in [
+            "2030-01-01T00:00:00Z",
+            "2030-01-01t00:00:00.123456z",
+            "2030-01-01 00:00:00+05:30",
+            "2030-01-01T00:00:00-00:00",
+        ] {
+            let valid = serde_json::json!({
+                "id": "test-token",
+                "expires_at": good,
+                "scope": {}
+            });
+            let parsed: IssueAccessTokenRequest = serde_json::from_value(valid)
+                .unwrap_or_else(|e| panic!("expected RFC 3339 acceptance for {good}: {e}"));
+            assert!(parsed.expires_at.is_some());
+        }
 
         for bad in [
             "-000001-01-01T00:00:00Z",
             "+010000-01-01T00:00:00Z",
             "2030-01-01T00:00:00Z[UTC]",
+            "2030-01-01T00:00:00+0000",
+            "2030-01-01T00:00:00+00:00:01",
+            "2030-01-01T00:00:00,5Z",
+            "2030-01-01T00:00:00.Z",
+            "2030-01-01T00:00:00",
         ] {
             let payload = serde_json::json!({
                 "id": "test-token",

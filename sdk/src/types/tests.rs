@@ -346,6 +346,24 @@ fn http2_config_bounds() {
             .with_connection_receive_window(u32::MAX)
             .is_err()
     );
+
+    // Cross-field C13d validation rejects connection_receive_window < stream_receive_window.
+    let smaller_conn = Http2Config::new()
+        .with_connection_receive_window(Http2Config::MIN_CONNECTION_RECEIVE_WINDOW)
+        .unwrap();
+    assert!(smaller_conn.validate().is_err());
+    assert!(
+        S2Config::new("token")
+            .with_http2(smaller_conn)
+            .validate()
+            .is_err()
+    );
+    let matching_windows = Http2Config::new()
+        .with_stream_receive_window(Http2Config::MIN_CONNECTION_RECEIVE_WINDOW)
+        .unwrap()
+        .with_connection_receive_window(Http2Config::MIN_CONNECTION_RECEIVE_WINDOW)
+        .unwrap();
+    assert!(matching_windows.validate().is_ok());
 }
 
 #[test]
@@ -637,7 +655,21 @@ fn list_inputs_omit_empty_prefix_and_start_after_on_wire() {
 fn server_oversized_fencing_token_rejected_when_reused_for_writes() {
     let oversized = FencingToken::from_server("x".repeat(40));
     assert!(oversized.validate().is_err());
+
+    // Batcher options reject oversized server tokens.
     let rec = AppendRecord::new("payload").unwrap();
-    let cfg = crate::batching::BatcherConfig::new().with_fencing_token(oversized);
+    let cfg = crate::batching::BatcherConfig::new().with_fencing_token(oversized.clone());
     assert!(crate::batching::batch_iter([rec], cfg).is_err());
+
+    // CommandRecord::fence carrying an oversized server token is rejected on write validation.
+    let fence_cmd = AppendRecord::from(CommandRecord::fence(oversized));
+    assert!(fence_cmd.validate_for_write().is_err());
+    assert!(
+        AppendInput::new(fence_cmd.clone())
+            .validate_for_write()
+            .is_err()
+    );
+    assert!(
+        crate::batching::batch_iter([fence_cmd], crate::batching::BatcherConfig::new()).is_err()
+    );
 }

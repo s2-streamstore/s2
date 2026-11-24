@@ -480,14 +480,14 @@ pub fn proto_read_batch_records(seq_nums: &[u64], tail_seq: Option<u64>) -> Vec<
             .iter()
             .map(|&seq_num| ProtoSequencedRecord {
                 seq_num,
-                timestamp: 1000 + seq_num,
+                timestamp: 1000u64.saturating_add(seq_num),
                 headers: vec![],
                 body: Bytes::from(format!("rec-{seq_num}")),
             })
             .collect(),
         tail: tail_seq.map(|seq_num| ProtoStreamPosition {
             seq_num,
-            timestamp: 1000 + seq_num,
+            timestamp: 1000u64.saturating_add(seq_num),
         }),
     }
     .encode_to_vec()

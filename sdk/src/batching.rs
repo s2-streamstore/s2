@@ -308,6 +308,7 @@ where
 
     for item in iter {
         let record = item.map_err(TryBatchError::Input)?.into();
+        record.validate_for_write()?;
         let record_bytes = record.metered_bytes();
         validate_record_size(record_bytes, config.max_batch_bytes)?;
 
@@ -729,6 +730,9 @@ impl BatcherCore {
 
             match poll_input(cx) {
                 Poll::Ready(Some(Ok(record))) => {
+                    if let Err(err) = record.validate_for_write() {
+                        return self.fail(TryBatchError::Validation(err));
+                    }
                     let record_bytes = record.metered_bytes();
                     if let Err(err) =
                         validate_record_size(record_bytes, self.config.max_batch_bytes)

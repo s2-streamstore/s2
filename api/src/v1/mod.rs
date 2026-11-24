@@ -14,10 +14,51 @@ pub(crate) mod rfc3339 {
 
     const RFC3339_MIN: Timestamp = Timestamp::constant(-62_167_219_200, 0);
 
+    fn is_valid_rfc3339_syntax(s: &str) -> bool {
+        // RFC 3339 §5.6: YYYY-MM-DD[T|t| ]HH:MM:SS(.digits)?(Z|z|[+-]HH:MM)
+        let b = s.as_bytes();
+        if b.len() < 20 {
+            return false;
+        }
+        if !(b[0..4].iter().all(u8::is_ascii_digit)
+            && b[4] == b'-'
+            && b[5..7].iter().all(u8::is_ascii_digit)
+            && b[7] == b'-'
+            && b[8..10].iter().all(u8::is_ascii_digit)
+            && matches!(b[10], b'T' | b't' | b' ')
+            && b[11..13].iter().all(u8::is_ascii_digit)
+            && b[13] == b':'
+            && b[14..16].iter().all(u8::is_ascii_digit)
+            && b[16] == b':'
+            && b[17..19].iter().all(u8::is_ascii_digit))
+        {
+            return false;
+        }
+        let mut i = 19;
+        if b[i] == b'.' {
+            i += 1;
+            let frac_start = i;
+            while i < b.len() && b[i].is_ascii_digit() {
+                i += 1;
+            }
+            if i == frac_start || i >= b.len() {
+                return false;
+            }
+        }
+        match b[i] {
+            b'Z' | b'z' => i + 1 == b.len(),
+            b'+' | b'-' => {
+                i + 6 == b.len()
+                    && b[i + 1..i + 3].iter().all(u8::is_ascii_digit)
+                    && b[i + 3] == b':'
+                    && b[i + 4..i + 6].iter().all(u8::is_ascii_digit)
+            }
+            _ => false,
+        }
+    }
+
     fn parse_rfc3339(s: &str) -> Result<Timestamp, String> {
-        // RFC 3339 requires a 4-digit non-negative year (`0000`–`9999`) with no Temporal
-        // `[TimeZone]` annotation suffix.
-        if s.len() < 20 || !s.as_bytes()[..4].iter().all(u8::is_ascii_digit) || s.contains('[') {
+        if !is_valid_rfc3339_syntax(s) {
             return Err(format!("invalid RFC 3339 timestamp: `{s}`"));
         }
         let ts: Timestamp = s

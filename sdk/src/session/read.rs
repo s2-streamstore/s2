@@ -1328,6 +1328,12 @@ impl ReadDriver {
 
                         if has_records {
                             permit.send(DriverEvent::Batch(batch));
+                            if read_limits_exhausted(&self.end) {
+                                debug!("read session count/bytes limit exhausted");
+                                self.active = None;
+                                self.finish_clean_stop(None).await;
+                                return;
+                            }
                         } else if let Some(tail) = tail
                             && !heartbeat_already_at_tail
                         {
@@ -1483,6 +1489,12 @@ fn validate_read_batch_order(
                     "read batch contained out-of-order or duplicate seq_num {} after {}",
                     record.seq_num, prev_seq
                 ),
+                context.clone(),
+            )));
+        }
+        if record.seq_num.checked_add(1).is_none() {
+            return Err(ReadSessionError::Protocol(ProtocolError::new_with_context(
+                "read batch record seq_num u64::MAX has no representable successor",
                 context.clone(),
             )));
         }

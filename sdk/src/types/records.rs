@@ -290,6 +290,16 @@ impl AppendRecord {
         }
     }
 
+    pub(crate) fn validate_for_write(&self) -> Result<(), ValidationError> {
+        if self.headers.len() == 1
+            && self.headers[0].name.is_empty()
+            && self.headers[0].value.as_ref() == CommandRecord::FENCE
+        {
+            FencingToken::validate_len(self.body.len())?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn into_proto(self) -> api::stream::proto::AppendRecord {
         api::stream::proto::AppendRecord {
             timestamp: self.timestamp,
@@ -608,6 +618,16 @@ impl AppendInput {
     #[must_use]
     pub fn metered_bytes(&self) -> usize {
         self.records.metered_bytes()
+    }
+
+    pub(crate) fn validate_for_write(&self) -> Result<(), ValidationError> {
+        if let Some(token) = &self.fencing_token {
+            token.validate()?;
+        }
+        for record in &self.records.records {
+            record.validate_for_write()?;
+        }
+        Ok(())
     }
 
     /// Set the expected sequence number for the first record in the batch.

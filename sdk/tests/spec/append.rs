@@ -2172,17 +2172,22 @@ async fn producer_and_append_session_progress_accessors() {
     assert_eq!(t1.await.unwrap().seq_num, 0);
     assert_eq!(t2.await.unwrap().seq_num, 1);
 
-    // Single record acked via flush/ticket updates counters before ticket resolves.
+    // Single record acked via concurrent flush/ticket completes promptly without waiting out the
+    // 10s linger and updates counters before ticket resolves.
     let r3 = AppendRecord::new("gamma").unwrap();
     let t3 = prod.submit(r3).await.unwrap();
     assert_eq!(prod.unacked_records(), 1);
-    let flush_fut = prod.flush();
-    let ack3 = t3.await.unwrap();
+    let (flush_res, ticket_res) = tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::join!(prod.flush(), t3)
+    })
+    .await
+    .expect("concurrent flush() must complete well below 10s linger");
+    flush_res.unwrap();
+    let ack3 = ticket_res.unwrap();
     assert_eq!(ack3.seq_num, 2);
     assert_eq!(prod.unacked_bytes(), 0);
     assert_eq!(prod.unacked_records(), 0);
     assert_eq!(prod.acked_records(), 3);
-    flush_fut.await.unwrap();
 
     // Terminal failure settles unacked_bytes and unacked_records back to 0 without advancing
     // acked_records.
@@ -2307,4 +2312,120 @@ async fn producer_and_append_session_progress_accessors() {
     assert_eq!(sess2.unacked_batches(), 0);
     assert_eq!(sess2.unacked_bytes(), 0);
     hold_gate.notify_waiters();
+}
+
+// spec: r1 A1, A6, A8b, A9
+#[tokio::test]
+async fn regression_unsent_batch_cannot_be_acked_and_producer_wakes_on_session_failure() {
+    // 1. A1/A6: While batch 1 is flow-control blocked so batch 2 stays buffered in the local body
+    //    channel (`batches_started == 1`), an unsolicited 2nd ack MUST fail with ProtocolError
+    //    rather than settling unsent batch 2 as durable.
+    let extra_ack_server = MockH2Server::start(|_conn_id, _req, respond| async move {
+        // Deliberately never read `req` so H2 stream flow control stalls batch 1 after the initial
+        // 64 KiB window and keeps batch 2 unstarted in the local body channel.
+        if let Some(mut s2s) = S2sResponder::open(respond) {
+            // Wait briefly for batch 1 to start sending and batch 2 to enter the local channel.
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            s2s.send_ack(0, 1, false, false);
+            s2s.send_ack(1, 2, false, false);
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+    })
+    .await;
+
+    let sess = extra_ack_server
+        .stream(no_retry_config())
+        .append_session(AppendSessionConfig::new())
+        .unwrap();
+    let big_payload = vec![b'a'; 256 * 1024];
+    let t1 = sess
+        .submit(AppendRecord::new(big_payload.clone()).unwrap())
+        .await
+        .unwrap();
+    let t2 = sess
+        .submit(AppendRecord::new(big_payload).unwrap())
+        .await
+        .unwrap();
+    // Batch 1 started sending, so its ack settles cleanly; batch 2 was never started, so the extra
+    // ack must trigger ProtocolError rather than reporting durable success for batch 2.
+    assert_eq!(t1.await.unwrap().start.seq_num, 0);
+    let err2 = tokio::time::timeout(Duration::from_secs(2), t2)
+        .await
+        .expect("extra ack must fail promptly")
+        .expect_err("unsent batch 2 must NOT be settled as durable");
+    assert!(
+        matches!(
+            err2,
+            AppendSessionError::Protocol(_) | AppendSessionError::SessionClosed(_)
+        ),
+        "expected ProtocolError or SessionClosedError wrapping ProtocolError for unsent batch 2, got {err2:?}"
+    );
+    let close_err = sess.close().await.unwrap_err();
+    assert!(
+        matches!(close_err, AppendSessionError::Protocol(_)),
+        "expected session failure to be ProtocolError, got {close_err:?}"
+    );
+
+    // 2. A8b/A9: Producer with an idle open session and a lingering record settles immediately (not
+    //    waiting out the 10s linger) when the owned session receives a permanent error.
+    let fail_gate = Arc::new(tokio::sync::Notify::new());
+    let perm_err_server = MockH2Server::start({
+        let fail_gate = fail_gate.clone();
+        move |_conn_id, req, respond| {
+            let fail_gate = fail_gate.clone();
+            async move {
+                let mut body = req.into_body();
+                let mut buf = BytesMut::new();
+                let Some(mut s2s) = S2sResponder::open(respond) else {
+                    return;
+                };
+                if read_one_s2s_frame(&mut body, &mut buf, true)
+                    .await
+                    .is_some()
+                {
+                    s2s.send_ack(0, 1, false, false);
+                }
+                // Wait until the producer holds a lingering record, then emit permanent 403.
+                fail_gate.notified().await;
+                s2s.send_terminal(403, br#"{"code":"permission_denied","message":"revoked"}"#);
+            }
+        }
+    })
+    .await;
+
+    let prod = perm_err_server
+        .stream(no_retry_config())
+        .producer(ProducerConfig::new().with_linger(Duration::from_secs(10)))
+        .unwrap();
+    let p1 = prod
+        .submit(AppendRecord::new("first").unwrap())
+        .await
+        .unwrap();
+    prod.flush().await.unwrap();
+    assert_eq!(p1.await.unwrap().seq_num, 0);
+
+    // Submit a second record that stays lingering in `partial_batch` while `pending_batch_acks` is
+    // empty, then fail the open append session with permanent 403.
+    let p2 = prod
+        .submit(AppendRecord::new("lingering").unwrap())
+        .await
+        .unwrap();
+    assert_eq!(prod.unacked_records(), 1);
+    fail_gate.notify_one();
+
+    let p2_err = tokio::time::timeout(Duration::from_secs(2), p2)
+        .await
+        .expect("producer must wake immediately on owned session failure without waiting out 10s linger")
+        .unwrap_err();
+    assert!(
+        matches!(p2_err, AppendSessionError::SessionClosed(_)),
+        "lingering record must fail with SessionClosedError, got {p2_err:?}"
+    );
+    let prod_close_err = prod.close().await.unwrap_err();
+    assert!(
+        matches!(prod_close_err, AppendSessionError::Server(ref e) if e.status == 403),
+        "producer close must surface 403, got {prod_close_err:?}"
+    );
+    assert_eq!(prod.unacked_records(), 0);
+    assert_eq!(prod.unacked_bytes(), 0);
 }

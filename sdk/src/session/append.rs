@@ -531,11 +531,9 @@ impl AppendSession {
         input: impl Into<AppendInput>,
     ) -> Result<BatchSubmitTicket, AppendSessionError> {
         let input = input.into();
-        if let Some(token) = input.fencing_token() {
-            token
-                .validate()
-                .map_err(|e| self.core.context.format_validation(e))?;
-        }
+        input
+            .validate_for_write()
+            .map_err(|e| self.core.context.format_validation(e))?;
         let bytes = input.metered_bytes();
         let permit = self.reserve(bytes).await?;
         permit.submit(input)
@@ -671,11 +669,9 @@ impl BatchSubmitPermit {
         input: impl Into<AppendInput>,
     ) -> Result<BatchSubmitTicket, AppendSessionError> {
         let input = input.into();
-        if let Some(token) = input.fencing_token() {
-            token
-                .validate()
-                .map_err(|e| self.core.context.format_validation(e))?;
-        }
+        input
+            .validate_for_write()
+            .map_err(|e| self.core.context.format_validation(e))?;
         let metered = input.metered_bytes();
         if metered > self.reserved_bytes {
             return Err(AppendSessionError::Validation(
@@ -1001,9 +997,10 @@ enum Command {
     Close,
 }
 
-/// Race-free gate between the session task and `AttemptBodyStream` (`Terms: Sent`, `T10`).
+/// Race-free gate between the session task and `AttemptBodyStream` (`Terms: Sent`, `T6a`, `T10`).
 struct AttemptSendGate {
     stopped: bool,
+    draining: bool,
     batches_started: usize,
 }
 
@@ -1011,6 +1008,7 @@ impl AttemptSendGate {
     fn new() -> Arc<StdMutex<Self>> {
         Arc::new(StdMutex::new(Self {
             stopped: false,
+            draining: false,
             batches_started: 0,
         }))
     }
@@ -1019,6 +1017,16 @@ impl AttemptSendGate {
         let mut g = gate.lock().unwrap();
         g.stopped = true;
         g.batches_started
+    }
+
+    fn start_draining(gate: &StdMutex<Self>) -> usize {
+        let mut g = gate.lock().unwrap();
+        g.draining = true;
+        g.batches_started
+    }
+
+    fn batches_started(gate: &StdMutex<Self>) -> usize {
+        gate.lock().unwrap().batches_started
     }
 }
 
@@ -1092,6 +1100,17 @@ impl Stream for AttemptBodyStream {
             return Poll::Ready(Some(Ok(chunk)));
         }
 
+        {
+            let gate = this.gate.lock().unwrap();
+            if gate.stopped {
+                this.aborted = true;
+                return Poll::Ready(Some(Err(Self::abort_err())));
+            }
+            if gate.draining {
+                return Poll::Ready(None);
+            }
+        }
+
         match this.rx.poll_recv(cx) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(None) => {
@@ -1108,6 +1127,9 @@ impl Stream for AttemptBodyStream {
                     if gate.stopped {
                         this.aborted = true;
                         return Poll::Ready(Some(Err(Self::abort_err())));
+                    }
+                    if gate.draining {
+                        return Poll::Ready(None);
                     }
                     gate.batches_started += 1;
                 }
@@ -1537,6 +1559,9 @@ impl AppendSessionTask {
             append.attempt_last_byte_rx = None;
         }
 
+        for append in &mut self.state.inflight_appends {
+            append.attempt_last_byte_rx = None;
+        }
         let send_gate = AttemptSendGate::new();
         let (input_tx, input_rx) = mpsc::channel::<OutboundBatch>(1);
         let (write_progress_tx, mut write_progress_rx) = watch::channel(Instant::now());
@@ -1644,10 +1669,12 @@ impl AppendSessionTask {
                 ack = acks.next() => {
                     match ack {
                         Some(Ok(frame)) => {
+                            let sent_unacked = AttemptSendGate::batches_started(&send_gate)
+                                .saturating_sub(acked_in_attempt);
                             match process_proto_ack(
                                 frame.msg,
                                 &mut self.state,
-                                send_cursor,
+                                sent_unacked,
                                 &self.context,
                             ) {
                                 Ok(()) => {
@@ -1657,16 +1684,21 @@ impl AppendSessionTask {
                                     became_oldest_at =
                                         (!self.state.inflight_appends.is_empty()).then(Instant::now);
                                     // T6a: Act on reconnect advice at most once per cooldown window
-                                    // by half-closing and draining batches already sent on this
-                                    // request.
+                                    // by stopping new batches from starting, finishing any
+                                    // already-started batch, half-closing, and draining acks for
+                                    // started batches only.
                                     if frame.reconnect_advised
                                         && !draining_for_reconnect
                                         && advised_reconnects.should_reconnect()
                                     {
                                         draining_for_reconnect = true;
+                                        AttemptSendGate::start_draining(&send_gate);
                                         drop_input_tx = true;
                                     }
-                                    if draining_for_reconnect && send_cursor == 0 {
+                                    if draining_for_reconnect
+                                        && AttemptSendGate::batches_started(&send_gate)
+                                            <= acked_in_attempt
+                                    {
                                         drop(acks);
                                         return AttemptResult::ReconnectAdvised {
                                             made_progress: acked_in_attempt > 0,
@@ -1765,6 +1797,7 @@ impl AppendSessionTask {
                     drain_ready_acks(
                         &mut acks,
                         &mut self.state,
+                        &send_gate,
                         &mut acked_in_attempt,
                         &mut send_cursor,
                         &self.context,
@@ -1774,6 +1807,59 @@ impl AppendSessionTask {
                 }
 
                 _ = &mut ack_timer, if timer_kind.is_some() => {
+                    // T7c: reconcile any already-ready last-byte or upload-progress update that
+                    // raced with the old deadline in this biased select before committing timeout.
+                    if timer_kind == Some(TimerKind::WriteStall) {
+                        let now = Instant::now();
+                        if let Some(front) = self.state.inflight_appends.front_mut()
+                            && let Some(rx) = front.attempt_last_byte_rx.as_mut()
+                        {
+                            match rx.try_recv() {
+                                Ok(sent_at) => {
+                                    front.attempt_last_byte_rx = None;
+                                    let start = became_oldest_at.map_or(sent_at, |b| b.max(sent_at));
+                                    arm_timer(
+                                        ack_timer.as_mut(),
+                                        &mut timer_kind,
+                                        TimerKind::Ack,
+                                        start,
+                                        ack_timeout,
+                                    );
+                                    if start.checked_add(ack_timeout).is_none_or(|dl| dl > now) {
+                                        continue;
+                                    }
+                                }
+                                Err(oneshot::error::TryRecvError::Closed) => {
+                                    front.attempt_last_byte_rx = None;
+                                    arm_timer(
+                                        ack_timer.as_mut(),
+                                        &mut timer_kind,
+                                        TimerKind::BodyClosed,
+                                        now,
+                                        ack_timeout,
+                                    );
+                                    continue;
+                                }
+                                Err(oneshot::error::TryRecvError::Empty) => {}
+                            }
+                        }
+                        if timer_kind == Some(TimerKind::WriteStall)
+                            && write_progress_open
+                            && write_progress_rx.has_changed().unwrap_or(false)
+                        {
+                            let progress_at = *write_progress_rx.borrow_and_update();
+                            if progress_at.checked_add(ack_timeout).is_none_or(|dl| dl > now) {
+                                arm_timer(
+                                    ack_timer.as_mut(),
+                                    &mut timer_kind,
+                                    TimerKind::WriteStall,
+                                    progress_at,
+                                    ack_timeout,
+                                );
+                                continue;
+                            }
+                        }
+                    }
                     acks.poison_connection();
                     let unacked_sent =
                         finish_attempt_gate(&send_gate, acked_in_attempt, &mut self.state);
@@ -1911,6 +1997,7 @@ impl AppendSessionTask {
                             drain_ready_acks(
                                 &mut acks,
                                 &mut self.state,
+                                &send_gate,
                                 &mut acked_in_attempt,
                                 &mut send_cursor,
                                 &self.context,
@@ -2029,6 +2116,7 @@ fn finish_attempt_gate(
 fn drain_ready_acks(
     acks: &mut Streaming<proto::AppendAck, AppendSessionError>,
     state: &mut SessionState,
+    send_gate: &StdMutex<AttemptSendGate>,
     acked_in_attempt: &mut usize,
     send_cursor: &mut usize,
     context: &ErrorContext,
@@ -2036,7 +2124,9 @@ fn drain_ready_acks(
     // Use `coop::unconstrained` so Tokio cooperative preemption cannot spuriously return
     // `Pending` and drop an already-buffered ack during abort (`T10`).
     while let Some(Some(Ok(frame))) = tokio::task::coop::unconstrained(acks.next()).now_or_never() {
-        if process_proto_ack(frame.msg, state, *send_cursor, context).is_err() {
+        let sent_unacked =
+            AttemptSendGate::batches_started(send_gate).saturating_sub(*acked_in_attempt);
+        if process_proto_ack(frame.msg, state, sent_unacked, context).is_err() {
             break;
         }
         *acked_in_attempt += 1;
@@ -2047,10 +2137,10 @@ fn drain_ready_acks(
 fn process_proto_ack(
     proto_ack: proto::AppendAck,
     state: &mut SessionState,
-    send_cursor: usize,
+    sent_unacked: usize,
     context: &ErrorContext,
 ) -> Result<(), AppendSessionError> {
-    if send_cursor == 0 {
+    if sent_unacked == 0 {
         return Err(AppendSessionError::Protocol(
             ProtocolError::new_with_context(
                 "received ack for a batch that was not sent on this attempt",
@@ -2277,7 +2367,7 @@ mod tests {
             })
         };
 
-        // send_cursor == 0 rejects unsolicited ack without popping inflight_appends.
+        // Unsent (sent_unacked == 0) rejects unsolicited ack without popping inflight_appends.
         let valid_ack = proto::AppendAck {
             start: pos(5),
             end: pos(6),
@@ -2302,5 +2392,53 @@ mod tests {
         ));
         assert_eq!(state.inflight_appends.len(), 1);
         assert!(ack_rx.try_recv().is_err());
+    }
+
+    // spec: r1 T6a
+    #[tokio::test]
+    async fn attempt_body_stream_draining_finishes_active_batch_and_skips_queued_batch() {
+        use futures_util::StreamExt;
+
+        use super::{AttemptBodyStream, AttemptSendGate, FRAME_CHUNK_BYTES, OutboundBatch};
+
+        let gate = AttemptSendGate::new();
+        let (tx, rx) = tokio::sync::mpsc::channel(2);
+        let (progress_tx, _progress_rx) = tokio::sync::watch::channel(tokio::time::Instant::now());
+        let mut stream = AttemptBodyStream::new(rx, gate.clone(), progress_tx);
+
+        // Enqueue a 2-chunk batch and a 2nd queued batch.
+        let (last1_tx, mut last1_rx) = tokio::sync::oneshot::channel();
+        let (last2_tx, mut last2_rx) = tokio::sync::oneshot::channel();
+        tx.send(OutboundBatch {
+            remaining: Bytes::from(vec![0xAA; FRAME_CHUNK_BYTES + 16]),
+            last_byte_tx: Some(last1_tx),
+        })
+        .await
+        .unwrap();
+        tx.send(OutboundBatch {
+            remaining: Bytes::from_static(b"queued-second-batch"),
+            last_byte_tx: Some(last2_tx),
+        })
+        .await
+        .unwrap();
+
+        // First chunk starts batch 1.
+        let first = stream.next().await.unwrap().unwrap();
+        assert_eq!(first.len(), FRAME_CHUNK_BYTES);
+        assert_eq!(AttemptSendGate::batches_started(&gate), 1);
+
+        // Reconnect advice begins draining before batch 1 finishes and while batch 2 sits queued.
+        assert_eq!(AttemptSendGate::start_draining(&gate), 1);
+        drop(tx);
+
+        // Batch 1 finishes cleanly...
+        let rest = stream.next().await.unwrap().unwrap();
+        assert_eq!(rest.len(), 16);
+        assert!(last1_rx.try_recv().is_ok());
+
+        // ...then the stream half-closes cleanly WITHOUT pulling batch 2!
+        assert!(stream.next().await.is_none());
+        assert_eq!(AttemptSendGate::batches_started(&gate), 1);
+        assert!(last2_rx.try_recv().is_err());
     }
 }
