@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-/// Structured error codes returned by S2 servers in JSON error responses.
+/// Structured error codes returned by S2 servers in standard error responses.
 #[derive(
     Debug,
     Clone,
@@ -23,11 +23,11 @@ use serde::{Deserialize, Serialize};
 pub enum ErrorCode {
     /// The referenced access token does not exist (HTTP 404).
     AccessTokenNotFound,
-    /// Authentication failed because the access token is missing, invalid, or expired (HTTP 401).
+    /// Authentication failed: access token is missing, invalid, expired, or revoked (HTTP 401).
     Authn,
     /// An S2S session frame was malformed or exceeded wire limits (HTTP 400).
     BadFrame,
-    /// A request HTTP header was missing or malformed (HTTP 400).
+    /// A request HTTP header was missing, malformed, or invalid for the request (HTTP 400).
     BadHeader,
     /// A JSON request body could not be parsed (HTTP 400).
     BadJson,
@@ -39,19 +39,19 @@ pub enum ErrorCode {
     BadQuery,
     /// The basin is currently being deleted (HTTP 409).
     BasinDeletionPending,
-    /// The referenced basin does not exist (HTTP 404).
+    /// The referenced basin does not exist or is not accessible to the caller's account (HTTP 404).
     BasinNotFound,
-    /// The client closed the connection before the server finished handling the request (HTTP 499).
+    /// The client disconnected or aborted the request before handling completed (HTTP 499).
     ClientHangup,
-    /// The server could not decrypt the stream with the supplied encryption key (HTTP 400).
+    /// The server could not decrypt records with the supplied encryption key (HTTP 400).
     DecryptionFailed,
-    /// The server is overloaded and requested the client reconnect elsewhere (HTTP 502).
+    /// The server instance is overloaded and shedding load; retry on a new connection (HTTP 502).
     HotServer,
-    /// The request was syntactically valid but failed semantic validation (HTTP 422).
+    /// The request had invalid arguments, configuration, or violated a constraint (HTTP 422).
     Invalid,
     /// The request was blocked by the access token's network policy (HTTP 403).
     NetworkPolicyDenied,
-    /// The network policy cannot be deleted while bound to an access token (HTTP 409).
+    /// The network policy cannot be deleted while still bound to access tokens (HTTP 409).
     NetworkPolicyInUse,
     /// The referenced network policy does not exist (HTTP 404).
     NetworkPolicyNotFound,
@@ -59,29 +59,29 @@ pub enum ErrorCode {
     NotImplemented,
     /// An unspecified internal server error occurred (HTTP 500).
     Other,
-    /// The authenticated access token is not authorized for this operation or resource (HTTP 403).
+    /// Not authorized for this operation or resource, or the account is restricted (HTTP 403).
     PermissionDenied,
     /// An account or resource quota has been exhausted (HTTP 403).
     QuotaExhausted,
     /// The request was throttled due to rate limiting (HTTP 429).
     RateLimited,
-    /// The server timed out waiting for the request (HTTP 408).
+    /// The server timed out while receiving the request body from the client (HTTP 408).
     RequestTimeout,
     /// A resource with the same identifier already exists (HTTP 409).
     ResourceAlreadyExists,
-    /// The server is draining and will not process further requests on this connection (HTTP 503).
+    /// The server instance is draining for shutdown; reconnect on a new connection (HTTP 503).
     ServerDraining,
-    /// An internal storage backend error occurred (HTTP 500).
+    /// An error occurred in the underlying storage backend (HTTP 500).
     Storage,
     /// The stream is currently being deleted (HTTP 409).
     StreamDeletionPending,
     /// The referenced stream does not exist (HTTP 404).
     StreamNotFound,
-    /// A concurrent metadata mutation conflicted; retrying may succeed (HTTP 409).
+    /// A concurrent operation conflicted with this request; retrying may succeed (HTTP 409).
     TransactionConflict,
-    /// The service is temporarily unavailable (HTTP 503).
+    /// The service is temporarily unavailable or busy (HTTP 503).
     Unavailable,
-    /// An upstream service timed out (HTTP 504).
+    /// The server timed out waiting for internal or upstream processing to complete (HTTP 504).
     UpstreamTimeout,
 }
 
