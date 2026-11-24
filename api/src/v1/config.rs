@@ -18,56 +18,45 @@ pub enum RetentionPolicy {
 }
 
 #[cfg(feature = "utoipa")]
-impl utoipa::PartialSchema for RetentionPolicy {
-    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
-        use utoipa::openapi::{KnownFormat, Object, OneOf, Ref, SchemaFormat, Type};
-
-        let age_desc = "Age in seconds for automatic trimming of records older than this threshold.\nThis must be set to a value greater than 0 seconds.";
-        let infinite_desc = "Retain records unless explicitly trimmed.";
-        OneOf::builder()
-            .item(
-                Object::builder()
-                    .description(Some(age_desc))
-                    .property(
-                        "age",
-                        Object::builder()
-                            .schema_type(Type::Integer)
-                            .format(Some(SchemaFormat::KnownFormat(KnownFormat::Int64)))
-                            .description(Some(age_desc))
-                            .minimum(Some(1)),
-                    )
-                    .required("age"),
-            )
-            .item(
-                Object::builder()
-                    .description(Some(infinite_desc))
-                    .property(
-                        "infinite",
-                        Ref::builder()
-                            .ref_location_from_schema_name("InfiniteRetention")
-                            .description(Some(infinite_desc)),
-                    )
-                    .required("infinite"),
-            )
-            .into()
+const _: () = {
+    // utoipa only accepts `#[schema(minimum = ...)]` on named fields (not tuple enum variants),
+    // and inlining a custom `value_type` on a documented variant wraps it in a single-item `oneOf`.
+    #[derive(Serialize, utoipa::ToSchema)]
+    #[serde(untagged)]
+    #[allow(dead_code)]
+    enum RetentionPolicySchema {
+        /// Age in seconds for automatic trimming of records older than this threshold.
+        /// This must be set to a value greater than 0 seconds.
+        Age {
+            /// Age in seconds for automatic trimming of records older than this threshold.
+            /// This must be set to a value greater than 0 seconds.
+            #[schema(minimum = 1)]
+            age: u64,
+        },
+        /// Retain records unless explicitly trimmed.
+        Infinite {
+            /// Retain records unless explicitly trimmed.
+            infinite: InfiniteRetention,
+        },
     }
-}
 
-#[cfg(feature = "utoipa")]
-impl utoipa::ToSchema for RetentionPolicy {
-    fn schemas(
-        schemas: &mut Vec<(
-            String,
-            utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>,
-        )>,
-    ) {
-        schemas.push((
-            <InfiniteRetention as utoipa::ToSchema>::name().into(),
-            <InfiniteRetention as utoipa::PartialSchema>::schema(),
-        ));
-        <InfiniteRetention as utoipa::ToSchema>::schemas(schemas);
+    impl utoipa::PartialSchema for RetentionPolicy {
+        fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
+            <RetentionPolicySchema as utoipa::PartialSchema>::schema()
+        }
     }
-}
+
+    impl utoipa::ToSchema for RetentionPolicy {
+        fn schemas(
+            schemas: &mut Vec<(
+                String,
+                utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>,
+            )>,
+        ) {
+            <RetentionPolicySchema as utoipa::ToSchema>::schemas(schemas);
+        }
+    }
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
@@ -1248,5 +1237,50 @@ mod tests {
         let updated = base.reconfigure(common_reconfig);
         assert!(!updated.create_stream_on_append);
         assert!(updated.create_stream_on_read);
+    }
+
+    #[cfg(feature = "utoipa")]
+    #[test]
+    fn retention_policy_openapi_schema() {
+        use utoipa::{PartialSchema as _, ToSchema as _};
+
+        assert_eq!(RetentionPolicy::name(), "RetentionPolicy");
+        let schema = serde_json::to_value(RetentionPolicy::schema()).unwrap();
+        assert_eq!(
+            schema,
+            serde_json::json!({
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "description": "Age in seconds for automatic trimming of records older than this threshold.\nThis must be set to a value greater than 0 seconds.",
+                        "required": ["age"],
+                        "properties": {
+                            "age": {
+                                "type": "integer",
+                                "format": "int64",
+                                "description": "Age in seconds for automatic trimming of records older than this threshold.\nThis must be set to a value greater than 0 seconds.",
+                                "minimum": 1
+                            }
+                        }
+                    },
+                    {
+                        "type": "object",
+                        "description": "Retain records unless explicitly trimmed.",
+                        "required": ["infinite"],
+                        "properties": {
+                            "infinite": {
+                                "$ref": "#/components/schemas/InfiniteRetention",
+                                "description": "Retain records unless explicitly trimmed."
+                            }
+                        }
+                    }
+                ]
+            })
+        );
+
+        let mut schemas = Vec::new();
+        RetentionPolicy::schemas(&mut schemas);
+        let names: Vec<&str> = schemas.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, vec!["InfiniteRetention"]);
     }
 }
