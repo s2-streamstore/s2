@@ -13,9 +13,9 @@ pub struct LastEventId {
     /// Sequence number of the last delivered record.
     pub seq_num: u64,
     /// Total records delivered.
-    pub count: usize,
+    pub count: u64,
     /// Total metered bytes delivered.
-    pub bytes: usize,
+    pub bytes: u64,
 }
 
 impl ParseableHeader for LastEventId {
