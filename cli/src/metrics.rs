@@ -1,43 +1,16 @@
 //! Output of metric sets beyond the generic per-metric rendering.
 
-use std::{
-    collections::BTreeMap,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+use std::{collections::BTreeMap, time::Duration};
 
 use colored::Colorize;
-use s2_sdk::types::{
-    AccumulationMetric, GaugeMetric, Metric, MetricUnit, RecordMetric, TimeseriesInterval,
-};
+use s2_sdk::types::{AccumulationMetric, GaugeMetric, Metric, MetricUnit, RecordMetric, Timestamp};
 use serde_json::{Value, json};
-
-pub fn format_unit(unit: &MetricUnit) -> &str {
-    match unit {
-        MetricUnit::Bytes => "bytes",
-        MetricUnit::Operations => "operations",
-        MetricUnit::Usd => "usd",
-        MetricUnit::Unknown(name) => name,
-        _ => "unknown",
-    }
-}
-
-fn format_interval(interval: &TimeseriesInterval) -> &str {
-    match interval {
-        TimeseriesInterval::Minute => "minute",
-        TimeseriesInterval::Hour => "hour",
-        TimeseriesInterval::Day => "day",
-        TimeseriesInterval::Unknown(name) => name,
-        _ => "unknown",
-    }
-}
 
 /// `2h 5m` for a time in the past, by its two largest units, and `None` for one that is not (a
 /// clock behind the server's would otherwise give a negative age).
-pub fn format_age(ts: u32, now: SystemTime) -> Option<String> {
-    let elapsed = now
-        .duration_since(UNIX_EPOCH + Duration::from_secs(ts as u64))
-        .ok()?;
-    let elapsed = humantime::format_duration(Duration::from_secs(elapsed.as_secs())).to_string();
+pub fn format_age(ts: Timestamp, now: Timestamp) -> Option<String> {
+    let elapsed_secs = u64::try_from(now.as_second().checked_sub(ts.as_second())?).ok()?;
+    let elapsed = humantime::format_duration(Duration::from_secs(elapsed_secs)).to_string();
     let largest: Vec<&str> = elapsed.split(' ').take(2).collect();
     Some(largest.join(" "))
 }
@@ -49,19 +22,19 @@ pub fn to_json(metrics: &[Metric]) -> Value {
         .map(|metric| match metric {
             Metric::Scalar(m) => json!({"scalar": {
                 "name": m.name,
-                "unit": format_unit(&m.unit),
+                "unit": m.unit.as_str(),
                 "value": m.value,
             }}),
             Metric::Accumulation(m) => json!({"accumulation": {
                 "name": m.name,
-                "unit": format_unit(&m.unit),
-                "interval": format_interval(&m.interval),
-                "values": m.values,
+                "unit": m.unit.as_str(),
+                "interval": m.interval.as_str(),
+                "values": m.values.iter().map(|(ts, v)| (ts.as_second(), *v)).collect::<Vec<_>>(),
             }}),
             Metric::Gauge(m) => json!({"gauge": {
                 "name": m.name,
-                "unit": format_unit(&m.unit),
-                "values": m.values,
+                "unit": m.unit.as_str(),
+                "values": m.values.iter().map(|(ts, v)| (ts.as_second(), *v)).collect::<Vec<_>>(),
             }}),
             Metric::Label(m) => json!({"label": {
                 "name": m.name,
@@ -69,7 +42,7 @@ pub fn to_json(metrics: &[Metric]) -> Value {
             }}),
             Metric::Record(m) => json!({"record": {
                 "name": m.name,
-                "timestamp": m.timestamp,
+                "timestamp": m.timestamp.as_second(),
                 "fields": m.fields,
             }}),
             Metric::Unknown(kind) => json!({ kind: {} }),
@@ -88,7 +61,7 @@ fn field<'a>(record: &'a RecordMetric, name: &str) -> &'a str {
 /// was), and its user agent. Columns line up across all sections.
 pub fn render_token_activity(
     records: &[&RecordMetric],
-    now: SystemTime,
+    now: Timestamp,
     width: Option<usize>,
 ) -> String {
     // Denials first: they are what a reader checking a policy or a leaked token looks for.
@@ -175,10 +148,6 @@ pub fn render_token_activity(
     out
 }
 
-fn timestamp(ts: u32) -> String {
-    humantime::format_rfc3339_seconds(UNIX_EPOCH + Duration::from_secs(ts as u64)).to_string()
-}
-
 fn value(unit: &MetricUnit, value: f64) -> String {
     match unit {
         // Usage of a small account is fractions of a cent.
@@ -221,13 +190,11 @@ fn table(heading: [&str; 2], rows: &[(String, String)], total: bool) -> String {
 }
 
 /// The time range metrics were asked for, as the heading of any view of them.
-pub fn render_time_range(start: u32, end: u32) -> String {
+pub fn render_time_range(start: Timestamp, end: Timestamp) -> String {
     format!(
-        "{} {}\n{}   {}\n\n",
+        "{} {start}\n{}   {end}\n\n",
         "start:".dimmed(),
-        timestamp(start),
         "end:".dimmed(),
-        timestamp(end)
     )
 }
 
@@ -246,7 +213,7 @@ pub fn render_sums(series: &[&AccumulationMetric]) -> String {
         let all = series.iter().fold(0.0, |all, series| all + sum(series));
         rows.push(("total".to_string(), value(&first.unit, all)));
     }
-    table(["", format_unit(&first.unit)], &rows, total)
+    table(["", first.unit.as_str()], &rows, total)
 }
 
 /// The latest value of a gauge, then its values over time: all of them, or of a long series, a
@@ -266,15 +233,15 @@ pub fn render_gauge(gauge: &GaugeMetric) -> String {
     let rows: Vec<(String, String)> = shown
         .iter()
         .map(|i| gauge.values[*i])
-        .map(|(ts, point)| (timestamp(ts), value(&gauge.unit, point)))
+        .map(|(ts, point)| (ts.to_string(), value(&gauge.unit, point)))
         .collect();
 
-    let unit = format_unit(&gauge.unit);
+    let unit = gauge.unit.as_str();
     let mut out = format!(
         "{}: {} {unit} at {}\n\n{}",
         gauge.name,
         value(&gauge.unit, *latest).bold(),
-        timestamp(*latest_at),
+        latest_at,
         table(["time", unit], &rows, false)
     );
     if shown.len() < len {
@@ -302,7 +269,7 @@ pub fn render_estimated_billable_usage(metrics: &[Metric], by_interval: bool) ->
     let usd = |usd: f64| value(&MetricUnit::Usd, usd);
 
     let (heading, mut rows): (&str, Vec<(String, String)>) = if by_interval {
-        let rows = total.values.iter().map(|(ts, v)| (timestamp(*ts), usd(*v)));
+        let rows = total.values.iter().map(|(ts, v)| (ts.to_string(), usd(*v)));
         ("interval start", rows.collect())
     } else {
         let dimensions = series.iter().filter(|series| series.name != TOTAL);
@@ -322,20 +289,20 @@ pub fn render_estimated_billable_usage(metrics: &[Metric], by_interval: bool) ->
 
 #[cfg(test)]
 mod tests {
+    use s2_sdk::types::TimeseriesInterval;
+
     use super::*;
 
     fn series(name: &str, unit: &str, values: &[(u32, f64)]) -> AccumulationMetric {
-        let api = s2_api::v1::metrics::AccumulationMetric {
-            name: name.into(),
-            unit: s2_api::v1::MaybeKnown::Unknown(unit.into()),
-            interval: s2_api::v1::MaybeKnown::Known(s2_api::v1::metrics::TimeseriesInterval::Hour),
-            values: values.to_vec(),
-        };
-        let metric = s2_api::v1::metrics::Metric::Accumulation(api);
-        match Metric::from(s2_api::v1::MaybeKnown::Known(metric)) {
-            Metric::Accumulation(series) => series,
-            _ => unreachable!(),
-        }
+        AccumulationMetric::new(
+            name,
+            MetricUnit::Unknown(unit.into()),
+            TimeseriesInterval::Hour,
+            values
+                .iter()
+                .map(|&(secs, value)| (Timestamp::from_second(i64::from(secs)).unwrap(), value))
+                .collect(),
+        )
     }
 
     fn usd(name: &str, values: &[(u32, f64)]) -> Metric {
@@ -345,16 +312,13 @@ mod tests {
     }
 
     fn record(timestamp: u32, fields: &[(&str, &str)]) -> Metric {
-        let api = s2_api::v1::metrics::RecordMetric {
-            name: "last_use".into(),
-            timestamp,
-            fields: fields
+        Metric::Record(RecordMetric::new(
+            "last_use",
+            Timestamp::from_second(i64::from(timestamp)).unwrap(),
+            fields
                 .iter()
                 .map(|(name, value)| (name.to_string(), value.to_string()))
                 .collect(),
-        };
-        Metric::from(s2_api::v1::MaybeKnown::Known(
-            s2_api::v1::metrics::Metric::Record(api),
         ))
     }
 
@@ -371,7 +335,7 @@ mod tests {
     #[test]
     fn token_activity_groups_by_outcome() {
         colored::control::set_override(false);
-        let now = UNIX_EPOCH + Duration::from_secs(10_000);
+        let now = Timestamp::from_second(10_000).unwrap();
         let metrics = [
             record(
                 6_400,
@@ -421,7 +385,7 @@ mod tests {
     #[test]
     fn token_activity_heads_each_token_and_omits_empty_columns() {
         colored::control::set_override(false);
-        let now = UNIX_EPOCH + Duration::from_secs(100);
+        let now = Timestamp::from_second(100).unwrap();
         let metrics = [
             record(
                 40,
@@ -511,15 +475,18 @@ mod tests {
         let appends: Vec<&AccumulationMetric> = appends.iter().collect();
         assert_eq!(render_sums(&appends), expected);
 
-        let api = s2_api::v1::metrics::GaugeMetric {
-            name: "storage".into(),
-            unit: s2_api::v1::MaybeKnown::Known(s2_api::v1::metrics::MetricUnit::Bytes),
-            values: (0..100).map(|i| (i * 60, f64::from(i))).collect(),
-        };
-        let gauge = s2_api::v1::metrics::Metric::Gauge(api);
-        let Metric::Gauge(gauge) = Metric::from(s2_api::v1::MaybeKnown::Known(gauge)) else {
-            unreachable!()
-        };
+        let gauge = GaugeMetric::new(
+            "storage",
+            MetricUnit::Bytes,
+            (0..100)
+                .map(|i| {
+                    (
+                        Timestamp::from_second(i64::from(i * 60)).unwrap(),
+                        f64::from(i),
+                    )
+                })
+                .collect(),
+        );
         let rendered = render_gauge(&gauge);
         let lines: Vec<&str> = rendered.lines().collect();
         assert_eq!(lines[0], "storage: 99 bytes at 1970-01-01T01:39:00Z");

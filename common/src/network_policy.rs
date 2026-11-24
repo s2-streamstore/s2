@@ -16,7 +16,7 @@ use compact_str::{CompactString, ToCompactString};
 use crate::{
     ValidationError, caps,
     resources::ListItemsRequest,
-    strings::{PrefixProps, SlugProps, StartAfterProps, StrProps},
+    strings::{PrefixProps, SlugProps, StartAfterProps, StrProps, impl_validated_str},
 };
 
 const NONCE_ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
@@ -59,6 +59,8 @@ impl<T: StrProps> NetworkPolicySlugStr<T> {
     }
 }
 
+impl_validated_str!(NetworkPolicySlugStr<T: StrProps>);
+
 #[cfg(feature = "utoipa")]
 impl<T: StrProps> utoipa::PartialSchema for NetworkPolicySlugStr<T> {
     fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
@@ -73,69 +75,6 @@ impl<T: StrProps> utoipa::PartialSchema for NetworkPolicySlugStr<T> {
 #[cfg(feature = "utoipa")]
 impl<T: StrProps> utoipa::ToSchema for NetworkPolicySlugStr<T> {}
 
-impl<T: StrProps> serde::Serialize for NetworkPolicySlugStr<T> {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_str(&self.0)
-    }
-}
-
-impl<'de, T: StrProps> serde::Deserialize<'de> for NetworkPolicySlugStr<T> {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let s = CompactString::deserialize(deserializer)?;
-        s.try_into().map_err(serde::de::Error::custom)
-    }
-}
-
-impl<T: StrProps> AsRef<str> for NetworkPolicySlugStr<T> {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
-impl<T: StrProps> Deref for NetworkPolicySlugStr<T> {
-    type Target = str;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl<T: StrProps> TryFrom<CompactString> for NetworkPolicySlugStr<T> {
-    type Error = ValidationError;
-
-    fn try_from(slug: CompactString) -> Result<Self, Self::Error> {
-        Self::validate_str(&slug)?;
-        Ok(Self(slug, PhantomData))
-    }
-}
-
-impl<T: StrProps> FromStr for NetworkPolicySlugStr<T> {
-    type Err = ValidationError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Self::validate_str(s)?;
-        Ok(Self(s.to_compact_string(), PhantomData))
-    }
-}
-
-impl<T: StrProps> fmt::Debug for NetworkPolicySlugStr<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl<T: StrProps> fmt::Display for NetworkPolicySlugStr<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
 pub type NetworkPolicySlug = NetworkPolicySlugStr<SlugProps>;
 
 pub type NetworkPolicySlugPrefix = NetworkPolicySlugStr<PrefixProps>;
@@ -143,6 +82,12 @@ pub type NetworkPolicySlugPrefix = NetworkPolicySlugStr<PrefixProps>;
 impl Default for NetworkPolicySlugPrefix {
     fn default() -> Self {
         Self(CompactString::default(), PhantomData)
+    }
+}
+
+impl From<NetworkPolicySlug> for NetworkPolicySlugPrefix {
+    fn from(value: NetworkPolicySlug) -> Self {
+        Self(value.0, PhantomData)
     }
 }
 
@@ -195,6 +140,53 @@ impl FromStr for NetworkPolicyNonce {
             .into());
         }
         Ok(Self(s.to_compact_string()))
+    }
+}
+
+impl TryFrom<&str> for NetworkPolicyNonce {
+    type Error = ValidationError;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        s.parse()
+    }
+}
+
+impl TryFrom<String> for NetworkPolicyNonce {
+    type Error = ValidationError;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        s.parse()
+    }
+}
+
+impl From<NetworkPolicyNonce> for String {
+    fn from(value: NetworkPolicyNonce) -> Self {
+        value.0.into()
+    }
+}
+
+impl AsRef<str> for NetworkPolicyNonce {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl serde::Serialize for NetworkPolicyNonce {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for NetworkPolicyNonce {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = CompactString::deserialize(deserializer)?;
+        s.parse().map_err(serde::de::Error::custom)
     }
 }
 
@@ -274,6 +266,22 @@ impl FromStr for NetworkPolicyRef {
     }
 }
 
+impl TryFrom<&str> for NetworkPolicyRef {
+    type Error = ValidationError;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        s.parse()
+    }
+}
+
+impl TryFrom<String> for NetworkPolicyRef {
+    type Error = ValidationError;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        s.parse()
+    }
+}
+
 impl serde::Serialize for NetworkPolicyRef {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -293,6 +301,12 @@ impl<'de> serde::Deserialize<'de> for NetworkPolicyRef {
     }
 }
 
+impl From<NetworkPolicyRef> for String {
+    fn from(value: NetworkPolicyRef) -> Self {
+        value.to_string()
+    }
+}
+
 impl fmt::Debug for NetworkPolicyRef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(self, f)
@@ -307,7 +321,7 @@ impl fmt::Display for NetworkPolicyRef {
 
 /// How a request names a policy. A bare slug selects whichever policy currently holds it; a
 /// full reference selects only that version.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum NetworkPolicySelector {
     Slug(NetworkPolicySlug),
     Ref(NetworkPolicyRef),
@@ -372,6 +386,28 @@ impl FromStr for NetworkPolicySelector {
         } else {
             s.parse().map(Self::Slug)
         }
+    }
+}
+
+impl TryFrom<&str> for NetworkPolicySelector {
+    type Error = ValidationError;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        s.parse()
+    }
+}
+
+impl TryFrom<String> for NetworkPolicySelector {
+    type Error = ValidationError;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        s.parse()
+    }
+}
+
+impl From<NetworkPolicySelector> for String {
+    fn from(value: NetworkPolicySelector) -> Self {
+        value.to_string()
     }
 }
 
@@ -509,6 +545,28 @@ impl FromStr for Cidr {
     }
 }
 
+impl TryFrom<&str> for Cidr {
+    type Error = ValidationError;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        s.parse()
+    }
+}
+
+impl TryFrom<String> for Cidr {
+    type Error = ValidationError;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        s.parse()
+    }
+}
+
+impl From<Cidr> for String {
+    fn from(value: Cidr) -> Self {
+        value.to_string()
+    }
+}
+
 impl serde::Serialize for Cidr {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -548,10 +606,8 @@ impl fmt::Display for Cidr {
 )]
 pub struct VpcEndpointId(CompactString);
 
-impl FromStr for VpcEndpointId {
-    type Err = ValidationError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
+impl VpcEndpointId {
+    fn validate_str(s: &str) -> Result<(), ValidationError> {
         let valid = s
             .strip_prefix("vpce-")
             .is_some_and(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_hexdigit()));
@@ -561,9 +617,11 @@ impl FromStr for VpcEndpointId {
             )
             .into());
         }
-        Ok(Self(s.to_compact_string()))
+        Ok(())
     }
 }
+
+impl_validated_str!(VpcEndpointId);
 
 #[cfg(feature = "utoipa")]
 impl utoipa::PartialSchema for VpcEndpointId {
@@ -577,45 +635,6 @@ impl utoipa::PartialSchema for VpcEndpointId {
 
 #[cfg(feature = "utoipa")]
 impl utoipa::ToSchema for VpcEndpointId {}
-
-impl serde::Serialize for VpcEndpointId {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_str(&self.0)
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for VpcEndpointId {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let s = CompactString::deserialize(deserializer)?;
-        s.parse().map_err(serde::de::Error::custom)
-    }
-}
-
-impl Deref for VpcEndpointId {
-    type Target = str;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl fmt::Debug for VpcEndpointId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl fmt::Display for VpcEndpointId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
 
 /// What a token may be used from over the public path.
 ///
@@ -798,7 +817,7 @@ impl From<PrivateNetPolicy> for NetworkPolicy {
 #[derive(Debug, Clone)]
 pub struct NetworkPolicyInfo {
     pub id: NetworkPolicyRef,
-    pub created_at: time::OffsetDateTime,
+    pub created_at: jiff::Timestamp,
     pub policy: NetworkPolicy,
 }
 
@@ -891,5 +910,19 @@ mod tests {
             NetworkPolicyNonce::from_random_bytes([0, 1, 25, 26, 35, 36, 255, 7]).to_string(),
             "abz09adh"
         );
+    }
+
+    #[test]
+    fn slug_string_conversions_and_serde_roundtrip() {
+        let from_str = NetworkPolicySlug::try_from("office_net-1").unwrap();
+        let from_string = NetworkPolicySlug::try_from("office_net-1".to_owned()).unwrap();
+        assert_eq!(from_str, from_string);
+        assert_eq!(String::from(from_string), "office_net-1");
+
+        let json = serde_json::to_string(&from_str).unwrap();
+        assert_eq!(json, r#""office_net-1""#);
+        let decoded: NetworkPolicySlug = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, from_str);
+        assert!(serde_json::from_str::<NetworkPolicySlug>(r#""""#).is_err());
     }
 }

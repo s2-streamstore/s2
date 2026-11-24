@@ -1,12 +1,12 @@
 //! Documentation examples for Configuration page.
 //!
-//! Run with: cargo run --example docs_configuration
+//! Run with: cargo run -p s2-sdk --example docs_configuration
 
-use std::{num::NonZeroU32, time::Duration};
+use std::time::Duration;
 
 use s2_sdk::{
     S2,
-    types::{AccountEndpoint, BasinEndpoint, RetryConfig, S2Config, S2Endpoints},
+    types::{RetryConfig, S2Config, S2Endpoints},
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -14,30 +14,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         // ANCHOR: custom-endpoints
         let client = S2::new(
-            S2Config::new("local-token").with_endpoints(S2Endpoints::new(
-                AccountEndpoint::new("http://localhost:8080")?,
-                BasinEndpoint::new("http://localhost:8080")?,
-            )?),
+            S2Config::new("local-token")
+                .with_endpoints(S2Endpoints::for_endpoint("http://localhost:8080")?),
         )?;
         // ANCHOR_END: custom-endpoints
         println!("Created client with custom endpoints: {:?}", client);
     }
 
-    // Example: Endpoints from environment variables
-    if [
-        "S2_ACCESS_TOKEN",
-        "S2_ACCOUNT_ENDPOINT",
-        "S2_BASIN_ENDPOINT",
-    ]
-    .iter()
-    .all(|v| std::env::var(v).is_ok())
-    {
+    // Example: Configuration from environment variables
+    if std::env::var("S2_ACCESS_TOKEN").is_ok() {
         // ANCHOR: env-endpoints
-        // Reads S2_ACCOUNT_ENDPOINT and S2_BASIN_ENDPOINT.
-        let client = S2::new(
-            S2Config::new(std::env::var("S2_ACCESS_TOKEN")?)
-                .with_endpoints(S2Endpoints::from_env()?),
-        )?;
+        // Reads S2_ACCESS_TOKEN and optional S2_ACCOUNT_ENDPOINT / S2_BASIN_ENDPOINT.
+        let client = S2::from_env()?;
         // ANCHOR_END: env-endpoints
         println!("Created client from environment: {:?}", client);
     }
@@ -49,7 +37,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let client = S2::new(
             S2Config::new(access_token).with_retry(
                 RetryConfig::new()
-                    .with_max_attempts(NonZeroU32::new(5).unwrap())
+                    .with_max_attempts(5)?
                     .with_min_base_delay(Duration::from_millis(100))
                     .with_max_base_delay(Duration::from_secs(2)),
             ),
@@ -64,8 +52,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // ANCHOR: timeout-config
         let client = S2::new(
             S2Config::new(access_token)
-                .with_connection_timeout(Duration::from_secs(5))
-                .with_request_timeout(Duration::from_secs(10)),
+                .with_connection_timeout(Duration::from_secs(5))?
+                .with_request_timeout(Duration::from_secs(10))?,
         )?;
         // ANCHOR_END: timeout-config
         println!("Created client with timeout config: {:?}", client);

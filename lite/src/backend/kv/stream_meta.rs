@@ -1,6 +1,7 @@
 use std::{ops::Range, str::FromStr};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use jiff::Timestamp;
 use s2_common::{
     basin::BasinName,
     caps::{MIN_BASIN_NAME_LEN, MIN_STREAM_NAME_LEN},
@@ -10,7 +11,6 @@ use s2_common::{
 };
 use s2_storage::bash::Bash;
 use serde::{Deserialize, Serialize};
-use time::OffsetDateTime;
 
 use super::{
     DeserializationError, KeyType, check_min_size, deser_json_value, increment_bytes,
@@ -24,8 +24,8 @@ const FIELD_SEPARATOR: u8 = b'\0';
 pub struct StreamMeta {
     pub config: StreamConfig,
     pub cipher: Option<EncryptionAlgorithm>,
-    pub created_at: OffsetDateTime,
-    pub deleted_at: Option<OffsetDateTime>,
+    pub created_at: Timestamp,
+    pub deleted_at: Option<Timestamp>,
     pub creation_idempotency_key: Option<Bash>,
 }
 
@@ -33,10 +33,9 @@ pub struct StreamMeta {
 struct StreamMetaSerde {
     config: Option<s2_api::v1::config::StreamConfig>,
     cipher: Option<EncryptionAlgorithm>,
-    #[serde(with = "time::serde::rfc3339")]
-    created_at: OffsetDateTime,
-    #[serde(with = "time::serde::rfc3339::option")]
-    deleted_at: Option<OffsetDateTime>,
+    created_at: Timestamp,
+    #[serde(default)]
+    deleted_at: Option<Timestamp>,
     creation_idempotency_key: Option<Bash>,
 }
 
@@ -153,6 +152,7 @@ mod tests {
     use std::{str::FromStr, time::Duration};
 
     use bytes::Bytes;
+    use jiff::Timestamp;
     use proptest::prelude::*;
     use s2_common::{
         basin::BasinName,
@@ -161,7 +161,6 @@ mod tests {
         stream::{StreamName, StreamNamePrefix, StreamNameStartAfter},
     };
     use s2_storage::bash::Bash;
-    use time::OffsetDateTime;
 
     use crate::backend::kv::proptest_strategies::{basin_name_strategy, stream_name_strategy};
 
@@ -174,16 +173,8 @@ mod tests {
             },
             ..Default::default()
         };
-        let created_at = OffsetDateTime::from_unix_timestamp(1234567890)
-            .unwrap()
-            .replace_nanosecond(123456789)
-            .unwrap();
-        let deleted_at = Some(
-            OffsetDateTime::from_unix_timestamp(1234567890)
-                .unwrap()
-                .replace_nanosecond(123456789)
-                .unwrap(),
-        );
+        let created_at = Timestamp::new(1234567890, 123456789).unwrap();
+        let deleted_at = Some(Timestamp::new(1234567890, 123456789).unwrap());
         let stream_meta = super::StreamMeta {
             config: config.into(),
             cipher: Some(EncryptionAlgorithm::Aegis256),
@@ -217,7 +208,7 @@ mod tests {
         let serde_value = super::StreamMetaSerde {
             config: None,
             cipher: Some(EncryptionAlgorithm::Aes256Gcm),
-            created_at: OffsetDateTime::from_unix_timestamp(2_345_678).unwrap(),
+            created_at: Timestamp::from_second(2_345_678).unwrap(),
             deleted_at: None,
             creation_idempotency_key: Some(Bash::length_prefixed(&[
                 b"my-basin",
@@ -249,6 +240,46 @@ mod tests {
         assert_eq!(decoded.created_at, serde_value.created_at);
         assert_eq!(decoded.deleted_at, serde_value.deleted_at);
         assert_eq!(decoded.cipher, serde_value.cipher);
+    }
+
+    #[test]
+    fn stream_meta_deser_legacy_time_rfc3339_json() {
+        let json = br#"{
+            "config": null,
+            "cipher": null,
+            "created_at": "2025-03-15T12:34:56.123456789Z",
+            "deleted_at": null,
+            "creation_idempotency_key": null
+        }"#;
+        let decoded = super::deser_value(Bytes::from_static(json)).unwrap();
+        assert_eq!(
+            decoded.created_at,
+            "2025-03-15T12:34:56.123456789Z"
+                .parse::<Timestamp>()
+                .unwrap()
+        );
+        assert_eq!(decoded.deleted_at, None);
+
+        let deleting_json = br#"{
+            "config": null,
+            "cipher": null,
+            "created_at": "2025-03-15T12:34:56Z",
+            "deleted_at": "2025-03-16T01:02:03.000000001Z",
+            "creation_idempotency_key": null
+        }"#;
+        let decoded = super::deser_value(Bytes::from_static(deleting_json)).unwrap();
+        assert_eq!(
+            decoded.created_at,
+            "2025-03-15T12:34:56Z".parse::<Timestamp>().unwrap()
+        );
+        assert_eq!(
+            decoded.deleted_at,
+            Some(
+                "2025-03-16T01:02:03.000000001Z"
+                    .parse::<Timestamp>()
+                    .unwrap()
+            )
+        );
     }
 
     fn stream_name_prefix_strategy() -> impl Strategy<Value = StreamNamePrefix> {

@@ -17,7 +17,7 @@ use s2_common::{
     basin::BasinName,
     caps::RECORD_BATCH_MAX,
     http::extract::Header,
-    read_extent::{CountOrBytes, ReadLimit},
+    read_extent::ReadLimit,
     record::{Metered, MeteredSize as _},
     stream::{ReadBatch, ReadEnd, ReadFrom, ReadSessionOutput, ReadStart, StreamName},
 };
@@ -46,6 +46,12 @@ fn validate_read_until(start: ReadStart, end: ReadEnd) -> Result<(), ServiceErro
     Ok(())
 }
 
+#[derive(Default, Clone, Copy)]
+struct SseDelivered {
+    count: u64,
+    bytes: u64,
+}
+
 /// Adjusts the read bounds to resume after `last_event_id`, and returns the
 /// count/bytes already delivered so emitted event ids stay cumulative across
 /// reconnects.
@@ -53,8 +59,8 @@ fn apply_last_event_id(
     mut start: ReadStart,
     mut end: v1t::stream::ReadEnd,
     last_event_id: Option<v1t::stream::sse::LastEventId>,
-) -> (ReadStart, v1t::stream::ReadEnd, CountOrBytes) {
-    let mut delivered = CountOrBytes::ZERO;
+) -> (ReadStart, v1t::stream::ReadEnd, SseDelivered) {
+    let mut delivered = SseDelivered::default();
     if let Some(v1t::stream::sse::LastEventId {
         seq_num,
         count,
@@ -64,7 +70,7 @@ fn apply_last_event_id(
         start.from = ReadFrom::SeqNum(seq_num.saturating_add(1));
         end.count = end.count.map(|c| c.saturating_sub(count));
         end.bytes = end.bytes.map(|c| c.saturating_sub(bytes));
-        delivered = CountOrBytes { count, bytes };
+        delivered = SseDelivered { count, bytes };
     }
     (start, end, delivered)
 }
@@ -242,8 +248,11 @@ pub async fn read(
                             let Some(last_record) = batch.records.last() else {
                                 continue;
                             };
-                            processed.count = processed.count.saturating_add(batch.records.len());
-                            processed.bytes = processed.bytes.saturating_add(batch.records.metered_size());
+                            processed.count =
+                                processed.count.saturating_add(batch.records.len() as u64);
+                            processed.bytes = processed
+                                .bytes
+                                .saturating_add(batch.records.metered_size() as u64);
                             let id = v1t::stream::sse::LastEventId {
                                 seq_num: last_record.position().seq_num,
                                 count: processed.count,
@@ -343,6 +352,7 @@ async fn merge_read_session(
                     wait.is_some_and(|d| d > Duration::ZERO),
                     "heartbeat {pos} only if non-zero wait"
                 );
+                acc.tail = Some(pos);
                 if !acc.records.is_empty() {
                     break;
                 }
@@ -1261,8 +1271,8 @@ mod tests {
     #[case::bytes_first(Some(15), Some(10))]
     #[tokio::test]
     async fn sse_resume_emits_cumulative_ids_and_honors_bounds(
-        #[case] count: Option<usize>,
-        #[case] bytes_in_records: Option<usize>,
+        #[case] count: Option<u64>,
+        #[case] bytes_in_records: Option<u64>,
     ) {
         let (app, backend, basin, stream) = setup_app_with_config(
             "read-sse-resume",
@@ -1270,7 +1280,7 @@ mod tests {
             OptionalStreamConfig::default(),
         )
         .await;
-        let per_record = append_input(b"payload").records.metered_size();
+        let per_record = append_input(b"payload").records.metered_size() as u64;
         let mut bounds = String::new();
         if let Some(count) = count {
             bounds.push_str(&format!("count={count}&"));
@@ -1283,15 +1293,15 @@ mod tests {
         // the same bounds and the actual id emitted by the previous connection.
         let mut last_id = None;
         let mut delivered = Vec::new();
-        for (appended, expected_total) in [(4, 4), (3, 7), (13, 10)] {
+        for (appended, expected_total) in [(4usize, 4u64), (3, 7), (13, 10)] {
             for _ in 0..appended {
                 append_payload(&backend, &basin, &stream, b"payload").await;
             }
             let resumed = sse_read(&app, &basin, &stream, &bounds, last_id).await;
             delivered.extend(resumed.seq_nums);
-            assert_eq!(delivered, (0..expected_total as u64).collect::<Vec<_>>());
+            assert_eq!(delivered, (0..expected_total).collect::<Vec<_>>());
             let id = resumed.last_id.expect("last id");
-            assert_eq!(id.seq_num, expected_total as u64 - 1);
+            assert_eq!(id.seq_num, expected_total - 1);
             assert_eq!(id.count, expected_total);
             assert_eq!(id.bytes, expected_total * per_record);
             last_id = Some(id);
@@ -1311,14 +1321,14 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case::unbounded("", (usize::MAX - 1, usize::MAX - 1), (usize::MAX, usize::MAX), 3)]
-    #[case::count_bound("count=2", (0, usize::MAX), (2, usize::MAX), 2)]
-    #[case::bytes_bound("bytes=30", (usize::MAX, 0), (usize::MAX, 30), 2)]
+    #[case::unbounded("", (u64::MAX - 1, u64::MAX - 1), (u64::MAX, u64::MAX), 3)]
+    #[case::count_bound("count=2", (0, u64::MAX), (2, u64::MAX), 2)]
+    #[case::bytes_bound("bytes=30", (u64::MAX, 0), (u64::MAX, 30), 2)]
     #[tokio::test]
     async fn sse_resume_saturates_client_supplied_counters(
         #[case] bounds: &str,
-        #[case] (count, bytes): (usize, usize),
-        #[case] expected_totals: (usize, usize),
+        #[case] (count, bytes): (u64, u64),
+        #[case] expected_totals: (u64, u64),
         #[case] expected_records: usize,
     ) {
         let (app, backend, basin, stream) = setup_app_with_config(

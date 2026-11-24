@@ -1,29 +1,21 @@
-use std::{pin::Pin, time::Duration};
+use std::time::Duration;
 
-use futures::{Stream, StreamExt, TryStreamExt, stream, stream::FuturesOrdered};
-use s2_api::v1::{
-    access::AccessTokenInfo as ApiAccessTokenInfo,
-    config::{BasinConfig as ApiBasinConfig, StreamConfig as ApiStreamConfig},
-};
+use futures::{Stream, StreamExt, TryStreamExt, stream::FuturesOrdered};
 use s2_sdk::{
     self as sdk, S2, S2Stream,
-    batching::BatchingConfig,
-    producer::{IndexedAppendAck, ProducerConfig},
-    read_session::ReadSession,
+    producer::{ProducerConfig, RecordAck},
+    read_session::{ReadBatchSession, ReadSessionConfig},
     types::{
-        AccessTokenId, AccessTokenInfo, AccessTokenScopeInput, AccountMetricSet, AppendAck,
-        AppendInput, AppendRecord, AppendRecordBatch, AwsPrivateNetPolicy, BasinInfo,
-        BasinMetricSet, BasinName, BasinReconfiguration, CommandRecord, CreateBasinInput,
-        CreateNetworkPolicyInput, CreateStreamInput, DeleteBasinInput, DeleteStreamInput,
-        EncryptionKey, FencingToken, GetAccountMetricsInput, GetBasinMetricsInput,
-        GetStreamMetricsInput, IssueAccessTokenInput, ListAccessTokensInput,
-        ListAllAccessTokensInput, ListAllBasinsInput, ListAllNetworkPoliciesInput,
-        ListAllStreamsInput, ListBasinsInput, ListNetworkPoliciesInput, ListStreamsInput,
-        LocationInfo, LocationName, MeteredBytes, Metric, NetworkPolicy, NetworkPolicyInfo,
-        NetworkPolicySelector, PublicNetPolicy, ReadFrom, ReadInput, ReadLimits, ReadSessionConfig,
-        ReadStart, ReadStop, ReconfigureBasinInput, ReconfigureStreamInput, S2DateTime,
-        SequencedRecord, StreamInfo, StreamMetricSet, StreamNamePrefix, StreamPosition,
-        StreamReconfiguration, TimeRange, TimeRangeAndInterval, TimeseriesInterval,
+        AccessTokenId, AccessTokenInfo, AccessTokenScope, AccountMetricSet, AppendAck, AppendInput,
+        AppendRecord, AwsPrivateNetPolicy, BasinInfo, BasinMetricSet, BasinName,
+        BasinReconfiguration, CommandRecord, CreateBasinInput, CreateNetworkPolicyInput,
+        CreateStreamInput, EncryptionKey, FencingToken, IssueAccessTokenInput,
+        ListAccessTokensInput, ListAllAccessTokensInput, ListAllBasinsInput,
+        ListAllNetworkPoliciesInput, ListAllStreamsInput, ListBasinsInput,
+        ListNetworkPoliciesInput, ListStreamsInput, LocationInfo, LocationName, Metric,
+        NetworkPolicy, NetworkPolicyInfo, NetworkPolicySelector, PublicNetPolicy, ReadInput,
+        ReadStart, SequencedRecord, StreamInfo, StreamMetricSet, StreamNamePrefix, StreamPosition,
+        StreamReconfiguration, TimeRangeAndInterval, TimeseriesInterval, Timestamp,
     },
 };
 
@@ -104,9 +96,7 @@ pub async fn list_basins(
 pub async fn create_basin(s2: &S2, args: CreateBasinArgs) -> Result<BasinInfo, CliError> {
     let mut input = CreateBasinInput::new(args.basin.into()).with_config(args.config.into());
     if let Some(location) = args.location {
-        input = input
-            .with_location(location)
-            .map_err(|e| CliError::InvalidArgs(miette::miette!("{e}")))?;
+        input = input.with_location(location);
     }
     s2.create_basin(input)
         .await
@@ -114,7 +104,7 @@ pub async fn create_basin(s2: &S2, args: CreateBasinArgs) -> Result<BasinInfo, C
 }
 
 pub async fn delete_basin(s2: &S2, basin: &BasinName) -> Result<(), CliError> {
-    s2.delete_basin(DeleteBasinInput::new(basin.clone()))
+    s2.delete_basin(basin.clone())
         .await
         .map_err(|e| CliError::op(OpKind::DeleteBasin, e))
 }
@@ -124,12 +114,6 @@ pub async fn get_basin_config(
     basin: &BasinName,
 ) -> Result<sdk::types::BasinConfig, CliError> {
     s2.get_basin_config(basin.clone())
-        .await
-        .map_err(|e| CliError::op(OpKind::GetBasinConfig, e))
-}
-
-pub async fn get_basin_config_api(s2: &S2, basin: &BasinName) -> Result<ApiBasinConfig, CliError> {
-    s2.get_basin_config_api(basin.clone())
         .await
         .map_err(|e| CliError::op(OpKind::GetBasinConfig, e))
 }
@@ -161,7 +145,7 @@ pub async fn reconfigure_basin_with(
     reconfig: BasinReconfiguration,
 ) -> Result<BasinConfig, CliError> {
     let config = s2
-        .reconfigure_basin(ReconfigureBasinInput::new(basin, reconfig))
+        .reconfigure_basin(basin, reconfig)
         .await
         .map_err(|e| CliError::op(OpKind::ReconfigureBasin, e))?;
 
@@ -218,12 +202,9 @@ pub async fn list_access_tokens(
     }
 }
 
-pub async fn get_access_token_api(
-    s2: &S2,
-    id: AccessTokenId,
-) -> Result<ApiAccessTokenInfo, CliError> {
+pub async fn get_access_token(s2: &S2, id: AccessTokenId) -> Result<AccessTokenInfo, CliError> {
     let page = s2
-        .list_access_tokens_api(
+        .list_access_tokens(
             ListAccessTokensInput::new()
                 .with_prefix(id.clone().into())
                 .with_limit(1),
@@ -231,7 +212,7 @@ pub async fn get_access_token_api(
         .await
         .map_err(|e| CliError::op(OpKind::ListAccessTokens, e))?;
 
-    page.access_tokens
+    page.values
         .into_iter()
         .find(|info| info.id == id)
         .ok_or_else(|| CliError::AccessTokenNotFound(id.to_string()))
@@ -239,7 +220,7 @@ pub async fn get_access_token_api(
 
 /// A preset allows every resource of a kind that no flag names. Without one, the token cannot
 /// access that kind at all.
-fn access_token_scope(args: &IssueAccessTokenArgs) -> Result<AccessTokenScopeInput, CliError> {
+fn access_token_scope(args: &IssueAccessTokenArgs) -> Result<AccessTokenScope, CliError> {
     let op_group_perms = args
         .preset
         .map(PermittedOperationGroups::from)
@@ -252,25 +233,27 @@ fn access_token_scope(args: &IssueAccessTokenArgs) -> Result<AccessTokenScopeInp
     }
     let all = args.preset.is_some();
 
-    let mut scope = AccessTokenScopeInput::from_ops(args.ops.iter().cloned().map(|op| op.into()));
+    let mut scope = AccessTokenScope::from_ops(args.ops.iter().cloned().map(|op| op.into()));
     if let Some(v) = args.basins_exact.clone() {
         scope = scope.with_basins(sdk::types::BasinMatcher::Exact(v));
-    } else if let Some(v) = args.basins_prefix.clone().or(all.then(Default::default)) {
+    } else if let Some(v) = args.basins_prefix.clone() {
         scope = scope.with_basins(sdk::types::BasinMatcher::Prefix(v));
+    } else if all {
+        scope = scope.with_basins(sdk::types::BasinMatcher::all());
     }
     if let Some(v) = args.streams_exact.clone() {
         scope = scope.with_streams(sdk::types::StreamMatcher::Exact(v));
-    } else if let Some(v) = args.streams_prefix.clone().or(all.then(Default::default)) {
+    } else if let Some(v) = args.streams_prefix.clone() {
         scope = scope.with_streams(sdk::types::StreamMatcher::Prefix(v));
+    } else if all {
+        scope = scope.with_streams(sdk::types::StreamMatcher::all());
     }
     if let Some(v) = args.access_tokens_exact.clone() {
         scope = scope.with_access_tokens(sdk::types::AccessTokenMatcher::Exact(v));
-    } else if let Some(v) = args
-        .access_tokens_prefix
-        .clone()
-        .or(all.then(Default::default))
-    {
+    } else if let Some(v) = args.access_tokens_prefix.clone() {
         scope = scope.with_access_tokens(sdk::types::AccessTokenMatcher::Prefix(v));
+    } else if all {
+        scope = scope.with_access_tokens(sdk::types::AccessTokenMatcher::all());
     }
     if let Some(op_group_perms) = op_group_perms {
         scope = scope.with_op_group_perms(op_group_perms.into());
@@ -283,20 +266,22 @@ pub async fn issue_access_token(s2: &S2, args: IssueAccessTokenArgs) -> Result<S
 
     let mut input = IssueAccessTokenInput::new(args.id, scope);
     if let Some(expires_in) = args.expires_in {
-        let expiry_time = std::time::SystemTime::now() + *expires_in;
-        let rfc3339 = humantime::format_rfc3339(expiry_time).to_string();
-        let dt: S2DateTime = rfc3339.parse().map_err(|e| {
-            CliError::InvalidArgs(miette::miette!("Invalid expiration time: {}", e))
-        })?;
-        input = input.with_expires_at(dt);
+        let dt = Timestamp::now()
+            .checked_add(*expires_in)
+            .map_err(|e| CliError::InvalidArgs(miette::miette!("Invalid expiration time: {e}")))?;
+        input = input
+            .with_expires_at(dt)
+            .map_err(|e| CliError::InvalidArgs(miette::miette!("Invalid expiration time: {e}")))?;
     } else if let Some(expires_at) = args.expires_at {
-        let dt: S2DateTime = expires_at.parse().map_err(|e| {
+        let dt: Timestamp = expires_at.parse().map_err(|e| {
             CliError::InvalidArgs(miette::miette!(
                 "Invalid expires_at (expected RFC3339 format, e.g., '2024-12-31T23:59:59Z'): {}",
                 e
             ))
         })?;
-        input = input.with_expires_at(dt);
+        input = input
+            .with_expires_at(dt)
+            .map_err(|e| CliError::InvalidArgs(miette::miette!("Invalid expires_at: {e}")))?;
     }
     if args.auto_prefix_streams {
         input = input.with_auto_prefix_streams(true);
@@ -438,7 +423,7 @@ pub async fn get_account_metrics(
     let (range, set) = match args.metric {
         AccountMetricCommand::ActiveBasins(t) => {
             let range = resolve_time_range(&t, None::<Interval>);
-            let set = AccountMetricSet::ActiveBasins(TimeRange::new(range.start, range.end));
+            let set = AccountMetricSet::ActiveBasins(range.range());
             (Some(range), set)
         }
         AccountMetricCommand::AccountOps(t) => {
@@ -455,9 +440,8 @@ pub async fn get_account_metrics(
         }
     };
 
-    let input = GetAccountMetricsInput::new(set);
     let metrics = s2
-        .get_account_metrics(input)
+        .get_account_metrics(set)
         .await
         .map_err(|e| CliError::op(OpKind::GetAccountMetrics, e))?;
     Ok((range, metrics))
@@ -472,7 +456,7 @@ pub async fn get_basin_metrics(
     let (range, set) = match args.metric {
         BasinMetricCommand::Storage(t) => {
             let range = resolve_time_range(&t, None::<Interval>);
-            let set = BasinMetricSet::Storage(TimeRange::new(range.start, range.end));
+            let set = BasinMetricSet::Storage(range.range());
             (range, set)
         }
         BasinMetricCommand::AppendOps(t) => {
@@ -497,9 +481,8 @@ pub async fn get_basin_metrics(
         }
     };
 
-    let input = GetBasinMetricsInput::new(args.basin.into(), set);
     let metrics = s2
-        .get_basin_metrics(input)
+        .get_basin_metrics(args.basin.into(), set)
         .await
         .map_err(|e| CliError::op(OpKind::GetBasinMetrics, e))?;
     Ok((Some(range), metrics))
@@ -514,14 +497,13 @@ pub async fn get_stream_metrics(
     let (range, set) = match args.metric {
         StreamMetricCommand::Storage(t) => {
             let range = resolve_time_range(&t, None::<Interval>);
-            let set = StreamMetricSet::Storage(TimeRange::new(range.start, range.end));
+            let set = StreamMetricSet::Storage(range.range());
             (range, set)
         }
     };
 
-    let input = GetStreamMetricsInput::new(args.uri.basin, args.uri.stream, set);
     let metrics = s2
-        .get_stream_metrics(input)
+        .get_stream_metrics(args.uri.basin, args.uri.stream, set)
         .await
         .map_err(|e| CliError::op(OpKind::GetStreamMetrics, e))?;
     Ok((Some(range), metrics))
@@ -597,7 +579,7 @@ pub async fn create_stream(s2: &S2, args: CreateStreamArgs) -> Result<StreamInfo
 pub async fn delete_stream(s2: &S2, uri: S2BasinAndStreamUri) -> Result<(), CliError> {
     let basin = s2.basin(uri.basin);
     basin
-        .delete_stream(DeleteStreamInput::new(uri.stream))
+        .delete_stream(uri.stream)
         .await
         .map_err(|e| CliError::op(OpKind::DeleteStream, e))
 }
@@ -609,17 +591,6 @@ pub async fn get_stream_config(
     let basin = s2.basin(uri.basin);
     basin
         .get_stream_config(uri.stream)
-        .await
-        .map_err(|e| CliError::op(OpKind::GetStreamConfig, e))
-}
-
-pub async fn get_stream_config_api(
-    s2: &S2,
-    uri: S2BasinAndStreamUri,
-) -> Result<ApiStreamConfig, CliError> {
-    let basin = s2.basin(uri.basin);
-    basin
-        .get_stream_config_api(uri.stream)
         .await
         .map_err(|e| CliError::op(OpKind::GetStreamConfig, e))
 }
@@ -639,7 +610,7 @@ pub async fn reconfigure_stream_with(
 ) -> Result<StreamConfig, CliError> {
     let config = s2
         .basin(uri.basin)
-        .reconfigure_stream(ReconfigureStreamInput::new(uri.stream, reconfig))
+        .reconfigure_stream(uri.stream, reconfig)
         .await
         .map_err(|e| CliError::op(OpKind::ReconfigureStream, e))?;
 
@@ -678,56 +649,42 @@ pub async fn fence(s2: &S2, args: FenceArgs) -> Result<AppendAck, CliError> {
     .await
 }
 
-pub async fn read(
+pub fn read(
     s2: &S2,
     args: &ReadArgs,
     encryption_key: Option<&EncryptionKey>,
-) -> Result<ReadSession, CliError> {
-    use std::time::SystemTime;
-
+) -> Result<ReadBatchSession, CliError> {
     let stream = stream_with_encryption(s2, args.uri.clone(), encryption_key);
 
     let from = match (args.seq_num, args.timestamp, args.tail_offset, args.ago) {
-        (Some(seq), None, None, None) => ReadFrom::SeqNum(seq),
-        (None, Some(ts), None, None) => ReadFrom::Timestamp(ts),
-        (None, None, Some(offset), None) => ReadFrom::TailOffset(offset),
+        (Some(seq), None, None, None) => ReadStart::SeqNum(seq),
+        (None, Some(ts), None, None) => ReadStart::Timestamp(ts),
+        (None, None, Some(offset), None) => ReadStart::TailOffset(offset),
         (None, None, None, Some(ago)) => {
-            let ts = SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap()
-                .as_millis()
-                .saturating_sub(ago.as_millis()) as u64;
-            ReadFrom::Timestamp(ts)
+            let now_ms = Timestamp::now().as_millisecond().max(0) as u64;
+            let ago_ms = u64::try_from(ago.as_millis()).unwrap_or(u64::MAX);
+            ReadStart::Timestamp(now_ms.saturating_sub(ago_ms))
         }
-        (None, None, None, None) => ReadFrom::TailOffset(0),
+        (None, None, None, None) => ReadStart::TailOffset(0),
         _ => unreachable!("clap ensures only one start option"),
     };
 
-    let start = ReadStart::new()
-        .with_from(from)
-        .with_clamp_to_tail(args.clamp);
-
-    let mut limits = ReadLimits::new();
+    let mut input = ReadInput::new().with_start(from).with_clamp(args.clamp);
     if let Some(count) = args.count {
-        limits = limits.with_count(count as usize);
+        input = input.with_count(count);
     }
     if let Some(bytes) = args.bytes {
-        limits = limits.with_bytes(bytes as usize);
+        input = input.with_bytes(bytes);
     }
-
-    let mut stop = ReadStop::new().with_limits(limits);
     if let Some(until) = args.until {
-        stop = stop.with_until(..until);
+        input = input.with_until(until);
     }
-
-    let mut input = ReadInput::new().with_start(start).with_stop(stop);
     if !args.stream_config.is_empty() {
         input = input.with_stream_config(args.stream_config.clone().into());
     }
 
     stream
-        .read_session(input, ReadSessionConfig::default())
-        .await
+        .read_batch_session(input, ReadSessionConfig::default())
         .map_err(|e| CliError::op(OpKind::Read, e))
 }
 
@@ -746,15 +703,14 @@ pub fn append<'a, S, E>(
     uri: S2BasinAndStreamUri,
     encryption_key: Option<&'a EncryptionKey>,
     options: AppendOptions,
-) -> impl Stream<Item = Result<IndexedAppendAck, CliError>> + Send + 'a
+) -> impl Stream<Item = Result<RecordAck, CliError>> + Send + 'a
 where
     S: Stream<Item = Result<AppendRecord, E>> + Send + Unpin + 'a,
     E: std::error::Error + Send + Sync + 'static,
 {
     let stream = stream_with_encryption(s2, uri, encryption_key);
 
-    let batching_config = BatchingConfig::new().with_linger(options.linger);
-    let mut producer_config = ProducerConfig::new().with_batching(batching_config);
+    let mut producer_config = ProducerConfig::new().with_linger(options.linger);
     if let Some(config) = options.stream_config {
         producer_config = producer_config.with_stream_config(config);
     }
@@ -768,11 +724,17 @@ where
     let producer = stream.producer(producer_config);
 
     async_stream::stream! {
+        let producer = match producer {
+            Ok(producer) => producer,
+            Err(e) => {
+                yield Err(CliError::op(OpKind::Append, e));
+                return;
+            }
+        };
         let mut records = records;
         let mut pending_acks = FuturesOrdered::new();
-        let mut input_done = false;
         let mut stashed_record: Option<AppendRecord> = None;
-        let mut stashed_bytes: u32 = 0;
+        let mut stashed_bytes: usize = 0;
 
         'inner: loop {
             tokio::select! {
@@ -780,27 +742,33 @@ where
                     match permit {
                         Ok(permit) => {
                             let record = stashed_record.take().unwrap();
-                            pending_acks.push_back(permit.submit(record));
+                            match permit.submit(record) {
+                                Ok(ticket) => pending_acks.push_back(ticket),
+                                Err(e) => {
+                                    yield Err(CliError::op(OpKind::Append, e));
+                                    return;
+                                }
+                            }
                         }
                         Err(e) => {
                             yield Err(CliError::op(OpKind::Append, e));
-                            break 'inner;
+                            return;
                         }
                     }
                 }
 
-                res = records.next(), if stashed_record.is_none() && !input_done => {
+                res = records.next(), if stashed_record.is_none() => {
                     match res {
                         Some(Ok(record)) => {
-                            stashed_bytes = record.metered_bytes() as u32;
+                            stashed_bytes = record.metered_bytes();
                             stashed_record = Some(record);
                         }
                         Some(Err(e)) => {
                             yield Err(CliError::RecordReaderInit(e.to_string()));
-                            break 'inner;
+                            return;
                         }
                         None => {
-                            input_done = true;
+                            break 'inner;
                         }
                     }
                 }
@@ -810,23 +778,14 @@ where
                         Ok(ack) => yield Ok(ack),
                         Err(e) => {
                             yield Err(CliError::op(OpKind::Append, e));
-                            break 'inner;
+                            return;
                         }
-                    }
-                }
-
-                else => {
-                    if input_done && stashed_record.is_none() && pending_acks.is_empty() {
-                        break;
                     }
                 }
             }
         }
 
-        if let Err(e) = producer.close().await {
-            yield Err(CliError::op(OpKind::Append, e));
-            return;
-        }
+        let close_res = producer.close().await;
 
         while let Some(res) = pending_acks.next().await {
             match res {
@@ -837,43 +796,54 @@ where
                 }
             }
         }
+
+        if let Err(e) = close_res {
+            yield Err(CliError::op(OpKind::Append, e));
+        }
     }
 }
 
-pub async fn tail(
+pub fn tail(
     s2: &S2,
     args: &TailArgs,
     encryption_key: Option<&EncryptionKey>,
-) -> Result<Pin<Box<dyn Stream<Item = Result<SequencedRecord, CliError>> + Send>>, CliError> {
+) -> Result<impl Stream<Item = Result<SequencedRecord, CliError>> + Send + Unpin, CliError> {
     let stream = stream_with_encryption(s2, args.uri.clone(), encryption_key);
 
-    // Use clamp_to_tail to handle empty streams gracefully - if we ask for
-    // TailOffset(10) but there are fewer records, clamp to the actual start
-    let start = ReadStart::new()
-        .with_from(ReadFrom::TailOffset(args.lines))
-        .with_clamp_to_tail(true);
-    let stop = if args.follow {
-        ReadStop::new()
-    } else {
-        ReadStop::new().with_limits(ReadLimits::new().with_count(args.lines as usize))
-    };
+    // Use clamp to handle empty streams gracefully - if we ask for
+    // TailOffset(10) but there are fewer records, clamp to the actual start.
+    let mut input = ReadInput::new()
+        .with_start(ReadStart::TailOffset(args.lines))
+        .with_clamp(true);
+    if !args.follow {
+        input = input.with_count(args.lines);
+    }
 
-    let batches = stream
-        .read_session(
-            ReadInput::new().with_start(start).with_stop(stop),
-            ReadSessionConfig::default(),
-        )
-        .await
+    let mut records = stream
+        .read_session(input, ReadSessionConfig::default())
         .map_err(|e| CliError::op(OpKind::Tail, e))?;
 
-    Ok(Box::pin(
-        batches
-            .map_err(|e| CliError::op(OpKind::Tail, e))
-            .flat_map(|batch_result| match batch_result {
-                Ok(batch) => stream::iter(batch.records.into_iter().map(Ok)).left_stream(),
-                Err(e) => stream::iter(std::iter::once(Err(e))).right_stream(),
-            }),
-    ))
+    let follow = args.follow;
+    Ok(Box::pin(async_stream::stream! {
+        let mut seen_any = false;
+        while let Some(item) = records.next().await {
+            match item {
+                Ok(record) => {
+                    seen_any = true;
+                    yield Ok(record);
+                }
+                // Non-follow tail on an empty or fully-trimmed stream returns initial 416;
+                // treat that as clean 0-record EOF.
+                Err(sdk::error::ReadSessionError::ReadUnwritten(_)) if !follow && !seen_any => {
+                    break;
+                }
+                Err(e) => {
+                    yield Err(CliError::op(OpKind::Tail, e));
+                    break;
+                }
+            }
+        }
+    }))
 }
 
 async fn append_command(
@@ -883,10 +853,7 @@ async fn append_command(
     match_seq_num: Option<u64>,
     op_error: OpKind,
 ) -> Result<AppendAck, CliError> {
-    let record: AppendRecord = command.into();
-    let records = AppendRecordBatch::try_from_iter([record])
-        .expect("single command record should always fit in a batch");
-    let mut input = AppendInput::new(records);
+    let mut input = AppendInput::new(command);
     if let Some(ft) = fencing_token {
         input = input.with_fencing_token(ft);
     }
@@ -902,7 +869,10 @@ async fn append_command(
 fn resolve_time(timestamp: Option<u32>, ago: Option<humantime::Duration>, now: u32) -> Option<u32> {
     match (timestamp, ago) {
         (Some(ts), None) => Some(ts),
-        (None, Some(ago)) => Some(now.saturating_sub(ago.as_secs() as u32)),
+        (None, Some(ago)) => {
+            let secs = u32::try_from(ago.as_secs()).unwrap_or(u32::MAX);
+            Some(now.saturating_sub(secs))
+        }
         (None, None) => None,
         (Some(_), Some(_)) => unreachable!("clap group ensures only one is specified"),
     }
@@ -915,14 +885,13 @@ fn resolve_time_range(
     interval: Option<impl Into<TimeseriesInterval>>,
 ) -> TimeRangeAndInterval {
     const DEFAULT_SPAN_SECS: u32 = 30 * 24 * 60 * 60;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as u32;
+    let now = u32::try_from(Timestamp::now().as_second().max(0)).unwrap_or(u32::MAX);
     let end = resolve_time(args.end_timestamp, args.end_ago, now).unwrap_or(now);
     let start = resolve_time(args.start_timestamp, args.start_ago, now)
         .unwrap_or_else(|| end.saturating_sub(DEFAULT_SPAN_SECS));
-    let range = TimeRangeAndInterval::new(start, end);
+    let start = Timestamp::from_second(i64::from(start)).expect("u32 fits in Timestamp");
+    let end = Timestamp::from_second(i64::from(end)).expect("u32 fits in Timestamp");
+    let range = TimeRangeAndInterval::new(start, end).expect("u32 seconds in range");
     match interval {
         Some(interval) => range.with_interval(interval.into()),
         None => range,

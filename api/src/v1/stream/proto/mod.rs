@@ -1,4 +1,3 @@
-use compact_str::ToCompactString;
 use s2_common::record;
 
 include!("s2.v1.rs");
@@ -61,10 +60,7 @@ impl TryFrom<AppendInput> for s2_common::stream::AppendInput {
         Ok(Self {
             records: s2_common::stream::AppendRecordBatch::try_from(records)?,
             match_seq_num,
-            fencing_token: fencing_token
-                .as_deref()
-                .map(|s| s.to_compact_string().try_into())
-                .transpose()?,
+            fencing_token: fencing_token.map(TryInto::try_into).transpose()?,
         })
     }
 }

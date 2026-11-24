@@ -422,7 +422,7 @@ mod tests {
         headers: Vec<Header>,
         body: Bytes,
     ) -> SequencedRecord {
-        SequencedRecord::from_parts(seq_num, timestamp, headers, body)
+        SequencedRecord::new(seq_num, body, headers, timestamp)
     }
 
     async fn parse_text_line(line: String) -> AppendRecord {
@@ -462,9 +462,9 @@ mod tests {
             futures::stream::iter(vec![Ok("line one".to_string()), Ok("line two".to_string())]);
         let mut stream = TextFormatter::parse_records(lines);
         let r1 = stream.next().await.unwrap().unwrap();
-        assert_eq!(r1.body(), b"line one");
+        assert_eq!(r1.body().as_ref(), b"line one");
         let r2 = stream.next().await.unwrap().unwrap();
-        assert_eq!(r2.body(), b"line two");
+        assert_eq!(r2.body().as_ref(), b"line two");
         assert!(stream.next().await.is_none());
     }
 
@@ -483,7 +483,7 @@ mod tests {
         let lines = futures::stream::iter(vec![Ok(json_line)]);
         let mut stream = <JsonFormatter as RecordParser<_>>::parse_records(lines);
         let r = stream.next().await.unwrap().unwrap();
-        assert_eq!(r.body(), b"");
+        assert_eq!(r.body().as_ref(), b"");
         assert!(r.headers().is_empty());
         assert_eq!(r.timestamp(), None);
     }

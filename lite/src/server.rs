@@ -303,8 +303,7 @@ pub async fn run(args: LiteArgs) -> eyre::Result<()> {
 
     let server_info = dashboard::ServerInfo {
         version: env!("CARGO_PKG_VERSION"),
-        started_at: time::OffsetDateTime::now_utc()
-            .format(&time::format_description::well_known::Rfc3339)?,
+        started_at: jiff::Timestamp::now().to_string(),
         store: store_type.info(),
         wal: wal_store_type.as_ref().map(StoreType::info),
         path: args.path.clone(),

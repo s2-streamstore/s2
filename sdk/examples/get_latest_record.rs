@@ -1,14 +1,10 @@
 use s2_sdk::{
     S2,
-    types::{
-        BasinName, ReadFrom, ReadInput, ReadLimits, ReadStart, ReadStop, S2Config, StreamName,
-    },
+    types::{BasinName, ReadInput, ReadStart, StreamName},
 };
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let access_token =
-        std::env::var("S2_ACCESS_TOKEN").map_err(|_| "S2_ACCESS_TOKEN env var not set")?;
     let basin_name: BasinName = std::env::var("S2_BASIN")
         .map_err(|_| "S2_BASIN env var not set")?
         .parse()?;
@@ -16,12 +12,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|_| "S2_STREAM env var not set")?
         .parse()?;
 
-    let s2 = S2::new(S2Config::new(access_token))?;
+    let s2 = S2::from_env()?;
     let stream = s2.basin(basin_name).stream(stream_name);
 
     let input = ReadInput::new()
-        .with_start(ReadStart::new().with_from(ReadFrom::TailOffset(1)))
-        .with_stop(ReadStop::new().with_limits(ReadLimits::new().with_count(1)));
+        .with_start(ReadStart::TailOffset(1))
+        .with_count(1);
     let batch = stream.read(input).await?;
     println!("{batch:#?}");
 

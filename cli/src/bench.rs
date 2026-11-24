@@ -21,13 +21,10 @@ use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use rand::{Rng, SeedableRng};
 use s2_sdk::{
     S2Stream,
-    batching::BatchingConfig,
-    error::ProducerError,
-    producer::{IndexedAppendAck, ProducerConfig},
-    types::{
-        AppendRecord, Header, MeteredBytes as _, RECORD_BATCH_MAX, ReadFrom, ReadInput,
-        ReadSessionConfig, ReadStart, ReadStop, SequencedRecord,
-    },
+    error::AppendSessionError,
+    producer::{ProducerConfig, RecordAck},
+    read_session::ReadSessionConfig,
+    types::{AppendRecord, Header, RECORD_BATCH_MAX, ReadInput, ReadStart, SequencedRecord},
 };
 use tokio::{
     sync::mpsc,
@@ -65,7 +62,7 @@ pub fn default_linger(target_mibps: NonZeroU64, record_size: u32) -> Duration {
 }
 
 type PendingAck =
-    Pin<Box<dyn Future<Output = (Instant, Result<IndexedAppendAck, ProducerError>)> + Send>>;
+    Pin<Box<dyn Future<Output = (Instant, Result<RecordAck, AppendSessionError>)> + Send>>;
 
 pub struct BenchWriteSample {
     pub bytes: u64,
@@ -425,11 +422,16 @@ pub fn bench_write(
         new_record(Bytes::from(vec![0u8; body_size(record_size)]), 0, 0).metered_bytes();
     assert_eq!(metered_size, record_size);
 
-    let producer = stream.producer(
-        ProducerConfig::default().with_batching(BatchingConfig::new().with_linger(linger)),
-    );
+    let producer = stream.producer(ProducerConfig::default().with_linger(linger));
 
     async_stream::stream! {
+        let producer = match producer {
+            Ok(producer) => producer,
+            Err(e) => {
+                yield Err(CliError::op(OpKind::Bench, e));
+                return;
+            }
+        };
         let target_bps = target_mibps.get() as f64 * 1024.0 * 1024.0;
 
         let mut total_bytes: u64 = 0;
@@ -486,7 +488,7 @@ pub fn bench_write(
                             ack_latencies.push(latency);
                             total_bytes += record_size as u64;
                             total_records += 1;
-                            next_seq_num = ack.seq_num + 1;
+                            next_seq_num = next_seq_num.max(ack.seq_num + 1);
 
                             if last_yield.elapsed() >= Duration::from_millis(100) {
                                 last_yield = Instant::now();
@@ -517,7 +519,7 @@ pub fn bench_write(
                     // Rate limit delay
                 }
 
-                permit = producer.reserve(record_size as u32), if !stopping() && throttle_delay.is_none() => {
+                permit = producer.reserve(record_size), if !stopping() && throttle_delay.is_none() => {
                     match permit {
                         Ok(permit) => {
                             let submit_time = Instant::now();
@@ -526,10 +528,18 @@ pub fn bench_write(
                             let hash = chain_hash(prev_hash, body.as_ref());
                             prev_hash = hash;
                             let record = new_record(body, timestamp, hash);
-                            pending_acks.push(Box::pin(async move {
-                                let res = permit.submit(record).await;
-                                (submit_time, res)
-                            }));
+                            match permit.submit(record) {
+                                Ok(ticket) => {
+                                    pending_acks.push(Box::pin(async move {
+                                        let res = ticket.await;
+                                        (submit_time, res)
+                                    }));
+                                }
+                                Err(e) => {
+                                    yield Err(CliError::op(OpKind::Bench, e));
+                                    return;
+                                }
+                            }
                             bytes_submitted += record_size;
                         }
                         Err(e) => {
@@ -561,7 +571,7 @@ pub fn bench_read(
     bench_read_inner(
         stream,
         record_size,
-        ReadStop::new(),
+        ReadInput::new().with_start(ReadStart::SeqNum(0)),
         write_done_records,
         bench_start,
     )
@@ -575,7 +585,9 @@ pub fn bench_read_catchup(
     bench_read_inner(
         stream,
         record_size,
-        ReadStop::new().with_wait(0),
+        ReadInput::new()
+            .with_start(ReadStart::SeqNum(0))
+            .with_wait_secs(0),
         Arc::new(AtomicU64::new(WRITE_DONE_SENTINEL)),
         bench_start,
     )
@@ -584,17 +596,13 @@ pub fn bench_read_catchup(
 fn bench_read_inner(
     stream: S2Stream,
     record_size: usize,
-    stop: ReadStop,
+    read_input: ReadInput,
     write_done_records: Arc<AtomicU64>,
     bench_start: Instant,
 ) -> impl Stream<Item = Result<BenchReadSample, CliError>> + Send {
     async_stream::stream! {
-        let read_input = ReadInput::new()
-            .with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0)))
-            .with_stop(stop);
         let mut read_session = stream
-            .read_session(read_input, ReadSessionConfig::default())
-            .await
+            .read_batch_session(read_input, ReadSessionConfig::default())
             .map_err(|e| CliError::op(OpKind::Bench, e))?;
 
         let mut total_bytes: u64 = 0;
@@ -690,6 +698,11 @@ fn bench_read_inner(
                             if let Some(expected) = done_records() && total_records >= expected {
                                 break;
                             }
+                        }
+                        Some(Err(s2_sdk::error::ReadSessionError::ReadUnwritten(_)))
+                            if total_records == 0 =>
+                        {
+                            break;
                         }
                         Some(Err(e)) => {
                             yield Err(CliError::op(OpKind::Bench, e));

@@ -1,10 +1,10 @@
+use jiff::Timestamp;
 use s2_common::{
     self,
     basin::{BasinName, BasinNamePrefix, BasinNameStartAfter},
     location::LocationName,
 };
 use serde::{Deserialize, Serialize};
-use time::OffsetDateTime;
 
 use super::config::BasinConfig;
 
@@ -46,11 +46,12 @@ pub struct BasinInfo {
     /// Basin location.
     pub location: Option<LocationName>,
     /// Creation time in RFC 3339 format.
-    #[serde(with = "time::serde::rfc3339")]
-    pub created_at: OffsetDateTime,
+    #[cfg_attr(feature = "utoipa", schema(value_type = String, format = DateTime))]
+    pub created_at: Timestamp,
     /// Deletion time in RFC 3339 format, if the basin is being deleted.
-    #[serde(default, with = "time::serde::rfc3339::option")]
-    pub deleted_at: Option<OffsetDateTime>,
+    #[serde(default)]
+    #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>, format = DateTime))]
+    pub deleted_at: Option<Timestamp>,
     /// Deprecated basin state inferred from `deleted_at`.
     #[cfg_attr(feature = "utoipa", schema(ignore))]
     pub state: BasinState,
@@ -75,7 +76,7 @@ impl From<s2_common::basin::BasinInfo> for BasinInfo {
     }
 }
 
-fn basin_state_for_deleted_at(deleted_at: Option<&OffsetDateTime>) -> BasinState {
+fn basin_state_for_deleted_at(deleted_at: Option<&Timestamp>) -> BasinState {
     if deleted_at.is_some() {
         BasinState::Deleting
     } else {
@@ -87,10 +88,9 @@ fn basin_state_for_deleted_at(deleted_at: Option<&OffsetDateTime>) -> BasinState
 struct BasinInfoSerde {
     name: BasinName,
     location: Option<LocationName>,
-    #[serde(with = "time::serde::rfc3339")]
-    created_at: OffsetDateTime,
-    #[serde(default, with = "time::serde::rfc3339::option")]
-    deleted_at: Option<OffsetDateTime>,
+    created_at: Timestamp,
+    #[serde(default)]
+    deleted_at: Option<Timestamp>,
 }
 
 impl<'de> Deserialize<'de> for BasinInfo {

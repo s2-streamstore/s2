@@ -2788,6 +2788,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -4942,13 +4943,13 @@ dependencies = [
  "axum",
  "base64ct",
  "bytes",
- "compact_str",
  "flate2",
  "futures",
  "futures-core",
  "futures-util",
  "http",
  "itertools 0.15.0",
+ "jiff",
  "mime",
  "proptest",
  "prost",
@@ -4959,7 +4960,6 @@ dependencies = [
  "serde_json",
  "strum",
  "thiserror 2.0.21",
- "time",
  "tokio-util",
  "utoipa",
  "zstd 0.14.4",
@@ -4978,7 +4978,6 @@ dependencies = [
  "clap",
  "color-print",
  "colored",
- "compact_str",
  "config",
  "dirs",
  "fs2",
@@ -4999,7 +4998,6 @@ dependencies = [
  "rpassword",
  "rstest",
  "rustls",
- "s2-api",
  "s2-common",
  "s2-lite",
  "s2-resource-spec",
@@ -5038,6 +5036,7 @@ dependencies = [
  "compact_str",
  "enumset",
  "http",
+ "jiff",
  "proptest",
  "rand 0.10.4",
  "rkyv",
@@ -5047,7 +5046,6 @@ dependencies = [
  "serde_json",
  "strum",
  "thiserror 2.0.21",
- "time",
  "utoipa",
 ]
 
@@ -5071,6 +5069,7 @@ dependencies = [
  "include_dir",
  "indexmap 2.14.2",
  "itertools 0.15.0",
+ "jiff",
  "parking_lot",
  "prometheus",
  "proptest",
@@ -5090,7 +5089,6 @@ dependencies = [
  "strum",
  "thiserror 2.0.21",
  "tikv-jemallocator",
- "time",
  "tokio",
  "tokio-util",
  "tower",
@@ -5105,7 +5103,6 @@ dependencies = [
 name = "s2-resource-spec"
 version = "0.49.0"
 dependencies = [
- "compact_str",
  "humantime",
  "s2-common",
  "schemars 1.2.3",
@@ -5118,11 +5115,11 @@ name = "s2-sdk"
 version = "0.49.0"
 dependencies = [
  "assert_matches",
- "async-compression",
  "async-stream",
  "async-trait",
+ "base64ct",
  "bytes",
- "compact_str",
+ "flate2",
  "futures-core",
  "futures-util",
  "h2",
@@ -5132,8 +5129,8 @@ dependencies = [
  "hyper",
  "hyper-rustls",
  "hyper-util",
+ "jiff",
  "pin-project-lite",
- "proptest",
  "prost",
  "rand 0.10.4",
  "rstest",
@@ -5144,17 +5141,17 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_urlencoded",
+ "sha2",
  "test-context",
  "thiserror 2.0.21",
- "time",
  "tokio",
- "tokio-muxt",
  "tokio-shared-rt",
- "tokio-stream",
  "tokio-util",
+ "tower-service",
  "tracing",
  "urlencoding",
  "uuid",
+ "zstd 0.14.4",
 ]
 
 [[package]]
@@ -6162,16 +6159,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tokio-muxt"
-version = "0.8.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a08b20f8324114e2639a1a251692cc8a4154aa311bee55a83bdc82826b09a3b1"
-dependencies = [
- "pin-project",
- "tokio",
-]
-
-[[package]]
 name = "tokio-rustls"
 version = "0.26.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6855,6 +6842,15 @@ name = "webpki-root-certs"
 version = "1.0.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "293198dcebfb821155b5092ab94b5a82ff180eddd7241df3bd6e66a4ffd1a585"
+dependencies = [
+ "rustls-pki-types",
+]
+
+[[package]]
+name = "webpki-roots"
+version = "1.0.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7265c9301c16a8711c992c2d8da90ee77ef54b1ed51482d6dfeb00dc756b1297"
 dependencies = [
  "rustls-pki-types",
 ]

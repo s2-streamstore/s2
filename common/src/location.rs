@@ -1,8 +1,6 @@
-use std::{ops::Deref, str::FromStr};
+use compact_str::CompactString;
 
-use compact_str::{CompactString, ToCompactString};
-
-use super::ValidationError;
+use super::{ValidationError, strings::impl_validated_str};
 use crate::caps;
 
 fn validate_location_str(field_name: &str, location: &str) -> Result<(), ValidationError> {
@@ -44,6 +42,8 @@ impl LocationName {
     }
 }
 
+impl_validated_str!(LocationName);
+
 #[cfg(feature = "utoipa")]
 impl utoipa::PartialSchema for LocationName {
     fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
@@ -58,94 +58,10 @@ impl utoipa::PartialSchema for LocationName {
 #[cfg(feature = "utoipa")]
 impl utoipa::ToSchema for LocationName {}
 
-impl serde::Serialize for LocationName {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_str(&self.0)
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for LocationName {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let s = CompactString::deserialize(deserializer)?;
-        s.try_into().map_err(serde::de::Error::custom)
-    }
-}
-
-impl AsRef<str> for LocationName {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
-impl Deref for LocationName {
-    type Target = str;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl TryFrom<CompactString> for LocationName {
-    type Error = ValidationError;
-
-    fn try_from(location: CompactString) -> Result<Self, Self::Error> {
-        Self::validate_str(&location)?;
-        Ok(Self(location))
-    }
-}
-
-impl TryFrom<String> for LocationName {
-    type Error = ValidationError;
-
-    fn try_from(location: String) -> Result<Self, Self::Error> {
-        location.to_compact_string().try_into()
-    }
-}
-
-impl TryFrom<&str> for LocationName {
-    type Error = ValidationError;
-
-    fn try_from(location: &str) -> Result<Self, Self::Error> {
-        location.to_compact_string().try_into()
-    }
-}
-
-impl FromStr for LocationName {
-    type Err = ValidationError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        s.try_into()
-    }
-}
-
-impl std::fmt::Debug for LocationName {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl std::fmt::Display for LocationName {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl From<LocationName> for CompactString {
-    fn from(value: LocationName) -> Self {
-        value.0
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AwsPrivateNet {
-    pub service_name: CompactString,
-    pub private_dns_name: Option<CompactString>,
+    pub service_name: String,
+    pub private_dns_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -157,8 +73,8 @@ pub enum PrivateNet {
 pub struct LocationInfo {
     pub name: LocationName,
     pub is_private: bool,
-    pub storage_classes: Vec<CompactString>,
-    pub default_storage_class: CompactString,
+    pub storage_classes: Vec<String>,
+    pub default_storage_class: String,
     pub private_net: Option<PrivateNet>,
 }
 
@@ -192,5 +108,19 @@ mod test {
         location
             .parse::<LocationName>()
             .expect_err("expected validation error");
+    }
+
+    #[test]
+    fn string_conversions_and_serde_roundtrip() {
+        let from_str = LocationName::try_from("aws:us-east-1").unwrap();
+        let from_string = LocationName::try_from("aws:us-east-1".to_owned()).unwrap();
+        assert_eq!(from_str, from_string);
+        assert_eq!(String::from(from_string), "aws:us-east-1");
+
+        let json = serde_json::to_string(&from_str).unwrap();
+        assert_eq!(json, r#""aws:us-east-1""#);
+        let decoded: LocationName = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, from_str);
+        assert!(serde_json::from_str::<LocationName>(r#""""#).is_err());
     }
 }

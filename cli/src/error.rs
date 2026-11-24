@@ -1,8 +1,5 @@
 use miette::Diagnostic;
-use s2_sdk::error::{
-    AppendError, AppendSessionError, ErrorCode, ProducerError, ReadError, ReadSessionError,
-    RequestError, ServerError,
-};
+use s2_sdk::error::{ErrorCode, S2Error, ServerError};
 use thiserror::Error;
 
 use crate::environment::Target;
@@ -27,38 +24,7 @@ const BUG_HELP: &str = color_print::cstr!(
 "
 );
 
-#[derive(Error, Debug)]
-pub enum SdkError {
-    #[error(transparent)]
-    Request(#[from] RequestError),
-    #[error(transparent)]
-    Read(#[from] ReadError),
-    #[error(transparent)]
-    Append(#[from] AppendError),
-    #[error(transparent)]
-    AppendSession(#[from] AppendSessionError),
-    #[error(transparent)]
-    ReadSession(#[from] ReadSessionError),
-    #[error(transparent)]
-    Producer(#[from] ProducerError),
-}
-
-impl SdkError {
-    fn request_error(&self) -> Option<&RequestError> {
-        match self {
-            Self::Request(error) => Some(error),
-            Self::Read(error) => error.request_error(),
-            Self::Append(error) => error.request_error(),
-            Self::AppendSession(error) => error.request_error(),
-            Self::ReadSession(error) => error.request_error(),
-            Self::Producer(error) => error.request_error(),
-        }
-    }
-
-    fn server_error(&self) -> Option<&ServerError> {
-        self.request_error().and_then(RequestError::server_error)
-    }
-}
+pub type SdkError = S2Error;
 
 #[derive(Error, Debug, Diagnostic)]
 pub enum CliError {
@@ -107,22 +73,22 @@ pub enum CliError {
     ))]
     BenchVerification(String),
 
-    #[error("{}: {}", .0, .1)]
+    #[error("{0}")]
     #[diagnostic(help("{}", HELP))]
     Operation(OpKind, #[source] SdkError),
 
-    #[error("{}: {}", .0, .1)]
+    #[error("{0}")]
     #[diagnostic(help(
         "Verify the token loaded from {2} is valid and has permission for this operation, then retry.\n{}",
         .2.recovery_command()
     ))]
     UnauthorizedAccessToken(OpKind, #[source] SdkError, TokenSource),
 
-    #[error("{}: {}", .0, .1)]
+    #[error("{0}")]
     #[diagnostic(help("{}", LITE_HELP))]
     NotImplemented(OpKind, #[source] SdkError),
 
-    #[error("{}: {}", .0, .1)]
+    #[error("{0}")]
     #[diagnostic(help(
         "The access token is bound to a network policy that does not permit requests from this \
          network. Retry from a permitted network, or use a token without that restriction."
@@ -172,11 +138,6 @@ impl CliError {
             }
             (CliError::Operation(kind, source), Some(token_source)) if is_auth_error(&source) => {
                 CliError::UnauthorizedAccessToken(kind, source, token_source)
-            }
-            (CliError::SdkInit(source), Some(token_source))
-                if is_malformed_access_token(&source) =>
-            {
-                CliError::MalformedAccessToken(source, token_source)
             }
             (err, _) => err,
         }
@@ -287,29 +248,35 @@ impl std::fmt::Display for TokenSource {
     }
 }
 
+fn root_server_error(mut err: &SdkError) -> Option<&ServerError> {
+    loop {
+        if let Some(server) = err.server_error() {
+            return Some(server);
+        }
+        err = err.failure().or_else(|| err.final_attempt_error())?;
+    }
+}
+
 fn is_auth_error(err: &SdkError) -> bool {
-    err.server_error()
+    root_server_error(err)
         .and_then(ServerError::known_code)
         .is_some_and(ErrorCode::is_auth_error)
 }
 
 fn is_network_policy_denied(err: &SdkError) -> bool {
-    err.server_error()
+    root_server_error(err)
         .and_then(ServerError::known_code)
         .is_some_and(|code| matches!(code, ErrorCode::NetworkPolicyDenied))
 }
 
 fn is_not_implemented(err: &SdkError) -> bool {
-    err.server_error()
+    root_server_error(err)
         .and_then(ServerError::known_code)
         .is_some_and(|code| matches!(code, ErrorCode::NotImplemented))
 }
 
-fn is_malformed_access_token(err: &SdkError) -> bool {
-    matches!(
-        err.request_error(),
-        Some(RequestError::MalformedAccessToken(_))
-    )
+pub fn is_valid_access_token(token: &str) -> bool {
+    !token.is_empty() && reqwest::header::HeaderValue::from_str(&format!("Bearer {token}")).is_ok()
 }
 
 #[cfg(test)]
@@ -440,7 +407,11 @@ mod tests {
         #[case] token_source: TokenSource,
         #[case] expected: &str,
     ) {
-        let sdk_error = || SdkError::Request(RequestError::MalformedAccessToken("bad".into()));
+        let sdk_error = || {
+            S2Error::Validation(s2_sdk::error::ValidationError(
+                "invalid access token: bad".into(),
+            ))
+        };
         for error in [
             CliError::UnauthorizedAccessToken(OpKind::ListBasins, sdk_error(), token_source),
             CliError::MalformedAccessToken(sdk_error(), token_source),
@@ -451,5 +422,57 @@ mod tests {
                 assert!(!help.contains("access-token set"), "{help}");
             }
         }
+    }
+
+    #[test]
+    fn operation_error_report_does_not_duplicate_sdk_error() {
+        let sdk_error = S2Error::Validation(s2_sdk::error::ValidationError(
+            "stream_not_found: stream 'my-stream' does not exist".into(),
+        ));
+        let rendered = format!(
+            "{:?}",
+            miette::Report::new(CliError::Operation(OpKind::Read, sdk_error))
+        );
+        assert_eq!(rendered.matches("Failed to read").count(), 1, "{rendered}");
+        assert_eq!(
+            rendered.matches("stream_not_found").count(),
+            1,
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn wrapped_session_and_indefinite_errors_still_classify_server_codes() {
+        use s2_sdk::error::{IndefiniteAppendError, SessionClosedError, StatusCode};
+
+        let auth_server =
+            ServerError::new(StatusCode::UNAUTHORIZED, "invalid token").with_code("authn");
+        let wrapped_auth = S2Error::SessionClosed(SessionClosedError::new(Some(
+            S2Error::IndefiniteAppend(IndefiniteAppendError::new(S2Error::Server(auth_server))),
+        )));
+        assert!(matches!(
+            CliError::Operation(OpKind::Append, wrapped_auth)
+                .with_token_source(Some(TokenSource::Environment)),
+            CliError::UnauthorizedAccessToken(OpKind::Append, _, TokenSource::Environment)
+        ));
+
+        let np_server =
+            ServerError::new(StatusCode::FORBIDDEN, "denied").with_code("network_policy_denied");
+        let wrapped_np =
+            S2Error::SessionClosed(SessionClosedError::new(Some(S2Error::Server(np_server))));
+        assert!(matches!(
+            CliError::Operation(OpKind::Append, wrapped_np)
+                .with_token_source(Some(TokenSource::Environment)),
+            CliError::NetworkPolicyDenied(OpKind::Append, _)
+        ));
+
+        let ni_server = ServerError::new(StatusCode::NOT_IMPLEMENTED, "unsupported")
+            .with_code("not_implemented");
+        let wrapped_ni =
+            S2Error::SessionClosed(SessionClosedError::new(Some(S2Error::Server(ni_server))));
+        assert!(matches!(
+            CliError::Operation(OpKind::Read, wrapped_ni).with_target(Target::Local),
+            CliError::NotImplemented(OpKind::Read, _)
+        ));
     }
 }

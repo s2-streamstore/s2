@@ -1,11 +1,10 @@
-use std::{marker::PhantomData, ops::Deref, str::FromStr, time::Duration};
+use std::{marker::PhantomData, time::Duration};
 
-use compact_str::{CompactString, ToCompactString};
-use time::OffsetDateTime;
+use compact_str::CompactString;
 
 use super::{
     ValidationError,
-    strings::{NameProps, PrefixProps, StartAfterProps, StrProps},
+    strings::{NameProps, PrefixProps, StartAfterProps, StrProps, impl_validated_str},
 };
 use crate::{
     caps,
@@ -56,6 +55,8 @@ impl<T: StrProps> StreamNameStr<T> {
     }
 }
 
+impl_validated_str!(StreamNameStr<T: StrProps>);
+
 #[cfg(feature = "utoipa")]
 impl<T> utoipa::PartialSchema for StreamNameStr<T>
 where
@@ -72,75 +73,6 @@ where
 
 #[cfg(feature = "utoipa")]
 impl<T> utoipa::ToSchema for StreamNameStr<T> where T: StrProps {}
-
-impl<T: StrProps> serde::Serialize for StreamNameStr<T> {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_str(&self.0)
-    }
-}
-
-impl<'de, T: StrProps> serde::Deserialize<'de> for StreamNameStr<T> {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let s = CompactString::deserialize(deserializer)?;
-        s.try_into().map_err(serde::de::Error::custom)
-    }
-}
-
-impl<T: StrProps> AsRef<str> for StreamNameStr<T> {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
-impl<T: StrProps> Deref for StreamNameStr<T> {
-    type Target = str;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl<T: StrProps> TryFrom<CompactString> for StreamNameStr<T> {
-    type Error = ValidationError;
-
-    fn try_from(name: CompactString) -> Result<Self, Self::Error> {
-        Self::validate_str(&name)?;
-        Ok(Self(name, PhantomData))
-    }
-}
-
-impl<T: StrProps> FromStr for StreamNameStr<T> {
-    type Err = ValidationError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Self::validate_str(s)?;
-        Ok(Self(s.to_compact_string(), PhantomData))
-    }
-}
-
-impl<T: StrProps> std::fmt::Debug for StreamNameStr<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl<T: StrProps> std::fmt::Display for StreamNameStr<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl<T: StrProps> From<StreamNameStr<T>> for CompactString {
-    fn from(value: StreamNameStr<T>) -> Self {
-        value.0
-    }
-}
 
 pub type StreamName = StreamNameStr<NameProps>;
 
@@ -175,8 +107,8 @@ impl From<StreamName> for StreamNameStartAfter {
 #[derive(Debug, Clone)]
 pub struct StreamInfo {
     pub name: StreamName,
-    pub created_at: OffsetDateTime,
-    pub deleted_at: Option<OffsetDateTime>,
+    pub created_at: jiff::Timestamp,
+    pub deleted_at: Option<jiff::Timestamp>,
     pub cipher: Option<EncryptionAlgorithm>,
 }
 
@@ -460,5 +392,19 @@ mod test {
         let empty_batch: Result<AppendRecordBatch, _> = Vec::<AppendRecord>::new().try_into();
 
         assert_eq!(empty_batch.unwrap_err(), "record batch must not be empty");
+    }
+
+    #[test]
+    fn string_conversions_and_serde_roundtrip() {
+        let from_str = StreamName::try_from("my-stream").unwrap();
+        let from_string = StreamName::try_from("my-stream".to_owned()).unwrap();
+        assert_eq!(from_str, from_string);
+        assert_eq!(String::from(from_string), "my-stream");
+
+        let json = serde_json::to_string(&from_str).unwrap();
+        assert_eq!(json, r#""my-stream""#);
+        let decoded: StreamName = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, from_str);
+        assert!(serde_json::from_str::<StreamName>(r#""""#).is_err());
     }
 }

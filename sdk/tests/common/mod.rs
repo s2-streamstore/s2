@@ -7,9 +7,12 @@ use std::{
     },
 };
 
-use s2_sdk::types::{
-    BasinName, Compression, CreateBasinInput, CreateStreamInput, DeleteBasinInput,
-    DeleteStreamInput, S2Config, S2Endpoints, StreamName, ValidationError,
+use s2_sdk::{
+    error::ValidationError,
+    types::{
+        BasinName, Compression, CreateBasinInput, CreateStreamInput, S2Config, S2Endpoints,
+        StreamName,
+    },
 };
 use test_context::AsyncTestContext;
 
@@ -53,10 +56,7 @@ impl AsyncTestContext for SharedS2Basin {
         if SHARED_BASIN_USERS.fetch_sub(1, Ordering::SeqCst) == 1
             && let Some(basin) = guard.take()
         {
-            let _ = basin
-                .s2
-                .delete_basin(DeleteBasinInput::new(basin.basin_name.clone()))
-                .await;
+            let _ = basin.s2.delete_basin(basin.basin_name.clone()).await;
         }
     }
 }
@@ -100,7 +100,7 @@ impl AsyncTestContext for S2Basin {
 
     async fn teardown(self) -> () {
         self.s2
-            .delete_basin(DeleteBasinInput::new(self.basin_name.clone()))
+            .delete_basin(self.basin_name.clone())
             .await
             .expect("successful deletion")
     }
@@ -149,10 +149,7 @@ impl AsyncTestContext for S2Stream {
 
     async fn teardown(self) {
         // Just a best effort op to ensure basin teardown always happens.
-        let _ = self
-            .basin
-            .delete_stream(DeleteStreamInput::new(self.stream_name))
-            .await;
+        let _ = self.basin.delete_stream(self.stream_name).await;
         self.basin.teardown().await;
     }
 }

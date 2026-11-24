@@ -487,8 +487,8 @@ pub mod extract {
             assert_roundtrip(&BasinReconfiguration {
                 default_stream_config: Maybe::Specified(None),
                 stream_cipher: Maybe::Unspecified,
-                create_stream_on_append: Maybe::Specified(true),
-                create_stream_on_read: Maybe::Unspecified,
+                create_stream_on_append: Maybe::Specified(Some(true)),
+                create_stream_on_read: Maybe::Specified(None),
             });
         }
     }

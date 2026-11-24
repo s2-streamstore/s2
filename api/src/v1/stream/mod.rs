@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use futures_core::stream::BoxStream;
 use itertools::Itertools as _;
+use jiff::Timestamp;
 use s2_common::{
     config::OptionalStreamConfig,
     encryption::EncryptionKey,
@@ -17,7 +18,6 @@ use s2_common::{
     stream::{StreamName, StreamNamePrefix, StreamNameStartAfter},
 };
 use serde::{Deserialize, Serialize};
-use time::OffsetDateTime;
 
 use super::{
     MaybeKnown,
@@ -32,11 +32,12 @@ pub struct StreamInfo {
     /// Stream name.
     pub name: StreamName,
     /// Creation time in RFC 3339 format.
-    #[serde(with = "time::serde::rfc3339")]
-    pub created_at: OffsetDateTime,
+    #[cfg_attr(feature = "utoipa", schema(value_type = String, format = DateTime))]
+    pub created_at: Timestamp,
     /// Deletion time in RFC 3339 format, if the stream is being deleted.
-    #[serde(with = "time::serde::rfc3339::option")]
-    pub deleted_at: Option<OffsetDateTime>,
+    #[serde(default)]
+    #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>, format = DateTime))]
+    pub deleted_at: Option<Timestamp>,
     /// Encryption algorithm for this stream, if encryption is enabled.
     #[cfg_attr(feature = "utoipa", schema(value_type = Option<EncryptionAlgorithm>))]
     pub cipher: Option<MaybeKnown<EncryptionAlgorithm>>,
@@ -183,11 +184,11 @@ pub struct ReadEnd {
     /// Record count limit.
     /// Non-streaming reads are capped by the default limit of 1000 records.
     #[cfg_attr(feature = "utoipa", param(value_type = u64, required = false))]
-    pub count: Option<usize>,
+    pub count: Option<u64>,
     /// Metered bytes limit.
     /// Non-streaming reads are capped by the default limit of 1 MiB.
-    #[cfg_attr(feature = "utoipa", param(value_type = usize, required = false))]
-    pub bytes: Option<usize>,
+    #[cfg_attr(feature = "utoipa", param(value_type = u64, required = false))]
+    pub bytes: Option<u64>,
     /// Exclusive timestamp to read until.
     #[cfg_attr(feature = "utoipa", param(value_type = record::Timestamp, required = false))]
     pub until: Option<record::Timestamp>,
@@ -203,8 +204,12 @@ impl From<ReadEnd> for s2_common::stream::ReadEnd {
     fn from(value: ReadEnd) -> Self {
         Self {
             limit: s2_common::read_extent::ReadLimit::from_count_and_bytes(
-                value.count,
-                value.bytes,
+                value
+                    .count
+                    .map(|c| usize::try_from(c).unwrap_or(usize::MAX)),
+                value
+                    .bytes
+                    .map(|b| usize::try_from(b).unwrap_or(usize::MAX)),
             ),
             until: value.until.into(),
             wait: value.wait.map(|w| Duration::from_secs(w as u64)),
@@ -465,7 +470,7 @@ pub enum AppendConditionFailed {
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct ReadBatch {
     /// Records that are durably sequenced on the stream, retrieved based on the requested criteria.
-    /// This can only be empty in response to a unary read (i.e. not SSE), if the request cannot be satisfied without violating an explicit bound (`count`, `bytes`, or `until`).
+    /// This can only be empty in response to a unary read (i.e. not SSE), if the request cannot be satisfied without violating an explicit bound (`count`, `bytes`, `until`, or `wait`).
     pub records: Vec<SequencedRecord>,
     /// Sequence number that will be assigned to the next record on the stream, and timestamp of the last record.
     /// This will only be present when reading recent records.
@@ -483,5 +488,19 @@ impl ReadBatch {
                 .collect(),
             tail: batch.tail.map(Into::into),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::StreamInfo;
+
+    #[test]
+    fn stream_info_deserializes_with_omitted_deleted_at() {
+        let info: StreamInfo =
+            serde_json::from_str(r#"{"name":"my-stream","created_at":"2026-01-01T00:00:00Z"}"#)
+                .expect("deleted_at is optional per OpenAPI");
+        assert_eq!(info.name.as_ref(), "my-stream");
+        assert!(info.deleted_at.is_none());
     }
 }

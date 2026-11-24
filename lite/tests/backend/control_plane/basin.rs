@@ -113,7 +113,7 @@ async fn test_create_basin_idempotency_respects_request_token() {
     assert!(matches!(
         created,
         ProvisionResult::Created(ref info) if info.deleted_at.is_none()
-            && info.created_at <= time::OffsetDateTime::now_utc()
+            && info.created_at <= jiff::Timestamp::now()
     ));
 
     let idempotent = backend
@@ -129,7 +129,7 @@ async fn test_create_basin_idempotency_respects_request_token() {
     assert!(matches!(
         idempotent,
         ProvisionResult::Noop(ref info) if info.deleted_at.is_none()
-            && info.created_at <= time::OffsetDateTime::now_utc()
+            && info.created_at <= jiff::Timestamp::now()
     ));
 
     let different_token: RequestToken = "token-2".parse().unwrap();
@@ -396,8 +396,8 @@ async fn test_reconfigure_basin_updates_nested_defaults() {
     let reconfig = BasinReconfiguration {
         default_stream_config: Maybe::from(Some(stream_reconfig)),
         stream_cipher: Maybe::default(),
-        create_stream_on_append: Maybe::from(true),
-        create_stream_on_read: Maybe::from(true),
+        create_stream_on_append: Maybe::from(Some(true)),
+        create_stream_on_read: Maybe::from(Some(true)),
     };
 
     let updated = backend

@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 
-use compact_str::CompactString;
 use s2_common::access::AccessTokenId;
 use serde::{Deserialize, Serialize};
 
@@ -330,8 +329,7 @@ impl From<s2_common::metrics::MetricUnit> for MetricUnit {
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct ScalarMetric {
     /// Metric name.
-    #[cfg_attr(feature = "utoipa", schema(value_type = String))]
-    pub name: CompactString,
+    pub name: String,
     /// Unit of the metric.
     #[cfg_attr(feature = "utoipa", schema(value_type = MetricUnit))]
     pub unit: MaybeKnown<MetricUnit>,
@@ -354,8 +352,7 @@ impl From<s2_common::metrics::ScalarMetric> for ScalarMetric {
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct AccumulationMetric {
     /// Timeseries name.
-    #[cfg_attr(feature = "utoipa", schema(value_type = String))]
-    pub name: CompactString,
+    pub name: String,
     /// Unit of the metric.
     #[cfg_attr(feature = "utoipa", schema(value_type = MetricUnit))]
     pub unit: MaybeKnown<MetricUnit>,
@@ -384,8 +381,7 @@ impl From<s2_common::metrics::AccumulationMetric> for AccumulationMetric {
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct GaugeMetric {
     /// Timeseries name.
-    #[cfg_attr(feature = "utoipa", schema(value_type = String))]
-    pub name: CompactString,
+    pub name: String,
     /// Unit of the metric.
     #[cfg_attr(feature = "utoipa", schema(value_type = MetricUnit))]
     pub unit: MaybeKnown<MetricUnit>,
@@ -410,8 +406,7 @@ impl From<s2_common::metrics::GaugeMetric> for GaugeMetric {
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct LabelMetric {
     /// Label name.
-    #[cfg_attr(feature = "utoipa", schema(value_type = String))]
-    pub name: CompactString,
+    pub name: String,
     /// Label values.
     pub values: Vec<String>,
 }
@@ -430,8 +425,7 @@ impl From<s2_common::metrics::LabelMetric> for LabelMetric {
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct RecordMetric {
     /// Record name.
-    #[cfg_attr(feature = "utoipa", schema(value_type = String))]
-    pub name: CompactString,
+    pub name: String,
     /// Timestamp of the record in Unix epoch seconds.
     pub timestamp: u32,
     /// Named string attributes of the record.

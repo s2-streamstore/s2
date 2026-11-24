@@ -1,3 +1,4 @@
+use jiff::Timestamp;
 use s2_common::{
     self,
     access::{AccessTokenId, AccessTokenIdPrefix, AccessTokenIdStartAfter},
@@ -44,8 +45,6 @@ where
         }
     }
 }
-
-use time::OffsetDateTime;
 
 #[rustfmt::skip]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -188,8 +187,9 @@ pub struct AccessTokenInfo {
     /// Access token ID.
     pub id: AccessTokenId,
     /// Expiration time in RFC 3339 format.
-    #[serde(default, with = "time::serde::rfc3339::option")]
-    pub expires_at: Option<OffsetDateTime>,
+    #[serde(default)]
+    #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>, format = DateTime))]
+    pub expires_at: Option<Timestamp>,
     /// Namespace streams based on the configured stream-level scope.
     pub auto_prefix_streams: bool,
     /// Access token scope.
@@ -221,8 +221,9 @@ pub struct IssueAccessTokenRequest {
     pub id: AccessTokenId,
     /// Expiration time in RFC 3339 format.
     /// If not set, the expiration will be set to that of the requestor's token.
-    #[serde(default, with = "time::serde::rfc3339::option")]
-    pub expires_at: Option<OffsetDateTime>,
+    #[serde(default)]
+    #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>, format = DateTime))]
+    pub expires_at: Option<Timestamp>,
     /// Namespace streams based on the configured stream-level scope, which must be a prefix.
     /// Stream name arguments will be automatically prefixed, and the prefix will be stripped when listing streams.
     #[cfg_attr(feature = "utoipa", schema(value_type = bool, default = false, required = false))]
@@ -546,5 +547,24 @@ mod tests {
             internal.scope.access_tokens,
             s2_common::access::ResourceSet::None
         ));
+    }
+
+    #[test]
+    fn issue_access_token_expires_at_deserializes_rfc3339() {
+        for ts in [
+            "2030-01-01T00:00:00Z",
+            "2030-01-01t00:00:00.123456z",
+            "2030-01-01 00:00:00+05:30",
+            "2030-01-01T00:00:00-00:00",
+        ] {
+            let valid = serde_json::json!({
+                "id": "test-token",
+                "expires_at": ts,
+                "scope": {}
+            });
+            let parsed: IssueAccessTokenRequest = serde_json::from_value(valid)
+                .unwrap_or_else(|e| panic!("expected RFC 3339 acceptance for {ts}: {e}"));
+            assert!(parsed.expires_at.is_some());
+        }
     }
 }

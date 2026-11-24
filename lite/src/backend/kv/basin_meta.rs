@@ -1,31 +1,30 @@
 use std::ops::Range;
 
 use bytes::{BufMut, Bytes, BytesMut};
+use jiff::Timestamp;
 use s2_common::{
     basin::{BasinName, BasinNamePrefix, BasinNameStartAfter},
     config::BasinConfig,
 };
 use s2_storage::bash::Bash;
 use serde::{Deserialize, Serialize};
-use time::OffsetDateTime;
 
 use super::{DeserializationError, KeyType, deser_json_value, increment_bytes, ser_json_value};
 
 #[derive(Debug, Clone)]
 pub struct BasinMeta {
     pub config: BasinConfig,
-    pub created_at: OffsetDateTime,
-    pub deleted_at: Option<OffsetDateTime>,
+    pub created_at: Timestamp,
+    pub deleted_at: Option<Timestamp>,
     pub creation_idempotency_key: Option<Bash>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 struct BasinMetaSerde {
     config: Option<s2_api::v1::config::BasinConfig>,
-    #[serde(with = "time::serde::rfc3339")]
-    created_at: OffsetDateTime,
-    #[serde(with = "time::serde::rfc3339::option")]
-    deleted_at: Option<OffsetDateTime>,
+    created_at: Timestamp,
+    #[serde(default)]
+    deleted_at: Option<Timestamp>,
     creation_idempotency_key: Option<Bash>,
 }
 
@@ -116,13 +115,13 @@ mod tests {
     use std::{str::FromStr, time::Duration};
 
     use bytes::Bytes;
+    use jiff::Timestamp;
     use proptest::prelude::*;
     use s2_common::{
         basin::{BasinName, BasinNamePrefix, BasinNameStartAfter},
         config::{BasinConfig, OptionalDeleteOnEmptyConfig, OptionalStreamConfig},
     };
     use s2_storage::bash::Bash;
-    use time::OffsetDateTime;
 
     use crate::backend::kv::{
         DeserializationError, KeyType, proptest_strategies::basin_name_strategy,
@@ -238,16 +237,8 @@ mod tests {
             },
             ..Default::default()
         };
-        let created_at = OffsetDateTime::from_unix_timestamp(1234567890)
-            .unwrap()
-            .replace_nanosecond(123456789)
-            .unwrap();
-        let deleted_at = Some(
-            OffsetDateTime::from_unix_timestamp(1234567890)
-                .unwrap()
-                .replace_nanosecond(123456789)
-                .unwrap(),
-        );
+        let created_at = Timestamp::new(1234567890, 123456789).unwrap();
+        let deleted_at = Some(Timestamp::new(1234567890, 123456789).unwrap());
         let basin_meta = super::BasinMeta {
             config: config.clone(),
             created_at,
@@ -285,7 +276,7 @@ mod tests {
     fn basin_meta_deser_defaults_config_missing() {
         let serde_value = super::BasinMetaSerde {
             config: None,
-            created_at: OffsetDateTime::from_unix_timestamp(1_234_567).unwrap(),
+            created_at: Timestamp::from_second(1_234_567).unwrap(),
             deleted_at: None,
             creation_idempotency_key: Some(Bash::length_prefixed(&[b"my-basin", b"req-789"])),
         };
@@ -329,6 +320,44 @@ mod tests {
     fn basin_meta_deser_invalid_json() {
         let err = super::deser_value(Bytes::from_static(b"{")).unwrap_err();
         assert!(matches!(err, DeserializationError::JsonDeserialization(_)));
+    }
+
+    #[test]
+    fn basin_meta_deser_legacy_time_rfc3339_json() {
+        let json = br#"{
+            "config": null,
+            "created_at": "2025-03-15T12:34:56.123456789Z",
+            "deleted_at": null,
+            "creation_idempotency_key": null
+        }"#;
+        let decoded = super::deser_value(Bytes::from_static(json)).unwrap();
+        assert_eq!(
+            decoded.created_at,
+            "2025-03-15T12:34:56.123456789Z"
+                .parse::<Timestamp>()
+                .unwrap()
+        );
+        assert_eq!(decoded.deleted_at, None);
+
+        let deleting_json = br#"{
+            "config": null,
+            "created_at": "2025-03-15T12:34:56Z",
+            "deleted_at": "2025-03-16T01:02:03.000000001Z",
+            "creation_idempotency_key": null
+        }"#;
+        let decoded = super::deser_value(Bytes::from_static(deleting_json)).unwrap();
+        assert_eq!(
+            decoded.created_at,
+            "2025-03-15T12:34:56Z".parse::<Timestamp>().unwrap()
+        );
+        assert_eq!(
+            decoded.deleted_at,
+            Some(
+                "2025-03-16T01:02:03.000000001Z"
+                    .parse::<Timestamp>()
+                    .unwrap()
+            )
+        );
     }
 
     fn basin_name_prefix_strategy() -> impl Strategy<Value = BasinNamePrefix> {

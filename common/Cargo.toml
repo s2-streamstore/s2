@@ -22,14 +22,14 @@ clap = { workspace = true, optional = true, features = ["derive"] }
 compact_str = { workspace = true, features = ["serde"] }
 enumset = { workspace = true }
 http = { workspace = true }
+jiff = { workspace = true }
 rand = { workspace = true }
 rkyv = { workspace = true, optional = true }
 secrecy = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 strum = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
-time = { workspace = true }
-utoipa = { workspace = true, optional = true, features = ["time"] }
+utoipa = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

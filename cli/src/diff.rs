@@ -1,13 +1,10 @@
 //! Diffing over typed presentation views of basins, streams, and access tokens.
 
 use colored::Colorize;
-use compact_str::CompactString;
-use s2_api::v1::{MaybeKnown, access::AccessTokenInfo as ApiAccessTokenInfo};
-use s2_common::{
-    access::{PermittedOperationGroups, ReadWritePermissions, ResourceSet},
-    config::StreamConfig,
+use s2_sdk::types::{
+    AccessTokenId, AccessTokenInfo, AccessTokenMatcher, AccessTokenScope, BasinConfig,
+    BasinMatcher, ReadWritePermissions, StreamConfig, StreamMatcher, Timestamp,
 };
-use s2_sdk::types::AccessTokenId;
 use serde::Serialize;
 use serde_json::{Map, Value};
 
@@ -81,22 +78,22 @@ pub async fn run(s2: &s2_sdk::S2, args: DiffArgs) -> Result<DiffOutcome, CliErro
     let (left_view, right_view) = match (left, right) {
         (DiffResource::Basin(left), DiffResource::Basin(right)) => {
             let (left_config, right_config) = tokio::try_join!(
-                ops::get_basin_config_api(s2, &left),
-                ops::get_basin_config_api(s2, &right),
+                ops::get_basin_config(s2, &left),
+                ops::get_basin_config(s2, &right),
             )?;
             (basin_view(left_config)?, basin_view(right_config)?)
         }
         (DiffResource::Stream(left), DiffResource::Stream(right)) => {
             let (left_config, right_config) = tokio::try_join!(
-                ops::get_stream_config_api(s2, left),
-                ops::get_stream_config_api(s2, right),
+                ops::get_stream_config(s2, left),
+                ops::get_stream_config(s2, right),
             )?;
             (stream_view(left_config)?, stream_view(right_config)?)
         }
         (DiffResource::Basin(basin), DiffResource::Stream(stream)) => {
             let (basin_config, stream_config) = tokio::try_join!(
-                ops::get_basin_config_api(s2, &basin),
-                ops::get_stream_config_api(s2, stream),
+                ops::get_basin_config(s2, &basin),
+                ops::get_stream_config(s2, stream),
             )?;
             (
                 basin_stream_defaults_view(basin_config)?,
@@ -105,8 +102,8 @@ pub async fn run(s2: &s2_sdk::S2, args: DiffArgs) -> Result<DiffOutcome, CliErro
         }
         (DiffResource::Stream(stream), DiffResource::Basin(basin)) => {
             let (stream_config, basin_config) = tokio::try_join!(
-                ops::get_stream_config_api(s2, stream),
-                ops::get_basin_config_api(s2, &basin),
+                ops::get_stream_config(s2, stream),
+                ops::get_basin_config(s2, &basin),
             )?;
             (
                 stream_view(stream_config)?,
@@ -115,8 +112,8 @@ pub async fn run(s2: &s2_sdk::S2, args: DiffArgs) -> Result<DiffOutcome, CliErro
         }
         (DiffResource::AccessToken(left), DiffResource::AccessToken(right)) => {
             let (left_info, right_info) = tokio::try_join!(
-                ops::get_access_token_api(s2, left),
-                ops::get_access_token_api(s2, right),
+                ops::get_access_token(s2, left),
+                ops::get_access_token(s2, right),
             )?;
             (
                 access_token_view(left_info)?,
@@ -302,7 +299,7 @@ fn resource_kind(resource: &DiffResource) -> DiffResourceKind {
 ///   duration.
 #[derive(Serialize)]
 struct StreamConfigView {
-    storage_class: Option<CompactString>,
+    storage_class: Option<String>,
     retention_policy: String,
     timestamping: TimestampingConfigView,
     delete_on_empty: DeleteOnEmptyConfigView,
@@ -319,28 +316,32 @@ struct DeleteOnEmptyConfigView {
     min_age: String,
 }
 
-impl From<StreamConfig> for StreamConfigView {
-    fn from(config: StreamConfig) -> Self {
-        let StreamConfig {
+impl From<crate::types::ResolvedStreamConfig> for StreamConfigView {
+    fn from(config: crate::types::ResolvedStreamConfig) -> Self {
+        let crate::types::ResolvedStreamConfig {
             storage_class,
             retention_policy,
-            timestamping,
-            delete_on_empty,
+            timestamping_mode,
+            timestamping_uncapped,
+            delete_on_empty_min_age,
         } = config;
-        let s2_common::config::TimestampingConfig { mode, uncapped } = timestamping;
 
         Self {
             storage_class,
             retention_policy: match retention_policy {
-                s2_common::config::RetentionPolicy::Age(age) => compact_duration(age),
-                s2_common::config::RetentionPolicy::Infinite() => "infinite".to_owned(),
+                s2_sdk::types::RetentionPolicy::Age(secs) => {
+                    compact_duration(std::time::Duration::from_secs(secs))
+                }
+                s2_sdk::types::RetentionPolicy::Infinite => "infinite".to_owned(),
+                s2_sdk::types::RetentionPolicy::Unknown(name) => name,
+                _ => "unknown".to_owned(),
             },
             timestamping: TimestampingConfigView {
-                mode: wire_name(s2_api::v1::config::TimestampingMode::from(mode)),
-                uncapped,
+                mode: timestamping_mode.as_str().to_owned(),
+                uncapped: timestamping_uncapped,
             },
             delete_on_empty: DeleteOnEmptyConfigView {
-                min_age: compact_duration(delete_on_empty.min_age),
+                min_age: compact_duration(delete_on_empty_min_age),
             },
         }
     }
@@ -355,30 +356,20 @@ struct BasinConfigView {
     create_stream_on_read: bool,
 }
 
-impl TryFrom<s2_api::v1::config::BasinConfig> for BasinConfigView {
-    type Error = s2_common::ValidationError;
-
-    fn try_from(config: s2_api::v1::config::BasinConfig) -> Result<Self, Self::Error> {
-        let s2_api::v1::config::BasinConfig {
-            default_stream_config,
-            stream_cipher,
-            create_stream_on_append,
-            create_stream_on_read,
-        } = config;
-
-        Ok(Self {
+impl From<BasinConfig> for BasinConfigView {
+    fn from(config: BasinConfig) -> Self {
+        Self {
             default_stream_config: resolve_stream_config(
-                default_stream_config.unwrap_or_default(),
+                config.default_stream_config().cloned().unwrap_or_default(),
                 Default::default(),
-            )?
+            )
             .into(),
-            stream_cipher: match stream_cipher {
-                None => "none".to_owned(),
-                Some(cipher) => wire_name(cipher),
-            },
-            create_stream_on_append,
-            create_stream_on_read,
-        })
+            stream_cipher: config
+                .stream_cipher()
+                .map_or_else(|| "none".to_owned(), |c| c.as_str().to_owned()),
+            create_stream_on_append: config.create_stream_on_append(),
+            create_stream_on_read: config.create_stream_on_read(),
+        }
     }
 }
 
@@ -413,52 +404,51 @@ struct OperationGroupsView {
     stream: String,
 }
 
-impl From<s2_common::access::AccessTokenScope> for AccessTokenScopeView {
-    fn from(scope: s2_common::access::AccessTokenScope) -> Self {
-        let s2_common::access::AccessTokenScope {
-            basins,
-            streams,
-            access_tokens,
-            op_groups,
-            ops,
-        } = scope;
-        let PermittedOperationGroups {
-            account,
-            basin,
-            stream,
-        } = op_groups;
-
-        let mut ops = ops
+impl From<&AccessTokenScope> for AccessTokenScopeView {
+    fn from(scope: &AccessTokenScope) -> Self {
+        let op_groups = scope.op_group_perms().unwrap_or_default();
+        let mut ops = scope
+            .ops()
             .iter()
-            .map(|op| wire_name(s2_api::v1::access::Operation::from(op)))
+            .map(|op| op.as_str().to_owned())
             .collect::<Vec<_>>();
         ops.sort();
 
         Self {
-            basins: resource_set_view(basins),
-            streams: resource_set_view(streams),
-            access_tokens: resource_set_view(access_tokens),
+            basins: match scope.basins() {
+                BasinMatcher::None => "none".to_owned(),
+                BasinMatcher::Exact(exact) => format!("exact: \"{exact}\""),
+                BasinMatcher::Prefix(prefix) => format!("prefix: \"{prefix}\""),
+                BasinMatcher::Unknown(kind) => kind.clone(),
+                _ => "unknown".to_owned(),
+            },
+            streams: match scope.streams() {
+                StreamMatcher::None => "none".to_owned(),
+                StreamMatcher::Exact(exact) => format!("exact: \"{exact}\""),
+                StreamMatcher::Prefix(prefix) => format!("prefix: \"{prefix}\""),
+                StreamMatcher::Unknown(kind) => kind.clone(),
+                _ => "unknown".to_owned(),
+            },
+            access_tokens: match scope.access_tokens() {
+                AccessTokenMatcher::None => "none".to_owned(),
+                AccessTokenMatcher::Exact(exact) => format!("exact: \"{exact}\""),
+                AccessTokenMatcher::Prefix(prefix) => format!("prefix: \"{prefix}\""),
+                AccessTokenMatcher::Unknown(kind) => kind.clone(),
+                _ => "unknown".to_owned(),
+            },
             op_groups: OperationGroupsView {
-                account: permissions_view(account),
-                basin: permissions_view(basin),
-                stream: permissions_view(stream),
+                account: permissions_view(op_groups.account()),
+                basin: permissions_view(op_groups.basin()),
+                stream: permissions_view(op_groups.stream()),
             },
             ops,
         }
     }
 }
 
-fn resource_set_view<E: std::fmt::Display, P: std::fmt::Display>(set: ResourceSet<E, P>) -> String {
-    match set {
-        ResourceSet::None => "none".to_owned(),
-        ResourceSet::Exact(exact) => format!("exact: \"{exact}\""),
-        ResourceSet::Prefix(prefix) => format!("prefix: \"{prefix}\""),
-    }
-}
-
-fn permissions_view(permissions: ReadWritePermissions) -> String {
-    let ReadWritePermissions { read, write } = permissions;
-    match (read, write) {
+fn permissions_view(permissions: Option<ReadWritePermissions>) -> String {
+    let permissions = permissions.unwrap_or_default();
+    match (permissions.read(), permissions.write()) {
         (true, true) => "rw",
         (true, false) => "r",
         (false, true) => "w",
@@ -467,63 +457,45 @@ fn permissions_view(permissions: ReadWritePermissions) -> String {
     .to_owned()
 }
 
-fn basin_view(config: s2_api::v1::config::BasinConfig) -> Result<Value, CliError> {
-    Ok(serde_json::to_value(BasinConfigView::try_from(config)?)?)
+fn basin_view(config: BasinConfig) -> Result<Value, CliError> {
+    Ok(serde_json::to_value(BasinConfigView::from(config))?)
 }
 
 /// Renders a basin's effective stream defaults for comparison against a concrete stream.
-fn basin_stream_defaults_view(config: s2_api::v1::config::BasinConfig) -> Result<Value, CliError> {
-    stream_view(config.default_stream_config.unwrap_or_default())
+fn basin_stream_defaults_view(config: BasinConfig) -> Result<Value, CliError> {
+    stream_view(config.default_stream_config().cloned().unwrap_or_default())
 }
 
-fn stream_view(config: s2_api::v1::config::StreamConfig) -> Result<Value, CliError> {
-    let config = resolve_stream_config(config, Default::default())?;
+fn stream_view(config: StreamConfig) -> Result<Value, CliError> {
+    let config = resolve_stream_config(config, Default::default());
     Ok(serde_json::to_value(StreamConfigView::from(config))?)
 }
 
-fn access_token_view(info: ApiAccessTokenInfo) -> Result<Value, CliError> {
-    let ApiAccessTokenInfo {
+fn access_token_view(info: AccessTokenInfo) -> Result<Value, CliError> {
+    let AccessTokenInfo {
         // Identity, not configuration.
         id: _,
         expires_at,
         auto_prefix_streams,
-        mut scope,
+        scope,
         network_policy,
+        ..
     } = info;
-    // Operations this version does not recognize cannot be canonicalized, only named.
-    let (known_ops, unknown_ops): (Vec<_>, Vec<_>) = scope
-        .ops
-        .take()
-        .unwrap_or_default()
-        .into_iter()
-        .partition(|op| matches!(op, MaybeKnown::Known(_)));
-    scope.ops = Some(known_ops);
-    let scope: s2_common::access::AccessTokenScope = scope.try_into()?;
-    let mut scope = AccessTokenScopeView::from(scope);
-    scope.ops.extend(unknown_ops.into_iter().map(wire_name));
-    scope.ops.sort();
 
     Ok(serde_json::to_value(AccessTokenInfoView {
         expires_at: match expires_at {
             None => "never".to_owned(),
-            Some(at) => humantime::format_rfc3339_seconds(at.into()).to_string(),
+            Some(at) => Timestamp::from_second(at.as_second())
+                .expect("valid timestamp second")
+                .to_string(),
         },
         auto_prefix_streams,
         network_policy: match network_policy {
             None => "none".to_owned(),
             Some(id) => id.to_string(),
         },
-        scope,
+        scope: AccessTokenScopeView::from(&scope),
     })?)
-}
-
-/// Wire-format name of a unit enum variant, taken from its serde serialization so that
-/// presentation never drifts from the API's actual field vocabulary.
-fn wire_name(value: impl Serialize) -> String {
-    match serde_json::to_value(value) {
-        Ok(Value::String(name)) => name,
-        _ => unreachable!("wire enums serialize to strings"),
-    }
 }
 
 /// Compact, exact duration rendering.
@@ -745,11 +717,11 @@ mod tests {
 
     #[test]
     fn stream_views_resolve_defaults_and_format_durations() {
-        let config = serde_json::from_value(json!({
-            "retention_policy": {"age": 172800},
-            "delete_on_empty": {"min_age_secs": 3600}
-        }))
-        .expect("stream config deserializes");
+        let config = s2_sdk::types::StreamConfig::new()
+            .with_retention_policy(s2_sdk::types::RetentionPolicy::Age(172_800))
+            .with_delete_on_empty(
+                s2_sdk::types::DeleteOnEmptyConfig::new().with_min_age_secs(3600),
+            );
 
         let view = stream_view(config).expect("stream view renders");
 
@@ -787,14 +759,15 @@ mod tests {
 
     #[test]
     fn omitted_and_explicit_defaults_render_identically() {
-        let omitted = serde_json::from_value(json!({})).expect("empty config deserializes");
-        let explicit = serde_json::from_value(json!({
-            "storage_class": null,
-            "retention_policy": {"age": 604800},
-            "timestamping": {"mode": "client-prefer", "uncapped": false},
-            "delete_on_empty": {"min_age_secs": 0}
-        }))
-        .expect("explicit config deserializes");
+        let omitted = s2_sdk::types::StreamConfig::new();
+        let explicit = s2_sdk::types::StreamConfig::new()
+            .with_retention_policy(s2_sdk::types::RetentionPolicy::Age(604_800))
+            .with_timestamping(
+                s2_sdk::types::TimestampingConfig::new()
+                    .with_mode(s2_sdk::types::TimestampingMode::ClientPrefer)
+                    .with_uncapped(false),
+            )
+            .with_delete_on_empty(s2_sdk::types::DeleteOnEmptyConfig::new().with_min_age_secs(0));
 
         assert_eq!(
             stream_view(omitted).expect("omitted view renders"),
@@ -804,13 +777,9 @@ mod tests {
 
     #[test]
     fn basin_views_materialize_effective_stream_defaults() {
-        let config = serde_json::from_value(json!({
-            "default_stream_config": null,
-            "stream_cipher": null,
-            "create_stream_on_append": true,
-            "create_stream_on_read": false
-        }))
-        .expect("basin config deserializes");
+        let config = s2_sdk::types::BasinConfig::new()
+            .with_create_stream_on_append(true)
+            .with_create_stream_on_read(false);
 
         let view = basin_view(config).expect("basin view renders");
 
@@ -832,17 +801,12 @@ mod tests {
 
     #[test]
     fn basin_defaults_view_matches_equivalent_stream_view() {
-        let basin = serde_json::from_value(json!({
-            "default_stream_config": {"retention_policy": {"age": 259200}},
-            "stream_cipher": null,
-            "create_stream_on_append": false,
-            "create_stream_on_read": false
-        }))
-        .expect("basin config deserializes");
-        let stream = serde_json::from_value(json!({
-            "retention_policy": {"age": 259200}
-        }))
-        .expect("stream config deserializes");
+        let basin = s2_sdk::types::BasinConfig::new().with_default_stream_config(
+            s2_sdk::types::StreamConfig::new()
+                .with_retention_policy(s2_sdk::types::RetentionPolicy::Age(259_200)),
+        );
+        let stream = s2_sdk::types::StreamConfig::new()
+            .with_retention_policy(s2_sdk::types::RetentionPolicy::Age(259_200));
 
         assert_eq!(
             basin_stream_defaults_view(basin).expect("defaults view renders"),
@@ -852,14 +816,10 @@ mod tests {
 
     #[test]
     fn infinite_and_finite_retention_render_distinctly() {
-        let infinite = serde_json::from_value(json!({
-            "retention_policy": {"infinite": {}}
-        }))
-        .expect("infinite config deserializes");
-        let finite = serde_json::from_value(json!({
-            "retention_policy": {"age": 604800}
-        }))
-        .expect("finite config deserializes");
+        let infinite = s2_sdk::types::StreamConfig::new()
+            .with_retention_policy(s2_sdk::types::RetentionPolicy::Infinite);
+        let finite = s2_sdk::types::StreamConfig::new()
+            .with_retention_policy(s2_sdk::types::RetentionPolicy::Age(604_800));
 
         let diffs = field_diffs(
             &stream_view(infinite).expect("infinite view renders"),
@@ -874,32 +834,41 @@ mod tests {
 
     #[test]
     fn access_token_views_canonicalize_ops_and_drop_identity() {
-        let left = serde_json::from_value(json!({
-            "id": "left-token",
-            "expires_at": null,
-            "auto_prefix_streams": false,
-            "scope": {
-                "basins": {"prefix": "prod-"},
-                "streams": null,
-                "access_tokens": null,
-                "op_groups": {"account": {"read": true, "write": false}},
-                "ops": ["read", "some-future-op", "get-stream-config", "account-metrics"]
-            }
-        }))
-        .expect("left access token deserializes");
-        let right = serde_json::from_value(json!({
-            "id": "right-token",
-            "expires_at": null,
-            "auto_prefix_streams": false,
-            "scope": {
-                "basins": {"prefix": "prod-"},
-                "streams": null,
-                "access_tokens": null,
-                "op_groups": {"account": {"read": true, "write": false}},
-                "ops": ["account-metrics", "read", "get-stream-config", "some-future-op"]
-            }
-        }))
-        .expect("right access token deserializes");
+        use s2_sdk::types::{
+            AccessTokenInfo, AccessTokenScope, BasinMatcher, Operation, OperationGroupPermissions,
+            ReadWritePermissions,
+        };
+
+        let left = AccessTokenInfo::new(
+            "left-token".parse().unwrap(),
+            AccessTokenScope::new()
+                .with_basins(BasinMatcher::Prefix("prod-".parse().unwrap()))
+                .with_op_group_perms(
+                    OperationGroupPermissions::new()
+                        .with_account(ReadWritePermissions::read_only()),
+                )
+                .with_ops([
+                    Operation::Read,
+                    Operation::Unknown("some-future-op".to_owned()),
+                    Operation::GetStreamConfig,
+                    Operation::GetAccountMetrics,
+                ]),
+        );
+        let right = AccessTokenInfo::new(
+            "right-token".parse().unwrap(),
+            AccessTokenScope::new()
+                .with_basins(BasinMatcher::Prefix("prod-".parse().unwrap()))
+                .with_op_group_perms(
+                    OperationGroupPermissions::new()
+                        .with_account(ReadWritePermissions::read_only()),
+                )
+                .with_ops([
+                    Operation::GetAccountMetrics,
+                    Operation::Read,
+                    Operation::GetStreamConfig,
+                    Operation::Unknown("some-future-op".to_owned()),
+                ]),
+        );
 
         let left = access_token_view(left).expect("left view renders");
         let right = access_token_view(right).expect("right view renders");
@@ -921,6 +890,28 @@ mod tests {
         assert_eq!(left["expires_at"], json!("never"));
         assert_eq!(left["network_policy"], json!("none"));
         assert!(left.get("id").is_none());
+    }
+
+    #[test]
+    fn access_token_views_preserve_unknown_resource_matchers() {
+        use s2_sdk::types::{
+            AccessTokenInfo, AccessTokenMatcher, AccessTokenScope, BasinMatcher, Operation,
+            StreamMatcher,
+        };
+
+        let info = AccessTokenInfo::new(
+            "future-token".parse().unwrap(),
+            AccessTokenScope::from_ops([Operation::Read])
+                .with_basins(BasinMatcher::Unknown("regex".to_owned()))
+                .with_streams(StreamMatcher::Unknown("glob".to_owned()))
+                .with_access_tokens(AccessTokenMatcher::Unknown("tag".to_owned())),
+        );
+
+        let view =
+            access_token_view(info).expect("view renders without failing on unknown matchers");
+        assert_eq!(view["scope"]["basins"], json!("regex"));
+        assert_eq!(view["scope"]["streams"], json!("glob"));
+        assert_eq!(view["scope"]["access_tokens"], json!("tag"));
     }
 
     #[test]

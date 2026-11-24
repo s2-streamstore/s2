@@ -1,7 +1,7 @@
 //! Minimal end-to-end check: create a basin and stream, append a couple of
 //! records, read them back.
 
-use s2_sdk::types::{AppendInput, AppendRecord, AppendRecordBatch, ReadInput};
+use s2_sdk::types::{AppendRecord, AppendRecordBatch, ReadInput, ReadStart};
 use tracing::info;
 
 pub async fn workload() -> turmoil::Result {
@@ -12,10 +12,12 @@ pub async fn workload() -> turmoil::Result {
         AppendRecord::new("hello")?,
         AppendRecord::new("turmoil")?,
     ])?;
-    let ack = stream.append(AppendInput::new(batch)).await?;
+    let ack = stream.append(batch).await?;
     info!(?ack, "appended records");
 
-    let batch = stream.read(ReadInput::new()).await?;
+    let batch = stream
+        .read(ReadInput::new().with_start(ReadStart::SeqNum(0)))
+        .await?;
     info!(?batch, "read records");
 
     Ok(())

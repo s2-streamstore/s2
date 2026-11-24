@@ -18,19 +18,19 @@ include = [
 
 [features]
 axum = ["dep:axum", "s2-common/axum"]
-utoipa = ["dep:utoipa"]
+utoipa = ["dep:utoipa", "s2-common/utoipa"]
 codegen = ["dep:prost-build"]
 
 [dependencies]
 axum = { workspace = true, optional = true }
 base64ct = { workspace = true, features = ["alloc"] }
 bytes = { workspace = true }
-compact_str = { workspace = true, features = ["serde"] }
 flate2 = { workspace = true }
 futures-core = { workspace = true }
 futures-util = { workspace = true }
 http = { workspace = true }
 itertools = { workspace = true }
+jiff = { workspace = true, features = ["serde"] }
 mime = { workspace = true }
 prost = { workspace = true }
 s2-common = { workspace = true }
@@ -38,9 +38,8 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 strum = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
-time = { workspace = true, features = ["serde", "formatting", "parsing"] }
 tokio-util = { workspace = true, features = ["codec", "io"] }
-utoipa = { workspace = true, optional = true, features = ["time"] }
+utoipa = { workspace = true, optional = true }
 zstd = { workspace = true }
 
 [build-dependencies]

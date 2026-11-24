@@ -189,6 +189,101 @@ fn production_browser_credentials_are_bound_to_production_transport() {
     );
 }
 
+#[test]
+fn endpoint_destination_matches_sdk_c3_parsing() {
+    let prod_issuer = "https://clerk.s2.dev/";
+    let dev_issuer = "https://staging-clerk.example/";
+
+    // Single trailing slash, scheme-less, and default port canonicalize to SDK C3 defaults.
+    for (account, basin) in [
+        ("https://a.s2.dev/", "https://{basin}.b.s2.dev/"),
+        ("a.s2.dev", "{basin}.b.s2.dev"),
+        ("HTTPS://A.S2.DEV:443/", "HTTPS://{basin}.B.S2.DEV:443/"),
+    ] {
+        let cfg = CliConfig {
+            account_endpoint: Some(account.to_owned()),
+            basin_endpoint: Some(basin.to_owned()),
+            ..CliConfig::default()
+        };
+        assert_eq!(
+            effective_endpoints(&cfg),
+            Some((
+                DEFAULT_ACCOUNT_ENDPOINT.to_owned(),
+                DEFAULT_BASIN_ENDPOINT.to_owned()
+            )),
+            "{account} / {basin}"
+        );
+        assert!(uses_default_endpoints(&cfg));
+        assert!(validate_endpoint_binding(prod_issuer, account, basin, false).is_ok());
+    }
+
+    // Multiple trailing slashes, whitespace/control chars, scheme mismatch, misplaced or IP
+    // `{basin}.` placeholders are rejected just like SDK C3.
+    for (issuer, account, basin) in [
+        (
+            prod_issuer,
+            "https://a.s2.dev//",
+            "https://{basin}.b.s2.dev",
+        ),
+        (
+            prod_issuer,
+            " https://a.s2.dev ",
+            "https://{basin}.b.s2.dev",
+        ),
+        (
+            prod_issuer,
+            "https://a.s2.dev\n",
+            "https://{basin}.b.s2.dev",
+        ),
+        (
+            dev_issuer,
+            "http://127.0.0.1:4243",
+            "https://localhost:4243",
+        ),
+        (
+            dev_issuer,
+            "http://127.0.0.1:4243",
+            "http://{basin}.127.0.0.1:4243",
+        ),
+        (
+            dev_issuer,
+            "https://cell.o-staging.aws.s2.dev",
+            "https://foo.{basin}.b-staging.aws.s2.dev",
+        ),
+    ] {
+        let cfg = CliConfig {
+            account_endpoint: Some(account.to_owned()),
+            basin_endpoint: Some(basin.to_owned()),
+            ..CliConfig::default()
+        };
+        assert_eq!(effective_endpoints(&cfg), None, "{account} / {basin}");
+        assert!(
+            validate_endpoint_binding(issuer, account, basin, false).is_err(),
+            "{account} / {basin}"
+        );
+    }
+
+    // Half-configured endpoints fail closed rather than falling back to defaults.
+    let partial = CliConfig {
+        account_endpoint: Some("https://a.s2.dev".to_owned()),
+        basin_endpoint: None,
+        ..CliConfig::default()
+    };
+    assert_eq!(effective_endpoints(&partial), None);
+    assert!(!uses_default_endpoints(&partial));
+    assert!(!browser_login_available(&partial));
+    let credential = ResolvedCredential {
+        access_token: "access".to_owned().into(),
+        source: TokenSource::BrowserLogin,
+        oauth_session: Some(oauth_session()),
+        oauth_tokens: None,
+    };
+    assert!(matches!(
+        credential.validate_destination(&partial),
+        Err(LoginError::UnsafeBrowserDestination)
+    ));
+}
+
 fn metadata() -> AuthorizationServerMetadata {
     serde_json::from_value(serde_json::json!({
         "issuer": "https://clerk.s2.dev",

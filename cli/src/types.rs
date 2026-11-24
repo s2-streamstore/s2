@@ -2,7 +2,6 @@ use std::{str::FromStr, time::Duration};
 
 use clap::{Args, Parser, ValueEnum};
 use colored::Colorize;
-use compact_str::CompactString;
 use s2_sdk::{
     self as sdk,
     types::{
@@ -177,7 +176,7 @@ pub struct StreamConfig {
     /// Storage class for a stream.
     ///
     /// `s2 location list` shows the storage classes available in each location, and the default.
-    pub storage_class: Option<CompactString>,
+    pub storage_class: Option<String>,
     #[arg(long, help("Example: 1d, 1w, 1y"))]
     /// Retention policy for a stream.
     pub retention_policy: Option<RetentionPolicy>,
@@ -204,12 +203,66 @@ impl StreamConfig {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedStreamConfig {
+    pub storage_class: Option<String>,
+    pub retention_policy: sdk::types::RetentionPolicy,
+    pub timestamping_mode: sdk::types::TimestampingMode,
+    pub timestamping_uncapped: bool,
+    pub delete_on_empty_min_age: Duration,
+}
+
+/// Resolve a stream configuration against basin defaults and server defaults while preserving
+/// unrecognized future enum values (`Unknown`) verbatim.
 pub fn resolve_stream_config(
-    config: s2_api::v1::config::StreamConfig,
-    basin_defaults: s2_api::v1::config::StreamConfig,
-) -> Result<s2_common::config::StreamConfig, s2_common::ValidationError> {
-    let config: s2_common::config::OptionalStreamConfig = config.try_into()?;
-    Ok(config.merge(basin_defaults.try_into()?))
+    config: sdk::types::StreamConfig,
+    basin_defaults: sdk::types::StreamConfig,
+) -> ResolvedStreamConfig {
+    let defaults = s2_common::config::StreamConfig::default();
+    let default_retention = match defaults.retention_policy {
+        s2_common::config::RetentionPolicy::Age(duration) => {
+            sdk::types::RetentionPolicy::Age(duration.as_secs())
+        }
+        s2_common::config::RetentionPolicy::Infinite() => sdk::types::RetentionPolicy::Infinite,
+    };
+    let default_timestamping_mode = match defaults.timestamping.mode {
+        s2_common::config::TimestampingMode::ClientPrefer => {
+            sdk::types::TimestampingMode::ClientPrefer
+        }
+        s2_common::config::TimestampingMode::ClientRequire => {
+            sdk::types::TimestampingMode::ClientRequire
+        }
+        s2_common::config::TimestampingMode::Arrival => sdk::types::TimestampingMode::Arrival,
+    };
+
+    let ts = config.timestamping();
+    let default_ts = basin_defaults.timestamping();
+
+    ResolvedStreamConfig {
+        storage_class: config
+            .storage_class()
+            .or_else(|| basin_defaults.storage_class())
+            .map(str::to_owned),
+        retention_policy: config
+            .retention_policy()
+            .or_else(|| basin_defaults.retention_policy())
+            .cloned()
+            .unwrap_or(default_retention),
+        timestamping_mode: ts
+            .and_then(|t| t.mode().cloned())
+            .or_else(|| default_ts.and_then(|t| t.mode().cloned()))
+            .unwrap_or(default_timestamping_mode),
+        timestamping_uncapped: ts
+            .and_then(|t| t.uncapped())
+            .or_else(|| default_ts.and_then(|t| t.uncapped()))
+            .unwrap_or(defaults.timestamping.uncapped),
+        delete_on_empty_min_age: config
+            .delete_on_empty()
+            .or_else(|| basin_defaults.delete_on_empty())
+            .map_or(defaults.delete_on_empty.min_age, |d| {
+                Duration::from_secs(d.min_age_secs())
+            }),
+    }
 }
 
 pub use sdk::types::LocationName;
@@ -246,7 +299,7 @@ impl From<sdk::types::EncryptionAlgorithm> for EncryptionAlgorithm {
             sdk::types::EncryptionAlgorithm::Aegis256 => Self::Aegis256,
             sdk::types::EncryptionAlgorithm::Aes256Gcm => Self::Aes256Gcm,
             sdk::types::EncryptionAlgorithm::Unknown(name) => Self::Unknown(name),
-            other => Self::Unknown(format!("{other:?}")),
+            other => Self::Unknown(other.as_str().to_owned()),
         }
     }
 }
@@ -283,6 +336,14 @@ pub enum RetentionPolicy {
     Unknown(String),
 }
 
+fn parse_whole_second_duration(s: &str) -> Result<Duration, String> {
+    let d = humantime::parse_duration(s).map_err(|e| e.to_string())?;
+    if d.subsec_nanos() != 0 {
+        return Err("duration must be a whole number of seconds".to_owned());
+    }
+    Ok(d)
+}
+
 impl TryFrom<&str> for RetentionPolicy {
     type Error = &'static str;
 
@@ -290,9 +351,12 @@ impl TryFrom<&str> for RetentionPolicy {
         if value == "infinite" {
             return Ok(RetentionPolicy::Infinite);
         } else if let Ok(d) = humantime::parse_duration(value) {
+            if d.subsec_nanos() != 0 {
+                return Err("invalid retention policy: duration must be a whole number of seconds");
+            }
             return Ok(RetentionPolicy::Age(d));
         }
-        Err("invalid retention policy: expected a duration, or 'infinite'")
+        Err("invalid retention policy: expected a whole-second duration, or 'infinite'")
     }
 }
 
@@ -306,7 +370,7 @@ impl FromStr for RetentionPolicy {
 
 #[derive(Args, Clone, Debug, Serialize)]
 pub struct DeleteOnEmptyConfig {
-    #[arg(long, value_parser = humantime::parse_duration, required = false)]
+    #[arg(long, value_parser = parse_whole_second_duration, required = false)]
     #[serde(serialize_with = "serialize_duration_humantime")]
     /// Minimum age before an empty stream can be deleted.
     /// Example: 1d, 1w, 1y
@@ -315,20 +379,22 @@ pub struct DeleteOnEmptyConfig {
 
 impl From<DeleteOnEmptyConfig> for sdk::types::DeleteOnEmptyConfig {
     fn from(value: DeleteOnEmptyConfig) -> Self {
-        sdk::types::DeleteOnEmptyConfig::new().with_min_age(value.delete_on_empty_min_age)
+        sdk::types::DeleteOnEmptyConfig::new()
+            .with_min_age_secs(value.delete_on_empty_min_age.as_secs())
     }
 }
 
 impl From<DeleteOnEmptyConfig> for sdk::types::DeleteOnEmptyReconfiguration {
     fn from(value: DeleteOnEmptyConfig) -> Self {
-        sdk::types::DeleteOnEmptyReconfiguration::new().with_min_age(value.delete_on_empty_min_age)
+        sdk::types::DeleteOnEmptyReconfiguration::new()
+            .with_min_age_secs(value.delete_on_empty_min_age.as_secs())
     }
 }
 
 impl From<sdk::types::DeleteOnEmptyConfig> for DeleteOnEmptyConfig {
     fn from(value: sdk::types::DeleteOnEmptyConfig) -> Self {
         Self {
-            delete_on_empty_min_age: Duration::from_secs(value.min_age_secs),
+            delete_on_empty_min_age: Duration::from_secs(value.min_age_secs()),
         }
     }
 }
@@ -383,7 +449,7 @@ impl From<sdk::types::TimestampingMode> for TimestampingMode {
             sdk::types::TimestampingMode::ClientRequire => TimestampingMode::ClientRequire,
             sdk::types::TimestampingMode::Arrival => TimestampingMode::Arrival,
             sdk::types::TimestampingMode::Unknown(name) => TimestampingMode::Unknown(name),
-            other => TimestampingMode::Unknown(format!("{other:?}")),
+            other => TimestampingMode::Unknown(other.as_str().to_owned()),
         }
     }
 }
@@ -404,8 +470,8 @@ impl From<TimestampingConfig> for sdk::types::TimestampingConfig {
 impl From<sdk::types::TimestampingConfig> for TimestampingConfig {
     fn from(config: sdk::types::TimestampingConfig) -> Self {
         TimestampingConfig {
-            timestamping_mode: config.mode.map(Into::into),
-            timestamping_uncapped: config.uncapped,
+            timestamping_mode: config.mode().cloned().map(Into::into),
+            timestamping_uncapped: config.uncapped(),
         }
     }
 }
@@ -437,12 +503,13 @@ impl From<sdk::types::BasinConfig> for BasinConfig {
     fn from(config: sdk::types::BasinConfig) -> Self {
         BasinConfig {
             default_stream_config: config
-                .default_stream_config
+                .default_stream_config()
+                .cloned()
                 .map(Into::into)
                 .unwrap_or_default(),
-            stream_cipher: config.stream_cipher.map(Into::into),
-            create_stream_on_append: config.create_stream_on_append,
-            create_stream_on_read: config.create_stream_on_read,
+            stream_cipher: config.stream_cipher().cloned().map(Into::into),
+            create_stream_on_append: config.create_stream_on_append(),
+            create_stream_on_read: config.create_stream_on_read(),
         }
     }
 }
@@ -450,10 +517,10 @@ impl From<sdk::types::BasinConfig> for BasinConfig {
 impl From<sdk::types::StreamConfig> for StreamConfig {
     fn from(config: sdk::types::StreamConfig) -> Self {
         StreamConfig {
-            storage_class: config.storage_class,
-            retention_policy: config.retention_policy.map(Into::into),
-            timestamping: config.timestamping.map(Into::into),
-            delete_on_empty: config.delete_on_empty.map(Into::into),
+            storage_class: config.storage_class().map(str::to_owned),
+            retention_policy: config.retention_policy().cloned().map(Into::into),
+            timestamping: config.timestamping().cloned().map(Into::into),
+            delete_on_empty: config.delete_on_empty().map(Into::into),
         }
     }
 }
@@ -698,9 +765,9 @@ impl From<PermittedOperationGroups> for sdk::types::OperationGroupPermissions {
 impl From<sdk::types::OperationGroupPermissions> for PermittedOperationGroups {
     fn from(groups: sdk::types::OperationGroupPermissions) -> Self {
         PermittedOperationGroups {
-            account: groups.account.map(Into::into),
-            basin: groups.basin.map(Into::into),
-            stream: groups.stream.map(Into::into),
+            account: groups.account().map(Into::into),
+            basin: groups.basin().map(Into::into),
+            stream: groups.stream().map(Into::into),
         }
     }
 }
@@ -792,8 +859,8 @@ impl From<ReadWritePermissions> for sdk::types::ReadWritePermissions {
 impl From<sdk::types::ReadWritePermissions> for ReadWritePermissions {
     fn from(permissions: sdk::types::ReadWritePermissions) -> Self {
         ReadWritePermissions {
-            read: permissions.read,
-            write: permissions.write,
+            read: permissions.read(),
+            write: permissions.write(),
         }
     }
 }
@@ -908,7 +975,7 @@ impl From<sdk::types::PrivateNetPolicy> for PrivateNetPolicy {
     fn from(policy: sdk::types::PrivateNetPolicy) -> Self {
         match policy {
             sdk::types::PrivateNetPolicy::Aws(aws) => PrivateNetPolicy::Aws(AwsPrivateNetPolicy {
-                vpce_ids: aws.vpce_ids.iter().map(ToString::to_string).collect(),
+                vpce_ids: aws.vpce_ids().iter().map(ToString::to_string).collect(),
             }),
             sdk::types::PrivateNetPolicy::Unknown(name) => PrivateNetPolicy::Unknown(name),
             other => PrivateNetPolicy::Unknown(format!("{other:?}")),
@@ -924,8 +991,8 @@ pub struct AwsPrivateNetPolicy {
 impl From<sdk::types::NetworkPolicy> for NetworkPolicy {
     fn from(policy: sdk::types::NetworkPolicy) -> Self {
         NetworkPolicy {
-            public_net: policy.public_net.map(Into::into),
-            private_net: policy.private_net.map(Into::into),
+            public_net: policy.public_net().cloned().map(Into::into),
+            private_net: policy.private_net().cloned().map(Into::into),
         }
     }
 }
@@ -984,11 +1051,11 @@ pub struct AccessTokenScope {
 impl From<sdk::types::AccessTokenScope> for AccessTokenScope {
     fn from(scope: sdk::types::AccessTokenScope) -> Self {
         AccessTokenScope {
-            basins: scope.basins.and_then(BasinMatcher::from_sdk),
-            streams: scope.streams.and_then(StreamMatcher::from_sdk),
-            access_tokens: scope.access_tokens.and_then(AccessTokenMatcher::from_sdk),
-            op_group_perms: scope.op_group_perms.map(Into::into),
-            ops: scope.ops.into_iter().map(Operation::from).collect(),
+            basins: BasinMatcher::from_sdk(scope.basins().clone()),
+            streams: StreamMatcher::from_sdk(scope.streams().clone()),
+            access_tokens: AccessTokenMatcher::from_sdk(scope.access_tokens().clone()),
+            op_group_perms: scope.op_group_perms().map(Into::into),
+            ops: scope.ops().iter().cloned().map(Operation::from).collect(),
         }
     }
 }
@@ -1102,7 +1169,7 @@ impl From<sdk::types::Operation> for Operation {
             sdk::types::Operation::GetNetworkPolicy => Operation::GetNetworkPolicy,
             sdk::types::Operation::DeleteNetworkPolicy => Operation::DeleteNetworkPolicy,
             sdk::types::Operation::Unknown(name) => Operation::Unknown(name),
-            other => Operation::Unknown(format!("{other:?}")),
+            other => Operation::Unknown(other.as_str().to_owned()),
         }
     }
 }
@@ -1195,15 +1262,10 @@ mod tests {
     fn match_none_scope_matchers_render_as_no_access() {
         colored::control::set_override(false);
 
-        // On the wire, an empty exact name means "match no resources".
-        let scope: s2_api::v1::access::AccessTokenScope =
-            serde_json::from_value(serde_json::json!({
-                "basins": { "exact": "" },
-                "streams": { "exact": "" },
-                "access_tokens": { "exact": "" },
-            }))
-            .unwrap();
-        let scope = s2_sdk::types::AccessTokenScope::from(scope);
+        let scope = s2_sdk::types::AccessTokenScope::new()
+            .with_basins(s2_sdk::types::BasinMatcher::None)
+            .with_streams(s2_sdk::types::StreamMatcher::None)
+            .with_access_tokens(s2_sdk::types::AccessTokenMatcher::None);
         let info = AccessTokenInfo {
             id: "tok".to_owned(),
             expires_at: None,
@@ -1492,5 +1554,40 @@ mod tests {
                 "S2BasinAndMaybeStreamUri: {s}"
             );
         }
+    }
+
+    #[test]
+    fn subsecond_durations_rejected_and_unknown_configs_resolved() {
+        use super::{
+            Duration, RetentionPolicy, parse_whole_second_duration, resolve_stream_config, sdk,
+        };
+
+        assert!(RetentionPolicy::try_from("500ms").is_err());
+        assert!(RetentionPolicy::try_from("1s 250ms").is_err());
+        assert!(RetentionPolicy::try_from("10s").is_ok());
+        assert!(RetentionPolicy::try_from("infinite").is_ok());
+
+        assert!(parse_whole_second_duration("500ms").is_err());
+        assert!(parse_whole_second_duration("1s 500ms").is_err());
+        assert_eq!(
+            parse_whole_second_duration("60s").unwrap(),
+            Duration::from_secs(60)
+        );
+
+        let unknown_cfg = sdk::types::StreamConfig::new()
+            .with_retention_policy(sdk::types::RetentionPolicy::Unknown("future_policy".into()))
+            .with_timestamping(
+                sdk::types::TimestampingConfig::new()
+                    .with_mode(sdk::types::TimestampingMode::Unknown("future_mode".into())),
+            );
+        let resolved = resolve_stream_config(unknown_cfg, Default::default());
+        assert_eq!(
+            resolved.retention_policy,
+            sdk::types::RetentionPolicy::Unknown("future_policy".into())
+        );
+        assert_eq!(
+            resolved.timestamping_mode,
+            sdk::types::TimestampingMode::Unknown("future_mode".into())
+        );
     }
 }

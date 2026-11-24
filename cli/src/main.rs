@@ -22,7 +22,7 @@ mod update;
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-use std::{pin::Pin, process::ExitCode, time::Duration};
+use std::{pin::Pin, process::ExitCode};
 
 use clap::Parser;
 use cli::{
@@ -44,9 +44,9 @@ use record_format::{
 use s2_sdk::{
     S2,
     types::{
-        AppendRetryPolicy, CreateStreamInput, DeleteOnEmptyConfig, DeleteStreamInput,
-        EncryptionKey, LocationInfo, MeteredBytes, Metric, PrivateNet, RetentionPolicy,
-        RetryConfig, StreamConfig as SdkStreamConfig, StreamName, TimestampingConfig,
+        AppendRetryPolicy, Command as SdkCommand, CreateStreamInput, DeleteOnEmptyConfig,
+        EncryptionKey, LocationInfo, Metric, PrivateNet, RetentionPolicy, RetryConfig,
+        StreamConfig as SdkStreamConfig, StreamName, Timestamp, TimestampingConfig,
         TimestampingMode,
     },
 };
@@ -397,8 +397,15 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
     )?);
     let token_source = Some(credential.source());
     let target = environment::Target::detect(&cli_config);
-    let s2 = S2::new(sdk_config.clone())
-        .map_err(|e| CliError::SdkInit(e.into()).with_token_source(token_source))?;
+    let s2 = S2::new(sdk_config).map_err(|e| {
+        if let Some(source) = token_source
+            && !error::is_valid_access_token(credential.access_token())
+        {
+            CliError::MalformedAccessToken(e.into(), source)
+        } else {
+            CliError::SdkInit(e.into())
+        }
+    })?;
     let mut exit_code = ExitCode::SUCCESS;
     let result: Result<(), CliError> = (async {
         match command {
@@ -621,7 +628,7 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
                 print_token_activity(&metrics);
             } else if billable_usage {
                 print_time_range(range.as_ref());
-                let by_interval = range.is_some_and(|range| range.interval.is_some());
+                let by_interval = range.is_some_and(|range| range.interval().is_some());
                 print_estimated_billable_usage(&metrics, by_interval);
             } else {
                 print_metrics(&metrics, output, range.as_ref());
@@ -777,7 +784,7 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
 
         Command::Read(args) => {
             let encryption_key = resolve_encryption_key(&args.encryption_key)?;
-            let mut batches = ops::read(&s2, &args, encryption_key.as_ref()).await?;
+            let mut batches = ops::read(&s2, &args, encryption_key.as_ref())?;
             let mut writer = args
                 .output
                 .writer()
@@ -840,7 +847,7 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
 
         Command::Tail(args) => {
             let encryption_key = resolve_encryption_key(&args.encryption_key)?;
-            let mut records = ops::tail(&s2, &args, encryption_key.as_ref()).await?;
+            let mut records = ops::tail(&s2, &args, encryption_key.as_ref())?;
             let mut writer = args
                 .output
                 .writer()
@@ -909,28 +916,26 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
                 "Creating temporary stream s2://{}/{} (storage class: {})",
                 basin_name,
                 stream_name,
-                args.storage_class
-                    .as_ref()
-                    .map(|sc| format!("{:?}", sc))
-                    .unwrap_or_else(|| "<default>".to_owned())
+                args.storage_class.as_deref().unwrap_or("<default>")
             );
 
             let mut stream_config = SdkStreamConfig::new()
                 .with_retention_policy(RetentionPolicy::Age(3600))
-                .with_delete_on_empty(
-                    DeleteOnEmptyConfig::new().with_min_age(Duration::from_secs(60)),
-                )
+                .with_delete_on_empty(DeleteOnEmptyConfig::new().with_min_age_secs(60))
                 .with_timestamping(
                     TimestampingConfig::new()
                         .with_mode(TimestampingMode::ClientRequire)
                         .with_uncapped(true),
                 );
-            stream_config.storage_class = args.storage_class;
+            if let Some(storage_class) = args.storage_class {
+                stream_config = stream_config.with_storage_class(storage_class);
+            }
 
-            let s2 = S2::new(sdk_config.clone().with_retry(
-                RetryConfig::new().with_append_retry_policy(AppendRetryPolicy::NoSideEffects),
-            ))
-            .map_err(|e| CliError::SdkInit(e.into()))?;
+            let s2 = s2
+                .with_retry(
+                    RetryConfig::new().with_append_retry_policy(AppendRetryPolicy::NoSideEffects),
+                )
+                .map_err(|e| CliError::SdkInit(e.into()))?;
 
             let basin = s2.basin(basin_name);
             basin
@@ -963,7 +968,7 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
             .await;
 
             let delete_result = basin
-                .delete_stream(DeleteStreamInput::new(stream_name))
+                .delete_stream(stream_name)
                 .await
                 .map_err(|e| CliError::op(OpKind::Bench, e));
             bench_result?;
@@ -1115,27 +1120,21 @@ async fn write_record(
     match format {
         RecordFormat::Text => {
             if record.is_command_record() {
-                if let Some(header) = record.headers.first() {
-                    let cmd_type = &header.value;
-                    let cmd_desc = if cmd_type.as_ref() == b"fence" {
-                        let fencing_token = String::from_utf8_lossy(&record.body);
-                        format!("new fencing token \"{}\"", fencing_token)
-                    } else if cmd_type.as_ref() == b"trim" {
-                        let trim_point = if record.body.len() >= 8 {
-                            u64::from_be_bytes(record.body[..8].try_into().unwrap_or_default())
-                        } else {
-                            0
-                        };
-                        format!("trim to {}", trim_point)
-                    } else {
-                        "unknown command".to_string()
-                    };
-                    eprintln!(
-                        "{} // {}",
-                        cmd_desc.bold(),
-                        format_position(record.seq_num, record.timestamp)
-                    );
-                }
+                let cmd_desc = match record.command() {
+                    Some(SdkCommand::Fence { fencing_token }) => {
+                        format!("new fencing token \"{fencing_token}\"")
+                    }
+                    Some(SdkCommand::Trim { trim_point }) => format!("trim to {trim_point}"),
+                    _ => format!(
+                        "unknown command \"{}\"",
+                        String::from_utf8_lossy(&record.headers[0].value)
+                    ),
+                };
+                eprintln!(
+                    "{} // {}",
+                    cmd_desc.bold(),
+                    format_position(record.seq_num, record.timestamp)
+                );
             } else {
                 TextFormatter::write_record(record, writer)
                     .await
@@ -1156,15 +1155,9 @@ async fn write_record(
     Ok(())
 }
 
-fn format_timestamp(ts: u32) -> String {
-    use std::time::{Duration, UNIX_EPOCH};
-    let time = UNIX_EPOCH + Duration::from_secs(ts as u64);
-    humantime::format_rfc3339_seconds(time).to_string()
-}
-
 /// ` (2h 5m ago)` for a time in the past, and nothing for one that is not.
-fn format_ago(ts: u32) -> String {
-    metrics::format_age(ts, std::time::SystemTime::now())
+fn format_ago(ts: Timestamp) -> String {
+    metrics::format_age(ts, Timestamp::now())
         .map(|age| format!(" ({age} ago)"))
         .unwrap_or_default()
 }
@@ -1191,7 +1184,7 @@ fn print_token_activity(metrics: &[Metric]) {
         .map(|(terminal_size::Width(width), _)| width as usize);
     print!(
         "{}",
-        metrics::render_token_activity(&records, std::time::SystemTime::now(), width)
+        metrics::render_token_activity(&records, Timestamp::now(), width)
     );
     let rest: Vec<Metric> = rest.into_iter().cloned().collect();
     print_metrics(&rest, cli::MetricsOutput::Pretty, None);
@@ -1207,7 +1200,7 @@ fn print_estimated_billable_usage(metrics: &[Metric], by_interval: bool) {
 
 fn print_time_range(range: Option<&s2_sdk::types::TimeRangeAndInterval>) {
     if let Some(range) = range {
-        print!("{}", metrics::render_time_range(range.start, range.end));
+        print!("{}", metrics::render_time_range(range.start(), range.end()));
     }
 }
 
@@ -1218,8 +1211,6 @@ fn print_metrics(
     output: cli::MetricsOutput,
     range: Option<&s2_sdk::types::TimeRangeAndInterval>,
 ) {
-    use metrics::format_unit;
-
     if output == cli::MetricsOutput::Json {
         println!(
             "{}",
@@ -1235,7 +1226,7 @@ fn print_metrics(
     }
 
     print_time_range(range);
-    let summed = range.is_some_and(|range| range.interval.is_none());
+    let summed = range.is_some_and(|range| range.interval().is_none());
     if summed {
         let series: Vec<_> = metrics
             .iter()
@@ -1254,7 +1245,7 @@ fn print_metrics(
     for metric in metrics {
         match metric {
             Metric::Scalar(m) => {
-                println!("{}: {} {}", m.name, m.value, format_unit(&m.unit));
+                println!("{}: {} {}", m.name, m.value, m.unit.as_str());
             }
             Metric::Accumulation(_) if summed => {}
             Metric::Accumulation(m) => {
@@ -1262,7 +1253,7 @@ fn print_metrics(
                     .values
                     .iter()
                     .map(|(ts, value)| AccumulationRow {
-                        interval_start: format_timestamp(*ts),
+                        interval_start: ts.to_string(),
                         count: value.to_string(),
                     })
                     .collect();
@@ -1276,7 +1267,7 @@ fn print_metrics(
                 );
 
                 let interval_col = "interval start time".to_string();
-                let count_col = format_unit(&m.unit).to_string();
+                let count_col = m.unit.as_str().to_string();
                 table.with(
                     tabled::settings::Modify::new(tabled::settings::object::Cell::new(0, 0))
                         .with(tabled::settings::Format::content(|_| interval_col.clone())),
@@ -1303,12 +1294,7 @@ fn print_metrics(
                 }
             }
             Metric::Record(m) => {
-                println!(
-                    "{} @ {}{}:",
-                    m.name,
-                    format_timestamp(m.timestamp),
-                    format_ago(m.timestamp)
-                );
+                println!("{} @ {}{}:", m.name, m.timestamp, format_ago(m.timestamp));
                 for (field, value) in &m.fields {
                     println!("  {field}: {value}");
                 }
@@ -1345,13 +1331,10 @@ mod tests {
     #[test]
     fn location_listing_marks_the_default_storage_class() {
         colored::control::set_override(false);
-        let render = |json: &str| {
-            let location: s2_api::v1::location::LocationInfo = serde_json::from_str(json).unwrap();
-            render_location_listing(&location.into(), false)
-        };
 
-        let listed = r#"{"name": "aws:us-east-1", "is_private": false,
-            "storage_classes": ["express", "standard"], "default_storage_class": "express"}"#;
+        let listed = LocationInfo::new("aws:us-east-1".parse().unwrap(), false)
+            .with_storage_classes(["express", "standard"])
+            .with_default_storage_class("express");
         let expected = [
             "aws:us-east-1 (public)",
             "  storage classes:",
@@ -1359,11 +1342,12 @@ mod tests {
             "    standard",
             "",
         ];
-        assert_eq!(render(listed), expected.join("\n"));
+        assert_eq!(render_location_listing(&listed, false), expected.join("\n"));
 
         // The default is not lost when the account cannot use it.
-        let unlisted = r#"{"name": "aws:us-east-1", "is_private": true,
-            "storage_classes": ["standard"], "default_storage_class": "express"}"#;
+        let unlisted = LocationInfo::new("aws:us-east-1".parse().unwrap(), true)
+            .with_storage_classes(["standard"])
+            .with_default_storage_class("express");
         let expected = [
             "aws:us-east-1 (private)",
             "  storage classes:",
@@ -1371,6 +1355,9 @@ mod tests {
             "  default storage class: express",
             "",
         ];
-        assert_eq!(render(unlisted), expected.join("\n"));
+        assert_eq!(
+            render_location_listing(&unlisted, false),
+            expected.join("\n")
+        );
     }
 }

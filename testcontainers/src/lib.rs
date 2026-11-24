@@ -4,9 +4,8 @@
 use std::time::Duration;
 
 use s2_sdk::{
-    S2,
-    error::RequestError,
-    types::{AccountEndpoint, BasinEndpoint, S2Config, S2Endpoints, ValidationError},
+    S2, S2Config, S2Endpoints,
+    error::{RequestError, ValidationError},
 };
 use testcontainers::{
     ContainerAsync, ContainerRequest, GenericImage, ImageExt, TestcontainersError,
@@ -130,12 +129,7 @@ pub fn s2_config_for_endpoint(
     endpoint: impl AsRef<str>,
     access_token: impl Into<String>,
 ) -> Result<S2Config> {
-    let endpoint = endpoint.as_ref();
-    let endpoints = S2Endpoints::new(
-        AccountEndpoint::new(endpoint)?,
-        BasinEndpoint::new(endpoint)?,
-    )?;
-
+    let endpoints = S2Endpoints::for_endpoint(endpoint.as_ref())?;
     Ok(S2Config::new(access_token).with_endpoints(endpoints))
 }
 
@@ -209,19 +203,24 @@ mod tests {
 
         let client = s2.client().unwrap();
         let basin_name = "test-basin".parse::<BasinName>().unwrap();
-        client
+        let basin_out = client
             .ensure_basin(EnsureBasinInput::new(basin_name.clone()))
             .await
             .unwrap();
+        assert!(matches!(
+            basin_out,
+            s2_sdk::types::EnsureOutput::Created(info) if info.name == basin_name
+        ));
 
         let basin = client.basin(basin_name.clone());
         let stream_name = "test-stream".parse::<StreamName>().unwrap();
-        basin
+        let stream_out = basin
             .ensure_stream(EnsureStreamInput::new(stream_name.clone()))
             .await
             .unwrap();
-
-        assert_eq!(basin_name.as_ref(), "test-basin");
-        assert_eq!(stream_name.as_ref(), "test-stream");
+        assert!(matches!(
+            stream_out,
+            s2_sdk::types::EnsureOutput::Created(info) if info.name == stream_name
+        ));
     }
 }

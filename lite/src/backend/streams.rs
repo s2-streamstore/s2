@@ -1,3 +1,4 @@
+use jiff::Timestamp;
 use s2_common::{
     basin::BasinName,
     config::{DeleteOnEmptyConfig, OptionalStreamConfig, StreamConfig, StreamReconfiguration},
@@ -10,7 +11,6 @@ use slatedb::{
     DbTransaction, IsolationLevel,
     config::{DurabilityLevel, ScanOptions},
 };
-use time::OffsetDateTime;
 use tracing::instrument;
 
 use super::{
@@ -186,7 +186,7 @@ impl Backend {
                 ProvisionResult::Created(kv::stream_meta::StreamMeta {
                     config: resolve_stream_config(config, basin_defaults),
                     cipher: basin_meta.config.stream_cipher,
-                    created_at: OffsetDateTime::now_utc(),
+                    created_at: Timestamp::now(),
                     deleted_at: None,
                     creation_idempotency_key: new_creation_idempotency_key,
                 })
@@ -195,7 +195,7 @@ impl Backend {
                 ProvisionResult::Created(kv::stream_meta::StreamMeta {
                     config: resolve_stream_config(config, basin_defaults),
                     cipher: basin_meta.config.stream_cipher,
-                    created_at: OffsetDateTime::now_utc(),
+                    created_at: Timestamp::now(),
                     deleted_at: None,
                     creation_idempotency_key: None,
                 })
@@ -409,7 +409,7 @@ impl Backend {
             stream: stream.clone(),
         })?;
         if meta.deleted_at.is_none() {
-            meta.deleted_at = Some(OffsetDateTime::now_utc());
+            meta.deleted_at = Some(Timestamp::now());
             txn.put_bytes(meta_key, kv::stream_meta::ser_value(&meta))?;
             db_txn_commit_durable(txn).await?;
         } else {

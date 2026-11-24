@@ -7,8 +7,6 @@
 pub mod linearizable;
 pub mod smoke;
 
-use std::num::NonZeroU32;
-
 use s2_sdk::{
     S2, S2Stream,
     types::{
@@ -27,10 +25,7 @@ pub const STREAM: &str = "sim-stream";
 const PROVISION_ATTEMPTS: u32 = 30;
 
 fn client(retry: RetryConfig) -> eyre::Result<S2> {
-    let endpoints = S2Endpoints::new(
-        lite_host::endpoint().parse()?,
-        lite_host::endpoint().parse()?,
-    )?;
+    let endpoints = S2Endpoints::for_endpoint(lite_host::endpoint())?;
     Ok(S2::new_with_connector(
         S2Config::new("unused-token")
             .with_endpoints(endpoints)
@@ -66,8 +61,7 @@ pub async fn provision_stream() -> eyre::Result<S2Stream> {
     let basin_name: BasinName = BASIN.parse()?;
     let stream_name: StreamName = STREAM.parse()?;
 
-    let retry =
-        RetryConfig::new().with_max_attempts(NonZeroU32::new(PROVISION_ATTEMPTS).expect("nonzero"));
+    let retry = RetryConfig::new().with_max_attempts(PROVISION_ATTEMPTS)?;
     let provisioner = client(retry)?;
     provisioner
         .ensure_basin(EnsureBasinInput::new(basin_name.clone()))

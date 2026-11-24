@@ -1,12 +1,12 @@
-use std::{marker::PhantomData, ops::Deref, str::FromStr};
+use std::marker::PhantomData;
 
-use compact_str::{CompactString, ToCompactString};
-use time::OffsetDateTime;
+use compact_str::CompactString;
+use jiff::Timestamp;
 
 use super::{
     ValidationError,
     location::LocationName,
-    strings::{NameProps, PrefixProps, StartAfterProps, StrProps},
+    strings::{NameProps, PrefixProps, StartAfterProps, StrProps, impl_validated_str},
 };
 use crate::{caps, resources::ListItemsRequest};
 
@@ -85,6 +85,8 @@ impl<T: StrProps> BasinNameStr<T> {
     }
 }
 
+impl_validated_str!(BasinNameStr<T: StrProps>);
+
 #[cfg(feature = "utoipa")]
 impl<T> utoipa::PartialSchema for BasinNameStr<T>
 where
@@ -111,75 +113,6 @@ where
         } else {
             std::borrow::Cow::Borrowed("BasinNameStr")
         }
-    }
-}
-
-impl<T: StrProps> serde::Serialize for BasinNameStr<T> {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_str(&self.0)
-    }
-}
-
-impl<'de, T: StrProps> serde::Deserialize<'de> for BasinNameStr<T> {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let s = CompactString::deserialize(deserializer)?;
-        s.try_into().map_err(serde::de::Error::custom)
-    }
-}
-
-impl<T: StrProps> AsRef<str> for BasinNameStr<T> {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
-impl<T: StrProps> Deref for BasinNameStr<T> {
-    type Target = str;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl<T: StrProps> TryFrom<CompactString> for BasinNameStr<T> {
-    type Error = ValidationError;
-
-    fn try_from(name: CompactString) -> Result<Self, Self::Error> {
-        Self::validate_str(&name)?;
-        Ok(Self(name, PhantomData))
-    }
-}
-
-impl<T: StrProps> FromStr for BasinNameStr<T> {
-    type Err = ValidationError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Self::validate_str(s)?;
-        Ok(Self(s.to_compact_string(), PhantomData))
-    }
-}
-
-impl<T: StrProps> std::fmt::Debug for BasinNameStr<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl<T: StrProps> std::fmt::Display for BasinNameStr<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl<T: StrProps> From<BasinNameStr<T>> for CompactString {
-    fn from(value: BasinNameStr<T>) -> Self {
-        value.0
     }
 }
 
@@ -225,8 +158,8 @@ pub type ListBasinsRequest = ListItemsRequest<BasinNamePrefix, BasinNameStartAft
 pub struct BasinInfo {
     pub name: BasinName,
     pub location: Option<LocationName>,
-    pub created_at: OffsetDateTime,
-    pub deleted_at: Option<OffsetDateTime>,
+    pub created_at: Timestamp,
+    pub deleted_at: Option<Timestamp>,
 }
 
 #[cfg(test)]
@@ -293,5 +226,19 @@ mod test {
     fn validate_start_after_err(#[case] start_after: String) {
         BasinNameStr::<StartAfterProps>::validate_str(&start_after)
             .expect_err("expected validation error");
+    }
+
+    #[test]
+    fn string_conversions_and_serde_roundtrip() {
+        let from_str = super::BasinName::try_from("my-basin").unwrap();
+        let from_string = super::BasinName::try_from("my-basin".to_owned()).unwrap();
+        assert_eq!(from_str, from_string);
+        assert_eq!(String::from(from_string), "my-basin");
+
+        let json = serde_json::to_string(&from_str).unwrap();
+        assert_eq!(json, r#""my-basin""#);
+        let decoded: super::BasinName = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, from_str);
+        assert!(serde_json::from_str::<super::BasinName>(r#""bad""#).is_err());
     }
 }

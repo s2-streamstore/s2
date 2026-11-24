@@ -640,11 +640,10 @@ fn mismatched_endpoint_schemes_from_config_file() {
     );
 }
 
-/// A command that sets only one endpoint should still warn (not error) and use
-/// default endpoints, ensuring endpoint validation is not triggered in that
-/// path. This guards against regressions in the partial-endpoint warnings.
+/// A command that sets only one endpoint should fail closed rather than silently
+/// falling back to the default cloud endpoints.
 #[test]
-fn only_account_endpoint_set_warns_and_uses_defaults() {
+fn only_account_endpoint_set_fails_closed() {
     let env = TestEnv::new();
 
     env.remember_access_token("test-token");
@@ -653,19 +652,20 @@ fn only_account_endpoint_set_warns_and_uses_defaults() {
         .assert()
         .success();
 
-    // Should not produce an endpoint parse error; it should warn about the
-    // missing basin endpoint and fall back to defaults. Without a reachable
-    // server the command will fail, but it must fail with a network/connection
-    // error, not an endpoint parse error.
     let assert = env.s2().args(["basin", "list"]).assert().failure();
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+    let normalized = stderr
+        .replace('│', " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
 
     assert!(
-        stderr.contains("account endpoint is set but basin endpoint is not"),
-        "stderr should warn about the partial endpoint config, got: {stderr}"
+        normalized.contains("Unable to parse S2 endpoints"),
+        "stderr should report an endpoint config error, got: {stderr}"
     );
     assert!(
-        !stderr.contains("Unable to parse S2 endpoints"),
-        "stderr should not report an endpoint parse error, got: {stderr}"
+        normalized.contains("account endpoint is set without basin endpoint"),
+        "stderr should explain the missing basin endpoint, got: {stderr}"
     );
 }

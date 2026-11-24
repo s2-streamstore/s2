@@ -66,17 +66,14 @@ pub async fn status() -> Result<ExitCode, CliError> {
             }
             ExitCode::SUCCESS
         }
-        Err(error)
-            if error.server_error().and_then(|error| error.known_code())
-                == Some(ErrorCode::PermissionDenied) =>
-        {
+        Err(error) if error.known_code() == Some(ErrorCode::PermissionDenied) => {
             // The server authenticated the credential before denying this probe.
             print_authenticated(&label);
             ExitCode::SUCCESS
         }
         Err(error)
             if matches!(
-                error.server_error().and_then(|error| error.known_code()),
+                error.known_code(),
                 Some(ErrorCode::Authn | ErrorCode::AccessTokenNotFound)
             ) =>
         {

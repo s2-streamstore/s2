@@ -1,49 +1,44 @@
 //! Documentation examples for Streams page.
 //!
-//! Run with: cargo run --example docs_streams
+//! Run with: cargo run -p s2-sdk --example docs_streams
 
 use std::time::Duration;
 
-use futures_util::StreamExt;
 use s2_sdk::{
     S2,
     append_session::AppendSessionConfig,
-    batching::BatchingConfig,
     producer::ProducerConfig,
+    read_session::ReadSessionConfig,
     types::{
-        AppendInput, AppendRecord, AppendRecordBatch, BasinName, ReadFrom, ReadInput, ReadLimits,
-        ReadSessionConfig, ReadStart, ReadStop, S2Config, StreamName,
+        AppendRecord, AppendRecordBatch, BasinName, CreateStreamInput, ReadInput, ReadStart,
+        StreamName, Timestamp,
     },
 };
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let access_token = std::env::var("S2_ACCESS_TOKEN")?;
-    let basin_name: BasinName = std::env::var("S2_BASIN")?.parse()?;
+    let basin_name: BasinName = std::env::var("S2_BASIN")
+        .map_err(|_| "S2_BASIN env var not set")?
+        .parse()?;
 
-    let client = S2::new(S2Config::new(access_token))?;
+    let client = S2::from_env()?;
     let basin = client.basin(basin_name);
 
     // Create a temporary stream for examples
-    let stream_name: StreamName = format!(
-        "docs-streams-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_millis()
-    )
-    .parse()?;
+    let stream_name: StreamName =
+        format!("docs-streams-{}", Timestamp::now().as_millisecond()).parse()?;
     basin
-        .create_stream(s2_sdk::types::CreateStreamInput::new(stream_name.clone()))
+        .create_stream(CreateStreamInput::new(stream_name.clone()))
         .await?;
 
     // ANCHOR: simple-append
     let stream = basin.stream(stream_name.clone());
 
     let ack = stream
-        .append(AppendInput::new(AppendRecordBatch::try_from_iter([
+        .append(AppendRecordBatch::try_from_iter([
             AppendRecord::new("first event")?,
             AppendRecord::new("second event")?,
-        ])?))
+        ])?)
         .await?;
 
     // ack tells us where the records landed
@@ -58,8 +53,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let batch = stream
         .read(
             ReadInput::new()
-                .with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0)))
-                .with_stop(ReadStop::new().with_limits(ReadLimits::new().with_count(100))),
+                .with_start(ReadStart::SeqNum(0))
+                .with_count(100),
         )
         .await?;
 
@@ -69,27 +64,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ANCHOR_END: simple-read
 
     // ANCHOR: append-session
-    let session = stream.append_session(AppendSessionConfig::new());
+    let session = stream.append_session(AppendSessionConfig::new())?;
 
     // Submit a batch - this enqueues it and returns a ticket
     let records = AppendRecordBatch::try_from_iter([
         AppendRecord::new("event-1")?,
         AppendRecord::new("event-2")?,
     ])?;
-    let ticket = session.submit(AppendInput::new(records)).await?;
+    let ticket = session.submit(records).await?;
 
     // Wait for durability
     let ack = ticket.await?;
-    println!("Durable at seqNum {}", ack.start.seq_num);
+    println!("Durable at seq_num {}", ack.start.seq_num);
 
     session.close().await?;
     // ANCHOR_END: append-session
 
     // ANCHOR: producer
-    let producer = stream.producer(
-        ProducerConfig::new()
-            .with_batching(BatchingConfig::new().with_linger(Duration::from_millis(5))),
-    );
+    let producer = stream.producer(ProducerConfig::new().with_linger(Duration::from_millis(5)))?;
 
     // Submit individual records
     let ticket = producer.submit(AppendRecord::new("my event")?).await?;
@@ -99,7 +91,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Get the exact sequence number
     let ack = ticket.await?;
-    println!("Record durable at seqNum {}", ack.seq_num);
+    println!("Record durable at seq_num {}", ack.seq_num);
 
     producer.close().await?;
     // ANCHOR_END: producer
@@ -109,116 +101,84 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Stream has {} records", tail.seq_num);
     // ANCHOR_END: check-tail
 
-    // Cleanup
-    basin
-        .delete_stream(s2_sdk::types::DeleteStreamInput::new(stream_name))
-        .await?;
-
     println!("Streams examples completed");
 
     // The following read session examples are for documentation snippets only.
-    // They are not executed because they would block waiting for new records.
+    // They are not executed unless RUN_READ_SESSIONS is set because they would block waiting
+    // for new records.
     if std::env::var("RUN_READ_SESSIONS").is_err() {
+        basin.delete_stream(stream_name).await?;
         return Ok(());
     }
 
     // ANCHOR: read-session
-    let mut session = stream
-        .read_session(
-            ReadInput::new().with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0))),
-            ReadSessionConfig::default(),
-        )
-        .await?;
+    let mut session = stream.read_session(ReadStart::SeqNum(0), ReadSessionConfig::new())?;
 
-    while let Some(batch) = session.next().await {
-        let batch = batch?;
-        for record in batch.records {
-            println!("[{}] {:?}", record.seq_num, record.body);
-        }
+    while let Some(record) = session.next().await {
+        let record = record?;
+        println!("[{}] {:?}", record.seq_num, record.body);
     }
     // ANCHOR_END: read-session
 
     // ANCHOR: read-session-tail-offset
     // Start reading from 10 records before the current tail
-    let mut session = stream
-        .read_session(
-            ReadInput::new().with_start(ReadStart::new().with_from(ReadFrom::TailOffset(10))),
-            ReadSessionConfig::default(),
-        )
-        .await?;
+    let mut session = stream.read_session(ReadStart::TailOffset(10), ReadSessionConfig::new())?;
 
-    while let Some(batch) = session.next().await {
-        let batch = batch?;
-        for record in batch.records {
-            println!("[{}] {:?}", record.seq_num, record.body);
-        }
+    while let Some(record) = session.next().await {
+        let record = record?;
+        println!("[{}] {:?}", record.seq_num, record.body);
     }
     // ANCHOR_END: read-session-tail-offset
 
     // ANCHOR: read-session-timestamp
     // Start reading from a specific timestamp
-    let one_hour_ago = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_millis() as u64
-        - 3600 * 1000;
-    let mut session = stream
-        .read_session(
-            ReadInput::new()
-                .with_start(ReadStart::new().with_from(ReadFrom::Timestamp(one_hour_ago))),
-            ReadSessionConfig::default(),
-        )
-        .await?;
+    let one_hour_ago = (Timestamp::now() - Duration::from_secs(3600))
+        .as_millisecond()
+        .max(0) as u64;
+    let mut session =
+        stream.read_session(ReadStart::Timestamp(one_hour_ago), ReadSessionConfig::new())?;
 
-    while let Some(batch) = session.next().await {
-        let batch = batch?;
-        for record in batch.records {
-            println!("[{}] {:?}", record.seq_num, record.body);
-        }
+    while let Some(record) = session.next().await {
+        let record = record?;
+        println!("[{}] {:?}", record.seq_num, record.body);
     }
     // ANCHOR_END: read-session-timestamp
 
     // ANCHOR: read-session-until
     // Read records until a specific timestamp
-    let one_hour_ago = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_millis() as u64
-        - 3600 * 1000;
-    let mut session = stream
-        .read_session(
-            ReadInput::new()
-                .with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0)))
-                .with_stop(ReadStop::new().with_until(..one_hour_ago)),
-            ReadSessionConfig::default(),
-        )
-        .await?;
+    let one_hour_ago = (Timestamp::now() - Duration::from_secs(3600))
+        .as_millisecond()
+        .max(0) as u64;
+    let mut session = stream.read_session(
+        ReadInput::new()
+            .with_start(ReadStart::SeqNum(0))
+            .with_until(one_hour_ago),
+        ReadSessionConfig::new(),
+    )?;
 
-    while let Some(batch) = session.next().await {
-        let batch = batch?;
-        for record in batch.records {
-            println!("[{}] {:?}", record.seq_num, record.body);
-        }
+    while let Some(record) = session.next().await {
+        let record = record?;
+        println!("[{}] {:?}", record.seq_num, record.body);
     }
     // ANCHOR_END: read-session-until
 
     // ANCHOR: read-session-wait
     // Read all available records, and once reaching the current tail, wait an additional 30 seconds
     // for new ones
-    let mut session = stream
-        .read_session(
-            ReadInput::new()
-                .with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0)))
-                .with_stop(ReadStop::new().with_wait(30)),
-            ReadSessionConfig::default(),
-        )
-        .await?;
+    let mut session = stream.read_session(
+        ReadInput::new()
+            .with_start(ReadStart::SeqNum(0))
+            .with_wait_secs(30),
+        ReadSessionConfig::new(),
+    )?;
 
-    while let Some(batch) = session.next().await {
-        let batch = batch?;
-        for record in batch.records {
-            println!("[{}] {:?}", record.seq_num, record.body);
-        }
+    while let Some(record) = session.next().await {
+        let record = record?;
+        println!("[{}] {:?}", record.seq_num, record.body);
     }
     // ANCHOR_END: read-session-wait
+
+    basin.delete_stream(stream_name).await?;
 
     Ok(())
 }

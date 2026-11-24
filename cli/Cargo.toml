@@ -21,7 +21,6 @@ bytes = { workspace = true }
 clap = { workspace = true, features = ["derive", "wrap_help"] }
 color-print = { workspace = true }
 colored = { workspace = true }
-compact_str = { workspace = true, features = ["serde"] }
 config = { workspace = true }
 dirs = { workspace = true }
 fs2 = { workspace = true }
@@ -36,7 +35,6 @@ rand = { workspace = true }
 reqwest = { workspace = true, features = ["form"] }
 rpassword = { workspace = true }
 rustls = { workspace = true, features = ["aws-lc-rs"] }
-s2-api = { workspace = true }
 s2-common = { workspace = true }
 s2-lite = { workspace = true }
 s2-resource-spec = { workspace = true }

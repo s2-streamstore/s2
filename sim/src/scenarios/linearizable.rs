@@ -20,7 +20,7 @@ use std::sync::{
 use s2_verification::history::{
     LabeledEvent, client, fencing_token_client, final_read, match_seq_num_client,
 };
-use tokio::sync::{Barrier, mpsc::UnboundedSender};
+use tokio::sync::mpsc::UnboundedSender;
 use tracing::info;
 
 #[derive(clap::Args, Debug, Clone)]
@@ -43,7 +43,6 @@ pub async fn workload(
 
     let client_ids = Arc::new(AtomicU64::new(0));
     let op_ids = Arc::new(AtomicU64::new(0));
-    let barrier = Arc::new(Barrier::new(config.clients));
 
     let mut tasks = Vec::new();
     for i in 0..config.clients {
@@ -51,30 +50,28 @@ pub async fn workload(
         let client_ids = client_ids.clone();
         let op_ids = op_ids.clone();
         let history_tx = history_tx.clone();
-        let barrier = barrier.clone();
         let num_ops = config.ops_per_client;
         tasks.push(tokio::spawn(async move {
-            let tx = history_tx.clone();
             let deferred = match i % 3 {
-                0 => client(num_ops, stream, client_ids, op_ids, tx).await,
-                1 => match_seq_num_client(num_ops, stream, client_ids, op_ids, tx).await,
-                _ => fencing_token_client(num_ops, stream, client_ids, op_ids, tx).await,
+                0 => client(num_ops, stream, client_ids, op_ids, history_tx).await,
+                1 => match_seq_num_client(num_ops, stream, client_ids, op_ids, history_tx).await,
+                _ => fencing_token_client(num_ops, stream, client_ids, op_ids, history_tx).await,
             }
             .map_err(|e| e.to_string())?;
             info!(task = i, deferred = deferred.len(), "client workflow done");
-
-            // Hold deferred (indefinite-failure) events until every client is
-            // done issuing operations, so they land at the end of the history.
-            barrier.wait().await;
-            for event in deferred {
-                history_tx.send(event).map_err(|e| e.to_string())?;
-            }
-            Ok::<_, String>(())
+            Ok::<_, String>(deferred)
         }));
     }
 
+    let mut all_deferred = Vec::new();
     for task in tasks {
-        task.await??;
+        all_deferred.extend(task.await??);
+    }
+    // Hold deferred (indefinite-failure) events until every client is done issuing
+    // operations, so they land at the end of the history without deadlocking if a client
+    // exits early with an error.
+    for event in all_deferred {
+        history_tx.send(event).map_err(|e| e.to_string())?;
     }
 
     final_read(

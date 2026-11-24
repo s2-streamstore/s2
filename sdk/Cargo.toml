@@ -12,53 +12,60 @@ categories = ["api-bindings", "database"]
 
 [package.metadata.docs.rs]
 cargo-args = ["-Zunstable-options", "-Zrustdoc-scrape-examples"]
-features = ["rustls-aws-lc-rs", "rustls-ring"]
+features = [
+    "rustls-aws-lc-rs",
+    "rustls-native-roots",
+    "rustls-ring",
+    "rustls-webpki-roots",
+]
 
 [features]
-default = ["rustls-aws-lc-rs"]
+default = ["rustls-aws-lc-rs", "rustls-native-roots"]
 _hidden = []
 rustls-aws-lc-rs = ["hyper-rustls/aws-lc-rs", "rustls/aws-lc-rs"]
+rustls-native-roots = ["hyper-rustls/native-tokio"]
 rustls-ring = ["hyper-rustls/ring", "rustls/ring"]
+rustls-webpki-roots = ["hyper-rustls/webpki-tokio"]
 
 [dependencies]
-async-compression = { version = "0.4", features = ["tokio", "gzip", "zstd"] }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
+base64ct = { workspace = true, features = ["alloc"] }
 bytes = { workspace = true }
-compact_str = { workspace = true, features = ["serde"] }
+flate2.workspace = true
 futures-core = { workspace = true }
 futures-util = { workspace = true }
 h2 = "0.4"
 http = { workspace = true }
 http-body = "1"
 http-body-util = "0.1"
-hyper = "1"
-hyper-rustls = { version = "0.27", default-features = false, features = ["http2", "native-tokio", "tls12"] }
-hyper-util = { version = "0.1", features = ["client-legacy", "tokio", "http1", "http2"] }
+hyper = { version = "1", features = ["client", "http2"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["http2", "tls12"] }
+hyper-util = { version = "0.1.21", features = ["client-legacy", "tokio"] }
+jiff = { workspace = true }
 pin-project-lite = "0.2"
 prost = { workspace = true }
 rand = { workspace = true }
 rustls = { workspace = true }
 s2-api = { workspace = true }
 s2-common = { workspace = true }
-secrecy = "0.10"
-serde = { workspace = true }
+secrecy = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 serde_urlencoded = "0.7"
 thiserror = { workspace = true }
-time = { workspace = true }
-tokio = { version = "1.53", features = ["time", "macros", "io-util", "sync"] }
-tokio-muxt = "0.8.1"
-tokio-stream = { workspace = true }
+tokio = { workspace = true, features = ["time", "macros", "sync"] }
 tokio-util = { workspace = true, features = ["rt", "codec"] }
+tower-service = "0.3.3"
 tracing = { workspace = true }
 urlencoding = "2"
-uuid = { version = "1", features = ["v4", "fast-rng"] }
+uuid = { workspace = true, features = ["v4", "fast-rng"] }
+zstd.workspace = true
 
 [dev-dependencies]
 assert_matches = "1.5"
-proptest = { workspace = true }
 rstest = { workspace = true }
+sha2 = "0.11"
 test-context = { version = "0.5" }
 tokio = { workspace = true, features = ["full", "test-util"] }
 tokio-shared-rt = "0.1"
@@ -67,3 +74,33 @@ tokio-shared-rt = "0.1"
 # `doc-scrape-examples` requires *any* one example to specify the option.
 name = "create_basin"
 doc-scrape-examples = true
+
+# Docs snippet harnesses contain `// ANCHOR:` markers and are rendered on s2.dev rather than scraped
+# into rustdoc pages.
+[[example]]
+name = "docs_account_and_basins"
+doc-scrape-examples = false
+
+[[example]]
+name = "docs_configuration"
+doc-scrape-examples = false
+
+[[example]]
+name = "docs_encryption"
+doc-scrape-examples = false
+
+[[example]]
+name = "docs_metrics"
+doc-scrape-examples = false
+
+[[example]]
+name = "docs_overview"
+doc-scrape-examples = false
+
+[[example]]
+name = "docs_streams"
+doc-scrape-examples = false
+
+[[test]]
+name = "conformance"
+required-features = ["_hidden"]

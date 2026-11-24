@@ -26,8 +26,6 @@
 
 use std::time::Duration;
 
-use compact_str::CompactString;
-
 use crate::{ValidationError, encryption::EncryptionAlgorithm, maybe::Maybe};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,11 +86,20 @@ impl DeleteOnEmptyConfig {
     pub fn min_age(&self) -> Option<Duration> {
         Some(self.min_age).filter(|age| !age.is_zero())
     }
+
+    pub fn validate(self) -> Result<Self, ValidationError> {
+        if self.min_age.subsec_nanos() != 0 {
+            return Err(ValidationError(
+                "delete_on_empty.min_age must be a whole number of seconds".to_string(),
+            ));
+        }
+        Ok(self)
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StreamConfig {
-    pub storage_class: Option<CompactString>,
+    pub storage_class: Option<String>,
     pub retention_policy: RetentionPolicy,
     pub timestamping: TimestampingConfig,
     pub delete_on_empty: DeleteOnEmptyConfig,
@@ -111,7 +118,7 @@ pub struct DeleteOnEmptyReconfiguration {
 
 #[derive(Debug, Clone, Default)]
 pub struct StreamReconfiguration {
-    pub storage_class: Maybe<Option<CompactString>>,
+    pub storage_class: Maybe<Option<String>>,
     pub retention_policy: Maybe<Option<RetentionPolicy>>,
     pub timestamping: Maybe<Option<TimestampingReconfiguration>>,
     pub delete_on_empty: Maybe<Option<DeleteOnEmptyReconfiguration>>,
@@ -162,12 +169,23 @@ impl From<TimestampingConfig> for OptionalTimestampingConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct OptionalDeleteOnEmptyConfig {
     pub min_age: Option<Duration>,
 }
 
 impl OptionalDeleteOnEmptyConfig {
+    pub fn validate(self) -> Result<Self, ValidationError> {
+        if let Some(min_age) = self.min_age
+            && min_age.subsec_nanos() != 0
+        {
+            return Err(ValidationError(
+                "delete_on_empty.min_age must be a whole number of seconds".to_string(),
+            ));
+        }
+        Ok(self)
+    }
+
     pub fn reconfigure(mut self, reconfiguration: DeleteOnEmptyReconfiguration) -> Self {
         if let Maybe::Specified(min_age) = reconfiguration.min_age {
             self.min_age = min_age;
@@ -199,7 +217,7 @@ impl From<DeleteOnEmptyConfig> for OptionalDeleteOnEmptyConfig {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OptionalStreamConfig {
-    pub storage_class: Option<CompactString>,
+    pub storage_class: Option<String>,
     pub retention_policy: Option<RetentionPolicy>,
     pub timestamping: OptionalTimestampingConfig,
     pub delete_on_empty: OptionalDeleteOnEmptyConfig,
@@ -210,6 +228,7 @@ impl OptionalStreamConfig {
         if let Some(retention_policy) = self.retention_policy {
             retention_policy.validate()?;
         }
+        self.delete_on_empty.validate()?;
         Ok(())
     }
 
@@ -328,11 +347,11 @@ impl BasinConfig {
         }
 
         if let Maybe::Specified(create_stream_on_append) = create_stream_on_append {
-            self.create_stream_on_append = create_stream_on_append;
+            self.create_stream_on_append = create_stream_on_append.unwrap_or(false);
         }
 
         if let Maybe::Specified(create_stream_on_read) = create_stream_on_read {
-            self.create_stream_on_read = create_stream_on_read;
+            self.create_stream_on_read = create_stream_on_read.unwrap_or(false);
         }
 
         self
@@ -343,8 +362,8 @@ impl BasinConfig {
 pub struct BasinReconfiguration {
     pub default_stream_config: Maybe<Option<StreamReconfiguration>>,
     pub stream_cipher: Maybe<Option<EncryptionAlgorithm>>,
-    pub create_stream_on_append: Maybe<bool>,
-    pub create_stream_on_read: Maybe<bool>,
+    pub create_stream_on_append: Maybe<Option<bool>>,
+    pub create_stream_on_read: Maybe<Option<bool>>,
 }
 
 #[cfg(test)]
@@ -353,7 +372,9 @@ mod tests {
 
     use rstest::rstest;
 
-    use super::RetentionPolicy;
+    use super::{
+        DeleteOnEmptyConfig, OptionalDeleteOnEmptyConfig, OptionalStreamConfig, RetentionPolicy,
+    };
 
     #[rstest]
     #[case::one_second(Duration::from_secs(1))]
@@ -368,5 +389,34 @@ mod tests {
     #[case::fractional_seconds(Duration::from_millis(1500))]
     fn retention_policy_age_invalid(#[case] age: Duration) {
         assert!(RetentionPolicy::Age(age).validate().is_err());
+    }
+
+    #[rstest]
+    #[case::unset(None)]
+    #[case::zero(Some(Duration::ZERO))]
+    #[case::whole_seconds(Some(Duration::from_secs(60)))]
+    fn delete_on_empty_min_age_valid(#[case] min_age: Option<Duration>) {
+        let config = OptionalStreamConfig {
+            delete_on_empty: OptionalDeleteOnEmptyConfig { min_age },
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+        if let Some(min_age) = min_age {
+            assert!(DeleteOnEmptyConfig { min_age }.validate().is_ok());
+        }
+    }
+
+    #[rstest]
+    #[case::sub_second(Duration::from_millis(500))]
+    #[case::fractional_seconds(Duration::from_millis(1500))]
+    fn delete_on_empty_min_age_invalid(#[case] min_age: Duration) {
+        let config = OptionalStreamConfig {
+            delete_on_empty: OptionalDeleteOnEmptyConfig {
+                min_age: Some(min_age),
+            },
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+        assert!(DeleteOnEmptyConfig { min_age }.validate().is_err());
     }
 }

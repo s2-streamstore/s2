@@ -165,6 +165,7 @@ mod tests {
     use std::{ops::RangeTo, str::FromStr};
 
     use bytes::Bytes;
+    use jiff::Timestamp;
     use s2_common::{
         basin::BasinName,
         config::StreamConfig,
@@ -175,7 +176,6 @@ mod tests {
     };
     use s2_storage::record::StoredRecord;
     use slatedb::WriteBatch;
-    use time::OffsetDateTime;
 
     use super::super::tests::test_backend;
     use crate::{
@@ -275,7 +275,7 @@ mod tests {
         let meta = kv::stream_meta::StreamMeta {
             config: StreamConfig::default(),
             cipher: None,
-            created_at: OffsetDateTime::now_utc(),
+            created_at: Timestamp::now(),
             deleted_at: None,
             creation_idempotency_key: None,
         };

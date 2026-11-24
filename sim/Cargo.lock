@@ -137,16 +137,16 @@ dependencies = [
 
 [[package]]
 name = "antithesis_sdk"
-version = "0.2.9"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08410fcac93669a476c006cd6c4512ac1e2b30fd117231a5d55d8a2c76599b82"
+checksum = "a8ed6751597568a284314fd9e2db420665898600109dedc7d8d9b588f00ae9c4"
 dependencies = [
  "libc",
  "libloading",
  "linkme",
  "once_cell",
  "rand 0.8.8",
- "rand_core 0.6.4",
+ "rand_core 0.10.1",
  "rustc_version_runtime",
  "serde",
  "serde_json",
@@ -1318,9 +1318,6 @@ name = "deranged"
 version = "0.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e9de72ce2ad1f90dc62fa25f0f430ef85eb4b0d8fa0be4f30373bc40a21d28e"
-dependencies = [
- "serde_core",
-]
 
 [[package]]
 name = "digest"
@@ -3617,12 +3614,12 @@ dependencies = [
  "axum",
  "base64ct",
  "bytes",
- "compact_str",
  "flate2",
  "futures-core",
  "futures-util",
  "http",
  "itertools",
+ "jiff",
  "mime",
  "prost",
  "s2-common",
@@ -3630,7 +3627,6 @@ dependencies = [
  "serde_json",
  "strum",
  "thiserror 2.0.21",
- "time",
  "tokio-util",
  "zstd 0.14.4",
 ]
@@ -3646,12 +3642,12 @@ dependencies = [
  "compact_str",
  "enumset",
  "http",
+ "jiff",
  "rand 0.10.4",
  "secrecy",
  "serde",
  "strum",
  "thiserror 2.0.21",
- "time",
 ]
 
 [[package]]
@@ -3674,6 +3670,7 @@ dependencies = [
  "include_dir",
  "indexmap",
  "itertools",
+ "jiff",
  "parking_lot",
  "prometheus",
  "prost",
@@ -3691,7 +3688,6 @@ dependencies = [
  "strum",
  "thiserror 2.0.21",
  "tikv-jemallocator",
- "time",
  "tokio",
  "tokio-util",
  "tower-http 0.7.1",
@@ -3703,7 +3699,6 @@ dependencies = [
 name = "s2-resource-spec"
 version = "0.49.0"
 dependencies = [
- "compact_str",
  "humantime",
  "s2-common",
  "schemars",
@@ -3715,11 +3710,11 @@ dependencies = [
 name = "s2-sdk"
 version = "0.49.0"
 dependencies = [
- "async-compression",
  "async-stream",
  "async-trait",
+ "base64ct",
  "bytes",
- "compact_str",
+ "flate2",
  "futures-core",
  "futures-util",
  "h2",
@@ -3729,6 +3724,7 @@ dependencies = [
  "hyper",
  "hyper-rustls",
  "hyper-util",
+ "jiff",
  "pin-project-lite",
  "prost",
  "rand 0.10.4",
@@ -3740,14 +3736,13 @@ dependencies = [
  "serde_json",
  "serde_urlencoded",
  "thiserror 2.0.21",
- "time",
  "tokio",
- "tokio-muxt",
- "tokio-stream",
  "tokio-util",
+ "tower-service",
  "tracing",
  "urlencoding",
  "uuid",
+ "zstd 0.14.4",
 ]
 
 [[package]]
@@ -3801,13 +3796,13 @@ dependencies = [
 [[package]]
 name = "s2-verification"
 version = "0.4.0"
-source = "git+https://github.com/s2-streamstore/s2-verification?rev=d5cf3b755083a62785c732e8a271ae3e54033d58#d5cf3b755083a62785c732e8a271ae3e54033d58"
+source = "git+https://github.com/s2-streamstore/s2-verification?rev=d269b4e0ee22e129a4e92d041c6c977110e3dcf3#d269b4e0ee22e129a4e92d041c6c977110e3dcf3"
 dependencies = [
  "antithesis_sdk",
  "clap",
  "eyre",
  "futures",
- "rand 0.8.8",
+ "rand 0.10.4",
  "s2-sdk",
  "serde",
  "serde_json",
@@ -4625,16 +4620,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.10",
-]
-
-[[package]]
-name = "tokio-muxt"
-version = "0.8.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a08b20f8324114e2639a1a251692cc8a4154aa311bee55a83bdc82826b09a3b1"
-dependencies = [
- "pin-project",
- "tokio",
 ]
 
 [[package]]
