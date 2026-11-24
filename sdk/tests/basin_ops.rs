@@ -1,7 +1,5 @@
 mod common;
 
-use std::time::Duration;
-
 use assert_matches::assert_matches;
 use common::{S2Basin, SharedS2Basin, unique_stream_name, uuid};
 use s2_sdk::{
@@ -51,7 +49,7 @@ async fn create_list_and_delete_stream(basin: &S2Basin) -> Result<(), RequestErr
 #[tokio_shared_rt::test(shared)]
 async fn ensure_stream_lifecycle(basin: &SharedS2Basin) -> Result<(), RequestError> {
     let stream_name = unique_stream_name();
-    let delete_on_empty = DeleteOnEmptyConfig::new().with_min_age(Duration::from_hours(24))?;
+    let delete_on_empty = DeleteOnEmptyConfig::new().with_min_age_secs(24 * 3600);
     let initial = StreamConfig::new()
         .with_delete_on_empty(delete_on_empty)
         .with_timestamping(TimestampingConfig::new().with_mode(TimestampingMode::ClientRequire));
@@ -206,7 +204,7 @@ async fn create_stream_configs(basin: &SharedS2Basin) -> Result<(), RequestError
                 .with_mode(TimestampingMode::ClientRequire)
                 .with_uncapped(true),
         )
-        .with_delete_on_empty(DeleteOnEmptyConfig::new().with_min_age(Duration::from_secs(3600))?);
+        .with_delete_on_empty(DeleteOnEmptyConfig::new().with_min_age_secs(3600));
     basin
         .create_stream(CreateStreamInput::new(s1.clone()).with_config(full))
         .await?;
@@ -225,8 +223,8 @@ async fn create_stream_configs(basin: &SharedS2Basin) -> Result<(), RequestError
         Some(true)
     );
     assert_eq!(
-        retrieved.delete_on_empty().map(|d| d.min_age()),
-        Some(Duration::from_secs(3600))
+        retrieved.delete_on_empty().map(|d| d.min_age_secs()),
+        Some(3600)
     );
     basin.delete_stream(s1).await?;
 
@@ -331,16 +329,14 @@ async fn reconfigure_stream_configs(basin: &SharedS2Basin) -> Result<(), Request
                         .with_mode(TimestampingMode::ClientPrefer)
                         .with_uncapped(true),
                 )
-                .with_delete_on_empty(
-                    DeleteOnEmptyReconfiguration::new().with_min_age(Duration::from_secs(3600))?,
-                ),
+                .with_delete_on_empty(DeleteOnEmptyReconfiguration::new().with_min_age_secs(3600)),
         )
         .await?;
     assert_eq!(config.storage_class(), Some("standard"));
     assert_eq!(config.retention_policy(), Some(&RetentionPolicy::Age(3600)));
     assert_eq!(
-        config.delete_on_empty().map(|d| d.min_age()),
-        Some(Duration::from_secs(3600))
+        config.delete_on_empty().map(|d| d.min_age_secs()),
+        Some(3600)
     );
     let ts = config
         .timestamping()
@@ -391,9 +387,7 @@ async fn reconfigure_stream_configs(basin: &SharedS2Basin) -> Result<(), Request
                 .with_timestamping(
                     TimestampingReconfiguration::new().with_mode(TimestampingMode::ClientRequire),
                 )
-                .with_delete_on_empty(
-                    DeleteOnEmptyReconfiguration::new().with_min_age(Duration::ZERO)?,
-                ),
+                .with_delete_on_empty(DeleteOnEmptyReconfiguration::new().with_min_age_secs(0)),
         )
         .await?;
     assert_eq!(

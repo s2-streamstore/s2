@@ -259,7 +259,9 @@ pub fn resolve_stream_config(
         delete_on_empty_min_age: config
             .delete_on_empty()
             .or_else(|| basin_defaults.delete_on_empty())
-            .map_or(defaults.delete_on_empty.min_age, |d| d.min_age()),
+            .map_or(defaults.delete_on_empty.min_age, |d| {
+                Duration::from_secs(d.min_age_secs())
+            }),
     }
 }
 
@@ -378,23 +380,21 @@ pub struct DeleteOnEmptyConfig {
 impl From<DeleteOnEmptyConfig> for sdk::types::DeleteOnEmptyConfig {
     fn from(value: DeleteOnEmptyConfig) -> Self {
         sdk::types::DeleteOnEmptyConfig::new()
-            .with_min_age(value.delete_on_empty_min_age)
-            .expect("whole-second duration")
+            .with_min_age_secs(value.delete_on_empty_min_age.as_secs())
     }
 }
 
 impl From<DeleteOnEmptyConfig> for sdk::types::DeleteOnEmptyReconfiguration {
     fn from(value: DeleteOnEmptyConfig) -> Self {
         sdk::types::DeleteOnEmptyReconfiguration::new()
-            .with_min_age(value.delete_on_empty_min_age)
-            .expect("whole-second duration")
+            .with_min_age_secs(value.delete_on_empty_min_age.as_secs())
     }
 }
 
 impl From<sdk::types::DeleteOnEmptyConfig> for DeleteOnEmptyConfig {
     fn from(value: sdk::types::DeleteOnEmptyConfig) -> Self {
         Self {
-            delete_on_empty_min_age: value.min_age(),
+            delete_on_empty_min_age: Duration::from_secs(value.min_age_secs()),
         }
     }
 }

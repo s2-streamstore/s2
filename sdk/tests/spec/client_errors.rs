@@ -1621,8 +1621,7 @@ async fn spec_t2_t7_t7b_m1_retry_safety_request_tokens_and_timeouts() {
         .read(
             ReadInput::new()
                 .with_start(ReadStart::SeqNum(0))
-                .with_wait(Duration::from_secs(1))
-                .unwrap(),
+                .with_wait_secs(1),
         )
         .await
         .expect("T7b: unary read timeout must be request_timeout + wait");

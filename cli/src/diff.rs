@@ -389,9 +389,7 @@ fn api_stream_config_to_sdk(
     }
     if let Some(doe) = config.delete_on_empty {
         out = out.with_delete_on_empty(
-            s2_sdk::types::DeleteOnEmptyConfig::new()
-                .with_min_age(std::time::Duration::from_secs(doe.min_age_secs))
-                .expect("whole-second duration"),
+            s2_sdk::types::DeleteOnEmptyConfig::new().with_min_age_secs(doe.min_age_secs),
         );
     }
     out

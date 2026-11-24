@@ -135,11 +135,7 @@ async fn spec_m3_reconfiguration_three_states() {
                         .with_mode(TimestampingMode::Arrival)
                         .with_uncapped(true),
                 )
-                .with_delete_on_empty(
-                    DeleteOnEmptyReconfiguration::new()
-                        .with_min_age(Duration::from_secs(60))
-                        .unwrap(),
-                ),
+                .with_delete_on_empty(DeleteOnEmptyReconfiguration::new().with_min_age_secs(60)),
         )
         .await
         .unwrap();
@@ -167,7 +163,7 @@ async fn spec_m3_reconfiguration_three_states() {
                         .reset_mode()
                         .reset_uncapped(),
                 )
-                .with_delete_on_empty(DeleteOnEmptyReconfiguration::new().reset_min_age()),
+                .with_delete_on_empty(DeleteOnEmptyReconfiguration::new().reset_min_age_secs()),
         )
         .await
         .unwrap();

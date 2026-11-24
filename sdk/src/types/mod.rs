@@ -10,8 +10,6 @@ mod resources;
 #[cfg(test)]
 mod tests;
 
-use std::time::Duration;
-
 /// Contiguous byte buffer.
 pub use bytes::Bytes;
 /// Wall-clock UTC timestamp.
@@ -92,15 +90,6 @@ pub const RECORD_BATCH_MAX: BatchLimits = BatchLimits {
 
 pub(crate) const ONE_MIB: usize = 1024 * 1024;
 pub(crate) const RFC3339_MIN: Timestamp = Timestamp::constant(-62_167_219_200, 0);
-
-pub(crate) fn whole_seconds(duration: Duration, field: &str) -> Result<u64, ValidationError> {
-    if duration.subsec_nanos() != 0 {
-        return Err(ValidationError(format!(
-            "{field} must be a whole number of seconds"
-        )));
-    }
-    Ok(duration.as_secs())
-}
 
 pub(crate) fn validate_rfc3339_timestamp(ts: Timestamp) -> Result<Timestamp, ValidationError> {
     if ts < RFC3339_MIN {

@@ -1,11 +1,11 @@
-use std::{fmt, ops::Deref, str::FromStr, time::Duration};
+use std::{fmt, ops::Deref, str::FromStr};
 
 use bytes::Bytes;
 use rand::RngExt;
 use s2_api::v1 as api;
 use s2_common::record::MAX_FENCING_TOKEN_LENGTH;
 
-use super::{RECORD_BATCH_MAX, StreamConfig, whole_seconds};
+use super::{RECORD_BATCH_MAX, StreamConfig};
 use crate::error::{ErrorContext, ProtocolError, ValidationError};
 
 /// Token for fencing appends to a stream.
@@ -820,10 +820,10 @@ impl ReadInput {
         self.until
     }
 
-    /// Return the duration to wait for new records before stopping, if set.
+    /// Return the number of seconds to wait for new records before stopping, if set.
     #[must_use]
-    pub fn wait(&self) -> Option<Duration> {
-        self.wait_secs.map(|s| Duration::from_secs(u64::from(s)))
+    pub fn wait_secs(&self) -> Option<u32> {
+        self.wait_secs
     }
 
     /// Return the stream configuration to apply if the stream is created on read, if set.
@@ -879,7 +879,7 @@ impl ReadInput {
         }
     }
 
-    /// Set the duration to wait for new records before stopping.
+    /// Set the number of seconds to wait for new records before stopping.
     ///
     /// Will be clamped to `60` seconds for [`read`](crate::S2Stream::read).
     ///
@@ -889,20 +889,11 @@ impl ReadInput {
     ///   `until` is specified.
     /// - Infinite wait for [`read_session`](crate::S2Stream::read_session) if none of `count`,
     ///   `bytes`, or `until` is specified.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ValidationError`] if `wait` has sub-second precision or exceeds `u32::MAX`
-    /// seconds.
-    pub fn with_wait(self, wait: Duration) -> Result<Self, ValidationError> {
-        let secs = whole_seconds(wait, "read.wait")?;
-        let secs = u32::try_from(secs).map_err(|_| {
-            ValidationError(format!("read.wait ({secs}s) exceeds maximum {}s", u32::MAX))
-        })?;
-        Ok(Self {
-            wait_secs: Some(secs),
+    pub fn with_wait_secs(self, wait_secs: u32) -> Self {
+        Self {
+            wait_secs: Some(wait_secs),
             ..self
-        })
+        }
     }
 
     /// Set the stream configuration to apply if the stream is created on read.

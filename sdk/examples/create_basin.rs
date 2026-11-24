@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use s2_sdk::{
     S2,
     types::{BasinConfig, BasinName, CreateBasinInput, RetentionPolicy, StreamConfig},
@@ -15,8 +13,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let input = CreateBasinInput::new(basin_name.clone()).with_config(
         BasinConfig::new().with_default_stream_config(
-            StreamConfig::new()
-                .with_retention_policy(RetentionPolicy::age(Duration::from_secs(10 * 24 * 3600))?),
+            StreamConfig::new().with_retention_policy(RetentionPolicy::Age(10 * 24 * 3600)),
         ),
     );
     let basin_info = s2.create_basin(input).await?;

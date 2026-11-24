@@ -2,7 +2,6 @@ use std::{
     fmt,
     pin::Pin,
     task::{Context, Poll},
-    time::Duration,
 };
 
 use futures_core::Stream;
@@ -15,8 +14,7 @@ use s2_common::{
     stream::{StreamName, StreamNamePrefix, StreamNameStartAfter},
 };
 
-use super::whole_seconds;
-use crate::error::{RequestError, ValidationError};
+use crate::error::RequestError;
 
 /// A page of values.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -215,18 +213,6 @@ pub enum RetentionPolicy {
 }
 
 impl RetentionPolicy {
-    /// Create an age-based retention policy from a whole-second [`Duration`].
-    ///
-    /// The SDK checks whole-second precision and leaves positivity validation (`> 0`) to the
-    /// server.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ValidationError`] if `age` has sub-second precision.
-    pub fn age(age: Duration) -> Result<Self, ValidationError> {
-        Ok(Self::Age(whole_seconds(age, "retention_age")?))
-    }
-
     pub(crate) fn from_api(value: MaybeKnown<api::config::RetentionPolicy>) -> Self {
         let value = match value {
             MaybeKnown::Known(value) => value,
@@ -375,28 +361,23 @@ pub struct DeleteOnEmptyConfig {
 }
 
 impl DeleteOnEmptyConfig {
-    /// Create a new [`DeleteOnEmptyConfig`] with default settings (`0s`, disabling automatic
-    /// deletion).
+    /// Create a new [`DeleteOnEmptyConfig`] with default settings (`0` seconds, disabling
+    /// automatic deletion).
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Return the minimum age before an empty stream can be deleted (`Duration::ZERO` disables
+    /// Return the minimum age in seconds before an empty stream can be deleted (`0` disables
     /// automatic deletion).
     #[must_use]
-    pub fn min_age(&self) -> Duration {
-        Duration::from_secs(self.min_age_secs)
+    pub fn min_age_secs(&self) -> u64 {
+        self.min_age_secs
     }
 
-    /// Set the minimum age before an empty stream can be deleted.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ValidationError`] if `min_age` has sub-second precision.
-    pub fn with_min_age(self, min_age: Duration) -> Result<Self, ValidationError> {
-        Ok(Self {
-            min_age_secs: whole_seconds(min_age, "delete_on_empty.min_age")?,
-        })
+    /// Set the minimum age in seconds before an empty stream can be deleted (`0` disables
+    /// automatic deletion).
+    pub fn with_min_age_secs(self, min_age_secs: u64) -> Self {
+        Self { min_age_secs }
     }
 
     pub(crate) fn from_api(value: api::config::DeleteOnEmptyConfig) -> Self {
@@ -1036,25 +1017,21 @@ impl DeleteOnEmptyReconfiguration {
         Self::default()
     }
 
-    /// Return the configured change for [`min_age`](DeleteOnEmptyConfig::min_age).
+    /// Return the configured change for [`min_age_secs`](DeleteOnEmptyConfig::min_age_secs).
     #[must_use]
-    pub fn min_age(&self) -> Reconfigure<Duration> {
-        self.min_age_secs.map(Duration::from_secs)
+    pub fn min_age_secs(&self) -> Reconfigure<u64> {
+        self.min_age_secs
     }
 
-    /// Set the override for the existing [`min_age`](DeleteOnEmptyConfig::min_age).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ValidationError`] if `min_age` has sub-second precision.
-    pub fn with_min_age(self, min_age: Duration) -> Result<Self, ValidationError> {
-        Ok(Self {
-            min_age_secs: Reconfigure::Set(whole_seconds(min_age, "delete_on_empty.min_age")?),
-        })
+    /// Set the override for the existing [`min_age_secs`](DeleteOnEmptyConfig::min_age_secs).
+    pub fn with_min_age_secs(self, min_age_secs: u64) -> Self {
+        Self {
+            min_age_secs: Reconfigure::Set(min_age_secs),
+        }
     }
 
-    /// Reset [`min_age`](DeleteOnEmptyConfig::min_age) to the server default.
-    pub fn reset_min_age(self) -> Self {
+    /// Reset [`min_age_secs`](DeleteOnEmptyConfig::min_age_secs) to the server default.
+    pub fn reset_min_age_secs(self) -> Self {
         Self {
             min_age_secs: Reconfigure::Reset,
         }

@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use s2_sdk::{
     S2,
     types::{BasinName, RetentionPolicy, StreamName, StreamReconfiguration},
@@ -21,7 +19,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .reconfigure_stream(
             stream_name,
             StreamReconfiguration::new()
-                .with_retention_policy(RetentionPolicy::age(Duration::from_secs(10 * 24 * 3600))?),
+                .with_retention_policy(RetentionPolicy::Age(10 * 24 * 3600)),
         )
         .await?;
     println!("{config:#?}");

@@ -645,9 +645,7 @@ async fn read_empty_and_beyond_tail_unary(
             ..
         }))
     );
-    let waited_empty = stream
-        .read(ReadInput::new().with_wait(Duration::from_secs(1))?)
-        .await?;
+    let waited_empty = stream.read(ReadInput::new().with_wait_secs(1)).await?;
     assert!(waited_empty.records.is_empty());
 
     // Beyond tail: without wait (with or without clamp) -> ReadUnwritten(1); with clamp + wait ->
@@ -677,7 +675,7 @@ async fn read_empty_and_beyond_tail_unary(
             ReadInput::new()
                 .with_start(ReadStart::SeqNum(10))
                 .with_clamp(true)
-                .with_wait(Duration::from_secs(1))?,
+                .with_wait_secs(1),
         )
         .await?;
     assert!(clamped_wait.records.is_empty());
@@ -932,7 +930,7 @@ async fn basin_default_and_auto_create_stream_config() -> Result<(), Box<dyn std
     let default_stream_config = StreamConfig::new()
         .with_storage_class("standard")
         .with_retention_policy(RetentionPolicy::Age(7200))
-        .with_delete_on_empty(DeleteOnEmptyConfig::new().with_min_age(Duration::from_secs(600))?);
+        .with_delete_on_empty(DeleteOnEmptyConfig::new().with_min_age_secs(600));
     s2.create_basin(
         CreateBasinInput::new(basin_name.clone()).with_config(
             BasinConfig::new()
@@ -956,13 +954,13 @@ async fn basin_default_and_auto_create_stream_config() -> Result<(), Box<dyn std
         Some(&RetentionPolicy::Age(7200))
     );
     assert_eq!(
-        inherited.delete_on_empty().map(|d| d.min_age()),
-        Some(Duration::from_secs(600))
+        inherited.delete_on_empty().map(|d| d.min_age_secs()),
+        Some(600)
     );
 
     let override_config = StreamConfig::new()
         .with_retention_policy(RetentionPolicy::Age(3600))
-        .with_delete_on_empty(DeleteOnEmptyConfig::new().with_min_age(Duration::from_secs(300))?);
+        .with_delete_on_empty(DeleteOnEmptyConfig::new().with_min_age_secs(300));
 
     // 2. Unary append_with_stream_config applies override when auto-creating a stream.
     let unary_stream = unique_stream_name();
@@ -974,8 +972,8 @@ async fn basin_default_and_auto_create_stream_config() -> Result<(), Box<dyn std
     assert_eq!(config.storage_class(), Some("standard"));
     assert_eq!(config.retention_policy(), Some(&RetentionPolicy::Age(3600)));
     assert_eq!(
-        config.delete_on_empty().map(|d| d.min_age()),
-        Some(Duration::from_secs(300))
+        config.delete_on_empty().map(|d| d.min_age_secs()),
+        Some(300)
     );
 
     // 3. Producer with_stream_config applies override when auto-creating a stream.
@@ -988,8 +986,8 @@ async fn basin_default_and_auto_create_stream_config() -> Result<(), Box<dyn std
     let config = basin.get_stream_config(session_stream).await?;
     assert_eq!(config.retention_policy(), Some(&RetentionPolicy::Age(3600)));
     assert_eq!(
-        config.delete_on_empty().map(|d| d.min_age()),
-        Some(Duration::from_secs(300))
+        config.delete_on_empty().map(|d| d.min_age_secs()),
+        Some(300)
     );
 
     // 4. append_with_stream_config on an existing stream leaves its config unchanged.

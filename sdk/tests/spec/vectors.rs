@@ -473,52 +473,102 @@ fn spec_vectors_numbers() {
                 other => panic!("unhandled value field {other:?}"),
             }
         } else if let Some(raw_ms) = &case.millis {
-            match raw_ms.parse::<u64>() {
-                Ok(ms) => {
-                    let dur = Duration::from_millis(ms);
-                    match case.field.as_str() {
-                        "read.stop.wait" => {
-                            let res = ReadInput::new().with_wait(dur);
-                            assert_eq!(res.is_ok(), expect_valid, "{label}");
-                        }
-                        "stream_config.retention_age" => {
-                            let res = RetentionPolicy::age(dur);
-                            assert_eq!(res.is_ok(), expect_valid, "{label}");
-                        }
-                        "stream_config.delete_on_empty.min_age" => {
-                            let cfg = DeleteOnEmptyConfig::new().with_min_age(dur);
-                            let rec = DeleteOnEmptyReconfiguration::new().with_min_age(dur);
-                            assert_eq!(cfg.is_ok(), expect_valid, "{label}");
-                            assert_eq!(rec.is_ok(), expect_valid, "{label}");
-                        }
-                        "client.connection_timeout" => {
-                            let res = S2Config::new("token").with_connection_timeout(dur);
-                            assert_eq!(res.is_ok(), expect_valid, "{label}");
-                        }
-                        "client.request_timeout" => {
-                            let res = S2Config::new("token").with_request_timeout(dur);
-                            assert_eq!(res.is_ok(), expect_valid, "{label}");
-                        }
-                        "client.min_base_delay" => {
+            let parse_whole_secs_u64 = || {
+                raw_ms
+                    .parse::<u128>()
+                    .ok()
+                    .filter(|ms| ms % 1000 == 0)
+                    .and_then(|ms| u64::try_from(ms / 1000).ok())
+            };
+            match case.field.as_str() {
+                "read.stop.wait" => {
+                    match parse_whole_secs_u64().and_then(|s| u32::try_from(s).ok()) {
+                        Some(secs) => {
                             assert!(expect_valid, "{label}");
-                            let _ = RetryConfig::new().with_min_base_delay(dur);
+                            assert_eq!(
+                                ReadInput::new().with_wait_secs(secs).wait_secs(),
+                                Some(secs),
+                                "{label}"
+                            );
                         }
-                        "client.max_base_delay" => {
-                            assert!(expect_valid, "{label}");
-                            let _ = RetryConfig::new().with_max_base_delay(dur);
-                        }
-                        "batching.linger" => {
-                            assert!(expect_valid, "{label}");
-                            let _ = BatcherConfig::new().with_linger(dur);
-                            let _ = ProducerConfig::new().with_linger(dur);
-                        }
-                        other => panic!("unhandled millis field {other:?}"),
+                        None => assert!(
+                            !expect_valid,
+                            "{label}: unrepresentable in Rust u32 whole seconds"
+                        ),
                     }
                 }
-                Err(_) => assert!(
-                    !expect_valid,
-                    "{label}: negative or non-integer millis is unrepresentable in Duration"
-                ),
+                "stream_config.retention_age" => match parse_whole_secs_u64() {
+                    Some(secs) => {
+                        assert!(expect_valid, "{label}");
+                        assert_eq!(
+                            s2_sdk::types::StreamConfig::new()
+                                .with_retention_policy(RetentionPolicy::Age(secs))
+                                .retention_policy(),
+                            Some(&RetentionPolicy::Age(secs)),
+                            "{label}"
+                        );
+                    }
+                    None => assert!(
+                        !expect_valid,
+                        "{label}: unrepresentable in Rust u64 whole seconds"
+                    ),
+                },
+                "stream_config.delete_on_empty.min_age" => match parse_whole_secs_u64() {
+                    Some(secs) => {
+                        assert!(expect_valid, "{label}");
+                        assert_eq!(
+                            DeleteOnEmptyConfig::new()
+                                .with_min_age_secs(secs)
+                                .min_age_secs(),
+                            secs,
+                            "{label}"
+                        );
+                        assert_eq!(
+                            DeleteOnEmptyReconfiguration::new()
+                                .with_min_age_secs(secs)
+                                .min_age_secs(),
+                            s2_sdk::types::Reconfigure::Set(secs),
+                            "{label}"
+                        );
+                    }
+                    None => assert!(
+                        !expect_valid,
+                        "{label}: unrepresentable in Rust u64 whole seconds"
+                    ),
+                },
+                other => match raw_ms.parse::<u64>() {
+                    Ok(ms) => {
+                        let dur = Duration::from_millis(ms);
+                        match other {
+                            "client.connection_timeout" => {
+                                let res = S2Config::new("token").with_connection_timeout(dur);
+                                assert_eq!(res.is_ok(), expect_valid, "{label}");
+                            }
+                            "client.request_timeout" => {
+                                let res = S2Config::new("token").with_request_timeout(dur);
+                                assert_eq!(res.is_ok(), expect_valid, "{label}");
+                            }
+                            "client.min_base_delay" => {
+                                assert!(expect_valid, "{label}");
+                                let _ = RetryConfig::new().with_min_base_delay(dur);
+                            }
+                            "client.max_base_delay" => {
+                                assert!(expect_valid, "{label}");
+                                let _ = RetryConfig::new().with_max_base_delay(dur);
+                            }
+                            "batching.linger" => {
+                                assert!(expect_valid, "{label}");
+                                let _ = BatcherConfig::new().with_linger(dur);
+                                let _ = ProducerConfig::new().with_linger(dur);
+                            }
+                            other => panic!("unhandled millis field {other:?}"),
+                        }
+                    }
+                    Err(_) => assert!(
+                        !expect_valid,
+                        "{label}: negative or non-integer millis is unrepresentable in Duration"
+                    ),
+                },
             }
         } else {
             panic!("{label}: case must have value or millis");

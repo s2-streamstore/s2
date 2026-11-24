@@ -74,8 +74,7 @@ async fn spec_r2_r3_r4_unary_read_stop_options_empty_batch_416_and_check_tail() 
                 .with_count(10)
                 .with_bytes(1024)
                 .with_until(9999)
-                .with_wait(Duration::ZERO)
-                .unwrap(),
+                .with_wait_secs(0),
         )
         .await
         .unwrap_err();
@@ -656,8 +655,7 @@ async fn spec_r11_t5_t5b_read_session_resume_clamp_wait_416_and_unbounded() {
                 .with_start(ReadStart::TailOffset(2))
                 .with_clamp(true)
                 .with_count(5)
-                .with_wait(Duration::from_secs(10))
-                .unwrap(),
+                .with_wait_secs(10),
             ReadSessionConfig::default(),
         )
         .unwrap();
@@ -748,8 +746,7 @@ async fn spec_r11_t5_t5b_read_session_resume_clamp_wait_416_and_unbounded() {
         .read_session(
             ReadInput::new()
                 .with_start(ReadStart::SeqNum(0))
-                .with_wait(Duration::from_secs(30))
-                .unwrap(),
+                .with_wait_secs(30),
             ReadSessionConfig::default(),
         )
         .unwrap();
@@ -908,8 +905,7 @@ async fn regression_read_session_r11c_reduced_wait_refreshes_after_record() {
         .read_session(
             ReadInput::new()
                 .with_start(ReadStart::SeqNum(0))
-                .with_wait(Duration::from_secs(4))
-                .unwrap()
+                .with_wait_secs(4)
                 .with_count(2),
             ReadSessionConfig::default(),
         )
@@ -1036,8 +1032,7 @@ async fn regression_read_session_r11d_caught_up_and_count_exhausted() {
         .read_session(
             ReadInput::new()
                 .with_start(ReadStart::SeqNum(0))
-                .with_wait(Duration::ZERO)
-                .unwrap(),
+                .with_wait_secs(0),
             ReadSessionConfig::default(),
         )
         .unwrap();

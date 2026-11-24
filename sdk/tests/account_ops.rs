@@ -73,9 +73,7 @@ async fn basin_config_and_reconfigure() -> Result<(), Box<dyn std::error::Error>
         .with_default_stream_config(
             StreamConfig::new()
                 .with_storage_class("express")
-                .with_delete_on_empty(
-                    DeleteOnEmptyConfig::new().with_min_age(Duration::from_secs(60))?,
-                ),
+                .with_delete_on_empty(DeleteOnEmptyConfig::new().with_min_age_secs(60)),
         )
         .with_create_stream_on_append(true)
         .with_create_stream_on_read(true);
@@ -89,8 +87,8 @@ async fn basin_config_and_reconfigure() -> Result<(), Box<dyn std::error::Error>
         .expect("default_stream_config should be present");
     assert_eq!(default_cfg.storage_class(), Some("express"));
     assert_eq!(
-        default_cfg.delete_on_empty().map(|d| d.min_age()),
-        Some(Duration::from_secs(60))
+        default_cfg.delete_on_empty().map(|d| d.min_age_secs()),
+        Some(60)
     );
     assert!(retrieved.create_stream_on_append());
     assert!(retrieved.create_stream_on_read());

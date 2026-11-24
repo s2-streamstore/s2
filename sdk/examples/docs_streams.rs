@@ -166,7 +166,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut session = stream.read_session(
         ReadInput::new()
             .with_start(ReadStart::SeqNum(0))
-            .with_wait(Duration::from_secs(30))?,
+            .with_wait_secs(30),
         ReadSessionConfig::new(),
     )?;
 

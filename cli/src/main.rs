@@ -22,7 +22,7 @@ mod update;
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-use std::{pin::Pin, process::ExitCode, time::Duration};
+use std::{pin::Pin, process::ExitCode};
 
 use clap::Parser;
 use cli::{
@@ -921,11 +921,7 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
 
             let mut stream_config = SdkStreamConfig::new()
                 .with_retention_policy(RetentionPolicy::Age(3600))
-                .with_delete_on_empty(
-                    DeleteOnEmptyConfig::new()
-                        .with_min_age(Duration::from_secs(60))
-                        .expect("whole-second duration"),
-                )
+                .with_delete_on_empty(DeleteOnEmptyConfig::new().with_min_age_secs(60))
                 .with_timestamping(
                     TimestampingConfig::new()
                         .with_mode(TimestampingMode::ClientRequire)
