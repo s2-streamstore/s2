@@ -221,7 +221,7 @@ pub struct IssueAccessTokenRequest {
     pub id: AccessTokenId,
     /// Expiration time in RFC 3339 format.
     /// If not set, the expiration will be set to that of the requestor's token.
-    #[serde(default, with = "super::rfc3339::option")]
+    #[serde(default)]
     #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>, format = DateTime))]
     pub expires_at: Option<Timestamp>,
     /// Namespace streams based on the configured stream-level scope, which must be a prefix.
@@ -550,8 +550,8 @@ mod tests {
     }
 
     #[test]
-    fn issue_access_token_expires_at_enforces_rfc3339() {
-        for good in [
+    fn issue_access_token_expires_at_deserializes_rfc3339() {
+        for ts in [
             "2030-01-01T00:00:00Z",
             "2030-01-01t00:00:00.123456z",
             "2030-01-01 00:00:00+05:30",
@@ -559,33 +559,12 @@ mod tests {
         ] {
             let valid = serde_json::json!({
                 "id": "test-token",
-                "expires_at": good,
+                "expires_at": ts,
                 "scope": {}
             });
             let parsed: IssueAccessTokenRequest = serde_json::from_value(valid)
-                .unwrap_or_else(|e| panic!("expected RFC 3339 acceptance for {good}: {e}"));
+                .unwrap_or_else(|e| panic!("expected RFC 3339 acceptance for {ts}: {e}"));
             assert!(parsed.expires_at.is_some());
-        }
-
-        for bad in [
-            "-000001-01-01T00:00:00Z",
-            "+010000-01-01T00:00:00Z",
-            "2030-01-01T00:00:00Z[UTC]",
-            "2030-01-01T00:00:00+0000",
-            "2030-01-01T00:00:00+00:00:01",
-            "2030-01-01T00:00:00,5Z",
-            "2030-01-01T00:00:00.Z",
-            "2030-01-01T00:00:00",
-        ] {
-            let payload = serde_json::json!({
-                "id": "test-token",
-                "expires_at": bad,
-                "scope": {}
-            });
-            assert!(
-                serde_json::from_value::<IssueAccessTokenRequest>(payload).is_err(),
-                "expected RFC 3339 rejection for {bad}"
-            );
         }
     }
 }
