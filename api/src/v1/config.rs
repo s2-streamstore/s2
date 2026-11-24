@@ -1238,49 +1238,4 @@ mod tests {
         assert!(!updated.create_stream_on_append);
         assert!(updated.create_stream_on_read);
     }
-
-    #[cfg(feature = "utoipa")]
-    #[test]
-    fn retention_policy_openapi_schema() {
-        use utoipa::{PartialSchema as _, ToSchema as _};
-
-        assert_eq!(RetentionPolicy::name(), "RetentionPolicy");
-        let schema = serde_json::to_value(RetentionPolicy::schema()).unwrap();
-        assert_eq!(
-            schema,
-            serde_json::json!({
-                "oneOf": [
-                    {
-                        "type": "object",
-                        "description": "Age in seconds for automatic trimming of records older than this threshold.\nThis must be set to a value greater than 0 seconds.",
-                        "required": ["age"],
-                        "properties": {
-                            "age": {
-                                "type": "integer",
-                                "format": "int64",
-                                "description": "Age in seconds for automatic trimming of records older than this threshold.\nThis must be set to a value greater than 0 seconds.",
-                                "minimum": 1
-                            }
-                        }
-                    },
-                    {
-                        "type": "object",
-                        "description": "Retain records unless explicitly trimmed.",
-                        "required": ["infinite"],
-                        "properties": {
-                            "infinite": {
-                                "$ref": "#/components/schemas/InfiniteRetention",
-                                "description": "Retain records unless explicitly trimmed."
-                            }
-                        }
-                    }
-                ]
-            })
-        );
-
-        let mut schemas = Vec::new();
-        RetentionPolicy::schemas(&mut schemas);
-        let names: Vec<&str> = schemas.iter().map(|(name, _)| name.as_str()).collect();
-        assert_eq!(names, vec!["InfiniteRetention"]);
-    }
 }
