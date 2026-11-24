@@ -3,19 +3,8 @@
 use std::{collections::BTreeMap, time::Duration};
 
 use colored::Colorize;
-use s2_sdk::types::{
-    AccumulationMetric, GaugeMetric, Metric, MetricUnit, RecordMetric, TimeseriesInterval,
-    Timestamp,
-};
+use s2_sdk::types::{AccumulationMetric, GaugeMetric, Metric, MetricUnit, RecordMetric, Timestamp};
 use serde_json::{Value, json};
-
-pub fn format_unit(unit: &MetricUnit) -> &str {
-    unit.as_str()
-}
-
-fn format_interval(interval: &TimeseriesInterval) -> &str {
-    interval.as_str()
-}
 
 /// `2h 5m` for a time in the past, by its two largest units, and `None` for one that is not (a
 /// clock behind the server's would otherwise give a negative age).
@@ -33,18 +22,18 @@ pub fn to_json(metrics: &[Metric]) -> Value {
         .map(|metric| match metric {
             Metric::Scalar(m) => json!({"scalar": {
                 "name": m.name,
-                "unit": format_unit(&m.unit),
+                "unit": m.unit.as_str(),
                 "value": m.value,
             }}),
             Metric::Accumulation(m) => json!({"accumulation": {
                 "name": m.name,
-                "unit": format_unit(&m.unit),
-                "interval": format_interval(&m.interval),
+                "unit": m.unit.as_str(),
+                "interval": m.interval.as_str(),
                 "values": m.values.iter().map(|(ts, v)| (ts.as_second(), *v)).collect::<Vec<_>>(),
             }}),
             Metric::Gauge(m) => json!({"gauge": {
                 "name": m.name,
-                "unit": format_unit(&m.unit),
+                "unit": m.unit.as_str(),
                 "values": m.values.iter().map(|(ts, v)| (ts.as_second(), *v)).collect::<Vec<_>>(),
             }}),
             Metric::Label(m) => json!({"label": {
@@ -224,7 +213,7 @@ pub fn render_sums(series: &[&AccumulationMetric]) -> String {
         let all = series.iter().fold(0.0, |all, series| all + sum(series));
         rows.push(("total".to_string(), value(&first.unit, all)));
     }
-    table(["", format_unit(&first.unit)], &rows, total)
+    table(["", first.unit.as_str()], &rows, total)
 }
 
 /// The latest value of a gauge, then its values over time: all of them, or of a long series, a
@@ -247,7 +236,7 @@ pub fn render_gauge(gauge: &GaugeMetric) -> String {
         .map(|(ts, point)| (ts.to_string(), value(&gauge.unit, point)))
         .collect();
 
-    let unit = format_unit(&gauge.unit);
+    let unit = gauge.unit.as_str();
     let mut out = format!(
         "{}: {} {unit} at {}\n\n{}",
         gauge.name,
@@ -300,6 +289,8 @@ pub fn render_estimated_billable_usage(metrics: &[Metric], by_interval: bool) ->
 
 #[cfg(test)]
 mod tests {
+    use s2_sdk::types::TimeseriesInterval;
+
     use super::*;
 
     fn series(name: &str, unit: &str, values: &[(u32, f64)]) -> AccumulationMetric {

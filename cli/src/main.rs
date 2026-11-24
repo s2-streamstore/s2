@@ -1211,8 +1211,6 @@ fn print_metrics(
     output: cli::MetricsOutput,
     range: Option<&s2_sdk::types::TimeRangeAndInterval>,
 ) {
-    use metrics::format_unit;
-
     if output == cli::MetricsOutput::Json {
         println!(
             "{}",
@@ -1247,7 +1245,7 @@ fn print_metrics(
     for metric in metrics {
         match metric {
             Metric::Scalar(m) => {
-                println!("{}: {} {}", m.name, m.value, format_unit(&m.unit));
+                println!("{}: {} {}", m.name, m.value, m.unit.as_str());
             }
             Metric::Accumulation(_) if summed => {}
             Metric::Accumulation(m) => {
@@ -1269,7 +1267,7 @@ fn print_metrics(
                 );
 
                 let interval_col = "interval start time".to_string();
-                let count_col = format_unit(&m.unit).to_string();
+                let count_col = m.unit.as_str().to_string();
                 table.with(
                     tabled::settings::Modify::new(tabled::settings::object::Cell::new(0, 0))
                         .with(tabled::settings::Format::content(|_| interval_col.clone())),
