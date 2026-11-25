@@ -5,7 +5,7 @@ use std::{
     pin::{Pin, pin},
     sync::{
         Arc, Mutex as StdMutex,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering},
     },
     task::{Context, Poll},
     time::Duration,
@@ -17,7 +17,7 @@ use futures_util::{FutureExt, StreamExt};
 use s2_api::v1::stream::{proto, s2s};
 use tokio::{
     sync::{Notify, mpsc, oneshot, watch},
-    time::{Instant, Sleep},
+    time::Instant,
 };
 use tracing::{Instrument, debug, debug_span};
 
@@ -34,8 +34,8 @@ use crate::{
     send_gate::attempt_ended_io_error,
     session::StreamHeaders,
     types::{
-        AppendAck, AppendInput, AppendRetryPolicy, BasinName, ONE_MIB, StreamConfig, StreamName,
-        StreamPosition,
+        AppendAck, AppendInput, AppendRecord, AppendRetryPolicy, BasinName, ONE_MIB, StreamConfig,
+        StreamName, StreamPosition, append_input_parts_encoded_len, encode_append_input_parts,
     },
 };
 
@@ -306,6 +306,12 @@ enum LifecycleState {
     Closed(Result<(), AppendSessionError>),
 }
 
+const PHASE_OPEN: u8 = 0;
+const PHASE_CLOSING_CLEAN: u8 = 1;
+const PHASE_CLOSING_ERR: u8 = 2;
+const PHASE_CLOSED_CLEAN: u8 = 3;
+const PHASE_CLOSED_ERR: u8 = 4;
+
 /// Shared lifecycle coordination for [`AppendSession`] and [`Producer`](crate::producer::Producer).
 ///
 /// Guarantees:
@@ -315,20 +321,31 @@ enum LifecycleState {
 /// - Dropping a `close(&self)` future cancels only that wait (`T8`).
 pub(crate) struct SessionLifecycle {
     state: watch::Sender<LifecycleState>,
+    phase: AtomicU8,
 }
 
 impl SessionLifecycle {
     pub(crate) fn new() -> Self {
         let (state, _) = watch::channel(LifecycleState::Open);
-        Self { state }
+        Self {
+            state,
+            phase: AtomicU8::new(PHASE_OPEN),
+        }
     }
 
     pub(crate) fn is_closing_or_closed(&self) -> bool {
-        !matches!(*self.state.borrow(), LifecycleState::Open)
+        self.phase.load(Ordering::Acquire) != PHASE_OPEN
     }
 
     pub(crate) fn is_closed(&self) -> bool {
-        matches!(*self.state.borrow(), LifecycleState::Closed(_))
+        self.phase.load(Ordering::Acquire) >= PHASE_CLOSED_CLEAN
+    }
+
+    pub(crate) fn has_terminal_err(&self) -> bool {
+        matches!(
+            self.phase.load(Ordering::Acquire),
+            PHASE_CLOSING_ERR | PHASE_CLOSED_ERR
+        )
     }
 
     /// Transition `Open -> Closing { failure: None }`. Returns `true` if this call performed the
@@ -337,6 +354,7 @@ impl SessionLifecycle {
         self.state.send_if_modified(|s| {
             if matches!(s, LifecycleState::Open) {
                 *s = LifecycleState::Closing { failure: None };
+                self.phase.store(PHASE_CLOSING_CLEAN, Ordering::Release);
                 true
             } else {
                 false
@@ -348,6 +366,7 @@ impl SessionLifecycle {
         self.state.send_if_modified(|s| match s {
             LifecycleState::Open | LifecycleState::Closing { .. } => {
                 *s = LifecycleState::Closing { failure: Some(err) };
+                self.phase.store(PHASE_CLOSING_ERR, Ordering::Release);
                 true
             }
             LifecycleState::Closed(_) => false,
@@ -355,6 +374,9 @@ impl SessionLifecycle {
     }
 
     pub(crate) fn terminal_err(&self) -> Option<AppendSessionError> {
+        if !self.has_terminal_err() {
+            return None;
+        }
         match &*self.state.borrow() {
             LifecycleState::Open => None,
             LifecycleState::Closing { failure } => failure.clone(),
@@ -374,13 +396,22 @@ impl SessionLifecycle {
             if matches!(s, LifecycleState::Closed(_)) {
                 false
             } else {
+                let phase = if result.is_ok() {
+                    PHASE_CLOSED_CLEAN
+                } else {
+                    PHASE_CLOSED_ERR
+                };
                 *s = LifecycleState::Closed(result);
+                self.phase.store(phase, Ordering::Release);
                 true
             }
         });
     }
 
     pub(crate) async fn wait_closing_or_closed(&self) {
+        if self.is_closing_or_closed() {
+            return;
+        }
         let mut rx = self.state.subscribe();
         let _ = rx.wait_for(|s| !matches!(s, LifecycleState::Open)).await;
     }
@@ -582,22 +613,38 @@ impl AppendSessionCore {
         input: AppendInput,
         permit: Option<AppendPermit>,
     ) -> Result<BatchSubmitTicket, AppendSessionError> {
+        self.submit_parts(
+            input.records(),
+            input.match_seq_num(),
+            input.fencing_token().map(AsRef::as_ref),
+            permit,
+        )
+    }
+
+    pub(crate) fn submit_parts(
+        &self,
+        records: &[AppendRecord],
+        match_seq_num: Option<u64>,
+        fencing_token: Option<&str>,
+        permit: Option<AppendPermit>,
+    ) -> Result<BatchSubmitTicket, AppendSessionError> {
         if self.lifecycle.is_closing_or_closed() || self.abort.is_cancelled() {
             return Err(self.session_closed_err_on_submit());
         }
 
         // Encode and compress on the caller task before taking the gate so the session task stays
         // focused on network I/O and state transitions.
-        let record_count = input.records().len() as u64;
-        let api_input = input.into_proto();
-        let frame = s2s::SessionMessage::regular(self.compression, &api_input)
-            .map_err(|err| {
-                AppendSessionError::Protocol(ProtocolError::new_definite(
-                    format!("failed to encode append frame: {err}"),
-                    self.context.clone(),
-                ))
-            })?
-            .encode();
+        let record_count = records.len() as u64;
+        let encoded_len = append_input_parts_encoded_len(records, match_seq_num, fencing_token);
+        let frame = s2s::encode_regular_frame_with(self.compression, encoded_len, |buf| {
+            encode_append_input_parts(records, match_seq_num, fencing_token, buf);
+        })
+        .map_err(|err| {
+            AppendSessionError::Protocol(ProtocolError::new_definite(
+                format!("failed to encode append frame: {err}"),
+                self.context.clone(),
+            ))
+        })?;
 
         let (ack_tx, ack_rx) = oneshot::channel();
         {
@@ -732,8 +779,8 @@ impl AppendSession {
             .validate_for_write()
             .map_err(|e| self.core.context.format_validation(e))?;
         let bytes = input.metered_bytes();
-        let permit = self.reserve(bytes).await?;
-        permit.submit_validated(input, bytes)
+        let append_permit = self.acquire_permit(bytes).await?;
+        self.core.submit(input, Some(append_permit))
     }
 
     /// Reserve capacity for a batch of up to `bytes` metered bytes to be submitted.
@@ -750,8 +797,22 @@ impl AppendSession {
     /// releases any partially acquired reservation.
     pub async fn reserve(&self, bytes: usize) -> Result<BatchSubmitPermit, AppendSessionError> {
         validate_reserve_bytes(bytes, ONE_MIB, &self.core.context)?;
+        let append_permit = self.acquire_permit(bytes).await?;
 
+        Ok(BatchSubmitPermit {
+            append_permit,
+            reserved_bytes: bytes,
+            core: self.core.clone(),
+        })
+    }
+
+    async fn acquire_permit(&self, bytes: usize) -> Result<AppendPermit, AppendSessionError> {
         self.check_open_for_reserve().await?;
+
+        if let Some(permit) = self.permits.try_acquire(bytes) {
+            self.check_open_for_reserve().await?;
+            return Ok(permit);
+        }
 
         let append_permit = tokio::select! {
             biased;
@@ -762,12 +823,7 @@ impl AppendSession {
         };
 
         self.check_open_for_reserve().await?;
-
-        Ok(BatchSubmitPermit {
-            append_permit,
-            reserved_bytes: bytes,
-            core: self.core.clone(),
-        })
+        Ok(append_permit)
     }
 
     async fn check_open_for_reserve(&self) -> Result<(), AppendSessionError> {
@@ -940,15 +996,15 @@ impl PermitsState {
         self.available_bytes -= bytes;
     }
 
-    fn release(&mut self, bytes: usize) {
+    fn release(&mut self, bytes: usize, has_waiters: &AtomicBool) {
         if let Some(c) = self.available_batches.as_mut() {
             *c += 1;
         }
         self.available_bytes += bytes;
-        self.grant_next();
+        self.grant_next(has_waiters);
     }
 
-    fn grant_next(&mut self) {
+    fn grant_next(&mut self, has_waiters: &AtomicBool) {
         while let Some(front) = self.waiters.front() {
             if !self.can_satisfy(front.bytes) {
                 break;
@@ -963,11 +1019,19 @@ impl PermitsState {
                 self.available_bytes += waiter.bytes;
             }
         }
+        if self.waiters.is_empty() {
+            has_waiters.store(false, Ordering::Release);
+        }
     }
 }
 
+struct PermitsInner {
+    state: StdMutex<PermitsState>,
+    has_waiters: AtomicBool,
+}
+
 pub(crate) struct AppendPermit {
-    inner: Arc<StdMutex<PermitsState>>,
+    inner: Arc<PermitsInner>,
     bytes: usize,
     has_batch_slot: bool,
 }
@@ -986,9 +1050,9 @@ impl AppendPermit {
         if new_bytes < self.bytes {
             let excess = self.bytes - new_bytes;
             self.bytes = new_bytes;
-            let mut state = self.inner.lock().unwrap();
+            let mut state = self.inner.state.lock().unwrap();
             state.available_bytes += excess;
-            state.grant_next();
+            state.grant_next(&self.inner.has_waiters);
         }
     }
 
@@ -1009,41 +1073,43 @@ impl Drop for AppendPermit {
         if self.bytes == 0 && !self.has_batch_slot {
             return;
         }
-        let mut state = self.inner.lock().unwrap();
-        state.release(self.bytes);
+        let mut state = self.inner.state.lock().unwrap();
+        state.release(self.bytes, &self.inner.has_waiters);
     }
 }
 
 #[derive(Clone)]
 pub(crate) struct AppendPermits {
-    inner: Arc<StdMutex<PermitsState>>,
+    inner: Arc<PermitsInner>,
 }
 
 impl AppendPermits {
     pub(crate) fn new(count_permits: Option<usize>, bytes_permits: usize) -> Self {
         Self {
-            inner: Arc::new(StdMutex::new(PermitsState {
-                available_batches: count_permits,
-                total_bytes: bytes_permits,
-                available_bytes: bytes_permits,
-                next_waiter_id: 0,
-                waiters: VecDeque::new(),
-            })),
+            inner: Arc::new(PermitsInner {
+                state: StdMutex::new(PermitsState {
+                    available_batches: count_permits,
+                    total_bytes: bytes_permits,
+                    available_bytes: bytes_permits,
+                    next_waiter_id: 0,
+                    waiters: VecDeque::new(),
+                }),
+                has_waiters: AtomicBool::new(false),
+            }),
         }
     }
 
     pub(crate) fn in_flight_bytes(&self) -> usize {
-        let state = self.inner.lock().unwrap();
+        let state = self.inner.state.lock().unwrap();
         state.total_bytes - state.available_bytes
     }
 
     pub(crate) fn has_waiters(&self) -> bool {
-        !self.inner.lock().unwrap().waiters.is_empty()
+        self.inner.has_waiters.load(Ordering::Acquire)
     }
 
-    #[cfg(test)]
-    fn try_acquire(&self, bytes: usize) -> Option<AppendPermit> {
-        let mut state = self.inner.lock().unwrap();
+    pub(crate) fn try_acquire(&self, bytes: usize) -> Option<AppendPermit> {
+        let mut state = self.inner.state.lock().unwrap();
         if state.waiters.is_empty() && state.can_satisfy(bytes) {
             let has_batch_slot = state.available_batches.is_some();
             state.take(bytes);
@@ -1061,15 +1127,15 @@ impl AppendPermits {
         self.acquire_inner(bytes, None).await
     }
 
-    /// Acquire capacity FIFO, notifying `on_wait` strictly after enqueueing this waiter so a
-    /// woken consumer is guaranteed to observe `has_waiters() == true` (`A5a`).
+    /// Acquire capacity FIFO, notifying `on_wait` strictly after enqueueing the first waiter
+    /// (`0 -> 1`) so a woken consumer is guaranteed to observe `has_waiters() == true` (`A5a`).
     pub(crate) async fn acquire_notifying(&self, bytes: usize, on_wait: &Notify) -> AppendPermit {
         self.acquire_inner(bytes, Some(on_wait)).await
     }
 
     async fn acquire_inner(&self, bytes: usize, on_wait: Option<&Notify>) -> AppendPermit {
         struct AcquireGuard<'a> {
-            inner: &'a StdMutex<PermitsState>,
+            inner: &'a PermitsInner,
             id: u64,
             bytes: usize,
             rx: oneshot::Receiver<()>,
@@ -1081,19 +1147,19 @@ impl AppendPermits {
                 if self.acquired {
                     return;
                 }
-                let mut state = self.inner.lock().unwrap();
+                let mut state = self.inner.state.lock().unwrap();
                 if let Some(pos) = state.waiters.iter().position(|w| w.id == self.id) {
                     state.waiters.remove(pos);
-                    state.grant_next();
+                    state.grant_next(&self.inner.has_waiters);
                 } else if self.rx.try_recv().is_ok() {
                     // Grant raced with cancellation; refund immediately.
-                    state.release(self.bytes);
+                    state.release(self.bytes, &self.inner.has_waiters);
                 }
             }
         }
 
-        let (has_batch_slot, mut guard) = {
-            let mut state = self.inner.lock().unwrap();
+        let (has_batch_slot, was_empty, mut guard) = {
+            let mut state = self.inner.state.lock().unwrap();
             let has_batch_slot = state.available_batches.is_some();
             if state.waiters.is_empty() && state.can_satisfy(bytes) {
                 state.take(bytes);
@@ -1103,6 +1169,7 @@ impl AppendPermits {
                     has_batch_slot,
                 };
             }
+            let was_empty = state.waiters.is_empty();
             let id = state.next_waiter_id;
             state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
             let (tx, rx) = oneshot::channel();
@@ -1111,8 +1178,12 @@ impl AppendPermits {
                 bytes,
                 granted: tx,
             });
+            if was_empty {
+                self.inner.has_waiters.store(true, Ordering::Release);
+            }
             (
                 has_batch_slot,
+                was_empty,
                 AcquireGuard {
                     inner: &self.inner,
                     id,
@@ -1123,7 +1194,7 @@ impl AppendPermits {
             )
         };
 
-        if let Some(notify) = on_wait {
+        if was_empty && let Some(notify) = on_wait {
             notify.notify_one();
         }
 
@@ -1167,7 +1238,6 @@ impl SessionState {
             _permit: permit,
             sent_ever: false,
             prior_uncertainty: false,
-            attempt_last_byte_rx: None,
         });
     }
 
@@ -1189,7 +1259,6 @@ struct InflightAppend {
     _permit: Option<AppendPermit>,
     sent_ever: bool,
     prior_uncertainty: bool,
-    attempt_last_byte_rx: Option<oneshot::Receiver<Instant>>,
 }
 
 enum Command {
@@ -1202,78 +1271,186 @@ enum Command {
     Close,
 }
 
-/// Race-free gate between the session task and `AttemptBodyStream` (`Terms: Sent`, `T6a`, `T10`).
-struct AttemptSendGate {
-    stopped: bool,
-    draining: bool,
-    batches_started: usize,
+const GATE_STOPPED: u64 = 1 << 63;
+const GATE_DRAINING: u64 = 1 << 62;
+const GATE_COUNT_MASK: u64 = (1 << 62) - 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GateState {
+    Open,
+    Draining,
+    Stopped,
 }
 
-impl AttemptSendGate {
-    fn new() -> Arc<StdMutex<Self>> {
-        Arc::new(StdMutex::new(Self {
-            stopped: false,
-            draining: false,
-            batches_started: 0,
-        }))
+struct FinishLog {
+    base_idx: usize,
+    times_ns: VecDeque<u64>,
+}
+
+/// Shared lock-free gate and lazy timeout telemetry between `AppendSessionTask::run_attempt` and
+/// `AttemptBodyStream` (`Terms: Sent`, `T6a`, `T7c`, `T10`).
+struct AttemptSync {
+    epoch: Instant,
+    /// Bit 63: STOPPED, Bit 62: DRAINING, Bits 0..62: `batches_started`.
+    gate: AtomicU64,
+    /// Latest chunk write progress in nanoseconds since `epoch`.
+    last_write_progress_ns: AtomicU64,
+    /// `0` while body stream is alive; `elapsed_nanos + 1` once dropped by hyper.
+    body_dropped_at_ns: AtomicU64,
+    /// Per-batch last-byte handoff timestamps (nanos since `epoch`), indexed by attempt batch idx.
+    finish_log: StdMutex<FinishLog>,
+}
+
+impl AttemptSync {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            epoch: Instant::now(),
+            gate: AtomicU64::new(0),
+            last_write_progress_ns: AtomicU64::new(0),
+            body_dropped_at_ns: AtomicU64::new(0),
+            finish_log: StdMutex::new(FinishLog {
+                base_idx: 0,
+                times_ns: VecDeque::new(),
+            }),
+        })
     }
 
-    fn stop(gate: &StdMutex<Self>) -> usize {
-        let mut g = gate.lock().unwrap();
-        g.stopped = true;
-        g.batches_started
+    fn elapsed_ns(&self) -> u64 {
+        self.epoch.elapsed().as_nanos().min((u64::MAX - 1) as u128) as u64
     }
 
-    fn start_draining(gate: &StdMutex<Self>) -> usize {
-        let mut g = gate.lock().unwrap();
-        g.draining = true;
-        g.batches_started
+    fn stop(&self) -> usize {
+        (self.gate.fetch_or(GATE_STOPPED, Ordering::AcqRel) & GATE_COUNT_MASK) as usize
     }
 
-    fn batches_started(gate: &StdMutex<Self>) -> usize {
-        gate.lock().unwrap().batches_started
+    fn start_draining(&self) -> usize {
+        (self.gate.fetch_or(GATE_DRAINING, Ordering::AcqRel) & GATE_COUNT_MASK) as usize
+    }
+
+    fn batches_started(&self) -> usize {
+        (self.gate.load(Ordering::Acquire) & GATE_COUNT_MASK) as usize
+    }
+
+    fn is_stopped(&self) -> bool {
+        (self.gate.load(Ordering::Acquire) & GATE_STOPPED) != 0
+    }
+
+    fn check_before_recv(&self) -> GateState {
+        let v = self.gate.load(Ordering::Acquire);
+        if v & GATE_STOPPED != 0 {
+            GateState::Stopped
+        } else if v & GATE_DRAINING != 0 {
+            GateState::Draining
+        } else {
+            GateState::Open
+        }
+    }
+
+    fn try_start_batch(&self) -> GateState {
+        let mut cur = self.gate.load(Ordering::Acquire);
+        loop {
+            if cur & GATE_STOPPED != 0 {
+                return GateState::Stopped;
+            }
+            if cur & GATE_DRAINING != 0 {
+                return GateState::Draining;
+            }
+            debug_assert!((cur & GATE_COUNT_MASK) < GATE_COUNT_MASK);
+            match self
+                .gate
+                .compare_exchange_weak(cur, cur + 1, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => return GateState::Open,
+                Err(actual) => cur = actual,
+            }
+        }
+    }
+
+    fn record_write_progress(&self) {
+        self.last_write_progress_ns
+            .store(self.elapsed_ns(), Ordering::Release);
+    }
+
+    fn last_write_progress(&self) -> Instant {
+        let ns = self.last_write_progress_ns.load(Ordering::Acquire);
+        self.epoch + Duration::from_nanos(ns)
+    }
+
+    fn record_batch_finished(&self) {
+        let ns = self.elapsed_ns();
+        self.finish_log.lock().unwrap().times_ns.push_back(ns);
+    }
+
+    fn finish_time(&self, batch_idx: usize) -> Option<Instant> {
+        let log = self.finish_log.lock().unwrap();
+        let offset = batch_idx.checked_sub(log.base_idx)?;
+        let ns = *log.times_ns.get(offset)?;
+        Some(self.epoch + Duration::from_nanos(ns))
+    }
+
+    fn prune_finished(&self, acked_in_attempt: usize) {
+        let mut log = self.finish_log.lock().unwrap();
+        let drop_count = acked_in_attempt
+            .saturating_sub(log.base_idx)
+            .min(log.times_ns.len());
+        if drop_count > 0 {
+            log.times_ns.drain(..drop_count);
+            log.base_idx += drop_count;
+        }
+    }
+
+    fn mark_body_dropped(&self) {
+        let encoded = self.elapsed_ns() + 1;
+        let _ = self.body_dropped_at_ns.compare_exchange(
+            0,
+            encoded,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    }
+
+    fn body_dropped_at(&self) -> Option<Instant> {
+        let encoded = self.body_dropped_at_ns.load(Ordering::Acquire);
+        if encoded == 0 {
+            None
+        } else {
+            Some(self.epoch + Duration::from_nanos(encoded - 1))
+        }
     }
 }
 
-struct OutboundBatch {
-    remaining: Bytes,
-    last_byte_tx: Option<oneshot::Sender<Instant>>,
+struct AttemptBodyStream {
+    rx: mpsc::Receiver<Bytes>,
+    current: Option<Bytes>,
+    sync: Arc<AttemptSync>,
+    aborted: bool,
 }
 
-impl OutboundBatch {
-    fn next_chunk(&mut self) -> Bytes {
-        let take_len = self.remaining.len().min(FRAME_CHUNK_BYTES);
-        let chunk = self.remaining.split_to(take_len);
-        if self.remaining.is_empty()
-            && let Some(tx) = self.last_byte_tx.take()
-        {
-            let _ = tx.send(Instant::now());
+impl AttemptBodyStream {
+    fn new(rx: mpsc::Receiver<Bytes>, sync: Arc<AttemptSync>) -> Self {
+        Self {
+            rx,
+            current: None,
+            sync,
+            aborted: false,
+        }
+    }
+
+    fn take_chunk(sync: &AttemptSync, remaining: &mut Bytes) -> Bytes {
+        let take_len = remaining.len().min(FRAME_CHUNK_BYTES);
+        let chunk = remaining.split_to(take_len);
+        if remaining.is_empty() {
+            sync.record_batch_finished();
+        } else {
+            sync.record_write_progress();
         }
         chunk
     }
 }
 
-struct AttemptBodyStream {
-    rx: mpsc::Receiver<OutboundBatch>,
-    current: Option<OutboundBatch>,
-    gate: Arc<StdMutex<AttemptSendGate>>,
-    write_progress_tx: watch::Sender<Instant>,
-    aborted: bool,
-}
-
-impl AttemptBodyStream {
-    fn new(
-        rx: mpsc::Receiver<OutboundBatch>,
-        gate: Arc<StdMutex<AttemptSendGate>>,
-        write_progress_tx: watch::Sender<Instant>,
-    ) -> Self {
-        Self {
-            rx,
-            current: None,
-            gate,
-            write_progress_tx,
-            aborted: false,
-        }
+impl Drop for AttemptBodyStream {
+    fn drop(&mut self) {
+        self.sync.mark_body_dropped();
     }
 }
 
@@ -1286,58 +1463,50 @@ impl Stream for AttemptBodyStream {
             return Poll::Ready(None);
         }
 
-        if let Some(active) = this.current.as_mut() {
-            if this.gate.lock().unwrap().stopped {
+        if let Some(remaining) = this.current.as_mut() {
+            if this.sync.is_stopped() {
                 this.current = None;
                 this.aborted = true;
                 return Poll::Ready(Some(Err(attempt_ended_io_error())));
             }
-            let chunk = active.next_chunk();
-            if active.remaining.is_empty() {
+            let chunk = Self::take_chunk(&this.sync, remaining);
+            if remaining.is_empty() {
                 this.current = None;
-            } else {
-                this.write_progress_tx.send_replace(Instant::now());
             }
             return Poll::Ready(Some(Ok(chunk)));
         }
 
-        {
-            let gate = this.gate.lock().unwrap();
-            if gate.stopped {
+        match this.sync.check_before_recv() {
+            GateState::Stopped => {
                 this.aborted = true;
                 return Poll::Ready(Some(Err(attempt_ended_io_error())));
             }
-            if gate.draining {
-                return Poll::Ready(None);
-            }
+            GateState::Draining => return Poll::Ready(None),
+            GateState::Open => {}
         }
 
         match this.rx.poll_recv(cx) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(None) => {
-                if this.gate.lock().unwrap().stopped {
+                if this.sync.is_stopped() {
                     this.aborted = true;
                     Poll::Ready(Some(Err(attempt_ended_io_error())))
                 } else {
                     Poll::Ready(None)
                 }
             }
-            Poll::Ready(Some(mut batch)) => {
-                {
-                    let mut gate = this.gate.lock().unwrap();
-                    if gate.stopped {
+            Poll::Ready(Some(mut remaining)) => {
+                match this.sync.try_start_batch() {
+                    GateState::Stopped => {
                         this.aborted = true;
                         return Poll::Ready(Some(Err(attempt_ended_io_error())));
                     }
-                    if gate.draining {
-                        return Poll::Ready(None);
-                    }
-                    gate.batches_started += 1;
+                    GateState::Draining => return Poll::Ready(None),
+                    GateState::Open => {}
                 }
-                let chunk = batch.next_chunk();
-                if !batch.remaining.is_empty() {
-                    this.write_progress_tx.send_replace(Instant::now());
-                    this.current = Some(batch);
+                let chunk = Self::take_chunk(&this.sync, &mut remaining);
+                if !remaining.is_empty() {
+                    this.current = Some(remaining);
                 }
                 Poll::Ready(Some(Ok(chunk)))
             }
@@ -1741,13 +1910,12 @@ impl AppendSessionTask {
         advised_reconnects: &mut AdvisedReconnects,
         attempt: u32,
     ) -> AttemptResult {
-        for append in &mut self.state.inflight_appends {
-            append.attempt_last_byte_rx = None;
-        }
-        let send_gate = AttemptSendGate::new();
-        let (input_tx, input_rx) = mpsc::channel::<OutboundBatch>(1);
-        let (write_progress_tx, mut write_progress_rx) = watch::channel(Instant::now());
-        let body_stream = AttemptBodyStream::new(input_rx, send_gate.clone(), write_progress_tx);
+        let sync = AttemptSync::new();
+        let (input_tx, input_rx) = mpsc::channel::<Bytes>(16);
+        let body_stream = AttemptBodyStream::new(input_rx, sync.clone());
+
+        let abort = self.abort.clone();
+        let mut abort_fut = pin!(abort.cancelled());
 
         let connect_fut =
             self.client
@@ -1755,14 +1923,14 @@ impl AppendSessionTask {
 
         let mut acks = tokio::select! {
             biased;
-            _ = self.abort.cancelled() => {
-                AttemptSendGate::stop(&send_gate);
+            _ = abort_fut.as_mut() => {
+                sync.stop();
                 return AttemptResult::Aborted(self.abort.reason());
             }
             res = connect_fut => match res {
                 Ok(s) => s,
                 Err(err) => {
-                    AttemptSendGate::stop(&send_gate);
+                    sync.stop();
                     if let Some(reason) = self.check_abort() {
                         return AttemptResult::Aborted(reason);
                     }
@@ -1784,14 +1952,33 @@ impl AppendSessionTask {
         let mut became_oldest_at: Option<Instant> =
             (!self.state.inflight_appends.is_empty()).then(Instant::now);
         let mut ack_timer = pin!(tokio::time::sleep(Duration::ZERO));
-        let mut timer_kind: Option<TimerKind> = None;
-        let mut write_progress_open = true;
+        let mut ack_timer_armed = false;
 
         loop {
             if self.state.is_close_complete() {
                 drop(input_tx);
                 drop(acks);
                 return AttemptResult::Closed;
+            }
+
+            // Eagerly enqueue ready frames into the bounded body channel without entering
+            // `select!` when slots are available.
+            if !draining_for_reconnect && let Some(tx) = input_tx.as_ref() {
+                let mut closed = false;
+                while send_cursor < self.state.inflight_appends.len() {
+                    let frame = self.state.inflight_appends[send_cursor].frame.clone();
+                    match tx.try_send(frame) {
+                        Ok(()) => send_cursor += 1,
+                        Err(mpsc::error::TrySendError::Full(_)) => break,
+                        Err(mpsc::error::TrySendError::Closed(_)) => {
+                            closed = true;
+                            break;
+                        }
+                    }
+                }
+                if closed {
+                    input_tx = None;
+                }
             }
 
             if input_tx.is_none()
@@ -1802,45 +1989,22 @@ impl AppendSessionTask {
                 return AttemptResult::IdleEnded;
             }
 
-            // Advance the oldest unacked batch's timer: arm `TimerKind::Ack` once its last byte
-            // has been handed to hyper (`T7c`), or arm `TimerKind::WriteStall` while waiting for
-            // forward HTTP/2 send capacity so a peer withholding WINDOW_UPDATE cannot hang forever.
-            refresh_oldest_timer(
-                &mut self.state,
-                became_oldest_at,
-                ack_timeout,
-                ack_timer.as_mut(),
-                &mut timer_kind,
-                input_tx.is_some(),
-                &mut write_progress_rx,
-            );
-
-            // If the request body was dropped by hyper while batches remain unacked (not an
-            // advised drain), bound waiting for the server's response error or EOF.
-            if input_tx.is_none()
-                && !draining_for_reconnect
-                && !self.state.inflight_appends.is_empty()
-                && timer_kind.is_none()
+            // Lazily arm the watchdog timer once; while healthy traffic flows, it is never
+            // reset per batch or per chunk and only recomputed if the old deadline fires (`T7c`).
+            if !self.state.inflight_appends.is_empty()
+                && !ack_timer_armed
+                && let Some(deadline) = became_oldest_at
+                    .unwrap_or_else(Instant::now)
+                    .checked_add(ack_timeout)
             {
-                arm_timer(
-                    ack_timer.as_mut(),
-                    &mut timer_kind,
-                    TimerKind::BodyClosed,
-                    Instant::now(),
-                    ack_timeout,
-                );
+                ack_timer.as_mut().reset(deadline);
+                ack_timer_armed = true;
             }
 
             let can_send_more = input_tx.is_some()
                 && !draining_for_reconnect
                 && send_cursor < self.state.inflight_appends.len();
-            let wait_oldest_last_byte =
-                !matches!(timer_kind, Some(TimerKind::Ack | TimerKind::BodyClosed))
-                    && self
-                        .state
-                        .inflight_appends
-                        .front()
-                        .is_some_and(|f| f.attempt_last_byte_rx.is_some());
+            let timer_active = ack_timer_armed && !self.state.inflight_appends.is_empty();
 
             let mut drop_input_tx = false;
 
@@ -1851,7 +2015,7 @@ impl AppendSessionTask {
                 ack = acks.next() => {
                     match ack {
                         Some(Ok(frame)) => {
-                            let sent_unacked = AttemptSendGate::batches_started(&send_gate)
+                            let sent_unacked = sync.batches_started()
                                 .saturating_sub(acked_in_attempt);
                             match process_proto_ack(
                                 frame.msg,
@@ -1862,7 +2026,9 @@ impl AppendSessionTask {
                                 Ok(()) => {
                                     acked_in_attempt += 1;
                                     send_cursor = send_cursor.saturating_sub(1);
-                                    timer_kind = None;
+                                    if acked_in_attempt.is_multiple_of(64) {
+                                        sync.prune_finished(acked_in_attempt);
+                                    }
                                     became_oldest_at =
                                         (!self.state.inflight_appends.is_empty()).then(Instant::now);
                                     // T6a: Act on reconnect advice at most once per cooldown window
@@ -1875,12 +2041,11 @@ impl AppendSessionTask {
                                     {
                                         draining_for_reconnect = true;
                                         advised_reconnects.record();
-                                        AttemptSendGate::start_draining(&send_gate);
+                                        sync.start_draining();
                                         drop_input_tx = true;
                                     }
                                     if draining_for_reconnect
-                                        && AttemptSendGate::batches_started(&send_gate)
-                                            <= acked_in_attempt
+                                        && sync.batches_started() <= acked_in_attempt
                                     {
                                         drop(acks);
                                         return AttemptResult::ReconnectAdvised;
@@ -1888,7 +2053,7 @@ impl AppendSessionTask {
                                 }
                                 Err(err) => {
                                     let unacked_sent = finish_attempt_gate(
-                                        &send_gate,
+                                        &sync,
                                         acked_in_attempt,
                                         &mut self.state,
                                     );
@@ -1902,7 +2067,7 @@ impl AppendSessionTask {
                         }
                         Some(Err(err)) => {
                             let unacked_sent =
-                                finish_attempt_gate(&send_gate, acked_in_attempt, &mut self.state);
+                                finish_attempt_gate(&sync, acked_in_attempt, &mut self.state);
 
                             if let Some(reason) = self.check_abort() {
                                 return AttemptResult::Aborted(reason);
@@ -1926,7 +2091,7 @@ impl AppendSessionTask {
                         }
                         None => {
                             let unacked_sent =
-                                finish_attempt_gate(&send_gate, acked_in_attempt, &mut self.state);
+                                finish_attempt_gate(&sync, acked_in_attempt, &mut self.state);
 
                             if let Some(reason) = self.check_abort() {
                                 return AttemptResult::Aborted(reason);
@@ -1970,80 +2135,57 @@ impl AppendSessionTask {
                     }
                 }
 
-                _ = self.abort.cancelled() => {
+                _ = abort_fut.as_mut() => {
                     drain_ready_acks(
                         &mut acks,
                         &mut self.state,
-                        &send_gate,
+                        &sync,
                         &mut acked_in_attempt,
                         &mut send_cursor,
                         &self.context,
                     );
-                    finish_attempt_gate(&send_gate, acked_in_attempt, &mut self.state);
+                    finish_attempt_gate(&sync, acked_in_attempt, &mut self.state);
                     return AttemptResult::Aborted(self.abort.reason());
                 }
 
-                _ = &mut ack_timer, if timer_kind.is_some() => {
-                    // T7c: reconcile any already-ready last-byte or upload-progress update that
-                    // raced with the old deadline in this biased select before committing timeout.
-                    if timer_kind == Some(TimerKind::WriteStall) {
-                        let now = Instant::now();
-                        if let Some(front) = self.state.inflight_appends.front_mut()
-                            && let Some(rx) = front.attempt_last_byte_rx.as_mut()
-                        {
-                            match rx.try_recv() {
-                                Ok(sent_at) => {
-                                    front.attempt_last_byte_rx = None;
-                                    let start = became_oldest_at.map_or(sent_at, |b| b.max(sent_at));
-                                    arm_timer(
-                                        ack_timer.as_mut(),
-                                        &mut timer_kind,
-                                        TimerKind::Ack,
-                                        start,
-                                        ack_timeout,
-                                    );
-                                    if start.checked_add(ack_timeout).is_none_or(|dl| dl > now) {
-                                        continue;
-                                    }
-                                }
-                                Err(oneshot::error::TryRecvError::Closed) => {
-                                    front.attempt_last_byte_rx = None;
-                                    arm_timer(
-                                        ack_timer.as_mut(),
-                                        &mut timer_kind,
-                                        TimerKind::BodyClosed,
-                                        now,
-                                        ack_timeout,
-                                    );
-                                    continue;
-                                }
-                                Err(oneshot::error::TryRecvError::Empty) => {}
-                            }
+                _ = &mut ack_timer, if timer_active => {
+                    ack_timer_armed = false;
+                    let now = Instant::now();
+                    let (kind, start) = if let Some(sent_at) = sync.finish_time(acked_in_attempt) {
+                        (
+                            TimerKind::Ack,
+                            became_oldest_at.map_or(sent_at, |b| b.max(sent_at)),
+                        )
+                    } else if let Some(dropped_at) = sync.body_dropped_at() {
+                        (
+                            TimerKind::BodyClosed,
+                            became_oldest_at.map_or(dropped_at, |b| b.max(dropped_at)),
+                        )
+                    } else {
+                        let progress_at = sync.last_write_progress();
+                        (
+                            TimerKind::WriteStall,
+                            became_oldest_at.map_or(progress_at, |b| b.max(progress_at)),
+                        )
+                    };
+
+                    match start.checked_add(ack_timeout) {
+                        Some(deadline) if deadline > now => {
+                            ack_timer.as_mut().reset(deadline);
+                            ack_timer_armed = true;
+                            continue;
                         }
-                        if timer_kind == Some(TimerKind::WriteStall)
-                            && write_progress_open
-                            && write_progress_rx.has_changed().unwrap_or(false)
-                        {
-                            let progress_at = *write_progress_rx.borrow_and_update();
-                            if progress_at.checked_add(ack_timeout).is_none_or(|dl| dl > now) {
-                                arm_timer(
-                                    ack_timer.as_mut(),
-                                    &mut timer_kind,
-                                    TimerKind::WriteStall,
-                                    progress_at,
-                                    ack_timeout,
-                                );
-                                continue;
-                            }
-                        }
+                        None => continue,
+                        Some(_) => {}
                     }
+
                     acks.retire_connection();
                     let unacked_sent =
-                        finish_attempt_gate(&send_gate, acked_in_attempt, &mut self.state);
+                        finish_attempt_gate(&sync, acked_in_attempt, &mut self.state);
                     if self.state.inflight_appends.is_empty() {
                         return AttemptResult::IdleEnded;
                     }
-                    let err = match timer_kind.expect("timer_kind is Some") {
+                    let err = match kind {
                         TimerKind::WriteStall => AppendSessionError::Timeout(TimeoutError::new_with_context(
                             "append write timed out",
                             self.context.clone(),
@@ -2067,60 +2209,6 @@ impl AppendSessionTask {
                     };
                 }
 
-                sent_at = async {
-                    self.state
-                        .inflight_appends
-                        .front_mut()
-                        .expect("front exists")
-                        .attempt_last_byte_rx
-                        .as_mut()
-                        .expect("rx exists")
-                        .await
-                }, if wait_oldest_last_byte => {
-                    if let Some(front) = self.state.inflight_appends.front_mut() {
-                        front.attempt_last_byte_rx = None;
-                        match sent_at {
-                            Ok(sent_at) => {
-                                let start = became_oldest_at.map_or(sent_at, |b| b.max(sent_at));
-                                arm_timer(
-                                    ack_timer.as_mut(),
-                                    &mut timer_kind,
-                                    TimerKind::Ack,
-                                    start,
-                                    ack_timeout,
-                                );
-                            }
-                            Err(_) => {
-                                arm_timer(
-                                    ack_timer.as_mut(),
-                                    &mut timer_kind,
-                                    TimerKind::BodyClosed,
-                                    Instant::now(),
-                                    ack_timeout,
-                                );
-                            }
-                        }
-                    }
-                }
-
-                changed = write_progress_rx.changed(), if write_progress_open && timer_kind == Some(TimerKind::WriteStall) => {
-                    match changed {
-                        Ok(()) => {
-                            let progress_at = *write_progress_rx.borrow_and_update();
-                            arm_timer(
-                                ack_timer.as_mut(),
-                                &mut timer_kind,
-                                TimerKind::WriteStall,
-                                progress_at,
-                                ack_timeout,
-                            );
-                        }
-                        Err(_) => {
-                            write_progress_open = false;
-                        }
-                    }
-                }
-
                 permit = async {
                     input_tx
                         .as_ref()
@@ -2130,57 +2218,64 @@ impl AppendSessionTask {
                 }, if can_send_more => {
                     match permit {
                         Ok(permit) => {
-                            let append = &mut self.state.inflight_appends[send_cursor];
-                            let (last_byte_tx, last_byte_rx) = oneshot::channel();
-                            append.attempt_last_byte_rx = Some(last_byte_rx);
-                            permit.send(OutboundBatch {
-                                remaining: append.frame.clone(),
-                                last_byte_tx: Some(last_byte_tx),
-                            });
+                            let frame = self.state.inflight_appends[send_cursor].frame.clone();
+                            permit.send(frame);
                             send_cursor += 1;
                         }
                         Err(_) => {
                             // Hyper dropped the request body stream (e.g. server replied with a
                             // terminal error or reset the stream). Stop sending and stay in the
                             // loop so `acks.next()` drains all buffered acks and surfaces the real
-                            // terminal server error or EOF (`T10`, `A6a`). The next iteration arms
-                            // `TimerKind::BodyClosed` if batches remain unacked.
+                            // terminal server error or EOF (`T10`, `A6a`).
                             drop_input_tx = true;
-                            if timer_kind == Some(TimerKind::WriteStall) {
-                                timer_kind = None;
-                            }
                         }
                     }
                 }
 
                 cmd = self.state.cmd_rx.recv() => {
-                    match cmd {
-                        Some(Command::Submit {
-                            frame,
-                            record_count,
-                            ack_tx,
-                            permit,
-                        }) => {
-                            let was_empty = self.state.inflight_appends.is_empty();
-                            self.state.push_submit(frame, record_count, ack_tx, permit);
-                            if was_empty {
-                                became_oldest_at = Some(Instant::now());
+                    let mut first = cmd;
+                    for remaining in (0..32).rev() {
+                        match first {
+                            Some(Command::Submit {
+                                frame,
+                                record_count,
+                                ack_tx,
+                                permit,
+                            }) => {
+                                let was_empty = self.state.inflight_appends.is_empty();
+                                self.state.push_submit(frame, record_count, ack_tx, permit);
+                                if was_empty {
+                                    let now = Instant::now();
+                                    became_oldest_at = Some(now);
+                                    if ack_timer_armed && ack_timer.deadline() <= now {
+                                        ack_timer_armed = false;
+                                    }
+                                }
+                            }
+                            Some(Command::Close) => {
+                                self.state.closing = true;
+                                break;
+                            }
+                            None => {
+                                drain_ready_acks(
+                                    &mut acks,
+                                    &mut self.state,
+                                    &sync,
+                                    &mut acked_in_attempt,
+                                    &mut send_cursor,
+                                    &self.context,
+                                );
+                                finish_attempt_gate(&sync, acked_in_attempt, &mut self.state);
+                                return AttemptResult::Aborted(self.abort.dropped_msg());
                             }
                         }
-                        Some(Command::Close) => {
-                            self.state.closing = true;
+                        if remaining == 0 {
+                            break;
                         }
-                        None => {
-                            drain_ready_acks(
-                                &mut acks,
-                                &mut self.state,
-                                &send_gate,
-                                &mut acked_in_attempt,
-                                &mut send_cursor,
-                                &self.context,
-                            );
-                            finish_attempt_gate(&send_gate, acked_in_attempt, &mut self.state);
-                            return AttemptResult::Aborted(self.abort.dropped_msg());
+                        match self.state.cmd_rx.try_recv() {
+                            Ok(next) => first = Some(next),
+                            Err(mpsc::error::TryRecvError::Empty) => break,
+                            Err(mpsc::error::TryRecvError::Disconnected) => first = None,
                         }
                     }
                 }
@@ -2193,78 +2288,12 @@ impl AppendSessionTask {
     }
 }
 
-fn arm_timer(
-    ack_timer: Pin<&mut Sleep>,
-    timer_kind: &mut Option<TimerKind>,
-    kind: TimerKind,
-    start: Instant,
-    ack_timeout: Duration,
-) {
-    if let Some(deadline) = start.checked_add(ack_timeout) {
-        ack_timer.reset(deadline);
-        *timer_kind = Some(kind);
-    } else {
-        *timer_kind = None;
-    }
-}
-
-fn refresh_oldest_timer(
-    state: &mut SessionState,
-    became_oldest_at: Option<Instant>,
-    ack_timeout: Duration,
-    ack_timer: Pin<&mut Sleep>,
-    timer_kind: &mut Option<TimerKind>,
-    input_tx_open: bool,
-    write_progress_rx: &mut watch::Receiver<Instant>,
-) {
-    if matches!(timer_kind, Some(TimerKind::Ack | TimerKind::BodyClosed)) {
-        return;
-    }
-    let Some(front) = state.inflight_appends.front_mut() else {
-        return;
-    };
-    let has_last_byte_rx = front.attempt_last_byte_rx.is_some();
-    if let Some(rx) = front.attempt_last_byte_rx.as_mut() {
-        match rx.try_recv() {
-            Ok(sent_at) => {
-                front.attempt_last_byte_rx = None;
-                let start = became_oldest_at.map_or(sent_at, |b| b.max(sent_at));
-                arm_timer(ack_timer, timer_kind, TimerKind::Ack, start, ack_timeout);
-                return;
-            }
-            Err(oneshot::error::TryRecvError::Empty) => {}
-            Err(oneshot::error::TryRecvError::Closed) => {
-                front.attempt_last_byte_rx = None;
-                arm_timer(
-                    ack_timer,
-                    timer_kind,
-                    TimerKind::BodyClosed,
-                    Instant::now(),
-                    ack_timeout,
-                );
-                return;
-            }
-        }
-    }
-    if timer_kind.is_none() && (input_tx_open || has_last_byte_rx) {
-        let _ = write_progress_rx.borrow_and_update();
-        let start = became_oldest_at.unwrap_or_else(Instant::now);
-        arm_timer(
-            ack_timer,
-            timer_kind,
-            TimerKind::WriteStall,
-            start,
-            ack_timeout,
-        );
-    }
-}
-
 fn finish_attempt_gate(
-    send_gate: &StdMutex<AttemptSendGate>,
+    sync: &AttemptSync,
     acked_in_attempt: usize,
     state: &mut SessionState,
 ) -> usize {
-    let batches_started = AttemptSendGate::stop(send_gate);
+    let batches_started = sync.stop();
     let unacked_sent = batches_started
         .saturating_sub(acked_in_attempt)
         .min(state.inflight_appends.len());
@@ -2278,7 +2307,7 @@ fn finish_attempt_gate(
 fn drain_ready_acks(
     acks: &mut Streaming<proto::AppendAck, AppendSessionError>,
     state: &mut SessionState,
-    send_gate: &StdMutex<AttemptSendGate>,
+    sync: &AttemptSync,
     acked_in_attempt: &mut usize,
     send_cursor: &mut usize,
     context: &ErrorContext,
@@ -2286,8 +2315,7 @@ fn drain_ready_acks(
     // Use `coop::unconstrained` so Tokio cooperative preemption cannot spuriously return
     // `Pending` and drop an already-buffered ack during abort (`T10`).
     while let Some(Some(Ok(frame))) = tokio::task::coop::unconstrained(acks.next()).now_or_never() {
-        let sent_unacked =
-            AttemptSendGate::batches_started(send_gate).saturating_sub(*acked_in_attempt);
+        let sent_unacked = sync.batches_started().saturating_sub(*acked_in_attempt);
         if process_proto_ack(frame.msg, state, sent_unacked, context).is_err() {
             break;
         }
@@ -2514,7 +2542,6 @@ mod tests {
                 _permit: None,
                 sent_ever: true,
                 prior_uncertainty: false,
-                attempt_last_byte_rx: None,
             }]),
             closing: false,
             prev_ack_end: Some(StreamPosition {
@@ -2563,46 +2590,67 @@ mod tests {
     async fn attempt_body_stream_draining_finishes_active_batch_and_skips_queued_batch() {
         use futures_util::StreamExt;
 
-        use super::{AttemptBodyStream, AttemptSendGate, FRAME_CHUNK_BYTES, OutboundBatch};
+        use super::{AttemptBodyStream, AttemptSync, FRAME_CHUNK_BYTES};
 
-        let gate = AttemptSendGate::new();
+        let sync = AttemptSync::new();
         let (tx, rx) = tokio::sync::mpsc::channel(2);
-        let (progress_tx, _progress_rx) = tokio::sync::watch::channel(tokio::time::Instant::now());
-        let mut stream = AttemptBodyStream::new(rx, gate.clone(), progress_tx);
+        let mut stream = AttemptBodyStream::new(rx, sync.clone());
 
         // Enqueue a 2-chunk batch and a 2nd queued batch.
-        let (last1_tx, mut last1_rx) = tokio::sync::oneshot::channel();
-        let (last2_tx, mut last2_rx) = tokio::sync::oneshot::channel();
-        tx.send(OutboundBatch {
-            remaining: Bytes::from(vec![0xAA; FRAME_CHUNK_BYTES + 16]),
-            last_byte_tx: Some(last1_tx),
-        })
-        .await
-        .unwrap();
-        tx.send(OutboundBatch {
-            remaining: Bytes::from_static(b"queued-second-batch"),
-            last_byte_tx: Some(last2_tx),
-        })
-        .await
-        .unwrap();
+        tx.send(Bytes::from(vec![0xAA; FRAME_CHUNK_BYTES + 16]))
+            .await
+            .unwrap();
+        tx.send(Bytes::from_static(b"queued-second-batch"))
+            .await
+            .unwrap();
 
         // First chunk starts batch 1.
         let first = stream.next().await.unwrap().unwrap();
         assert_eq!(first.len(), FRAME_CHUNK_BYTES);
-        assert_eq!(AttemptSendGate::batches_started(&gate), 1);
+        assert_eq!(sync.batches_started(), 1);
+        assert!(sync.finish_time(0).is_none());
 
         // Reconnect advice begins draining before batch 1 finishes and while batch 2 sits queued.
-        assert_eq!(AttemptSendGate::start_draining(&gate), 1);
+        assert_eq!(sync.start_draining(), 1);
         drop(tx);
 
         // Batch 1 finishes cleanly...
         let rest = stream.next().await.unwrap().unwrap();
         assert_eq!(rest.len(), 16);
-        assert!(last1_rx.try_recv().is_ok());
+        assert!(sync.finish_time(0).is_some());
 
         // ...then the stream half-closes cleanly WITHOUT pulling batch 2!
         assert!(stream.next().await.is_none());
-        assert_eq!(AttemptSendGate::batches_started(&gate), 1);
-        assert!(last2_rx.try_recv().is_err());
+        assert_eq!(sync.batches_started(), 1);
+        assert!(sync.finish_time(1).is_none());
+    }
+
+    #[test]
+    fn attempt_sync_finish_time_after_prune_and_gate_transitions() {
+        use super::{AttemptSync, GateState};
+
+        let sync = AttemptSync::new();
+        for i in 0..100usize {
+            assert_eq!(sync.try_start_batch(), GateState::Open);
+            assert_eq!(sync.batches_started(), i + 1);
+            sync.record_batch_finished();
+        }
+        // Prune past the 64-entry compaction threshold and verify lookup indexing remains exact.
+        sync.prune_finished(70);
+        assert!(sync.finish_time(0).is_none());
+        assert!(sync.finish_time(69).is_none());
+        let t70 = sync.finish_time(70).expect("index 70 retained");
+        let t99 = sync.finish_time(99).expect("index 99 retained");
+        assert!(t99 >= t70);
+        assert!(sync.finish_time(100).is_none());
+
+        assert_eq!(sync.start_draining(), 100);
+        assert_eq!(sync.try_start_batch(), GateState::Draining);
+        assert_eq!(sync.batches_started(), 100);
+
+        assert_eq!(sync.stop(), 100);
+        assert!(sync.is_stopped());
+        assert_eq!(sync.try_start_batch(), GateState::Stopped);
+        assert_eq!(sync.batches_started(), 100);
     }
 }

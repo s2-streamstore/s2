@@ -1,26 +1,29 @@
 use std::{
+    cell::RefCell,
     collections::HashMap,
-    convert::Infallible,
     future::Future,
     io::{Read as _, Write as _},
-    pin::pin,
+    pin::{Pin, pin},
     sync::{
-        Arc, Mutex, OnceLock, RwLock as StdRwLock, Weak,
+        Arc, OnceLock, RwLock as StdRwLock, Weak,
         atomic::{AtomicU64, AtomicUsize, Ordering},
     },
+    task::{Context, Poll},
     time::Duration,
 };
 
+#[cfg(feature = "_hidden")]
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
-use flate2::{Compression as FlateCompression, read::MultiGzDecoder, write::GzEncoder};
+use flate2::{Compression as FlateCompression, bufread::MultiGzDecoder, write::GzEncoder};
 use futures_core::Stream;
 use futures_util::StreamExt;
 use http::{
     HeaderMap, Method, StatusCode, Uri,
     header::{CONTENT_ENCODING, CONTENT_TYPE, HeaderName, HeaderValue},
+    uri::PathAndQuery,
 };
-use http_body_util::{BodyExt, Empty, Full, StreamBody, combinators::UnsyncBoxBody};
+use http_body_util::{BodyExt, Full, StreamBody, combinators::UnsyncBoxBody};
 use hyper::{
     body::{Frame, Incoming},
     client::conn::http2,
@@ -28,10 +31,11 @@ use hyper::{
 };
 use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
 use hyper_util::{client::legacy::connect::HttpConnector, rt::TokioTimer};
+use pin_project_lite::pin_project;
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::{
     sync::{Notify, watch},
-    time::{Instant, timeout, timeout_at},
+    time::{Instant, Sleep, timeout},
 };
 pub(crate) use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
@@ -120,9 +124,69 @@ pub(crate) enum HttpError {
     ResponseTooLarge(usize),
 }
 
+pin_project! {
+    #[project = HttpBodyProj]
+    pub(crate) enum HttpBody {
+        Empty,
+        Full {
+            #[pin]
+            inner: Full<Bytes>,
+        },
+        GatedFull {
+            #[pin]
+            inner: GatedRequestBody<Full<Bytes>>,
+        },
+        Streaming {
+            #[pin]
+            inner: BoxBody,
+        },
+    }
+}
+
+impl http_body::Body for HttpBody {
+    type Data = Bytes;
+    type Error = BoxError;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        match self.project() {
+            HttpBodyProj::Empty => Poll::Ready(None),
+            HttpBodyProj::Full { inner } => match inner.poll_frame(cx) {
+                Poll::Ready(Some(Ok(frame))) => Poll::Ready(Some(Ok(frame))),
+                Poll::Ready(Some(Err(never))) => match never {},
+                Poll::Ready(None) => Poll::Ready(None),
+                Poll::Pending => Poll::Pending,
+            },
+            HttpBodyProj::GatedFull { inner } => inner.poll_frame(cx),
+            HttpBodyProj::Streaming { inner } => inner.poll_frame(cx),
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        match self {
+            Self::Empty => true,
+            Self::Full { inner } => inner.is_end_stream(),
+            Self::GatedFull { inner } => inner.is_end_stream(),
+            Self::Streaming { inner } => inner.is_end_stream(),
+        }
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        match self {
+            Self::Empty => http_body::SizeHint::with_exact(0),
+            Self::Full { inner } => inner.size_hint(),
+            Self::GatedFull { inner } => inner.size_hint(),
+            Self::Streaming { inner } => inner.size_hint(),
+        }
+    }
+}
+
 enum BodyInner {
     Empty,
     Full(Bytes),
+    GatedFull(Bytes, SendGate),
     Streaming(BoxBody),
 }
 
@@ -149,11 +213,7 @@ impl Body {
                     !bytes.is_empty(),
                     "gated body should be non-empty so SendGate can observe frames"
                 );
-                let boxed = BoxBody::new(GatedRequestBody::new(
-                    Full::new(bytes).map_err(|e: Infallible| match e {}),
-                    gate,
-                ));
-                Self(BodyInner::Streaming(boxed))
+                Self(BodyInner::GatedFull(bytes, gate))
             }
             other => {
                 debug_assert!(
@@ -169,17 +229,20 @@ impl Body {
         match &self.0 {
             BodyInner::Empty => Some(&[]),
             BodyInner::Full(bytes) => Some(bytes),
-            BodyInner::Streaming(_) => None,
+            BodyInner::GatedFull(_, _) | BodyInner::Streaming(_) => None,
         }
     }
 
-    fn into_http_body(self) -> BoxBody {
+    fn into_http_body(self) -> HttpBody {
         match self.0 {
-            BodyInner::Empty => BoxBody::new(Empty::new().map_err(|e: Infallible| match e {})),
-            BodyInner::Full(bytes) => {
-                BoxBody::new(Full::new(bytes).map_err(|e: Infallible| match e {}))
-            }
-            BodyInner::Streaming(stream) => stream,
+            BodyInner::Empty => HttpBody::Empty,
+            BodyInner::Full(bytes) => HttpBody::Full {
+                inner: Full::new(bytes),
+            },
+            BodyInner::GatedFull(bytes, gate) => HttpBody::GatedFull {
+                inner: GatedRequestBody::new(Full::new(bytes), gate),
+            },
+            BodyInner::Streaming(inner) => HttpBody::Streaming { inner },
         }
     }
 }
@@ -194,6 +257,67 @@ impl From<Vec<u8>> for Body {
     fn from(data: Vec<u8>) -> Self {
         Self(BodyInner::Full(Bytes::from(data)))
     }
+}
+
+fn with_origin_key<R>(uri: &Uri, f: impl FnOnce(&str) -> R) -> R {
+    let scheme = uri.scheme_str().unwrap_or("https");
+    let host = uri.host().unwrap_or("");
+    let port = uri.port_u16().filter(|&p| {
+        !((scheme.eq_ignore_ascii_case("http") && p == 80)
+            || (scheme.eq_ignore_ascii_case("https") && p == 443))
+    });
+
+    let mut port_buf = [0u8; 6];
+    let port_bytes: &[u8] = if let Some(mut n) = port {
+        let mut pos = port_buf.len();
+        if n == 0 {
+            pos -= 1;
+            port_buf[pos] = b'0';
+        } else {
+            while n > 0 {
+                pos -= 1;
+                port_buf[pos] = b'0' + (n % 10) as u8;
+                n /= 10;
+            }
+        }
+        pos -= 1;
+        port_buf[pos] = b':';
+        &port_buf[pos..]
+    } else {
+        &[]
+    };
+
+    let total_len = scheme.len() + 3 + host.len() + port_bytes.len();
+    let mut stack = [0u8; 280];
+    if total_len <= stack.len() {
+        let mut offset = 0;
+        for &b in scheme.as_bytes() {
+            stack[offset] = b.to_ascii_lowercase();
+            offset += 1;
+        }
+        stack[offset..offset + 3].copy_from_slice(b"://");
+        offset += 3;
+        for &b in host.as_bytes() {
+            stack[offset] = b.to_ascii_lowercase();
+            offset += 1;
+        }
+        stack[offset..offset + port_bytes.len()].copy_from_slice(port_bytes);
+        offset += port_bytes.len();
+        let key = std::str::from_utf8(&stack[..offset])
+            .expect("ASCII-lowercased URI origin is valid UTF-8");
+        return f(key);
+    }
+
+    let mut owned = String::with_capacity(total_len);
+    for b in scheme.bytes() {
+        owned.push(char::from(b.to_ascii_lowercase()));
+    }
+    owned.push_str("://");
+    for c in host.chars() {
+        owned.push(c.to_ascii_lowercase());
+    }
+    owned.push_str(std::str::from_utf8(port_bytes).expect("ASCII port"));
+    f(&owned)
 }
 
 pub(crate) struct Request {
@@ -233,28 +357,16 @@ impl Request {
         })
     }
 
+    #[cfg(test)]
     fn origin(&self) -> String {
-        let scheme = self
-            .uri
-            .scheme_str()
-            .unwrap_or("https")
-            .to_ascii_lowercase();
-        let host = self.uri.host().unwrap_or("").to_ascii_lowercase();
-        let port = self
-            .uri
-            .port_u16()
-            .filter(|&p| !((scheme == "http" && p == 80) || (scheme == "https" && p == 443)));
-        match port {
-            Some(port) => format!("{scheme}://{host}:{port}"),
-            None => format!("{scheme}://{host}"),
-        }
+        with_origin_key(&self.uri, str::to_owned)
     }
 
     pub(crate) fn try_clone(&self) -> Option<Self> {
         let body = match &self.body.0 {
             BodyInner::Empty => Body::empty(),
             BodyInner::Full(bytes) => Body(BodyInner::Full(bytes.clone())),
-            BodyInner::Streaming(_) => return None,
+            BodyInner::GatedFull(_, _) | BodyInner::Streaming(_) => return None,
         };
 
         Some(Self {
@@ -270,6 +382,7 @@ impl Request {
 pub(crate) struct RequestBuilder {
     method: Method,
     uri: Uri,
+    query: String,
     headers: HeaderMap,
     body: Option<Body>,
     timeout: Option<Duration>,
@@ -281,6 +394,7 @@ impl RequestBuilder {
         Self {
             method,
             uri,
+            query: String::new(),
             headers: HeaderMap::new(),
             body: None,
             timeout: None,
@@ -316,13 +430,12 @@ impl RequestBuilder {
         match serde_urlencoded::to_string(query) {
             Ok(query_string) => {
                 if !query_string.is_empty() {
-                    self.uri = match uri_with_query(&self.uri, &query_string) {
-                        Ok(uri) => uri,
-                        Err(e) => {
-                            self.error = Some(HttpError::RequestBuild(e.to_string()));
-                            return self;
-                        }
-                    };
+                    if self.query.is_empty() {
+                        self.query = query_string;
+                    } else {
+                        self.query.push('&');
+                        self.query.push_str(&query_string);
+                    }
                 }
             }
             Err(e) => self.error = Some(HttpError::RequestBuild(e.to_string())),
@@ -385,9 +498,14 @@ impl RequestBuilder {
         self
     }
 
-    pub(crate) fn build(self) -> Result<Request, HttpError> {
+    pub(crate) fn build(mut self) -> Result<Request, HttpError> {
         if let Some(e) = self.error {
             return Err(e);
+        }
+
+        if !self.query.is_empty() {
+            self.uri = uri_with_query(&self.uri, &self.query)
+                .map_err(|e| HttpError::RequestBuild(e.to_string()))?;
         }
 
         Ok(Request {
@@ -531,9 +649,15 @@ impl StreamingResponse {
             retire_handle,
             deadline,
         } = self;
-        let bytes =
-            collect_and_decompress_error_body(status, &headers, body, deadline, &retire_handle)
-                .await;
+        let mut sleep = pin!(deadline.map(tokio::time::sleep_until));
+        let bytes = collect_and_decompress_error_body(
+            status,
+            &headers,
+            body,
+            sleep.as_mut().as_pin_mut(),
+            &retire_handle,
+        )
+        .await;
         drop(permit);
         (bytes, retire_handle)
     }
@@ -564,6 +688,27 @@ impl StreamingResponse {
     }
 }
 
+/// Poll `fut` racing an optional pinned `Sleep` deadline, polling `fut` first so already-ready
+/// futures never register on the Tokio timer wheel.
+async fn race_deadline<F: Future>(
+    fut: F,
+    mut sleep: Option<Pin<&mut Sleep>>,
+) -> Result<F::Output, ()> {
+    let mut fut = pin!(fut);
+    std::future::poll_fn(|cx| {
+        if let Poll::Ready(out) = fut.as_mut().poll(cx) {
+            return Poll::Ready(Ok(out));
+        }
+        if let Some(sleep) = sleep.as_mut()
+            && sleep.as_mut().poll(cx).is_ready()
+        {
+            return Poll::Ready(Err(()));
+        }
+        Poll::Pending
+    })
+    .await
+}
+
 enum CollectBodyError<E> {
     Timeout,
     TooLarge,
@@ -573,14 +718,19 @@ enum CollectBodyError<E> {
 async fn collect_bounded_body<B>(
     mut body: B,
     limit: usize,
-    deadline: Option<Instant>,
+    sleep: Option<Pin<&mut Sleep>>,
 ) -> Result<Bytes, CollectBodyError<B::Error>>
 where
     B: http_body::Body<Data = Bytes> + Unpin,
 {
-    if body.size_hint().lower() > limit as u64 {
+    let lower_hint = body.size_hint().lower();
+    if lower_hint > limit as u64 {
         return Err(CollectBodyError::TooLarge);
     }
+    let prealloc_hint = usize::try_from(lower_hint)
+        .unwrap_or(limit)
+        .min(limit)
+        .min(2 * 1024 * 1024);
 
     let collect = async {
         let mut first: Option<Bytes> = None;
@@ -602,7 +752,7 @@ where
             if let Some(buf) = buf.as_mut() {
                 buf.extend_from_slice(&data);
             } else if let Some(prev) = first.take() {
-                let mut combined = BytesMut::with_capacity(total);
+                let mut combined = BytesMut::with_capacity(total.max(prealloc_hint));
                 combined.extend_from_slice(&prev);
                 combined.extend_from_slice(&data);
                 buf = Some(combined);
@@ -617,22 +767,19 @@ where
         })
     };
 
-    match deadline {
-        Some(dl) => timeout_at(dl, collect)
-            .await
-            .unwrap_or(Err(CollectBodyError::Timeout)),
-        None => collect.await,
-    }
+    race_deadline(collect, sleep)
+        .await
+        .unwrap_or(Err(CollectBodyError::Timeout))
 }
 
 async fn collect_and_decompress_error_body(
     status: StatusCode,
     headers: &HeaderMap,
     body: Incoming,
-    deadline: Option<Instant>,
+    sleep: Option<Pin<&mut Sleep>>,
     retire_handle: &RetireHandle,
 ) -> Bytes {
-    let bytes = match collect_bounded_body(body, MAX_ERROR_RESPONSE_BYTES, deadline).await {
+    let bytes = match collect_bounded_body(body, MAX_ERROR_RESPONSE_BYTES, sleep).await {
         Ok(bytes) => bytes,
         Err(CollectBodyError::Timeout) => {
             // Dropping `body` resets the HTTP/2 stream; retiring the connection prevents
@@ -677,11 +824,51 @@ async fn collect_and_decompress_error_body(
     }
 }
 
+#[cfg(feature = "_hidden")]
 #[async_trait]
 pub(crate) trait RequestExecutor: Send + Sync {
     async fn execute_unary(&self, request: Request) -> Result<UnaryResponse, HttpError>;
     async fn init_streaming(&self, request: Request) -> Result<StreamingResponse, HttpError>;
     fn close(&self) {}
+}
+
+pub(crate) enum ClientTransport {
+    Http(Pool<HttpConnector>),
+    Https(Pool<HttpsConnector<HttpConnector>>),
+    #[cfg(feature = "_hidden")]
+    Custom(Arc<dyn RequestExecutor>),
+}
+
+impl ClientTransport {
+    pub(crate) async fn execute_unary(&self, request: Request) -> Result<UnaryResponse, HttpError> {
+        match self {
+            Self::Http(pool) => pool.execute_unary(request).await,
+            Self::Https(pool) => pool.execute_unary(request).await,
+            #[cfg(feature = "_hidden")]
+            Self::Custom(exec) => exec.execute_unary(request).await,
+        }
+    }
+
+    pub(crate) async fn init_streaming(
+        &self,
+        request: Request,
+    ) -> Result<StreamingResponse, HttpError> {
+        match self {
+            Self::Http(pool) => pool.init_streaming(request).await,
+            Self::Https(pool) => pool.init_streaming(request).await,
+            #[cfg(feature = "_hidden")]
+            Self::Custom(exec) => exec.init_streaming(request).await,
+        }
+    }
+
+    pub(crate) fn close(&self) {
+        match self {
+            Self::Http(pool) => pool.close(),
+            Self::Https(pool) => pool.close(),
+            #[cfg(feature = "_hidden")]
+            Self::Custom(exec) => exec.close(),
+        }
+    }
 }
 
 pub(crate) fn default_http_connector(connect_timeout: Option<Duration>) -> HttpConnector {
@@ -862,11 +1049,11 @@ impl rustls::client::danger::ServerCertVerifier for NoVerifier {
 
 fn build_http_request(
     method: Method,
-    uri: &Uri,
+    uri: Uri,
     headers: HeaderMap,
-    body: BoxBody,
-) -> Result<http::Request<BoxBody>, HttpError> {
-    let mut builder = http::Request::builder().method(method).uri(uri.clone());
+    body: HttpBody,
+) -> Result<http::Request<HttpBody>, HttpError> {
+    let mut builder = http::Request::builder().method(method).uri(uri);
 
     if let Some(req_headers) = builder.headers_mut() {
         *req_headers = headers;
@@ -879,27 +1066,97 @@ fn build_http_request(
 
 /// Builds a URI from `base`'s scheme and authority, replacing any path/query.
 pub(crate) fn uri_with_path(base: &Uri, path: impl AsRef<str>) -> Uri {
-    let path = path.as_ref().trim_start_matches('/');
-    uri_with_path_and_query(base, &format!("/{path}")).expect("SDK-generated path is a valid URI")
+    let path = path.as_ref();
+    let pq = if path.starts_with('/') {
+        PathAndQuery::try_from(path)
+    } else {
+        let mut prefixed = String::with_capacity(1 + path.len());
+        prefixed.push('/');
+        prefixed.push_str(path);
+        PathAndQuery::try_from(prefixed)
+    }
+    .expect("SDK-generated path is a valid PathAndQuery");
+    uri_with_path_and_query(base, pq).expect("SDK-generated path is a valid URI")
 }
 
-fn uri_with_query(uri: &Uri, query: &str) -> Result<Uri, http::uri::InvalidUri> {
+fn uri_with_query(uri: &Uri, query: &str) -> Result<Uri, http::Error> {
     let path_and_query = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
     let (path, existing_query) = path_and_query
         .split_once('?')
         .map_or((path_and_query, ""), |(path, query)| (path, query));
-    let path_and_query = if existing_query.is_empty() {
-        format!("{path}?{query}")
+    let combined = if existing_query.is_empty() {
+        let mut s = String::with_capacity(path.len() + 1 + query.len());
+        s.push_str(path);
+        s.push('?');
+        s.push_str(query);
+        s
     } else {
-        format!("{path}?{existing_query}&{query}")
+        let mut s = String::with_capacity(path.len() + 1 + existing_query.len() + 1 + query.len());
+        s.push_str(path);
+        s.push('?');
+        s.push_str(existing_query);
+        s.push('&');
+        s.push_str(query);
+        s
     };
-    uri_with_path_and_query(uri, &path_and_query)
+    let pq = PathAndQuery::try_from(combined)?;
+    uri_with_path_and_query(uri, pq)
 }
 
-fn uri_with_path_and_query(uri: &Uri, path_and_query: &str) -> Result<Uri, http::uri::InvalidUri> {
-    let scheme = uri.scheme_str().unwrap_or("https");
-    let authority = uri.authority().map(|a| a.as_str()).unwrap_or("");
-    format!("{scheme}://{authority}{path_and_query}").parse()
+fn uri_with_path_and_query(uri: &Uri, path_and_query: PathAndQuery) -> Result<Uri, http::Error> {
+    let mut parts = http::uri::Parts::default();
+    parts.scheme = uri.scheme().cloned().or_else(|| {
+        uri.authority()
+            .is_some()
+            .then_some(http::uri::Scheme::HTTPS)
+    });
+    parts.authority = uri.authority().cloned();
+    parts.path_and_query = Some(path_and_query);
+    Ok(Uri::from_parts(parts)?)
+}
+
+const UNARY_ZSTD_WINDOW_LOG_MAX: u32 = 24;
+const UNARY_ZSTD_ONE_SHOT_MAX_BYTES: usize = 4 * 1024 * 1024;
+
+thread_local! {
+    static UNARY_ZSTD_COMPRESSOR: RefCell<Option<zstd::bulk::Compressor<'static>>> =
+        const { RefCell::new(None) };
+    static UNARY_ZSTD_DCTX: RefCell<Option<zstd::zstd_safe::DCtx<'static>>> =
+        const { RefCell::new(None) };
+}
+
+fn compress_zstd_unary(data: &[u8]) -> std::io::Result<Vec<u8>> {
+    let mut out = Vec::with_capacity(zstd::compress_bound(data.len()));
+    let result = UNARY_ZSTD_COMPRESSOR.try_with(|cell| {
+        let Ok(mut slot) = cell.try_borrow_mut() else {
+            return None;
+        };
+        let compressor = match slot.as_mut() {
+            Some(c) => c,
+            None => match zstd::bulk::Compressor::new(1) {
+                Ok(c) => slot.insert(c),
+                Err(err) => return Some(Err(err)),
+            },
+        };
+        Some(compressor.compress_to_buffer(data, &mut out))
+    });
+    if let Ok(Some(res)) = result {
+        res?;
+        return Ok(out);
+    }
+    let mut compressor = zstd::bulk::Compressor::new(1)?;
+    compressor.compress_to_buffer(data, &mut out)?;
+    Ok(out)
+}
+
+fn create_bounded_dctx() -> std::io::Result<zstd::zstd_safe::DCtx<'static>> {
+    let mut dctx = zstd::zstd_safe::DCtx::try_create()
+        .ok_or_else(|| std::io::Error::other("zstd could not allocate a decompression context"))?;
+    dctx.set_parameter(zstd::zstd_safe::DParameter::WindowLogMax(
+        UNARY_ZSTD_WINDOW_LOG_MAX,
+    ))
+    .map_err(|code| std::io::Error::other(zstd::zstd_safe::get_error_name(code)))?;
+    Ok(dctx)
 }
 
 fn compress_body(
@@ -917,7 +1174,8 @@ fn compress_body(
     match compression {
         Compression::None => unreachable!(),
         Compression::Gzip => {
-            let mut encoder = GzEncoder::new(Vec::new(), FlateCompression::fast());
+            let mut encoder =
+                GzEncoder::new(Vec::with_capacity(data.len()), FlateCompression::fast());
             encoder
                 .write_all(data)
                 .map_err(|e| HttpError::RequestCompression(e.to_string()))?;
@@ -930,7 +1188,7 @@ fn compress_body(
             ))
         }
         Compression::Zstd => {
-            let compressed = zstd::stream::encode_all(data, 1)
+            let compressed = compress_zstd_unary(data)
                 .map_err(|e| HttpError::RequestCompression(e.to_string()))?;
             Ok((
                 Body::from(compressed),
@@ -940,9 +1198,19 @@ fn compress_body(
     }
 }
 
-fn read_bounded(reader: impl std::io::Read, max_bytes: usize) -> Result<Bytes, HttpError> {
+fn maybe_shrink_vec(buf: &mut Vec<u8>, min_slack: usize) {
+    if buf.capacity() > buf.len().saturating_mul(2) && buf.capacity() - buf.len() > min_slack {
+        buf.shrink_to_fit();
+    }
+}
+
+fn read_bounded(
+    reader: impl std::io::Read,
+    initial_capacity: usize,
+    max_bytes: usize,
+) -> Result<Bytes, HttpError> {
     let limit = (max_bytes as u64) + 1;
-    let mut decompressed = Vec::new();
+    let mut decompressed = Vec::with_capacity(initial_capacity);
     reader
         .take(limit)
         .read_to_end(&mut decompressed)
@@ -950,21 +1218,104 @@ fn read_bounded(reader: impl std::io::Read, max_bytes: usize) -> Result<Bytes, H
     if decompressed.len() > max_bytes {
         return Err(HttpError::ResponseTooLarge(max_bytes));
     }
+    maybe_shrink_vec(&mut decompressed, 16 * 1024);
     Ok(Bytes::from(decompressed))
 }
 
+fn decompress_gzip(bytes: Bytes, max_bytes: usize) -> Result<Bytes, HttpError> {
+    let initial_capacity = bytes.len().saturating_mul(2).max(1024).min(max_bytes);
+    read_bounded(
+        MultiGzDecoder::new(bytes.as_ref()),
+        initial_capacity,
+        max_bytes,
+    )
+}
+
+fn decompress_zstd_with_dctx(
+    dctx: &mut zstd::zstd_safe::DCtx<'static>,
+    src: &[u8],
+    exact_size: Option<usize>,
+    fallback_capacity: usize,
+    max_bytes: usize,
+) -> Result<Bytes, HttpError> {
+    // Explicit session reset keeps DCtx reuse safe across all zstd 0.14.x patch versions.
+    dctx.reset(zstd::zstd_safe::ResetDirective::SessionOnly)
+        .map_err(|code| {
+            HttpError::ResponseCompression(zstd::zstd_safe::get_error_name(code).to_owned())
+        })?;
+
+    if let Some(exact) = exact_size
+        && !src.is_empty()
+        && exact <= UNARY_ZSTD_ONE_SHOT_MAX_BYTES
+    {
+        let mut buf = Vec::with_capacity(exact);
+        dctx.decompress(&mut buf, src).map_err(|code| {
+            HttpError::ResponseCompression(zstd::zstd_safe::get_error_name(code).to_owned())
+        })?;
+        debug_assert!(buf.len() <= max_bytes);
+        maybe_shrink_vec(&mut buf, 16 * 1024);
+        return Ok(Bytes::from(buf));
+    }
+
+    let decoder = zstd::stream::read::Decoder::with_context(src, dctx);
+    read_bounded(decoder, fallback_capacity, max_bytes)
+}
+
+fn decompress_zstd(bytes: Bytes, max_bytes: usize) -> Result<Bytes, HttpError> {
+    let fallback_capacity = bytes.len().saturating_mul(2).max(1024).min(max_bytes);
+    let exact_size = match zstd::bulk::Decompressor::upper_bound(bytes.as_ref()) {
+        Some(exact) if exact > max_bytes => return Err(HttpError::ResponseTooLarge(max_bytes)),
+        other => other,
+    };
+
+    let result = UNARY_ZSTD_DCTX.try_with(|cell| {
+        let Ok(mut slot) = cell.try_borrow_mut() else {
+            return None;
+        };
+        let dctx = match slot.as_mut() {
+            Some(d) => d,
+            None => match create_bounded_dctx() {
+                Ok(d) => slot.insert(d),
+                Err(err) => {
+                    return Some(Err(HttpError::ResponseCompression(err.to_string())));
+                }
+            },
+        };
+        Some(decompress_zstd_with_dctx(
+            dctx,
+            bytes.as_ref(),
+            exact_size,
+            fallback_capacity,
+            max_bytes,
+        ))
+    });
+    if let Ok(Some(res)) = result {
+        return res;
+    }
+
+    let mut dctx =
+        create_bounded_dctx().map_err(|e| HttpError::ResponseCompression(e.to_string()))?;
+    decompress_zstd_with_dctx(
+        &mut dctx,
+        bytes.as_ref(),
+        exact_size,
+        fallback_capacity,
+        max_bytes,
+    )
+}
+
 fn decompress_single(encoding: &str, bytes: Bytes, max_bytes: usize) -> Result<Bytes, HttpError> {
-    match encoding {
-        "" | "identity" => Ok(bytes),
-        "gzip" => read_bounded(MultiGzDecoder::new(bytes.as_ref()), max_bytes),
-        "zstd" => {
-            let decoder = zstd::stream::Decoder::new(bytes.as_ref())
-                .map_err(|e| HttpError::ResponseCompression(e.to_string()))?;
-            read_bounded(decoder, max_bytes)
-        }
-        other => Err(HttpError::ResponseCompression(format!(
-            "unsupported content-encoding: {other}"
-        ))),
+    if encoding.is_empty() || encoding.eq_ignore_ascii_case("identity") {
+        Ok(bytes)
+    } else if encoding.eq_ignore_ascii_case("gzip") {
+        decompress_gzip(bytes, max_bytes)
+    } else if encoding.eq_ignore_ascii_case("zstd") {
+        decompress_zstd(bytes, max_bytes)
+    } else {
+        Err(HttpError::ResponseCompression(format!(
+            "unsupported content-encoding: {}",
+            encoding.to_ascii_lowercase()
+        )))
     }
 }
 
@@ -973,48 +1324,143 @@ fn decompress_body(
     mut bytes: Bytes,
     max_bytes: usize,
 ) -> Result<Bytes, HttpError> {
+    let mut header_iter = headers.get_all(CONTENT_ENCODING).iter();
+    let Some(first) = header_iter.next() else {
+        return Ok(bytes);
+    };
+    if header_iter.next().is_none() {
+        let s = first.to_str().map_err(|e| {
+            HttpError::ResponseCompression(format!("invalid content-encoding: {e}"))
+        })?;
+        if !s.contains(',') {
+            return decompress_single(s.trim(), bytes, max_bytes);
+        }
+    }
+
     let mut encodings = Vec::new();
     for raw in headers.get_all(CONTENT_ENCODING) {
         let s = raw.to_str().map_err(|e| {
             HttpError::ResponseCompression(format!("invalid content-encoding: {e}"))
         })?;
         for part in s.split(',') {
-            let token = part.trim().to_ascii_lowercase();
-            if !token.is_empty() && token != "identity" {
-                encodings.push(token);
+            let trimmed = part.trim();
+            if !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("identity") {
+                encodings.push(trimmed);
             }
         }
     }
     for encoding in encodings.into_iter().rev() {
-        bytes = decompress_single(&encoding, bytes, max_bytes)?;
+        bytes = decompress_single(encoding, bytes, max_bytes)?;
     }
     Ok(bytes)
 }
 
+/// Bit 63 clear: active request count in bits `0..63`.
+/// Bit 63 set: connection is idle; bits `0..63` hold nanoseconds since `epoch`.
+const PERMIT_IDLE_BIT: u64 = 1 << 63;
+
 struct PermitState {
-    active_requests: usize,
-    idle_since: Option<Instant>,
+    epoch: Instant,
+    packed: AtomicU64,
+    reaper_notify: Arc<Notify>,
+}
+
+impl PermitState {
+    fn new(reaper_notify: Arc<Notify>) -> Self {
+        Self {
+            epoch: Instant::now(),
+            packed: AtomicU64::new(1),
+            reaper_notify,
+        }
+    }
+
+    #[cfg(test)]
+    fn active_requests(&self) -> usize {
+        let cur = self.packed.load(Ordering::Acquire);
+        if cur & PERMIT_IDLE_BIT != 0 {
+            0
+        } else {
+            cur as usize
+        }
+    }
+
+    fn try_acquire(self: &Arc<Self>, effective_limit: usize) -> Option<RequestPermit> {
+        let mut cur = self.packed.load(Ordering::Acquire);
+        loop {
+            let active = if cur & PERMIT_IDLE_BIT != 0 {
+                0
+            } else {
+                cur as usize
+            };
+            if active >= effective_limit {
+                return None;
+            }
+            let next = (active + 1) as u64;
+            match self
+                .packed
+                .compare_exchange_weak(cur, next, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => {
+                    return Some(RequestPermit {
+                        state: self.clone(),
+                    });
+                }
+                Err(actual) => cur = actual,
+            }
+        }
+    }
+
+    fn idle_deadline(&self, idle_timeout: Duration) -> Option<Instant> {
+        let cur = self.packed.load(Ordering::Acquire);
+        if cur & PERMIT_IDLE_BIT != 0 {
+            let elapsed_nanos = cur & !PERMIT_IDLE_BIT;
+            Some(self.epoch + Duration::from_nanos(elapsed_nanos) + idle_timeout)
+        } else {
+            None
+        }
+    }
 }
 
 struct RequestPermit {
-    state: Arc<Mutex<PermitState>>,
-    reaper_notify: Arc<Notify>,
+    state: Arc<PermitState>,
 }
 
 impl Drop for RequestPermit {
     fn drop(&mut self) {
-        let became_idle = {
-            let mut state = self.state.lock().unwrap();
-            state.active_requests = state.active_requests.saturating_sub(1);
-            if state.active_requests == 0 {
-                state.idle_since = Some(Instant::now());
-                true
+        let mut cur = self.state.packed.load(Ordering::Acquire);
+        loop {
+            debug_assert!(cur & PERMIT_IDLE_BIT == 0 && cur > 0);
+            if cur > 1 {
+                match self.state.packed.compare_exchange_weak(
+                    cur,
+                    cur - 1,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => return,
+                    Err(actual) => cur = actual,
+                }
             } else {
-                false
+                let elapsed_nanos = self
+                    .state
+                    .epoch
+                    .elapsed()
+                    .as_nanos()
+                    .min((PERMIT_IDLE_BIT - 1) as u128) as u64;
+                let next = PERMIT_IDLE_BIT | elapsed_nanos;
+                match self.state.packed.compare_exchange_weak(
+                    cur,
+                    next,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => {
+                        self.state.reaper_notify.notify_one();
+                        return;
+                    }
+                    Err(actual) => cur = actual,
+                }
             }
-        };
-        if became_idle {
-            self.reaper_notify.notify_one();
         }
     }
 }
@@ -1022,7 +1468,7 @@ impl Drop for RequestPermit {
 #[derive(Clone)]
 enum DialOutcome {
     Pending,
-    Ready(http2::SendRequest<BoxBody>),
+    Ready(http2::SendRequest<HttpBody>),
     Failed(Arc<String>),
     Aborted,
 }
@@ -1034,15 +1480,14 @@ enum DialError {
 
 enum ConnectionState {
     Connecting(watch::Receiver<DialOutcome>),
-    Ready(http2::SendRequest<BoxBody>),
+    Ready(http2::SendRequest<HttpBody>),
 }
 
 struct PooledConnection {
     id: ConnectionId,
     max_concurrent_requests: usize,
     peer_max_streams: Arc<AtomicUsize>,
-    state: Arc<Mutex<PermitState>>,
-    reaper_notify: Arc<Notify>,
+    state: Arc<PermitState>,
     conn: ConnectionState,
 }
 
@@ -1053,13 +1498,9 @@ impl PooledConnection {
         rx: watch::Receiver<DialOutcome>,
         reaper_notify: Arc<Notify>,
     ) -> (Self, RequestPermit) {
-        let state = Arc::new(Mutex::new(PermitState {
-            active_requests: 1,
-            idle_since: None,
-        }));
+        let state = Arc::new(PermitState::new(reaper_notify));
         let permit = RequestPermit {
             state: state.clone(),
-            reaper_notify: reaper_notify.clone(),
         };
         (
             Self {
@@ -1067,7 +1508,6 @@ impl PooledConnection {
                 max_concurrent_requests,
                 peer_max_streams: Arc::new(AtomicUsize::new(usize::MAX)),
                 state,
-                reaper_notify,
                 conn: ConnectionState::Connecting(rx),
             },
             permit,
@@ -1086,35 +1526,21 @@ impl PooledConnection {
     }
 
     fn try_acquire_permit(&self) -> Option<RequestPermit> {
-        let mut state = self.state.lock().unwrap();
         let effective_limit = self
             .max_concurrent_requests
             .min(self.peer_max_streams.load(Ordering::Relaxed));
-        if state.active_requests >= effective_limit {
-            return None;
-        }
-        state.active_requests += 1;
-        state.idle_since = None;
-        Some(RequestPermit {
-            state: self.state.clone(),
-            reaper_notify: self.reaper_notify.clone(),
-        })
+        self.state.try_acquire(effective_limit)
     }
 
     fn idle_deadline(&self, idle_timeout: Duration) -> Option<Instant> {
-        let state = self.state.lock().unwrap();
-        if state.active_requests == 0 {
-            state.idle_since.map(|since| since + idle_timeout)
-        } else {
-            None
-        }
+        self.state.idle_deadline(idle_timeout)
     }
 }
 
 enum Checkout {
     Ready {
         id: ConnectionId,
-        sender: http2::SendRequest<BoxBody>,
+        sender: http2::SendRequest<HttpBody>,
         permit: RequestPermit,
     },
     Connecting {
@@ -1125,7 +1551,7 @@ enum Checkout {
 }
 
 struct CheckedOutSender {
-    sender: http2::SendRequest<BoxBody>,
+    sender: http2::SendRequest<HttpBody>,
     permit: RequestPermit,
     retire_handle: RetireHandle,
     deadline: Option<Instant>,
@@ -1328,7 +1754,8 @@ where
                 }
             };
 
-            peer_max_streams.store(conn.current_max_send_streams(), Ordering::Relaxed);
+            let mut last_peer_max_streams = conn.current_max_send_streams();
+            peer_max_streams.store(last_peer_max_streams, Ordering::Relaxed);
             if let Some(pool) = weak_pool.upgrade() {
                 pool.promote_ready(id, sender.clone());
             }
@@ -1349,7 +1776,11 @@ where
                 _ = shutdown.cancelled() => {}
                 res = std::future::poll_fn(|cx| {
                     let poll = conn.as_mut().poll(cx);
-                    peer_max_streams.store(conn.current_max_send_streams(), Ordering::Relaxed);
+                    let current = conn.current_max_send_streams();
+                    if current != last_peer_max_streams {
+                        last_peer_max_streams = current;
+                        peer_max_streams.store(current, Ordering::Relaxed);
+                    }
                     poll
                 }) => {
                     if let Err(err) = res {
@@ -1365,7 +1796,7 @@ where
         });
     }
 
-    fn promote_ready(&self, id: ConnectionId, sender: http2::SendRequest<BoxBody>) {
+    fn promote_ready(&self, id: ConnectionId, sender: http2::SendRequest<HttpBody>) {
         let mut state = self.state.write().unwrap();
         if let Some(entry) = state.connections.iter_mut().find(|c| c.id == id) {
             entry.conn = ConnectionState::Ready(sender);
@@ -1378,9 +1809,34 @@ where
         state.detached = true;
     }
 
-    /// Reap connections idle for at least `idle_timeout` and return the earliest
-    /// future deadline among remaining idle connections (`C13c`).
-    fn reap_idle(&self, now: Instant, idle_timeout: Duration) -> Option<Instant> {
+    /// Reap connections idle for at least `idle_timeout` and return `(next_deadline, is_empty)`
+    /// (`C13c`). Avoids acquiring the write lock when nothing needs eviction.
+    fn reap_idle(&self, now: Instant, idle_timeout: Duration) -> (Option<Instant>, bool) {
+        {
+            let state = self.state.read().unwrap();
+            let mut needs_eviction = false;
+            let mut next_deadline: Option<Instant> = None;
+            for conn in &state.connections {
+                if !conn.is_live() {
+                    needs_eviction = true;
+                    break;
+                }
+                if let Some(deadline) = conn.idle_deadline(idle_timeout) {
+                    if deadline <= now {
+                        needs_eviction = true;
+                        break;
+                    }
+                    next_deadline = Some(match next_deadline {
+                        Some(earliest) => earliest.min(deadline),
+                        None => deadline,
+                    });
+                }
+            }
+            if !needs_eviction {
+                return (next_deadline, state.connections.is_empty());
+            }
+        }
+
         let mut state = self.state.write().unwrap();
         let before = state.connections.len();
         let mut next_deadline: Option<Instant> = None;
@@ -1408,7 +1864,7 @@ where
                 "reaped idle HTTP/2 connections"
             );
         }
-        next_deadline
+        (next_deadline, state.connections.is_empty())
     }
 
     /// Atomically detach this host pool if it currently has no pooled connections.
@@ -1439,11 +1895,18 @@ where
     fn execute(&self, fut: F) {
         let shutdown = self.0.clone();
         tokio::spawn(async move {
-            tokio::select! {
-                biased;
-                _ = shutdown.cancelled() => {}
-                _ = fut => {}
-            }
+            let mut fut = pin!(fut);
+            let mut cancelled = pin!(shutdown.cancelled());
+            std::future::poll_fn(|cx| {
+                if shutdown.is_cancelled() {
+                    return Poll::Ready(());
+                }
+                if fut.as_mut().poll(cx).is_ready() {
+                    return Poll::Ready(());
+                }
+                cancelled.as_mut().poll(cx)
+            })
+            .await;
         });
     }
 }
@@ -1485,8 +1948,8 @@ async fn dial_http2<C: Connect>(
     shutdown: CancellationToken,
 ) -> Result<
     (
-        http2::SendRequest<BoxBody>,
-        http2::Connection<C::Io, BoxBody, ShutdownExecutor>,
+        http2::SendRequest<HttpBody>,
+        http2::Connection<C::Io, HttpBody, ShutdownExecutor>,
     ),
     DialError,
 > {
@@ -1526,7 +1989,7 @@ async fn dial_http2<C: Connect>(
 async fn wait_for_dial(
     rx: &mut watch::Receiver<DialOutcome>,
     shutdown: &CancellationToken,
-) -> Result<http2::SendRequest<BoxBody>, HttpError> {
+) -> Result<http2::SendRequest<HttpBody>, HttpError> {
     loop {
         match &*rx.borrow_and_update() {
             DialOutcome::Pending => {}
@@ -1626,6 +2089,13 @@ where
                                 _ = &mut shutdown_fut => break,
                                 _ = notify.notified() => {}
                             }
+                            // Wait one full `IDLE_TIMEOUT` before scanning so rapid sequential
+                            // requests do not trigger a reaper wakeup storm on every completion.
+                            tokio::select! {
+                                biased;
+                                _ = &mut shutdown_fut => break,
+                                _ = tokio::time::sleep(IDLE_TIMEOUT) => {}
+                            }
                         }
                     }
                 }
@@ -1671,22 +2141,20 @@ where
             .clone())
     }
 
-    fn checkout_for_origin(
-        &self,
-        origin: &str,
-        fallback_uri: &Uri,
-    ) -> Result<(Arc<HostPool<C>>, Checkout), HttpError> {
-        loop {
-            let pool = self.get_or_create_host_pool(origin, fallback_uri)?;
-            if let Some(checkout) = pool.checkout() {
-                return Ok((pool, checkout));
+    fn checkout_for_origin(&self, uri: &Uri) -> Result<(Arc<HostPool<C>>, Checkout), HttpError> {
+        with_origin_key(uri, |origin| {
+            loop {
+                let pool = self.get_or_create_host_pool(origin, uri)?;
+                if let Some(checkout) = pool.checkout() {
+                    return Ok((pool, checkout));
+                }
+                // The host pool was detached concurrently by the idle reaper or close(); loop to
+                // re-check closed state or allocate a fresh host pool.
             }
-            // The host pool was detached concurrently by the idle reaper or close(); loop to
-            // re-check closed state or allocate a fresh host pool.
-        }
+        })
     }
 
-    /// Acquire a live, ready HTTP/2 `SendRequest` for `origin`.
+    /// Acquire a live, ready HTTP/2 `SendRequest` for `uri`'s origin.
     ///
     /// Phase 1 (`T7a`): connection establishment (DNS/TCP/TLS/H2 handshake) is bounded by
     /// `connection_timeout`, completely independent of `request_timeout`.
@@ -1696,15 +2164,14 @@ where
     /// dial a fresh connection so the caller sees no spurious error.
     async fn checkout_ready(
         &self,
-        origin: &str,
-        fallback_uri: &Uri,
+        uri: &Uri,
         request_timeout: Option<Duration>,
     ) -> Result<CheckedOutSender, HttpError> {
         loop {
             if self.shutdown.is_cancelled() {
                 return Err(HttpError::Closed);
             }
-            let (pool, checkout) = self.checkout_for_origin(origin, fallback_uri)?;
+            let (pool, checkout) = self.checkout_for_origin(uri)?;
             let (id, mut sender, permit, reused) = match checkout {
                 Checkout::Ready { id, sender, permit } => (id, sender, permit, true),
                 Checkout::Connecting { id, mut rx, permit } => {
@@ -1720,16 +2187,15 @@ where
             };
 
             let deadline = request_timeout.and_then(|d| Instant::now().checked_add(d));
-            let ready_res = match deadline {
-                Some(dl) => match timeout_at(dl, sender.ready()).await {
+            let mut ready_sleep = pin!(deadline.map(tokio::time::sleep_until));
+            let ready_res =
+                match race_deadline(sender.ready(), ready_sleep.as_mut().as_pin_mut()).await {
                     Ok(res) => res,
-                    Err(_) => {
+                    Err(()) => {
                         pool.retire(id);
                         return Err(HttpError::Timeout);
                     }
-                },
-                None => sender.ready().await,
-            };
+                };
 
             match ready_res {
                 Ok(()) => {
@@ -1748,7 +2214,7 @@ where
                     drop(permit);
                     if reused {
                         tracing::debug!(
-                            origin = %origin,
+                            origin = %pool.origin,
                             connection = id.0,
                             err = %format_error_chain(&err),
                             "evicted stale pooled HTTP/2 connection; redialing"
@@ -1770,18 +2236,39 @@ where
             return Err(HttpError::Closed);
         }
         self.ensure_reaper_started();
-        let origin = request.origin();
         let request_timeout = request.timeout;
-        let shutdown = self.shutdown.clone();
         tokio::select! {
             biased;
-            _ = shutdown.cancelled() => Err(HttpError::Closed),
+            _ = self.shutdown.cancelled() => Err(HttpError::Closed),
             res = async {
                 let checked_out = self
-                    .checkout_ready(&origin, &request.uri, request_timeout)
+                    .checkout_ready(&request.uri, request_timeout)
                     .await?;
                 run(checked_out, request).await
             } => res,
+        }
+    }
+
+    pub(crate) async fn execute_unary(&self, request: Request) -> Result<UnaryResponse, HttpError> {
+        self.send_with(request, execute_unary_with).await
+    }
+
+    pub(crate) async fn init_streaming(
+        &self,
+        request: Request,
+    ) -> Result<StreamingResponse, HttpError> {
+        self.send_with(request, init_streaming_with).await
+    }
+
+    pub(crate) fn close(&self) {
+        self.shutdown.cancel();
+        let pools: Vec<_> = {
+            let mut hosts = self.hosts.write().unwrap();
+            hosts.closed = true;
+            hosts.map.drain().map(|(_, pool)| pool).collect()
+        };
+        for pool in pools {
+            pool.clear_and_detach();
         }
     }
 }
@@ -1797,8 +2284,11 @@ fn reap_idle_connections<C: Connect>(
     };
 
     let mut next_deadline: Option<Instant> = None;
+    let mut any_empty = false;
     for pool in &pools {
-        if let Some(deadline) = pool.reap_idle(now, idle_timeout) {
+        let (deadline, is_empty) = pool.reap_idle(now, idle_timeout);
+        any_empty |= is_empty;
+        if let Some(deadline) = deadline {
             next_deadline = Some(match next_deadline {
                 Some(earliest) => earliest.min(deadline),
                 None => deadline,
@@ -1806,38 +2296,37 @@ fn reap_idle_connections<C: Connect>(
         }
     }
 
-    hosts
-        .write()
-        .unwrap()
-        .map
-        .retain(|_, pool| !pool.detach_if_empty());
+    if any_empty {
+        hosts
+            .write()
+            .unwrap()
+            .map
+            .retain(|_, pool| !pool.detach_if_empty());
+    }
 
     next_deadline
 }
 
 async fn send_http_request(
-    mut sender: http2::SendRequest<BoxBody>,
+    mut sender: http2::SendRequest<HttpBody>,
     request: Request,
     retire_handle: &RetireHandle,
-    deadline: Option<Instant>,
+    sleep: Option<Pin<&mut Sleep>>,
 ) -> Result<http::Response<Incoming>, HttpError> {
     let http_request = build_http_request(
         request.method,
-        &request.uri,
+        request.uri,
         request.headers,
         request.body.into_http_body(),
     )?;
 
     let send_fut = sender.send_request(http_request);
-    match deadline {
-        Some(dl) => match timeout_at(dl, send_fut).await {
-            Ok(res) => res,
-            Err(_) => {
-                retire_handle.retire();
-                return Err(HttpError::Timeout);
-            }
-        },
-        None => send_fut.await,
+    match race_deadline(send_fut, sleep).await {
+        Ok(res) => res,
+        Err(()) => {
+            retire_handle.retire();
+            return Err(HttpError::Timeout);
+        }
     }
     .map_err(|err| {
         if is_dead_connection_hyper_error(&err) {
@@ -1857,11 +2346,13 @@ async fn execute_unary_with(
         retire_handle,
         deadline,
     } = checked_out;
-    let response = send_http_request(sender, request, &retire_handle, deadline).await?;
+    let mut sleep = pin!(deadline.map(tokio::time::sleep_until));
+    let response =
+        send_http_request(sender, request, &retire_handle, sleep.as_mut().as_pin_mut()).await?;
 
     let (parts, body) = response.into_parts();
     let bytes = if parts.status.is_success() {
-        let bytes = collect_bounded_body(body, MAX_RESPONSE_BYTES, deadline)
+        let bytes = collect_bounded_body(body, MAX_RESPONSE_BYTES, sleep.as_mut().as_pin_mut())
             .await
             .map_err(|err| match err {
                 CollectBodyError::Timeout => {
@@ -1884,7 +2375,7 @@ async fn execute_unary_with(
             parts.status,
             &parts.headers,
             body,
-            deadline,
+            sleep.as_mut().as_pin_mut(),
             &retire_handle,
         )
         .await
@@ -1908,7 +2399,9 @@ async fn init_streaming_with(
         retire_handle,
         deadline,
     } = checked_out;
-    let response = send_http_request(sender, request, &retire_handle, deadline).await?;
+    let mut sleep = pin!(deadline.map(tokio::time::sleep_until));
+    let response =
+        send_http_request(sender, request, &retire_handle, sleep.as_mut().as_pin_mut()).await?;
 
     let (parts, body) = response.into_parts();
     Ok(StreamingResponse::new(
@@ -1921,40 +2414,38 @@ async fn init_streaming_with(
     ))
 }
 
+#[cfg(feature = "_hidden")]
 #[async_trait]
 impl<C> RequestExecutor for Pool<C>
 where
     C: Connect,
 {
     async fn execute_unary(&self, request: Request) -> Result<UnaryResponse, HttpError> {
-        self.send_with(request, execute_unary_with).await
+        Pool::execute_unary(self, request).await
     }
 
     async fn init_streaming(&self, request: Request) -> Result<StreamingResponse, HttpError> {
-        self.send_with(request, init_streaming_with).await
+        Pool::init_streaming(self, request).await
     }
 
     fn close(&self) {
-        self.shutdown.cancel();
-        let pools: Vec<_> = {
-            let mut hosts = self.hosts.write().unwrap();
-            hosts.closed = true;
-            hosts.map.drain().map(|(_, pool)| pool).collect()
-        };
-        for pool in pools {
-            pool.clear_and_detach();
-        }
+        Pool::close(self);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::{
+        convert::Infallible,
         pin::Pin,
-        sync::atomic::{AtomicUsize, Ordering},
+        sync::{
+            Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
         task::{Context, Poll},
     };
 
+    use http_body_util::Empty;
     use hyper_util::rt::TokioIo;
     #[cfg(any(feature = "rustls-aws-lc-rs", feature = "rustls-ring"))]
     use rustls::client::danger::ServerCertVerifier;
@@ -2126,7 +2617,7 @@ mod tests {
         origin: &str,
     ) -> (ConnectionId, RequestPermit) {
         let uri: Uri = origin.parse().unwrap();
-        let (_host_pool, checkout) = pool.checkout_for_origin(origin, &uri).unwrap();
+        let (_host_pool, checkout) = pool.checkout_for_origin(&uri).unwrap();
         match checkout {
             Checkout::Ready { id, permit, .. } => (id, permit),
             Checkout::Connecting { id, mut rx, permit } => {
@@ -2153,7 +2644,7 @@ mod tests {
         let cloned = request.try_clone().unwrap();
         let http = build_http_request(
             cloned.method,
-            &cloned.uri,
+            cloned.uri,
             cloned.headers,
             cloned.body.into_http_body(),
         )
@@ -2748,7 +3239,7 @@ mod tests {
                             .unwrap()
                             .connections
                             .first()
-                            .map(|c| c.state.lock().unwrap().active_requests)
+                            .map(|c| c.state.active_requests())
                     })
                 };
                 if active == Some(1) {
@@ -2825,5 +3316,81 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(connector.dials.load(Ordering::SeqCst), 3);
         pool.close();
+    }
+
+    #[test]
+    fn permit_state_active_idle_transitions_and_reaper_check() {
+        let state = Arc::new(PermitState::new(Arc::new(Notify::new())));
+        let p1 = RequestPermit {
+            state: state.clone(),
+        };
+        assert_eq!(state.active_requests(), 1);
+        assert!(state.idle_deadline(Duration::ZERO).is_none());
+
+        let p2 = state.try_acquire(2).expect("second permit");
+        assert_eq!(state.active_requests(), 2);
+        assert!(state.try_acquire(2).is_none());
+
+        drop(p2);
+        assert_eq!(state.active_requests(), 1);
+        assert!(state.idle_deadline(Duration::ZERO).is_none());
+
+        drop(p1);
+        assert_eq!(state.active_requests(), 0);
+        let deadline = state
+            .idle_deadline(Duration::ZERO)
+            .expect("idle deadline set on last permit drop");
+        assert!(deadline <= Instant::now());
+        assert!(
+            state
+                .idle_deadline(Duration::from_secs(60))
+                .expect("idle deadline")
+                > Instant::now()
+        );
+
+        // Re-acquiring from idle clears the idle marker.
+        let p3 = state.try_acquire(1).expect("re-acquire from idle");
+        assert_eq!(state.active_requests(), 1);
+        assert!(state.idle_deadline(Duration::ZERO).is_none());
+        drop(p3);
+    }
+
+    #[test]
+    fn unary_zstd_decompress_recovers_after_bad_frames_and_handles_multiframe() {
+        let payload = b"hello world repeated payload ".repeat(512);
+        let compressed = compress_zstd_unary(&payload).unwrap();
+
+        // Truncated frame fails cleanly without poisoning thread-local DCtx.
+        assert!(matches!(
+            decompress_zstd(
+                Bytes::copy_from_slice(&compressed[..compressed.len() / 2]),
+                1024 * 1024
+            ),
+            Err(HttpError::ResponseCompression(_))
+        ));
+        assert_eq!(
+            decompress_zstd(Bytes::from(compressed.clone()), 1024 * 1024).unwrap(),
+            payload
+        );
+
+        // Oversized streaming frame fails with ResponseTooLarge and leaves DCtx reusable.
+        let oversized = vec![0xAAu8; 64 * 1024];
+        let streaming_oversized = zstd::stream::encode_all(&oversized[..], 1).unwrap();
+        assert!(matches!(
+            decompress_zstd(Bytes::from(streaming_oversized), 1024),
+            Err(HttpError::ResponseTooLarge(1024))
+        ));
+        assert_eq!(
+            decompress_zstd(Bytes::from(compressed), 1024 * 1024).unwrap(),
+            payload
+        );
+
+        // Multi-frame concatenated zstd payload round-trips cleanly.
+        let mut multi = compress_zstd_unary(b"part-one-").unwrap();
+        multi.extend_from_slice(&compress_zstd_unary(b"part-two").unwrap());
+        assert_eq!(
+            decompress_zstd(Bytes::from(multi), 1024).unwrap(),
+            Bytes::from_static(b"part-one-part-two")
+        );
     }
 }

@@ -46,6 +46,22 @@ pub(crate) const APPLICATION_PROTOBUF: HeaderValue =
 const S2_ATTEMPT: HeaderName = HeaderName::from_static("s2-attempt");
 const RETRY_AFTER_MS_HEADER: HeaderName = HeaderName::from_static("retry-after-ms");
 
+fn attempt_header_value(attempt: u32) -> HeaderValue {
+    match attempt {
+        1 => HeaderValue::from_static("1"),
+        2 => HeaderValue::from_static("2"),
+        3 => HeaderValue::from_static("3"),
+        4 => HeaderValue::from_static("4"),
+        5 => HeaderValue::from_static("5"),
+        6 => HeaderValue::from_static("6"),
+        7 => HeaderValue::from_static("7"),
+        8 => HeaderValue::from_static("8"),
+        9 => HeaderValue::from_static("9"),
+        10 => HeaderValue::from_static("10"),
+        n => HeaderValue::from(n),
+    }
+}
+
 pub(crate) struct S2sFrame<T> {
     pub(crate) msg: T,
     pub(crate) reconnect_advised: bool,
@@ -71,39 +87,39 @@ impl<R, E> Stream for Streaming<R, E> {
 }
 
 pub(crate) fn basin_path(name: &BasinName) -> String {
-    format!("v1/basins/{}", urlencoding::encode(name))
+    format!("/v1/basins/{}", urlencoding::encode(name))
 }
 
 pub(crate) fn stream_path(name: &StreamName) -> String {
-    format!("v1/streams/{}", urlencoding::encode(name))
+    format!("/v1/streams/{}", urlencoding::encode(name))
 }
 
 pub(crate) fn stream_records_path(name: &StreamName) -> String {
-    format!("v1/streams/{}/records", urlencoding::encode(name))
+    format!("/v1/streams/{}/records", urlencoding::encode(name))
 }
 
 pub(crate) fn stream_tail_path(name: &StreamName) -> String {
-    format!("v1/streams/{}/records/tail", urlencoding::encode(name))
+    format!("/v1/streams/{}/records/tail", urlencoding::encode(name))
 }
 
 pub(crate) fn token_path(id: &AccessTokenId) -> String {
-    format!("v1/access-tokens/{}", urlencoding::encode(id))
+    format!("/v1/access-tokens/{}", urlencoding::encode(id))
 }
 
 pub(crate) fn network_policy_path(selector: &NetworkPolicySelector) -> String {
     format!(
-        "v1/network-policies/{}",
+        "/v1/network-policies/{}",
         urlencoding::encode(&selector.to_string())
     )
 }
 
 pub(crate) fn metrics_basin_path(basin: &BasinName) -> String {
-    format!("v1/metrics/{}", urlencoding::encode(basin))
+    format!("/v1/metrics/{}", urlencoding::encode(basin))
 }
 
 pub(crate) fn metrics_stream_path(basin: &BasinName, stream: &StreamName) -> String {
     format!(
-        "v1/metrics/{}/{}",
+        "/v1/metrics/{}/{}",
         urlencoding::encode(basin),
         urlencoding::encode(stream)
     )
@@ -122,7 +138,7 @@ pub(crate) fn authorization_header(access_token: &str) -> Result<HeaderValue, Va
 }
 
 struct BaseClientInner {
-    client: Arc<dyn client::RequestExecutor>,
+    client: client::ClientTransport,
     shutdown: CancellationToken,
     default_headers: HeaderMap,
     #[cfg(feature = "_hidden")]
@@ -149,14 +165,13 @@ impl BaseClient {
         // masked by missing TLS providers or native CA errors.
         let (default_headers, provider) = Self::prepare(config)?;
         let shutdown = CancellationToken::new();
-        if config.endpoints.scheme == http::uri::Scheme::HTTP {
+        let transport = if config.endpoints.scheme == http::uri::Scheme::HTTP {
             let connector = client::default_http_connector(Some(config.connection_timeout));
-            Ok(Self::from_parts(
-                config,
-                default_headers,
-                provider,
+            client::ClientTransport::Http(client::Pool::new(
                 connector,
-                shutdown,
+                config.connection_timeout,
+                config.http2,
+                shutdown.clone(),
             ))
         } else {
             let connector = client::default_connector(
@@ -165,14 +180,20 @@ impl BaseClient {
                 config.rustls_crypto_provider.clone(),
             )
             .map_err(|e| ValidationError(format!("failed to initialize TLS connector: {e}")))?;
-            Ok(Self::from_parts(
-                config,
-                default_headers,
-                provider,
+            client::ClientTransport::Https(client::Pool::new(
                 connector,
-                shutdown,
+                config.connection_timeout,
+                config.http2,
+                shutdown.clone(),
             ))
-        }
+        };
+        Ok(Self::from_transport(
+            config,
+            default_headers,
+            provider,
+            transport,
+            shutdown,
+        ))
     }
 
     #[cfg(feature = "_hidden")]
@@ -184,12 +205,19 @@ impl BaseClient {
         C: client::Connect,
     {
         let (default_headers, provider) = Self::prepare(config)?;
-        Ok(Self::from_parts(
+        let shutdown = CancellationToken::new();
+        let pool = client::Pool::new(
+            connector,
+            config.connection_timeout,
+            config.http2,
+            shutdown.clone(),
+        );
+        Ok(Self::from_transport(
             config,
             default_headers,
             provider,
-            connector,
-            CancellationToken::new(),
+            client::ClientTransport::Custom(Arc::new(pool)),
+            shutdown,
         ))
     }
 
@@ -217,27 +245,25 @@ impl BaseClient {
             },
         };
         apply_standard_default_headers(&mut default_headers, config);
+        // Reserve headroom for per-request headers (`s2-basin`, `content-type`, `accept`,
+        // `content-encoding`, `s2-attempt`, `s2-encryption-key`) so cloned maps avoid cap 8 -> 16
+        // hash-table rehashes.
+        default_headers.reserve(6);
         Ok((default_headers, provider))
     }
 
-    fn from_parts<C: client::Connect>(
+    fn from_transport(
         config: &S2Config,
         default_headers: HeaderMap,
         access_token_provider: PreparedTokenProvider,
-        connector: C,
+        transport: client::ClientTransport,
         shutdown: CancellationToken,
     ) -> Self {
-        let pool = client::Pool::new(
-            connector,
-            config.connection_timeout,
-            config.http2,
-            shutdown.clone(),
-        );
         #[cfg(not(feature = "_hidden"))]
         let _ = access_token_provider;
         Self {
             inner: Arc::new(BaseClientInner {
-                client: Arc::new(pool),
+                client: transport,
                 shutdown,
                 default_headers,
                 #[cfg(feature = "_hidden")]
@@ -338,13 +364,19 @@ impl BaseClient {
         mut request: client::Request,
         context: ErrorContext,
     ) -> Result<(StreamingResponse, Option<String>), E> {
-        let shutdown = self.shutdown_token();
-        let access_token = tokio::select! {
-            biased;
-            _ = shutdown.cancelled() => {
+        let access_token = if self.refreshes_tokens() {
+            tokio::select! {
+                biased;
+                _ = self.inner.shutdown.cancelled() => {
+                    return Err(AbortedError::new_with_context("client closed", context).into());
+                }
+                res = self.authorize::<E>(&mut request, || context.clone()) => res?,
+            }
+        } else {
+            if self.is_closed() {
                 return Err(AbortedError::new_with_context("client closed", context).into());
             }
-            res = self.authorize::<E>(&mut request, || context.clone()) => res?,
+            None
         };
         let response = self
             .inner
@@ -361,13 +393,23 @@ impl BaseClient {
         scope: OpScope<'_>,
         attempts: u32,
     ) -> Result<(UnaryResponse, Option<String>), E> {
-        let shutdown = self.shutdown_token();
-        let access_token = tokio::select! {
-            biased;
-            _ = shutdown.cancelled() => {
-                return Err(AbortedError::new_with_context("client closed", scope.context(attempts)).into());
+        let access_token = if self.refreshes_tokens() {
+            tokio::select! {
+                biased;
+                _ = self.inner.shutdown.cancelled() => {
+                    return Err(AbortedError::new_with_context("client closed", scope.context(attempts)).into());
+                }
+                res = self.authorize::<E>(&mut request, || scope.context(attempts)) => res?,
             }
-            res = self.authorize::<E>(&mut request, || scope.context(attempts)) => res?,
+        } else {
+            if self.is_closed() {
+                return Err(AbortedError::new_with_context(
+                    "client closed",
+                    scope.context(attempts),
+                )
+                .into());
+            }
+            None
         };
         let response = self
             .inner
@@ -508,6 +550,7 @@ impl<'a> UnaryCall<'a> {
 
         let mut retry_backoff = RetryBackoff::from_config(&self.client.retry_config());
         let mut prior_uncertainty = false;
+        let mut request = Some(request);
 
         loop {
             let attempts = retry_backoff.attempt_number();
@@ -516,9 +559,17 @@ impl<'a> UnaryCall<'a> {
             let send_gate = gate_body.then(SendGate::new);
 
             let attempt_request = {
-                let mut r = request.try_clone().expect("body should not be a stream");
+                let mut r = if retry_backoff.is_exhausted() {
+                    request.take().expect("request available on final attempt")
+                } else {
+                    request
+                        .as_ref()
+                        .expect("request available before final attempt")
+                        .try_clone()
+                        .expect("body should not be a stream")
+                };
                 r.headers_mut()
-                    .insert(S2_ATTEMPT, HeaderValue::from(attempts));
+                    .insert(S2_ATTEMPT, attempt_header_value(attempts));
                 if let Some(ref gate) = send_gate {
                     r = r.with_gated_body(gate.clone());
                 }
@@ -746,7 +797,7 @@ impl BasinClient {
         self.base.shutdown_token()
     }
 
-    fn uri(&self, path: impl AsRef<str>) -> Uri {
+    pub(crate) fn uri(&self, path: impl AsRef<str>) -> Uri {
         client::uri_with_path(&self.base_url, path)
     }
 
@@ -816,7 +867,7 @@ impl BasinClient {
     {
         let mut request = builder
             .header(CONTENT_TYPE, CONTENT_TYPE_S2S)
-            .header(S2_ATTEMPT, HeaderValue::from(attempt))
+            .header(S2_ATTEMPT, attempt_header_value(attempt))
             .build()
             .map_err(|e| E::from_http(e, ctx.clone()))?;
         self.apply_basin_header(&mut request);
@@ -848,37 +899,67 @@ impl BasinClient {
 
         let stream = Box::pin(try_stream! {
             while let Some(chunk) = bytes_stream.next().await {
-                let chunk = chunk.map_err(|e| E::from_http(e, ctx.clone()))?;
-                buffer.extend_from_slice(&chunk);
+                let mut chunk = chunk.map_err(|e| E::from_http(e, ctx.clone()))?;
+                if chunk.is_empty() {
+                    continue;
+                }
+
+                // When a partial frame straddles chunks, copy only the exact bytes needed to
+                // finish that single frame so trailing frames in `chunk` still decode zero-copy.
+                if !buffer.is_empty() {
+                    if buffer.len() < 3 {
+                        let header_needed = (3 - buffer.len()).min(chunk.len());
+                        buffer.extend_from_slice(&chunk.split_to(header_needed));
+                        if buffer.len() < 3 {
+                            continue;
+                        }
+                    }
+                    let total_size = match FrameDecoder::peek_total_frame_len(&buffer) {
+                        Ok(Some(total_size)) => total_size,
+                        Ok(None) => unreachable!("buffer has at least 3 bytes"),
+                        Err(err) => Err(E::from(ProtocolError::new_with_context(
+                            format!("s2s frame decode: {err}"),
+                            ctx.clone(),
+                        )))?,
+                    };
+                    let needed = total_size.saturating_sub(buffer.len());
+                    if chunk.len() < needed {
+                        buffer.reserve(needed);
+                        buffer.extend_from_slice(&chunk);
+                        continue;
+                    }
+                    if needed > 0 {
+                        buffer.extend_from_slice(&chunk.split_to(needed));
+                    }
+                    match decoder.decode(&mut buffer) {
+                        Ok(Some(msg)) => {
+                            yield decode_s2s_message::<T, E>(
+                                msg,
+                                &stream_retire,
+                                &auth_client,
+                                access_token.as_deref(),
+                                &ctx,
+                            )?;
+                        }
+                        Ok(None) => unreachable!("buffer holds complete frame"),
+                        Err(err) => Err(E::from(ProtocolError::new_with_context(
+                            format!("s2s frame decode: {err}"),
+                            ctx.clone(),
+                        )))?,
+                    }
+                    debug_assert!(buffer.is_empty());
+                }
 
                 loop {
-                    match decoder.decode(&mut buffer) {
-                        Ok(Some(SessionMessage::Regular(msg))) => {
-                            let reconnect_advised = msg.reconnect_advised();
-                            if reconnect_advised {
-                                stream_retire.retire();
-                            }
-                            let decoded = msg.try_into_proto().map_err(|e| {
-                                E::from(ProtocolError::new_with_context(
-                                    format!("protobuf decode: {e}"),
-                                    ctx.clone(),
-                                ))
-                            })?;
-                            yield S2sFrame {
-                                msg: decoded,
-                                reconnect_advised,
-                            };
-                        }
-                        Ok(Some(SessionMessage::Terminal(msg))) => {
-                            let error = E::from_terminal_message(msg, ctx.clone());
-                            if error.should_retire_connection() {
-                                stream_retire.retire();
-                            }
-                            auth_client.invalidate_access_token_if_rejected(
-                                &error,
+                    match FrameDecoder::decode_bytes(&mut chunk) {
+                        Ok(Some(msg)) => {
+                            yield decode_s2s_message::<T, E>(
+                                msg,
+                                &stream_retire,
+                                &auth_client,
                                 access_token.as_deref(),
-                            );
-                            Err::<(), E>(error)?;
+                                &ctx,
+                            )?;
                         }
                         Ok(None) => break,
                         Err(err) => Err(E::from(ProtocolError::new_with_context(
@@ -886,6 +967,12 @@ impl BasinClient {
                             ctx.clone(),
                         )))?,
                     }
+                }
+                if !chunk.is_empty() {
+                    if let Ok(Some(total_size)) = FrameDecoder::peek_total_frame_len(&chunk) {
+                        buffer.reserve(total_size);
+                    }
+                    buffer.extend_from_slice(&chunk);
                 }
             }
             if !buffer.is_empty() {
@@ -940,6 +1027,45 @@ impl BasinClient {
             .query(&start)
             .query(&end);
         self.open_s2s(builder, headers, attempt, ctx).await
+    }
+}
+
+fn decode_s2s_message<T, E>(
+    msg: SessionMessage,
+    stream_retire: &client::RetireHandle,
+    auth_client: &BaseClient,
+    access_token: Option<&str>,
+    ctx: &ErrorContext,
+) -> Result<S2sFrame<T>, E>
+where
+    T: Message + Default,
+    E: TransportError,
+{
+    match msg {
+        SessionMessage::Regular(msg) => {
+            let reconnect_advised = msg.reconnect_advised();
+            if reconnect_advised {
+                stream_retire.retire();
+            }
+            let decoded = msg.try_into_proto().map_err(|e| {
+                E::from(ProtocolError::new_with_context(
+                    format!("protobuf decode: {e}"),
+                    ctx.clone(),
+                ))
+            })?;
+            Ok(S2sFrame {
+                msg: decoded,
+                reconnect_advised,
+            })
+        }
+        SessionMessage::Terminal(msg) => {
+            let error = E::from_terminal_message(msg, ctx.clone());
+            if error.should_retire_connection() {
+                stream_retire.retire();
+            }
+            auth_client.invalidate_access_token_if_rejected(&error, access_token);
+            Err(error)
+        }
     }
 }
 
@@ -1060,7 +1186,7 @@ mod tests {
         let (default_headers, access_token_provider) = BaseClient::prepare(config).unwrap();
         BaseClient {
             inner: Arc::new(BaseClientInner {
-                client: executor,
+                client: client::ClientTransport::Custom(executor),
                 shutdown: CancellationToken::new(),
                 default_headers,
                 access_token_provider: access_token_provider.provider,
@@ -1413,7 +1539,7 @@ mod tests {
             .unwrap();
         let client = BaseClient {
             inner: Arc::new(BaseClientInner {
-                client: executor.clone(),
+                client: client::ClientTransport::Custom(executor.clone()),
                 shutdown: CancellationToken::new(),
                 default_headers: HeaderMap::new(),
                 access_token_provider: Some(provider.clone()),

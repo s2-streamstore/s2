@@ -2429,3 +2429,60 @@ async fn regression_unsent_batch_cannot_be_acked_and_producer_wakes_on_session_f
     assert_eq!(prod.unacked_records(), 0);
     assert_eq!(prod.unacked_bytes(), 0);
 }
+
+#[tokio::test]
+async fn append_session_burst_over_32_queued_submits_delivers_every_batch() {
+    let server = auto_ack_s2s_server().await;
+    let stream = server.stream(no_retry_config());
+    let session = stream.append_session(AppendSessionConfig::new()).unwrap();
+    submit_and_ack(&session, sample_append_input()).await;
+
+    let mut tickets = Vec::with_capacity(64);
+    for _ in 0..64 {
+        tickets.push(
+            session
+                .submit(sample_append_input())
+                .await
+                .expect("submit accepted"),
+        );
+    }
+    let mut prev_end = 1u64;
+    for (i, ticket) in tickets.into_iter().enumerate() {
+        let ack = tokio::time::timeout(Duration::from_secs(5), ticket)
+            .await
+            .unwrap_or_else(|_| panic!("batch {i} timed out"))
+            .unwrap_or_else(|e| panic!("batch {i} failed: {e}"));
+        assert_eq!(ack.start.seq_num, prev_end, "gap at batch {i}");
+        prev_end = ack.end.seq_num;
+    }
+    assert_eq!(session.unacked_batches(), 0);
+    session.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn producer_burst_over_32_queued_batches_delivers_every_record() {
+    let server = auto_ack_s2s_server().await;
+    let stream = server.stream(no_retry_config());
+    let producer = stream
+        .producer(ProducerConfig::new().with_max_batch_records(1).unwrap())
+        .unwrap();
+
+    let mut tickets = Vec::with_capacity(64);
+    for i in 0..64 {
+        tickets.push(
+            producer
+                .submit(AppendRecord::new(format!("r{i}")).unwrap())
+                .await
+                .expect("submit accepted"),
+        );
+    }
+    for (i, ticket) in tickets.into_iter().enumerate() {
+        let ack = tokio::time::timeout(Duration::from_secs(5), ticket)
+            .await
+            .unwrap_or_else(|_| panic!("record {i} timed out"))
+            .unwrap_or_else(|e| panic!("record {i} failed: {e}"));
+        assert_eq!(ack.seq_num, i as u64);
+    }
+    assert_eq!(producer.unacked_records(), 0);
+    producer.close().await.unwrap();
+}

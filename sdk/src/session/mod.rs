@@ -3,8 +3,8 @@ pub mod read;
 
 pub(crate) use append::{
     AppendPermit, AppendPermits, AppendSession, AppendSessionConfig, AppendSessionCore,
-    BatchSubmitTicket, FinishOnDrop, SessionAbort, SessionLifecycle, SubmitTicket,
-    validate_max_unacked_bytes, validate_reserve_bytes,
+    BatchSubmitTicket, SessionAbort, SessionLifecycle, validate_max_unacked_bytes,
+    validate_reserve_bytes,
 };
 pub(crate) use read::{ReadBatchSession, ReadSession, ReadSessionConfig};
 
