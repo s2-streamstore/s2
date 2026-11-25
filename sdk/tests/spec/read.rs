@@ -1418,6 +1418,109 @@ async fn spec_t5a_empty_frame_does_not_reset_budget_and_r9_close_boundary() {
         "T5a: empty non-heartbeat frame must not reset retry budget"
     );
 
+    // 1b. T6 / T6a + T5a: an empty frame with reconnect_advised=true still triggers handover
+    //     (free after prior progress; counted as a retry and not resetting retry budget when no
+    //     progress was made yet).
+    let advised_empty_after_progress_conns = Arc::new(Mutex::new(Vec::<usize>::new()));
+    let advised_empty_after_progress_reqs = Arc::new(AtomicUsize::new(0));
+    let advised_empty_after_progress_server = MockH2Server::start({
+        let seen_conns = advised_empty_after_progress_conns.clone();
+        let reqs = advised_empty_after_progress_reqs.clone();
+        move |conn_id, _req, respond| {
+            let seen_conns = seen_conns.clone();
+            let reqs = reqs.clone();
+            async move {
+                let n = reqs.fetch_add(1, Ordering::SeqCst);
+                seen_conns.lock().unwrap().push(conn_id);
+                let Some(mut s2s) = S2sResponder::open(respond) else {
+                    return;
+                };
+                if n == 0 {
+                    // Deliver record 0 (progress!), then send an empty frame with reconnect advice
+                    // and keep the stream open so the client must actively end the request.
+                    s2s.send_regular(&proto_read_batch(0, 1), false, false);
+                    s2s.send_regular(&proto_read_batch_records(&[], None), true, false);
+                    std::future::pending::<()>().await;
+                } else {
+                    s2s.send_regular(&proto_read_batch(1, 2), false, true);
+                }
+            }
+        }
+    })
+    .await;
+
+    let mut advised_after_sess = advised_empty_after_progress_server
+        .stream(no_retry_config())
+        .read_session(
+            ReadInput::new()
+                .with_start(ReadStart::SeqNum(0))
+                .with_count(2),
+            ReadSessionConfig::default(),
+        )
+        .unwrap();
+    assert_eq!(advised_after_sess.next().await.unwrap().unwrap().seq_num, 0);
+    let rec1 = tokio::time::timeout(Duration::from_secs(2), advised_after_sess.next())
+        .await
+        .expect("T6: empty frame with reconnect_advised after progress must trigger handover")
+        .unwrap()
+        .unwrap();
+    assert_eq!(rec1.seq_num, 1);
+    assert!(advised_after_sess.next().await.is_none());
+    let conns = advised_empty_after_progress_conns.lock().unwrap().clone();
+    assert_eq!(conns.len(), 2);
+    assert_ne!(
+        conns[0], conns[1],
+        "T6: empty frame handover must move to a fresh connection"
+    );
+
+    let advised_empty_before_progress_reqs = Arc::new(AtomicUsize::new(0));
+    let advised_empty_before_progress_server = MockH2Server::start({
+        let reqs = advised_empty_before_progress_reqs.clone();
+        move |_conn_id, _req, respond| {
+            let reqs = reqs.clone();
+            async move {
+                let n = reqs.fetch_add(1, Ordering::SeqCst);
+                let Some(mut s2s) = S2sResponder::open(respond) else {
+                    return;
+                };
+                if n == 0 {
+                    // Empty frame with reconnect advice BEFORE any progress -> must consume retry
+                    // budget (T6 / T5a) instead of resetting budget or hanging forever.
+                    s2s.send_regular(&proto_read_batch_records(&[], None), true, false);
+                    std::future::pending::<()>().await;
+                } else {
+                    s2s.send_terminal(
+                        503,
+                        r#"{"code":"unavailable","message":"transient"}"#.as_bytes(),
+                    );
+                }
+            }
+        }
+    })
+    .await;
+
+    let mut advised_before_sess = advised_empty_before_progress_server
+        .stream(fast_retry_config(2))
+        .read_session(
+            ReadInput::new().with_start(ReadStart::SeqNum(0)),
+            ReadSessionConfig::default(),
+        )
+        .unwrap();
+    let err = tokio::time::timeout(Duration::from_secs(2), advised_before_sess.next())
+        .await
+        .expect("T6: empty frame with reconnect_advised before progress must retry and finish")
+        .expect("must fail after retry budget exhausted")
+        .unwrap_err();
+    assert!(
+        matches!(err, ReadSessionError::Server(ref e) if e.status == 503),
+        "T6/T5a: expected 503 on second attempt after empty-frame handover consumed attempt 1, got {err:?}"
+    );
+    assert_eq!(
+        advised_empty_before_progress_reqs.load(Ordering::SeqCst),
+        2,
+        "T6/T5a: empty-frame handover before progress must count as a retry without resetting budget"
+    );
+
     // 2. R9c with zero buffered records: iterating observes the terminal 404 and closes immediately
     //    (failing caught_up() with 404); a subsequent client.close() has no effect.
     let err_server = MockH2Server::start(|_conn_id, _req, respond| async move {
@@ -1529,12 +1632,25 @@ async fn spec_t5a_empty_frame_does_not_reset_budget_and_r9_close_boundary() {
         .unwrap();
     let cu1 = s1.caught_up();
     assert_eq!(s1.next().await.unwrap().unwrap().seq_num, 0);
-    // Do NOT poll s1.next() — verify `c1.close()` still wakes parked `cu1` immediately
-    // (`R8d`/`R9d`)!
+    // Park `cu1` on the shutdown future first (and do NOT poll s1.next()) — verify `c1.close()`
+    // wakes the already-parked `cu1` immediately (`R8d`/`R9d`)!
+    let cu1_polled = Arc::new(tokio::sync::Notify::new());
+    let cu1_task = tokio::spawn({
+        let cu1_polled = cu1_polled.clone();
+        async move {
+            let mut cu = Box::pin(cu1);
+            assert!(futures_util::poll!(cu.as_mut()).is_pending());
+            cu1_polled.notify_one();
+            cu.await
+        }
+    });
+    cu1_polled.notified().await;
+    tokio::task::yield_now().await;
     c1.close();
-    let cu1_err = tokio::time::timeout(Duration::from_secs(1), cu1)
+    let cu1_err = tokio::time::timeout(Duration::from_secs(1), cu1_task)
         .await
         .expect("R8d/R9d: client.close() must wake parked caught_up immediately")
+        .unwrap()
         .unwrap_err();
     assert!(
         matches!(cu1_err, ReadSessionError::Aborted(_)),

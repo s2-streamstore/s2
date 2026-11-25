@@ -1169,7 +1169,6 @@ async fn spec_refused_stream_classified_as_definite_and_retried_under_no_side_ef
 #[tokio::test]
 async fn spec_c5_c7_c10_c11_d1_a1_transport_user_agent_inputs_concurrency_and_binary_records() {
     fn assert_send_sync<T: Send + Sync>() {}
-    fn assert_send<T: Send>() {}
 
     assert_send_sync::<S2>();
     assert_send_sync::<S2Basin>();
@@ -1177,8 +1176,9 @@ async fn spec_c5_c7_c10_c11_d1_a1_transport_user_agent_inputs_concurrency_and_bi
     assert_send_sync::<AppendSession>();
     assert_send_sync::<Producer>();
     assert_send_sync::<ReadSessionState>();
-    assert_send::<ReadSession>();
-    assert_send::<ReadBatchSession>();
+    assert_send_sync::<ReadSession>();
+    assert_send_sync::<ReadBatchSession>();
+    assert_send_sync::<s2_sdk::read_session::CaughtUp>();
 
     let seen_user_agents = Arc::new(Mutex::new(Vec::<String>::new()));
     let stored = Arc::new(Mutex::new(Vec::<api::stream::proto::AppendRecord>::new()));
