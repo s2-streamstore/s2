@@ -15,6 +15,7 @@ use crate::backend::{
     Backend,
     error::{BasinDeletionError, StorageError},
     kv,
+    streamer::TerminalTrimCondition,
 };
 
 const PENDING_LIST_LIMIT: usize = 32;
@@ -84,7 +85,12 @@ impl Backend {
             if info.deleted_at.is_some() {
                 continue;
             }
-            self.delete_stream(basin.clone(), stream.clone()).await?;
+            self.delete_stream_with_condition(
+                basin.clone(),
+                stream.clone(),
+                TerminalTrimCondition::Always,
+            )
+            .await?;
         }
 
         if page.has_more {

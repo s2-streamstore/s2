@@ -174,6 +174,9 @@ impl Backend {
         else {
             return Err(BasinNotFoundError { basin }.into());
         };
+        if meta.deleted_at.is_some() {
+            return Err(BasinDeletionPendingError { basin }.into());
+        }
         Ok(meta.config)
     }
 

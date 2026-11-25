@@ -411,6 +411,7 @@ impl Backend {
                     Ok(config) => config,
                     Err(GetBasinConfigError::Storage(e)) => Err(e)?,
                     Err(GetBasinConfigError::BasinNotFound(e)) => Err(e)?,
+                    Err(GetBasinConfigError::BasinDeletionPending(e)) => Err(e)?,
                 };
                 if !auto_create_on.is_enabled(&config) {
                     return Err(e.into());

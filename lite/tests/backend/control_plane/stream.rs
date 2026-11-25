@@ -795,10 +795,17 @@ async fn test_stream_config_updates_active_streamer(#[case] ensure: bool, #[case
 }
 
 #[tokio::test]
-async fn test_create_stream_fails_when_basin_deleting() {
+async fn test_stream_ops_fail_when_basin_deleting() {
     let backend = create_backend().await;
     let basin_name =
         create_test_basin(&backend, "stream-basin-deleting", BasinConfig::default()).await;
+    let existing_stream = create_test_stream(
+        &backend,
+        &basin_name,
+        "existing",
+        OptionalStreamConfig::default(),
+    )
+    .await;
 
     backend
         .delete_basin(basin_name.clone())
@@ -808,18 +815,47 @@ async fn test_create_stream_fails_when_basin_deleting() {
     let stream_name = test_stream_name("blocked");
     let result = backend
         .provision_stream(
-            basin_name,
-            stream_name,
+            basin_name.clone(),
+            stream_name.clone(),
             OptionalStreamConfig::default(),
             ProvisionMode::CreateOnly {
                 request_token: None,
             },
         )
         .await;
-
     assert!(matches!(
         result,
         Err(ProvisionStreamError::BasinDeletionPending(_))
+    ));
+
+    let get_existing = backend
+        .get_stream_config(basin_name.clone(), existing_stream.clone())
+        .await;
+    assert!(matches!(
+        get_existing,
+        Err(GetStreamConfigError::BasinDeletionPending(_))
+    ));
+
+    let get_missing = backend
+        .get_stream_config(basin_name.clone(), stream_name.clone())
+        .await;
+    assert!(matches!(
+        get_missing,
+        Err(GetStreamConfigError::BasinDeletionPending(_))
+    ));
+
+    let delete_existing = backend
+        .delete_stream(basin_name.clone(), existing_stream)
+        .await;
+    assert!(matches!(
+        delete_existing,
+        Err(DeleteStreamError::BasinDeletionPending(_))
+    ));
+
+    let delete_missing = backend.delete_stream(basin_name, stream_name).await;
+    assert!(matches!(
+        delete_missing,
+        Err(DeleteStreamError::BasinDeletionPending(_))
     ));
 }
 

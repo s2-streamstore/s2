@@ -15,7 +15,7 @@ use tracing::instrument;
 
 use super::{
     Backend, doe, resolve_stream_config,
-    store::{db_txn_commit_durable, db_txn_get, db_txn_get_with},
+    store::{db_snapshot_get_durable, db_txn_commit_durable, db_txn_get, db_txn_get_with},
     streamer::{TerminalTrimCondition, TerminalTrimOutcome},
     timestamp::TimestampSecs,
 };
@@ -247,16 +247,29 @@ impl Backend {
         basin: BasinName,
         stream: StreamName,
     ) -> Result<StreamConfig, GetStreamConfigError> {
-        let meta = self
-            .db_get(
+        let snapshot = self.db.snapshot().map_err(StorageError::from)?;
+        let (basin_meta, meta) = tokio::try_join!(
+            db_snapshot_get_durable(
+                &snapshot,
+                kv::basin_meta::ser_key(&basin),
+                kv::basin_meta::deser_value,
+            ),
+            db_snapshot_get_durable(
+                &snapshot,
                 kv::stream_meta::ser_key(&basin, &stream),
                 kv::stream_meta::deser_value,
-            )
-            .await?
-            .ok_or_else(|| StreamNotFoundError {
-                basin: basin.clone(),
-                stream: stream.clone(),
-            })?;
+            ),
+        )?;
+        let basin_meta = basin_meta.ok_or_else(|| BasinNotFoundError {
+            basin: basin.clone(),
+        })?;
+        if basin_meta.deleted_at.is_some() {
+            return Err(BasinDeletionPendingError { basin }.into());
+        }
+        let meta = meta.ok_or_else(|| StreamNotFoundError {
+            basin: basin.clone(),
+            stream: stream.clone(),
+        })?;
         if meta.deleted_at.is_some() {
             return Err(StreamDeletionPendingError.into());
         }
@@ -355,9 +368,35 @@ impl Backend {
         basin: BasinName,
         stream: StreamName,
     ) -> Result<(), DeleteStreamError> {
-        self.delete_stream_with_condition(basin, stream, TerminalTrimCondition::Always)
+        let check_basin = || async {
+            let Some(basin_meta) = self
+                .db_get(kv::basin_meta::ser_key(&basin), kv::basin_meta::deser_value)
+                .await?
+            else {
+                return Err(DeleteStreamError::from(BasinNotFoundError {
+                    basin: basin.clone(),
+                }));
+            };
+            if basin_meta.deleted_at.is_some() {
+                return Err(DeleteStreamError::from(BasinDeletionPendingError {
+                    basin: basin.clone(),
+                }));
+            }
+            Ok(())
+        };
+
+        check_basin().await?;
+        match self
+            .delete_stream_with_condition(basin.clone(), stream, TerminalTrimCondition::Always)
             .await
-            .map(|_| ())
+        {
+            Ok(_) => Ok(()),
+            Err(DeleteStreamError::StreamNotFound(err)) => {
+                check_basin().await?;
+                Err(DeleteStreamError::StreamNotFound(err))
+            }
+            Err(err) => Err(err),
+        }
     }
 
     pub(super) async fn delete_stream_with_condition(

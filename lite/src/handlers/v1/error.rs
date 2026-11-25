@@ -114,6 +114,9 @@ impl ServiceError {
                 GetBasinConfigError::BasinNotFound(e) => {
                     standard(ErrorCode::BasinNotFound, e.to_string())
                 }
+                GetBasinConfigError::BasinDeletionPending(e) => {
+                    standard(ErrorCode::BasinDeletionPending, e.to_string())
+                }
             },
             ServiceError::DeleteBasin(e) => match e {
                 DeleteBasinError::Storage(e) => standard(ErrorCode::Storage, e.to_string()),
@@ -163,6 +166,12 @@ impl ServiceError {
             },
             ServiceError::GetStreamConfig(e) => match e {
                 GetStreamConfigError::Storage(e) => standard(ErrorCode::Storage, e.to_string()),
+                GetStreamConfigError::BasinNotFound(e) => {
+                    standard(ErrorCode::BasinNotFound, e.to_string())
+                }
+                GetStreamConfigError::BasinDeletionPending(e) => {
+                    standard(ErrorCode::BasinDeletionPending, e.to_string())
+                }
                 GetStreamConfigError::StreamNotFound(e) => {
                     standard(ErrorCode::StreamNotFound, e.to_string())
                 }
@@ -178,6 +187,12 @@ impl ServiceError {
                 DeleteStreamError::StreamerMissingInActionError(_)
                 | DeleteStreamError::RequestDroppedError(_) => {
                     standard(ErrorCode::Unavailable, e.to_string())
+                }
+                DeleteStreamError::BasinNotFound(e) => {
+                    standard(ErrorCode::BasinNotFound, e.to_string())
+                }
+                DeleteStreamError::BasinDeletionPending(e) => {
+                    standard(ErrorCode::BasinDeletionPending, e.to_string())
                 }
                 DeleteStreamError::StreamNotFound(e) => {
                     standard(ErrorCode::StreamNotFound, e.to_string())
