@@ -1058,7 +1058,12 @@ fn decompress_single(encoding: &str, bytes: Bytes, max_bytes: usize) -> Result<B
             max_bytes,
         ),
         "zstd" => {
-            let decoder = zstd::stream::Decoder::with_buffer(bytes.as_ref())
+            let mut decoder = zstd::stream::Decoder::with_buffer(bytes.as_ref())
+                .map_err(|e| HttpError::ResponseCompression(e.to_string()))?;
+            // 16 MiB max window covers standard streaming zstd encoders (e.g. 8 MiB default
+            // windowLog=23) while bounding decoder memory well below libzstd's 128 MiB default.
+            decoder
+                .window_log_max(24)
                 .map_err(|e| HttpError::ResponseCompression(e.to_string()))?;
             read_bounded(decoder, initial_capacity, max_bytes)
         }
@@ -2645,6 +2650,31 @@ mod tests {
             let err = decompress_body(&headers, raw, payload.len() - 1).unwrap_err();
             assert!(matches!(err, HttpError::ResponseTooLarge(n) if n == payload.len() - 1));
         }
+    }
+
+    #[test]
+    fn decompress_zstd_enforces_window_log_max() {
+        let encode_with_window_log = |window_log: u32, payload: &[u8]| -> Bytes {
+            let mut encoder = zstd::stream::write::Encoder::new(Vec::new(), 1).unwrap();
+            encoder.window_log(window_log).unwrap();
+            encoder.write_all(payload).unwrap();
+            Bytes::from(encoder.finish().unwrap())
+        };
+
+        let payload = b"bounded zstd window test payload";
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_ENCODING, HeaderValue::from_static("zstd"));
+
+        let within_limit = encode_with_window_log(24, payload);
+        let decoded = decompress_body(&headers, within_limit, MAX_RESPONSE_BYTES).unwrap();
+        assert_eq!(decoded.as_ref(), payload);
+
+        let exceeds_limit = encode_with_window_log(25, payload);
+        let err = decompress_body(&headers, exceeds_limit, MAX_RESPONSE_BYTES).unwrap_err();
+        assert!(
+            matches!(err, HttpError::ResponseCompression(_)),
+            "expected ResponseCompression error for window_log=25, got {err:?}"
+        );
     }
 
     #[tokio::test]
