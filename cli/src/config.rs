@@ -268,11 +268,9 @@ impl CliConfig {
                 );
             }
             ConfigKey::SslNoVerify => {
-                self.ssl_no_verify = Some(
-                    value
-                        .parse()
-                        .map_err(|_| CliConfigError::InvalidValue(key.to_string(), value))?,
-                );
+                let parsed = parse_bool(&value)
+                    .ok_or_else(|| CliConfigError::InvalidValue(key.to_string(), value))?;
+                self.ssl_no_verify = Some(parsed);
             }
         }
         Ok(())
@@ -432,4 +430,38 @@ pub fn sdk_config(
     }
 
     Ok(sdk_config)
+}
+
+fn parse_bool(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "on" | "yes" => Some(true),
+        "0" | "false" | "off" | "no" => Some(false),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn set_ssl_no_verify_parses_boolean_values() {
+        for raw in ["1", "yes", "on", "TRUE"] {
+            let mut config = CliConfig::default();
+            config.set(ConfigKey::SslNoVerify, raw.to_owned()).unwrap();
+            assert_eq!(config.ssl_no_verify, Some(true), "raw={raw:?}");
+        }
+        for raw in ["0", "no", "off", "False"] {
+            let mut config = CliConfig::default();
+            config.set(ConfigKey::SslNoVerify, raw.to_owned()).unwrap();
+            assert_eq!(config.ssl_no_verify, Some(false), "raw={raw:?}");
+        }
+        for raw in ["", "2"] {
+            let mut config = CliConfig::default();
+            assert!(matches!(
+                config.set(ConfigKey::SslNoVerify, raw.to_owned()),
+                Err(CliConfigError::InvalidValue(..))
+            ));
+        }
+    }
 }
