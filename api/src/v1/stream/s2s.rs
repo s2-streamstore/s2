@@ -1194,6 +1194,45 @@ mod test {
     }
 
     #[test]
+    fn try_into_proto_copies_while_zero_copy_aliases_frame_buffer() {
+        #[derive(Clone, PartialEq, prost::Message)]
+        struct BytesProto {
+            #[prost(bytes = "bytes", tag = "1")]
+            payload: Bytes,
+        }
+
+        let proto = BytesProto {
+            payload: Bytes::from_static(b"small-record-body"),
+        };
+        let frame = encode_regular_frame(CompressionAlgorithm::None, &proto).unwrap();
+        let frame_start = frame.as_ptr() as usize;
+        let frame_end = frame_start + frame.len();
+
+        let mut wire = frame.clone();
+        let SessionMessage::Regular(data) = FrameDecoder::decode_bytes(&mut wire).unwrap().unwrap()
+        else {
+            panic!("expected regular frame");
+        };
+
+        let copied = data.clone().try_into_proto::<BytesProto>().unwrap();
+        assert_eq!(copied, proto);
+        let copied_ptr = copied.payload.as_ptr() as usize;
+        assert!(
+            copied_ptr < frame_start || copied_ptr >= frame_end,
+            "try_into_proto must copy out of the frame buffer"
+        );
+
+        let zero_copy = data.try_into_proto_zero_copy::<BytesProto>().unwrap();
+        assert_eq!(zero_copy, proto);
+        let zc_start = zero_copy.payload.as_ptr() as usize;
+        let zc_end = zc_start + zero_copy.payload.len();
+        assert!(
+            zc_start >= frame_start && zc_end <= frame_end,
+            "try_into_proto_zero_copy must alias the frame buffer"
+        );
+    }
+
+    #[test]
     fn compressed_data_for_proto_trims_slack_on_highly_compressible_payload() {
         let proto = TestProto::new(vec![0u8; 256 * 1024]);
         for alg in [CompressionAlgorithm::Gzip, CompressionAlgorithm::Zstd] {
