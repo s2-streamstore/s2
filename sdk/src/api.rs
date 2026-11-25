@@ -46,6 +46,22 @@ pub(crate) const APPLICATION_PROTOBUF: HeaderValue =
 const S2_ATTEMPT: HeaderName = HeaderName::from_static("s2-attempt");
 const RETRY_AFTER_MS_HEADER: HeaderName = HeaderName::from_static("retry-after-ms");
 
+fn attempt_header_value(attempt: u32) -> HeaderValue {
+    match attempt {
+        1 => HeaderValue::from_static("1"),
+        2 => HeaderValue::from_static("2"),
+        3 => HeaderValue::from_static("3"),
+        4 => HeaderValue::from_static("4"),
+        5 => HeaderValue::from_static("5"),
+        6 => HeaderValue::from_static("6"),
+        7 => HeaderValue::from_static("7"),
+        8 => HeaderValue::from_static("8"),
+        9 => HeaderValue::from_static("9"),
+        10 => HeaderValue::from_static("10"),
+        n => HeaderValue::from(n),
+    }
+}
+
 pub(crate) struct S2sFrame<T> {
     pub(crate) msg: T,
     pub(crate) reconnect_advised: bool,
@@ -71,39 +87,39 @@ impl<R, E> Stream for Streaming<R, E> {
 }
 
 pub(crate) fn basin_path(name: &BasinName) -> String {
-    format!("v1/basins/{}", urlencoding::encode(name))
+    format!("/v1/basins/{}", urlencoding::encode(name))
 }
 
 pub(crate) fn stream_path(name: &StreamName) -> String {
-    format!("v1/streams/{}", urlencoding::encode(name))
+    format!("/v1/streams/{}", urlencoding::encode(name))
 }
 
 pub(crate) fn stream_records_path(name: &StreamName) -> String {
-    format!("v1/streams/{}/records", urlencoding::encode(name))
+    format!("/v1/streams/{}/records", urlencoding::encode(name))
 }
 
 pub(crate) fn stream_tail_path(name: &StreamName) -> String {
-    format!("v1/streams/{}/records/tail", urlencoding::encode(name))
+    format!("/v1/streams/{}/records/tail", urlencoding::encode(name))
 }
 
 pub(crate) fn token_path(id: &AccessTokenId) -> String {
-    format!("v1/access-tokens/{}", urlencoding::encode(id))
+    format!("/v1/access-tokens/{}", urlencoding::encode(id))
 }
 
 pub(crate) fn network_policy_path(selector: &NetworkPolicySelector) -> String {
     format!(
-        "v1/network-policies/{}",
+        "/v1/network-policies/{}",
         urlencoding::encode(&selector.to_string())
     )
 }
 
 pub(crate) fn metrics_basin_path(basin: &BasinName) -> String {
-    format!("v1/metrics/{}", urlencoding::encode(basin))
+    format!("/v1/metrics/{}", urlencoding::encode(basin))
 }
 
 pub(crate) fn metrics_stream_path(basin: &BasinName, stream: &StreamName) -> String {
     format!(
-        "v1/metrics/{}/{}",
+        "/v1/metrics/{}/{}",
         urlencoding::encode(basin),
         urlencoding::encode(stream)
     )
@@ -338,13 +354,19 @@ impl BaseClient {
         mut request: client::Request,
         context: ErrorContext,
     ) -> Result<(StreamingResponse, Option<String>), E> {
-        let shutdown = self.shutdown_token();
-        let access_token = tokio::select! {
-            biased;
-            _ = shutdown.cancelled() => {
+        let access_token = if self.refreshes_tokens() {
+            tokio::select! {
+                biased;
+                _ = self.inner.shutdown.cancelled() => {
+                    return Err(AbortedError::new_with_context("client closed", context).into());
+                }
+                res = self.authorize::<E>(&mut request, || context.clone()) => res?,
+            }
+        } else {
+            if self.is_closed() {
                 return Err(AbortedError::new_with_context("client closed", context).into());
             }
-            res = self.authorize::<E>(&mut request, || context.clone()) => res?,
+            None
         };
         let response = self
             .inner
@@ -361,13 +383,23 @@ impl BaseClient {
         scope: OpScope<'_>,
         attempts: u32,
     ) -> Result<(UnaryResponse, Option<String>), E> {
-        let shutdown = self.shutdown_token();
-        let access_token = tokio::select! {
-            biased;
-            _ = shutdown.cancelled() => {
-                return Err(AbortedError::new_with_context("client closed", scope.context(attempts)).into());
+        let access_token = if self.refreshes_tokens() {
+            tokio::select! {
+                biased;
+                _ = self.inner.shutdown.cancelled() => {
+                    return Err(AbortedError::new_with_context("client closed", scope.context(attempts)).into());
+                }
+                res = self.authorize::<E>(&mut request, || scope.context(attempts)) => res?,
             }
-            res = self.authorize::<E>(&mut request, || scope.context(attempts)) => res?,
+        } else {
+            if self.is_closed() {
+                return Err(AbortedError::new_with_context(
+                    "client closed",
+                    scope.context(attempts),
+                )
+                .into());
+            }
+            None
         };
         let response = self
             .inner
@@ -508,6 +540,7 @@ impl<'a> UnaryCall<'a> {
 
         let mut retry_backoff = RetryBackoff::from_config(&self.client.retry_config());
         let mut prior_uncertainty = false;
+        let mut request = Some(request);
 
         loop {
             let attempts = retry_backoff.attempt_number();
@@ -516,9 +549,17 @@ impl<'a> UnaryCall<'a> {
             let send_gate = gate_body.then(SendGate::new);
 
             let attempt_request = {
-                let mut r = request.try_clone().expect("body should not be a stream");
+                let mut r = if retry_backoff.is_exhausted() {
+                    request.take().expect("request available on final attempt")
+                } else {
+                    request
+                        .as_ref()
+                        .expect("request available before final attempt")
+                        .try_clone()
+                        .expect("body should not be a stream")
+                };
                 r.headers_mut()
-                    .insert(S2_ATTEMPT, HeaderValue::from(attempts));
+                    .insert(S2_ATTEMPT, attempt_header_value(attempts));
                 if let Some(ref gate) = send_gate {
                     r = r.with_gated_body(gate.clone());
                 }
@@ -746,7 +787,7 @@ impl BasinClient {
         self.base.shutdown_token()
     }
 
-    fn uri(&self, path: impl AsRef<str>) -> Uri {
+    pub(crate) fn uri(&self, path: impl AsRef<str>) -> Uri {
         client::uri_with_path(&self.base_url, path)
     }
 
@@ -816,7 +857,7 @@ impl BasinClient {
     {
         let mut request = builder
             .header(CONTENT_TYPE, CONTENT_TYPE_S2S)
-            .header(S2_ATTEMPT, HeaderValue::from(attempt))
+            .header(S2_ATTEMPT, attempt_header_value(attempt))
             .build()
             .map_err(|e| E::from_http(e, ctx.clone()))?;
         self.apply_basin_header(&mut request);

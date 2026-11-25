@@ -13,9 +13,8 @@ use pin_project_lite::pin_project;
 use crate::client::BoxError;
 
 const UNSENT: u8 = 0;
-const SENT: u8 = 1;
-const STOPPED_UNSENT: u8 = 2;
-const STOPPED_SENT: u8 = 3;
+const SENT_BIT: u8 = 0b01;
+const STOPPED_BIT: u8 = 0b10;
 
 pub(crate) fn attempt_ended_io_error() -> io::Error {
     io::Error::new(io::ErrorKind::ConnectionAborted, "attempt ended")
@@ -44,35 +43,23 @@ impl SendGate {
 
     /// Returns `true` if at least one body frame passed the gate.
     pub(crate) fn was_sent(&self) -> bool {
-        matches!(self.0.load(Ordering::Acquire), SENT | STOPPED_SENT)
+        (self.0.load(Ordering::Acquire) & SENT_BIT) != 0
     }
 
     fn is_stopped(&self) -> bool {
-        matches!(
-            self.0.load(Ordering::Acquire),
-            STOPPED_UNSENT | STOPPED_SENT
-        )
+        (self.0.load(Ordering::Acquire) & STOPPED_BIT) != 0
     }
 
     /// Atomically allow a frame to be yielded, marking the request as sent.
     ///
     /// Returns `false` if the attempt has already been stopped.
     pub(crate) fn try_mark_sent(&self) -> bool {
-        loop {
-            match self.0.load(Ordering::Acquire) {
-                UNSENT => {
-                    if self
-                        .0
-                        .compare_exchange(UNSENT, SENT, Ordering::AcqRel, Ordering::Acquire)
-                        .is_ok()
-                    {
-                        return true;
-                    }
-                }
-                SENT => return true,
-                STOPPED_UNSENT | STOPPED_SENT => return false,
-                _ => unreachable!("invalid SendGate state"),
-            }
+        match self
+            .0
+            .compare_exchange(UNSENT, SENT_BIT, Ordering::AcqRel, Ordering::Acquire)
+        {
+            Ok(_) | Err(SENT_BIT) => true,
+            Err(_) => false,
         }
     }
 
@@ -80,36 +67,7 @@ impl SendGate {
     ///
     /// Returns `true` if and only if no frame was ever yielded before stopping.
     pub(crate) fn stop(&self) -> bool {
-        loop {
-            match self.0.load(Ordering::Acquire) {
-                UNSENT => {
-                    if self
-                        .0
-                        .compare_exchange(
-                            UNSENT,
-                            STOPPED_UNSENT,
-                            Ordering::AcqRel,
-                            Ordering::Acquire,
-                        )
-                        .is_ok()
-                    {
-                        return true;
-                    }
-                }
-                SENT => {
-                    if self
-                        .0
-                        .compare_exchange(SENT, STOPPED_SENT, Ordering::AcqRel, Ordering::Acquire)
-                        .is_ok()
-                    {
-                        return false;
-                    }
-                }
-                STOPPED_UNSENT => return true,
-                STOPPED_SENT => return false,
-                _ => unreachable!("invalid SendGate state"),
-            }
-        }
+        (self.0.fetch_or(STOPPED_BIT, Ordering::AcqRel) & SENT_BIT) == 0
     }
 }
 

@@ -220,7 +220,7 @@ impl S2 {
         let response: api::basin::ListBasinsResponse = self
             .base
             .unary(
-                self.get("v1/basins").query(&req).build(),
+                self.get("/v1/basins").query(&req).build(),
                 OpScope::account("list_basins", true),
             )
             .send_json()
@@ -264,7 +264,7 @@ impl S2 {
         let info: api::basin::BasinInfo = self
             .base
             .unary(
-                self.post("v1/basins")
+                self.post("/v1/basins")
                     .header(REQUEST_TOKEN_HEADER.clone(), request_token())
                     .json(&req)
                     .build(),
@@ -359,7 +359,7 @@ impl S2 {
         let response: api::access::ListAccessTokensResponse = self
             .base
             .unary(
-                self.get("v1/access-tokens").query(&req).build(),
+                self.get("/v1/access-tokens").query(&req).build(),
                 OpScope::account("list_access_tokens", true),
             )
             .send_json()
@@ -405,7 +405,7 @@ impl S2 {
         let response: api::access::IssueAccessTokenResponse = self
             .base
             .unary(
-                self.post("v1/access-tokens").json(&req).build(),
+                self.post("/v1/access-tokens").json(&req).build(),
                 OpScope::account("issue_access_token", false),
             )
             .definite_retries_only()
@@ -439,7 +439,7 @@ impl S2 {
         let response: api::network_policy::ListNetworkPoliciesResponse = self
             .base
             .unary(
-                self.get("v1/network-policies").query(&req).build(),
+                self.get("/v1/network-policies").query(&req).build(),
                 OpScope::account("list_network_policies", true),
             )
             .send_json()
@@ -485,7 +485,7 @@ impl S2 {
         let response: api::network_policy::NetworkPolicyInfo = self
             .base
             .unary(
-                self.post("v1/network-policies").json(&req).build(),
+                self.post("/v1/network-policies").json(&req).build(),
                 OpScope::account("create_network_policy", false),
             )
             .definite_retries_only()
@@ -540,7 +540,7 @@ impl S2 {
         let response: Vec<api::location::LocationInfo> = self
             .base
             .unary(
-                self.get("v1/locations").build(),
+                self.get("/v1/locations").build(),
                 OpScope::account("list_locations", true),
             )
             .send_json()
@@ -553,7 +553,7 @@ impl S2 {
         let response: api::location::LocationInfo = self
             .base
             .unary(
-                self.get("v1/locations/default").build(),
+                self.get("/v1/locations/default").build(),
                 OpScope::account("get_default_location", true),
             )
             .send_json()
@@ -569,7 +569,7 @@ impl S2 {
         let response: api::location::LocationInfo = self
             .base
             .unary(
-                self.put("v1/locations/default").json(&location).build(),
+                self.put("/v1/locations/default").json(&location).build(),
                 OpScope::account("set_default_location", false),
             )
             .send_json()
@@ -586,7 +586,7 @@ impl S2 {
         let response: api::metrics::MetricSetResponse = self
             .base
             .unary(
-                self.get("v1/metrics").query(&req).build(),
+                self.get("/v1/metrics").query(&req).build(),
                 OpScope::account("get_account_metrics", true),
             )
             .send_json()
@@ -682,9 +682,11 @@ impl S2Basin {
     /// Get an [`S2Stream`].
     #[must_use]
     pub fn stream(&self, name: StreamName) -> S2Stream {
+        let records_uri = self.client.uri(stream_records_path(&name));
         S2Stream {
             client: self.client.clone(),
             name,
+            records_uri,
             encryption: None,
         }
     }
@@ -700,7 +702,7 @@ impl S2Basin {
         let response: api::stream::ListStreamsResponse = self
             .client
             .unary(
-                self.client.get("v1/streams").query(&req).build(),
+                self.client.get("/v1/streams").query(&req).build(),
                 self.client.basin_scope("list_streams", true),
             )
             .send_json()
@@ -748,7 +750,7 @@ impl S2Basin {
             .client
             .unary(
                 self.client
-                    .post("v1/streams")
+                    .post("/v1/streams")
                     .header(REQUEST_TOKEN_HEADER.clone(), request_token())
                     .json(&req)
                     .build(),
@@ -841,6 +843,7 @@ impl S2Basin {
 pub struct S2Stream {
     client: BasinClient,
     name: StreamName,
+    records_uri: http::Uri,
     encryption: Option<HeaderValue>,
 }
 
@@ -978,7 +981,8 @@ impl S2Stream {
         let headers = self.headers(stream_config);
         let req = self
             .client
-            .post(stream_records_path(&self.name))
+            .base()
+            .post(self.records_uri.clone())
             .header(CONTENT_TYPE, APPLICATION_PROTOBUF)
             .header(ACCEPT, APPLICATION_PROTOBUF)
             .body(proto_input.encode_to_vec())
@@ -1006,7 +1010,8 @@ impl S2Stream {
         let scope = self.client.stream_scope("read", &self.name, true);
         let mut builder = self
             .client
-            .get(stream_records_path(&self.name))
+            .base()
+            .get(self.records_uri.clone())
             .header(ACCEPT, APPLICATION_PROTOBUF)
             .query(&start)
             .query(&end);
