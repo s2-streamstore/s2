@@ -266,7 +266,7 @@ impl Future for CaughtUp {
                 }
 
                 // R8d / R9d / C12: observe client shutdown immediately even when no task is
-                // polling the pull-driven session.
+                // polling the on-demand session.
                 let shutdown_fired = if this.state.shutdown.is_cancelled() {
                     true
                 } else {
@@ -478,8 +478,8 @@ impl ReadStateInner {
         }
     }
 
-    /// Record a decoded heartbeat (`records` empty, `tail` present). Because reading is
-    /// pull-driven (`R6b`), no records remain undelivered when a heartbeat is decoded.
+    /// Record a decoded heartbeat (`records` empty, `tail` present). Because reading is on-demand
+    /// (`R6b`), no records remain undelivered when a heartbeat is decoded.
     fn on_heartbeat(
         &mut self,
         tail: StreamPosition,
@@ -865,7 +865,7 @@ struct ReadSessionCore {
     idle_since: Option<Instant>,
     has_received_response: bool,
     last_fetched_seq: Option<u64>,
-    /// Non-`Sync` pull-driven transport state wrapped in `StdMutex` solely to keep `ReadSession`
+    /// Non-`Sync` on-demand transport state wrapped in `StdMutex` solely to keep `ReadSession`
     /// and `ReadBatchSession` `Sync` (`Mutex<T>: Sync` for `T: Send`). Accessed exclusively via
     /// `get_mut()` on `&mut self`, so polling incurs zero runtime locking.
     transport: StdMutex<PollTransport>,
@@ -1109,7 +1109,7 @@ impl ReadSessionCore {
         // Spawn the opening request behind `AbortOnDropHandle` so `T7a`/`T7b` (`connection_timeout`
         // and `request_timeout` until `200` headers or full non-2xx error body) settle in real time
         // even if the caller parks while `Opening`, while keeping body decoding, heartbeats, and
-        // retries strictly pull-driven (`R6b`) and aborting immediately if the session drops.
+        // retries on-demand (`R6b`) and aborting immediately if the session drops.
         self.transport_mut().phase = DriverPhase::Opening {
             handle: AbortOnDropHandle::new(tokio::spawn(fut)),
             snapshot,
@@ -1537,7 +1537,7 @@ impl Drop for ReadSessionCore {
     }
 }
 
-/// Drop guard pausing the pull-driven `T7d` heartbeat countdown if a caller cancels `next()`.
+/// Drop guard pausing the on-demand `T7d` heartbeat countdown if a caller cancels `next()`.
 struct PauseHeartbeatOnDrop<'a, T>(&'a mut T, fn(&mut T));
 
 impl<T> Drop for PauseHeartbeatOnDrop<'_, T> {
@@ -1548,10 +1548,11 @@ impl<T> Drop for PauseHeartbeatOnDrop<'_, T> {
 
 /// A continuous stream of sequenced records.
 ///
-/// Pull-driven: opening sends no request, and the session decodes zero batches ahead of the batch
-/// currently being delivered, relying on transport flow control for network read-ahead. Yields
-/// individual [`SequencedRecord`]s in sequence-number order. Dropping the session closes it
-/// immediately. Use [`state`](Self::state) to observe progress concurrently from other tasks.
+/// Reads on demand with no session-level read-ahead: opening sends no request, and the session
+/// decodes zero batches ahead of the batch currently being delivered, relying on transport flow
+/// control for byte-level network read-ahead. Yields individual [`SequencedRecord`]s in
+/// sequence-number order. Dropping the session closes it immediately. Use [`state`](Self::state)
+/// to observe progress concurrently from other tasks.
 ///
 /// Prefer the inherent [`next`](Self::next) method when canceling pending waits (such as in
 /// [`tokio::select!`] or timeouts): dropping `next()` pauses the 20 s heartbeat timer across idle
@@ -1706,10 +1707,11 @@ impl FusedStream for ReadSession {
 
 /// A continuous stream of non-empty read batches.
 ///
-/// Pull-driven: opening sends no request, and the session decodes zero batches ahead, relying on
-/// transport flow control for network read-ahead. Delivers each server batch whole, skips empty
-/// heartbeat frames while updating session state, and follows all read-session rules per batch.
-/// Dropping the session closes it immediately.
+/// Reads on demand with no session-level read-ahead: opening sends no request, and the session
+/// decodes zero batches ahead, relying on transport flow control for byte-level network
+/// read-ahead. Delivers each server batch whole, skips empty heartbeat frames while updating
+/// session state, and follows all read-session rules per batch. Dropping the session closes it
+/// immediately.
 ///
 /// Prefer the inherent [`next`](Self::next) method when canceling pending waits (such as in
 /// [`tokio::select!`] or timeouts): dropping `next()` pauses the 20 s heartbeat timer across idle

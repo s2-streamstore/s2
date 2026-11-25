@@ -114,8 +114,8 @@ async fn spec_r5_r6_r7_r8_read_session_records_batches_readahead_state_and_caugh
 
     let fast_retry = fast_retry_config(3);
 
-    // 1. R5 + R6 + R6c + R7 + R7a + R7b + R7c + R8 + R8a-R8d: Walk the exact pull-driven spec
-    //    Example table over loopback HTTP/2 with a concurrent observer task!
+    // 1. R5 + R6 + R6c + R7 + R7a + R7b + R7c + R8 + R8a-R8d: Walk the exact on-demand spec Example
+    //    table over loopback HTTP/2 with a concurrent observer task!
     let opened_notify = Arc::new(tokio::sync::Notify::new());
     let send_step4_hb = Arc::new(tokio::sync::Notify::new());
     let send_step5_rec5_6 = Arc::new(tokio::sync::Notify::new());
@@ -428,7 +428,7 @@ async fn spec_r5_r6_r7_r8_read_session_records_batches_readahead_state_and_caugh
     assert_eq!(
         drained,
         vec![3, 4, 5, 6, 7],
-        "R6b: pull-driven session must synchronously drain already-buffered batches via now_or_never"
+        "R6b: on-demand session must synchronously drain already-buffered batches via now_or_never"
     );
     assert_eq!(ra_session.last_observed_tail().map(|t| t.seq_num), Some(8));
     assert!(ra_session.is_caught_up());
@@ -839,7 +839,7 @@ async fn spec_r11_t5_t5b_read_session_resume_clamp_wait_416_and_unbounded() {
         )
         .unwrap();
 
-    // Drive iteration while waiting for hb1 so the pull-driven session connects and resolves start!
+    // Drive iteration while waiting for hb1 so the on-demand session connects and resolves start!
     let state = session.state();
     let mut cu = state.caught_up();
     tokio::time::timeout(Duration::from_secs(3), async {

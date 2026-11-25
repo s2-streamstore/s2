@@ -1083,8 +1083,8 @@ impl S2Stream {
     /// [`SequencedRecord`](crate::types::SequencedRecord)s.
     ///
     /// Accepts a [`ReadInput`] or a [`ReadStart`](crate::types::ReadStart).
-    /// Reading is pull-driven: opening sends no request, and the first request initiates on the
-    /// first pull. Request errors surface through iteration.
+    /// Reading is on-demand (no session-level read-ahead): opening sends no request, and the first
+    /// request initiates on the first pull. Request errors surface through iteration.
     ///
     /// # Errors
     ///
@@ -1109,8 +1109,8 @@ impl S2Stream {
     /// Create a continuous read session yielding whole non-empty [`ReadBatch`]es.
     ///
     /// Accepts a [`ReadInput`] or a [`ReadStart`](crate::types::ReadStart).
-    /// Reading is pull-driven: opening sends no request, and the first request initiates on the
-    /// first pull. Request errors surface through iteration.
+    /// Reading is on-demand (no session-level read-ahead): opening sends no request, and the first
+    /// request initiates on the first pull. Request errors surface through iteration.
     ///
     /// # Errors
     ///
