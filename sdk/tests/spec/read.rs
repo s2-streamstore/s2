@@ -351,31 +351,30 @@ async fn spec_r5_r6_r7_r8_read_session_records_batches_readahead_state_and_caugh
     assert!(batch_session.next().await.is_none());
     assert!(!batch_session.is_caught_up());
 
-    // 3. R6b: Zero decoded batches ahead + synchronous draining (`now_or_never`) of already-
-    //    buffered HTTP/2 frames!
+    // 3. R6b: Zero decoded batches ahead + deterministic synchronous draining (`now_or_never`) of
+    //    already-buffered frames! All 4 small S2S frames are coalesced into a single HTTP/2 DATA
+    //    chunk so once batch 0 is decoded, batches 1..3 are guaranteed already buffered in the
+    //    client without loopback timing dependence.
     let ra_reqs = Arc::new(AtomicUsize::new(0));
-    let all_sent = Arc::new(tokio::sync::Notify::new());
     let readahead_server = MockH2Server::start({
         let ra_reqs = ra_reqs.clone();
-        let all_sent = all_sent.clone();
         move |_conn_id, _req, respond| {
             let ra_reqs = ra_reqs.clone();
-            let all_sent = all_sent.clone();
             async move {
                 ra_reqs.fetch_add(1, Ordering::SeqCst);
                 let Some(mut s2s) = S2sResponder::open(respond) else {
                     return;
                 };
+                let mut coalesced = Vec::new();
                 for b_idx in 0u64..4 {
                     let s0 = b_idx * 2;
                     let s1 = s0 + 1;
-                    s2s.send_regular(
+                    coalesced.extend_from_slice(&encode_s2s_regular_frame(
                         &proto_read_batch_records(&[s0, s1], Some(s1 + 1)),
                         false,
-                        false,
-                    );
+                    ));
                 }
-                all_sent.notify_one();
+                s2s.send_raw(bytes::Bytes::from(coalesced), false);
                 std::future::pending::<()>().await;
             }
         }
@@ -395,10 +394,9 @@ async fn spec_r5_r6_r7_r8_read_session_records_batches_readahead_state_and_caugh
     assert_eq!(ra_reqs.load(Ordering::SeqCst), 0);
     assert_eq!(ra_session.last_observed_tail(), None);
 
-    // Pull record 0 of B0 -> ONLY B0 (tail=2) is decoded; B1..B3 stay undecoded in HTTP/2!
+    // Pull record 0 of B0 -> ONLY B0 (tail=2) is decoded; B1..B3 remain undecoded even though
+    // their bytes are already in the client decoder buffer!
     assert_eq!(ra_session.next().await.unwrap().unwrap().seq_num, 0);
-    all_sent.notified().await;
-    tokio::time::sleep(Duration::from_millis(25)).await;
     assert_eq!(
         ra_session.last_observed_tail().map(|t| t.seq_num),
         Some(2),
@@ -407,7 +405,6 @@ async fn spec_r5_r6_r7_r8_read_session_records_batches_readahead_state_and_caugh
 
     // Finish B0 (record 1) -> STILL 0 batches decoded ahead (tail stays 2 until next pull)!
     assert_eq!(ra_session.next().await.unwrap().unwrap().seq_num, 1);
-    tokio::time::sleep(Duration::from_millis(25)).await;
     assert_eq!(
         ra_session.last_observed_tail().map(|t| t.seq_num),
         Some(2),
@@ -416,15 +413,14 @@ async fn spec_r5_r6_r7_r8_read_session_records_batches_readahead_state_and_caugh
 
     // Pull record 2 of B1 -> decodes B1 (tail=4), NOT B2 (tail=6)!
     assert_eq!(ra_session.next().await.unwrap().unwrap().seq_num, 2);
-    tokio::time::sleep(Duration::from_millis(25)).await;
     assert_eq!(
         ra_session.last_observed_tail().map(|t| t.seq_num),
         Some(4),
         "R6b: while delivering B1, session must decode 0 batches ahead"
     );
 
-    // All remaining small batches (B1 tail, B2, B3) are already buffered in hyper's HTTP/2 receive
-    // buffer, so `now_or_never()` synchronously drains records 3..=7 without a single Pending!
+    // All remaining small batches (B1 tail, B2, B3) are already buffered in the client, so
+    // `now_or_never()` deterministically drains records 3..=7 without a single Pending!
     let mut drained = Vec::new();
     while let Some(item) = ra_session.next().now_or_never() {
         drained.push(item.unwrap().unwrap().seq_num);
@@ -432,13 +428,13 @@ async fn spec_r5_r6_r7_r8_read_session_records_batches_readahead_state_and_caugh
     assert_eq!(
         drained,
         vec![3, 4, 5, 6, 7],
-        "R6b: pull-driven session must synchronously drain already-buffered HTTP/2 batches via now_or_never"
+        "R6b: pull-driven session must synchronously drain already-buffered batches via now_or_never"
     );
     assert_eq!(ra_session.last_observed_tail().map(|t| t.seq_num), Some(8));
     assert!(ra_session.is_caught_up());
 
-    // 4. R6a + R6b: ReadBatchSession also decodes 0 batches ahead and synchronously drains
-    //    already-buffered HTTP/2 batches via `now_or_never()`.
+    // 4. R6a + R6b: ReadBatchSession also decodes 0 batches ahead and deterministically drains
+    //    already-buffered batches via `now_or_never()`.
     let mut ra_batch_session = readahead_server
         .stream(no_retry_config())
         .read_batch_session(
@@ -451,8 +447,6 @@ async fn spec_r5_r6_r7_r8_read_session_records_batches_readahead_state_and_caugh
         b0.records.iter().map(|r| r.seq_num).collect::<Vec<_>>(),
         vec![0, 1]
     );
-    all_sent.notified().await;
-    tokio::time::sleep(Duration::from_millis(25)).await;
     assert_eq!(
         ra_batch_session.last_observed_tail().map(|t| t.seq_num),
         Some(2),
@@ -472,7 +466,7 @@ async fn spec_r5_r6_r7_r8_read_session_records_batches_readahead_state_and_caugh
     assert_eq!(
         drained_batches,
         vec![vec![2, 3], vec![4, 5], vec![6, 7]],
-        "R6b: ReadBatchSession must synchronously drain already-buffered HTTP/2 batches via now_or_never"
+        "R6b: ReadBatchSession must synchronously drain already-buffered batches via now_or_never"
     );
 }
 
@@ -832,6 +826,148 @@ async fn spec_t7d_read_session_heartbeat_timeout_and_backpressure_pause() {
     send_part3.notify_one();
     assert_eq!(partial_sess.next().await.unwrap().unwrap().seq_num, 1);
     assert_eq!(partial_attempts.load(Ordering::SeqCst), 1);
+
+    // T7d: continuously pending fragmented frame — chunks arriving < 20s apart reset the wait
+    // timer so the frame completes without timing out, while > 20s of silence mid-frame times out.
+    let send_frag2 = Arc::new(tokio::sync::Notify::new());
+    let frag2_sent = Arc::new(tokio::sync::Notify::new());
+    let send_frag3 = Arc::new(tokio::sync::Notify::new());
+    let frag_server = MockH2Server::start({
+        let send_frag2 = send_frag2.clone();
+        let frag2_sent = frag2_sent.clone();
+        let send_frag3 = send_frag3.clone();
+        move |_conn_id, _req, respond| {
+            let send_frag2 = send_frag2.clone();
+            let frag2_sent = frag2_sent.clone();
+            let send_frag3 = send_frag3.clone();
+            async move {
+                let Some(mut s2s) = S2sResponder::open(respond) else {
+                    return;
+                };
+                s2s.send_regular(&proto_read_batch_records(&[0], Some(1)), false, false);
+                let frame1 =
+                    encode_s2s_regular_frame(&proto_read_batch_records(&[1], Some(2)), false);
+                let mid1 = 4;
+                let mid2 = (frame1.len() + mid1) / 2;
+                s2s.send_raw(frame1.slice(..mid1), false);
+                send_frag2.notified().await;
+                s2s.send_raw(frame1.slice(mid1..mid2), false);
+                frag2_sent.notify_one();
+                send_frag3.notified().await;
+                s2s.send_raw(frame1.slice(mid2..), false);
+                // Start a second frame then go permanently silent mid-frame.
+                let frame2 =
+                    encode_s2s_regular_frame(&proto_read_batch_records(&[2], Some(3)), false);
+                s2s.send_raw(frame2.slice(..4), false);
+                std::future::pending::<()>().await;
+            }
+        }
+    })
+    .await;
+
+    let mut frag_sess = frag_server
+        .stream(no_retry_config())
+        .read_session(
+            ReadInput::new().with_start(ReadStart::SeqNum(0)),
+            ReadSessionConfig::default(),
+        )
+        .unwrap();
+    assert_eq!(frag_sess.next().await.unwrap().unwrap().seq_num, 0);
+    {
+        let mut rec1_fut = Box::pin(frag_sess.next());
+        assert!(futures_util::poll!(rec1_fut.as_mut()).is_pending());
+        advance_virtual_time(Duration::from_secs(12)).await;
+        assert!(futures_util::poll!(rec1_fut.as_mut()).is_pending());
+        send_frag2.notify_one();
+        frag2_sent.notified().await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(futures_util::poll!(rec1_fut.as_mut()).is_pending());
+        // Another 12s (24s total since start of wait, but only 12s since fragment 2!) -> alive!
+        advance_virtual_time(Duration::from_secs(12)).await;
+        assert!(futures_util::poll!(rec1_fut.as_mut()).is_pending());
+        send_frag3.notify_one();
+        let rec1 = tokio::time::timeout(Duration::from_secs(2), rec1_fut)
+            .await
+            .expect("fragmented frame with <20s chunk spacing must succeed")
+            .unwrap()
+            .unwrap();
+        assert_eq!(rec1.seq_num, 1);
+    }
+    // Mid-frame stall for > 20s with no further bytes MUST time out!
+    {
+        let mut rec2_fut = Box::pin(frag_sess.next());
+        assert!(futures_util::poll!(rec2_fut.as_mut()).is_pending());
+        advance_virtual_time(Duration::from_secs(21)).await;
+        let err = tokio::time::timeout(Duration::from_secs(2), rec2_fut)
+            .await
+            .expect("mid-frame silence >20s must time out")
+            .unwrap()
+            .unwrap_err();
+        assert!(matches!(err, ReadSessionError::Timeout(_)), "{err:?}");
+    }
+
+    // T7d + Languages: silent-resume behavior on ReadBatchSession::next() (drop guard pauses wait
+    // timer across parked time) vs direct StreamExt::next() (no drop hook when a pending poll is
+    // abandoned, so an armed deadline expires on a silent resume).
+    let silent_server = MockH2Server::start(|_conn_id, _req, respond| async move {
+        let Some(mut s2s) = S2sResponder::open(respond) else {
+            return;
+        };
+        s2s.send_regular(&proto_read_batch_records(&[0], Some(1)), false, false);
+        std::future::pending::<()>().await;
+    })
+    .await;
+
+    // Inherent ReadBatchSession::next(): cancel after 5s, park 30s, resume -> still pending!
+    let mut batch_sess = silent_server
+        .stream(no_retry_config())
+        .read_batch_session(
+            ReadInput::new().with_start(ReadStart::SeqNum(0)),
+            ReadSessionConfig::default(),
+        )
+        .unwrap();
+    assert_eq!(batch_sess.next().await.unwrap().unwrap().records.len(), 1);
+    {
+        let mut pending = Box::pin(batch_sess.next());
+        assert!(futures_util::poll!(pending.as_mut()).is_pending());
+        advance_virtual_time(Duration::from_secs(5)).await;
+        assert!(futures_util::poll!(pending.as_mut()).is_pending());
+        drop(pending);
+    }
+    advance_virtual_time(Duration::from_secs(30)).await;
+    {
+        let mut resumed = Box::pin(batch_sess.next());
+        assert!(
+            futures_util::poll!(resumed.as_mut()).is_pending(),
+            "T7d: ReadBatchSession::next() drop guard must pause heartbeat timer across parked time"
+        );
+    }
+
+    // Raw StreamExt::next(): abandoning a pending poll leaves its armed deadline running on a
+    // silent resume (documented in Languages and rustdocs).
+    let mut raw_sess = silent_server
+        .stream(no_retry_config())
+        .read_session(
+            ReadInput::new().with_start(ReadStart::SeqNum(0)),
+            ReadSessionConfig::default(),
+        )
+        .unwrap();
+    assert_eq!(raw_sess.next().await.unwrap().unwrap().seq_num, 0);
+    {
+        use futures_util::StreamExt;
+        let mut pending = Box::pin(StreamExt::next(&mut raw_sess));
+        assert!(futures_util::poll!(pending.as_mut()).is_pending());
+        drop(pending);
+    }
+    advance_virtual_time(Duration::from_secs(30)).await;
+    {
+        use futures_util::StreamExt;
+        let err = StreamExt::next(&mut raw_sess)
+            .await
+            .expect("abandoned raw StreamExt::next poll times out on silent resume")
+            .unwrap_err();
+        assert!(matches!(err, ReadSessionError::Timeout(_)), "{err:?}");
+    }
 }
 
 // spec: r1 R11, R11a, R11b, R11c, R11d, T5, T5b
@@ -1737,17 +1873,28 @@ async fn regression_read_session_stops_on_exhausted_count_and_rejects_u64_max_se
         "expected clean end after count=1, got {end:?}"
     );
 
-    // 2. R7a: A record at seq_num == u64::MAX has no representable successor `next_seq_num`, so the
-    //    session fails with ProtocolError before delivering it.
-    let overflow_server = MockH2Server::start(|_conn_id, _req, respond| async move {
-        if let Some(mut s2s) = S2sResponder::open(respond) {
-            s2s.send_regular(&proto_read_batch_records(&[u64::MAX], None), false, true);
+    // 2. R7a + E7: A record at seq_num == u64::MAX has no representable successor `next_seq_num`,
+    //    so the session fails with ProtocolError before delivering it — and if it arrived after a
+    //    retry, the rendered ProtocolError reports the retry attempt count (`E7`).
+    let overflow_attempts = Arc::new(AtomicUsize::new(0));
+    let overflow_server = MockH2Server::start({
+        let overflow_attempts = overflow_attempts.clone();
+        move |_conn_id, _req, respond| {
+            let overflow_attempts = overflow_attempts.clone();
+            async move {
+                let n = overflow_attempts.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    send_json(respond, 503, r#"{"code":"unavailable","message":"retry"}"#);
+                } else if let Some(mut s2s) = S2sResponder::open(respond) {
+                    s2s.send_regular(&proto_read_batch_records(&[u64::MAX], None), false, true);
+                }
+            }
         }
     })
     .await;
 
     let mut overflow_sess = overflow_server
-        .stream(no_retry_config())
+        .stream(fast_retry_config(2))
         .read_session(
             ReadInput::new().with_start(ReadStart::SeqNum(u64::MAX)),
             ReadSessionConfig::default(),
@@ -1761,5 +1908,10 @@ async fn regression_read_session_stops_on_exhausted_count_and_rejects_u64_max_se
     assert!(
         matches!(err, ReadSessionError::Protocol(_)),
         "expected ProtocolError on u64::MAX seq_num, got {err:?}"
+    );
+    let rendered = err.to_string();
+    assert!(
+        rendered.contains("after 2 attempts"),
+        "E7: ProtocolError after retry must report attempt count, got: {rendered}"
     );
 }

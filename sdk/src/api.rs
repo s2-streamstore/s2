@@ -1026,9 +1026,22 @@ impl BasinClient {
 }
 
 fn release_excess_s2s_buffer(buffer: &mut BytesMut, peak_bytes: &mut usize) {
-    if buffer.is_empty() && *peak_bytes > S2S_READ_BUFFER_MAX_IDLE_CAPACITY {
+    if *peak_bytes <= S2S_READ_BUFFER_MAX_IDLE_CAPACITY {
+        return;
+    }
+    if buffer.is_empty() {
         *buffer = BytesMut::new();
         *peak_bytes = 0;
+    } else if buffer.len() <= S2S_READ_BUFFER_MAX_IDLE_CAPACITY
+        && *peak_bytes > S2S_READ_BUFFER_MAX_IDLE_CAPACITY.max(buffer.len().saturating_mul(2))
+    {
+        // Compact a small trailing fragment (such as the start of the next frame delivered in the
+        // same HTTP/2 DATA chunk) into a right-sized buffer so parking after yield does not pin a
+        // multi-MiB backing allocation.
+        let mut compacted = BytesMut::with_capacity(buffer.len());
+        compacted.extend_from_slice(buffer);
+        *peak_bytes = compacted.capacity();
+        *buffer = compacted;
     }
 }
 
@@ -1654,6 +1667,25 @@ mod tests {
             "expected small buffer after release, got capacity {}",
             buf.capacity()
         );
+
+        // Small trailing fragment after a large frame also compacts out of the multi-KiB backing
+        // allocation so parking after yield does not pin the oversized buffer.
+        let mut with_tail = BytesMut::with_capacity(256 * 1024 + 16);
+        with_tail.resize(256 * 1024, 0xAB);
+        with_tail.extend_from_slice(&[0x42; 16]);
+        let mut with_tail_peak = with_tail.len().max(with_tail.capacity());
+        let big_frame = with_tail.split_to(256 * 1024);
+        assert_eq!(with_tail.len(), 16);
+        drop(big_frame);
+
+        release_excess_s2s_buffer(&mut with_tail, &mut with_tail_peak);
+        assert_eq!(with_tail.as_ref(), &[0x42; 16]);
+        assert!(
+            with_tail.capacity() <= S2S_READ_BUFFER_MAX_IDLE_CAPACITY,
+            "expected compacted small buffer after release, got capacity {}",
+            with_tail.capacity()
+        );
+        assert!(with_tail_peak <= S2S_READ_BUFFER_MAX_IDLE_CAPACITY);
 
         // Small buffers within the idle threshold stay reusable without resetting.
         let mut small = BytesMut::with_capacity(1024);
