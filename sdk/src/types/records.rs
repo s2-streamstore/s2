@@ -306,6 +306,10 @@ impl AppendRecord {
         Ok(())
     }
 
+    pub(crate) fn into_owned_parts(self) -> (Bytes, Vec<Header>) {
+        (self.body, self.headers)
+    }
+
     #[cfg(test)]
     pub(crate) fn into_proto(self) -> api::stream::proto::AppendRecord {
         api::stream::proto::AppendRecord {

@@ -3666,14 +3666,14 @@ mod tests {
         });
         assert_eq!(host_connection_count(&pool, "http://origin-tls:8080"), 1);
 
-        // Drop the response (and its last RequestPermit) inside a thread-local destructor after
-        // touching Tokio's context TLS on that thread so Tokio's TLS can tear down first.
+        // Register HELD *before* touching Tokio's context TLS so LIFO TLS destruction tears down
+        // Tokio's context first, forcing `RequestPermit::drop` onto the `PERMIT_IDLE_NEEDS_STAMP`
+        // path when `HELD` drops.
         let handle = std::thread::spawn(move || {
             thread_local! {
                 static HELD: std::cell::RefCell<Option<StreamingResponse>> =
                     const { std::cell::RefCell::new(None) };
             }
-            let _ = tokio::runtime::Handle::try_current();
             HELD.with(|slot| *slot.borrow_mut() = Some(resp));
             let _ = tokio::runtime::Handle::try_current();
         });

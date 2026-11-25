@@ -17,18 +17,22 @@ pub(crate) use read::{ReadBatchSession, ReadSession, ReadSessionConfig};
 pub(crate) fn try_now_on_runtime(
     owner_handle: Option<&tokio::runtime::Handle>,
 ) -> Option<tokio::time::Instant> {
+    let current = match tokio::runtime::Handle::try_current() {
+        Ok(cur) => Some(cur),
+        Err(e) if e.is_thread_local_destroyed() => return None,
+        Err(_) => None,
+    };
     let Some(owner) = owner_handle else {
         return Some(tokio::time::Instant::now());
     };
-    match tokio::runtime::Handle::try_current() {
-        Ok(cur) if cur.id() == owner.id() => Some(tokio::time::Instant::now()),
-        Err(e) if e.is_thread_local_destroyed() => None,
-        _ => std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _enter = owner.enter();
-            tokio::time::Instant::now()
-        }))
-        .ok(),
+    if current.is_some_and(|cur| cur.id() == owner.id()) {
+        return Some(tokio::time::Instant::now());
     }
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _enter = owner.enter();
+        tokio::time::Instant::now()
+    }))
+    .ok()
 }
 
 /// Compute elapsed time since `epoch` on `owner_handle`'s Tokio clock without panicking during

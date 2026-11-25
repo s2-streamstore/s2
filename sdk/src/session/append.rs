@@ -835,15 +835,26 @@ impl AppendSessionCore {
         self.sent_tracker.terminal_classification()
     }
 
+    /// Return the monotonic `seq + 1` watermark of batches whose `Ok(ack)` has already been sent
+    /// to their oneshot tickets (`A6d`).
+    pub(crate) fn acked_watermark(&self) -> u64 {
+        self.sent_tracker.acked_watermark()
+    }
+
     #[cfg(test)]
     pub(crate) fn publish_terminal_for_test(
         &self,
         session_failure: AppendSessionError,
+        final_err: Option<AppendSessionError>,
         base_seq: u64,
-        outcomes: Vec<AppendSessionError>,
+        flags: Vec<(bool, bool)>,
     ) {
+        let flags = flags
+            .into_iter()
+            .map(|(closed, prior)| BatchTerminalFlags::new(closed, prior))
+            .collect();
         self.sent_tracker
-            .publish_terminal(session_failure.clone(), base_seq, outcomes);
+            .publish_terminal(session_failure.clone(), final_err, base_seq, flags);
         self.lifecycle.set_terminal_err(session_failure).fire();
     }
 
@@ -1249,10 +1260,53 @@ pub(crate) fn validate_reserve_bytes(
     Ok(())
 }
 
+/// RAII capacity grant sent over a waiter's oneshot once capacity has been debited.
+///
+/// Dropping an unclaimed `GrantedPermit` (for example, when a canceled `acquire()` future drops
+/// its `oneshot::Receiver` or when Tokio's `close()`/`try_recv()` unwinds inside a custom waker
+/// destructor) automatically refunds the debited capacity to `PermitsInner`.
+struct GrantedPermit {
+    inner: Option<Arc<PermitsInner>>,
+    bytes: usize,
+    has_batch_slot: bool,
+}
+
+impl GrantedPermit {
+    fn into_append_permit(mut self) -> AppendPermit {
+        AppendPermit {
+            inner: self.inner.take().expect("GrantedPermit not yet claimed"),
+            bytes: self.bytes,
+            has_batch_slot: self.has_batch_slot,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.inner = None;
+    }
+}
+
+impl Drop for GrantedPermit {
+    fn drop(&mut self) {
+        let Some(inner) = self.inner.take() else {
+            return;
+        };
+        let grants = {
+            let mut state = inner
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.release_units(self.bytes, usize::from(self.has_batch_slot));
+            state.take_ready_grants(&inner.has_waiters)
+        };
+        inner.deliver_grants(grants);
+    }
+}
+
 struct PermitWaiter {
     id: u64,
     bytes: usize,
-    granted: oneshot::Sender<()>,
+    has_batch_slot: bool,
+    granted: oneshot::Sender<GrantedPermit>,
 }
 
 /// Zero-allocation container for the 0- and 1-waiter common cases when detaching granted permit
@@ -1336,23 +1390,31 @@ impl PermitsInner {
     /// Deliver detached grants strictly outside `self.state`. Any grant whose receiver was closed
     /// concurrently is refunded under re-acquired `self.state`, preserving FIFO ordering and
     /// isolating panicking user wakers.
-    fn deliver_grants(&self, mut grants: GrantedWaiters) {
+    fn deliver_grants(self: &Arc<Self>, mut grants: GrantedWaiters) {
         while !grants.is_empty() {
             let mut refund_bytes = 0usize;
             let mut refund_batches = 0usize;
             let mut send_one = |waiter: PermitWaiter| {
                 let bytes = waiter.bytes;
+                let has_batch_slot = waiter.has_batch_slot;
                 let tx = waiter.granted;
-                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || tx.send(()))) {
+                let grant = GrantedPermit {
+                    inner: Some(self.clone()),
+                    bytes,
+                    has_batch_slot,
+                };
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || tx.send(grant)))
+                {
                     Ok(Ok(())) => {}
-                    Ok(Err(())) => {
+                    Ok(Err(mut returned)) => {
+                        returned.disarm();
                         refund_bytes += bytes;
-                        refund_batches += 1;
+                        refund_batches += usize::from(has_batch_slot);
                     }
                     Err(_) => {
-                        // In `tokio::sync::oneshot`, `()` is stored before waking the receiver.
-                        // Do not refund here: either the receiver will poll `Ok(())`, or
-                        // `AcquireGuard::drop` will observe `try_recv().is_ok()` and refund.
+                        // In `tokio::sync::oneshot`, `grant` is stored before waking the receiver.
+                        // Either the receiver claims it via `into_append_permit()`, or dropping
+                        // the receiver runs `GrantedPermit::drop` to refund automatically.
                     }
                 }
             };
@@ -1365,7 +1427,7 @@ impl PermitsInner {
                     }
                 }
             }
-            if refund_batches == 0 {
+            if refund_bytes == 0 && refund_batches == 0 {
                 break;
             }
             let mut state = self
@@ -1506,10 +1568,9 @@ impl AppendPermits {
 
     async fn acquire_inner(&self, bytes: usize, on_wait: Option<&Notify>) -> AppendPermit {
         struct AcquireGuard<'a> {
-            inner: &'a PermitsInner,
+            inner: &'a Arc<PermitsInner>,
             id: u64,
-            bytes: usize,
-            rx: oneshot::Receiver<()>,
+            rx: Option<oneshot::Receiver<GrantedPermit>>,
             acquired: bool,
         }
 
@@ -1518,18 +1579,18 @@ impl AppendPermits {
                 if self.acquired {
                     return;
                 }
-                // Close AND inspect `rx` strictly BEFORE acquiring `self.inner.state`: Tokio's
-                // `oneshot::Receiver::close()` / `try_recv()` can drop the registered custom
-                // `Waker` inline, and a custom waker destructor calling `unacked_bytes()` would
-                // deadlock if `self.inner.state` were held. Closing before `try_recv()` still
-                // guarantees mutual exclusion between refunding here vs in `deliver_grants`.
-                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    self.rx.close();
-                }));
-                let received = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    self.rx.try_recv().is_ok()
-                }))
-                .unwrap_or(false);
+                // Drop `rx` strictly BEFORE locking `self.inner.state` and inside `catch_unwind`:
+                // - `Receiver::drop` calls `inner.close()` and, if a `GrantedPermit` was already
+                //   delivered, consumes and drops it (refunding capacity outside any lock).
+                // - Dropping the receiver's `Arc<Inner>` may then drop a registered custom `Waker`;
+                //   doing this outside `self.inner.state` prevents re-entrant deadlock, and
+                //   `catch_unwind` ensures a panicking waker destructor cannot unwind out of drop
+                //   or skip waiter cleanup.
+                if let Some(rx) = self.rx.take() {
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                        drop(rx);
+                    }));
+                }
                 let (removed_waiter, grants) = {
                     let mut state = self
                         .inner
@@ -1540,10 +1601,6 @@ impl AppendPermits {
                         let removed = state.waiters.remove(pos);
                         let grants = state.take_ready_grants(&self.inner.has_waiters);
                         (removed, grants)
-                    } else if received {
-                        state.release_units(self.bytes, 1);
-                        let grants = state.take_ready_grants(&self.inner.has_waiters);
-                        (None, grants)
                     } else {
                         (None, GrantedWaiters::Empty)
                     }
@@ -1553,7 +1610,7 @@ impl AppendPermits {
             }
         }
 
-        let (has_batch_slot, was_empty, mut guard) = {
+        let (was_empty, mut guard) = {
             let mut state = self.inner.state.lock().unwrap();
             let has_batch_slot = state.available_batches.is_some();
             if state.waiters.is_empty() && state.can_satisfy(bytes) {
@@ -1571,19 +1628,18 @@ impl AppendPermits {
             state.waiters.push_back(PermitWaiter {
                 id,
                 bytes,
+                has_batch_slot,
                 granted: tx,
             });
             if was_empty {
                 self.inner.has_waiters.store(true, Ordering::Release);
             }
             (
-                has_batch_slot,
                 was_empty,
                 AcquireGuard {
                     inner: &self.inner,
                     id,
-                    bytes,
-                    rx,
+                    rx: Some(rx),
                     acquired: false,
                 },
             )
@@ -1593,15 +1649,14 @@ impl AppendPermits {
             notify.notify_one();
         }
 
-        (&mut guard.rx)
+        let granted = guard
+            .rx
+            .as_mut()
+            .expect("rx present until drop")
             .await
             .expect("permit waiter sender stays alive while AppendPermits is borrowed");
         guard.acquired = true;
-        AppendPermit {
-            inner: self.inner.clone(),
-            bytes,
-            has_batch_slot,
-        }
+        granted.into_append_permit()
     }
 }
 
@@ -1670,25 +1725,79 @@ enum Command {
     Close,
 }
 
+/// Compact 1-byte per-batch classification flags for a terminal session error, avoiding retaining
+/// a deep-cloned `AppendSessionError` per in-flight batch.
+#[derive(Clone, Copy)]
+struct BatchTerminalFlags(u8);
+
+impl BatchTerminalFlags {
+    const CLOSED: u8 = 1 << 0;
+    const PRIOR_UNCERTAINTY: u8 = 1 << 1;
+
+    fn new(gets_closed_err: bool, prior_uncertainty: bool) -> Self {
+        let mut bits = 0;
+        if gets_closed_err {
+            bits |= Self::CLOSED;
+        }
+        if prior_uncertainty {
+            bits |= Self::PRIOR_UNCERTAINTY;
+        }
+        Self(bits)
+    }
+
+    fn gets_closed_err(self) -> bool {
+        (self.0 & Self::CLOSED) != 0
+    }
+
+    fn prior_uncertainty(self) -> bool {
+        (self.0 & Self::PRIOR_UNCERTAINTY) != 0
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct TerminalClassification {
     pub(crate) session_failure: AppendSessionError,
+    /// Present only when `session_failure` was wrapped in `IndefiniteAppendError` while the
+    /// underlying `final_err` remained distinct (`A9`).
+    final_err: Option<AppendSessionError>,
     base_seq: u64,
-    outcomes: Arc<[AppendSessionError]>,
+    flags: Arc<[BatchTerminalFlags]>,
 }
 
 impl TerminalClassification {
-    pub(crate) fn outcome_for(&self, seq: u64, context: &ErrorContext) -> AppendSessionError {
-        if let Some(offset) = seq.checked_sub(self.base_seq) {
-            if let Some(outcome) = self.outcomes.get(offset as usize) {
-                return outcome.clone();
-            }
-            return AppendSessionError::SessionClosed(SessionClosedError::new_with_context(
-                Some(self.session_failure.clone()),
-                context.clone(),
-            ));
+    pub(crate) fn base_seq(&self) -> u64 {
+        self.base_seq
+    }
+
+    /// Reconstruct the exact terminal error for batch `seq`, or return `None` when `seq < base_seq`
+    /// (indicating `seq` was already acknowledged before terminal settlement began).
+    pub(crate) fn outcome_for(
+        &self,
+        seq: u64,
+        context: &ErrorContext,
+    ) -> Option<AppendSessionError> {
+        let offset = seq.checked_sub(self.base_seq)?;
+        if let Some(&flags) = self.flags.get(offset as usize) {
+            let base = if flags.gets_closed_err() {
+                AppendSessionError::SessionClosed(SessionClosedError::new_with_context(
+                    Some(self.session_failure.clone()),
+                    context.clone(),
+                ))
+            } else {
+                self.final_err
+                    .as_ref()
+                    .unwrap_or(&self.session_failure)
+                    .clone()
+            };
+            Some(base.with_prior_uncertainty(flags.prior_uncertainty()))
+        } else {
+            Some(AppendSessionError::SessionClosed(
+                SessionClosedError::new_with_context(
+                    Some(self.session_failure.clone()),
+                    context.clone(),
+                ),
+            ))
         }
-        self.session_failure.clone()
     }
 }
 
@@ -1703,11 +1812,12 @@ struct SentTrackerState {
     terminal: Option<TerminalClassification>,
 }
 
-/// Synchronizes the monotonic `sent_watermark` (`max(seq + 1)` across all started batches) and
-/// exact per-batch terminal classifications between `AppendSessionTask` and `ProducerTask::drop`
-/// (`A6a`, `A6b`, `A8c`, `A9`).
+/// Synchronizes the monotonic `sent_watermark`, `acked_watermark`, and compact per-batch terminal
+/// classifications between `AppendSessionTask` and `ProducerTask::drop` (`A6a`, `A6b`, `A6d`,
+/// `A8c`, `A9`).
 struct SentTracker {
     sent_watermark: AtomicU64,
+    acked_watermark: AtomicU64,
     state: StdMutex<SentTrackerState>,
 }
 
@@ -1715,12 +1825,22 @@ impl SentTracker {
     fn new() -> Arc<Self> {
         Arc::new(Self {
             sent_watermark: AtomicU64::new(0),
+            acked_watermark: AtomicU64::new(0),
             state: StdMutex::new(SentTrackerState {
                 frozen: false,
                 active: None,
                 terminal: None,
             }),
         })
+    }
+
+    fn mark_acked(&self, seq: u64) {
+        self.acked_watermark
+            .fetch_max(seq.saturating_add(1), Ordering::Release);
+    }
+
+    fn acked_watermark(&self) -> u64 {
+        self.acked_watermark.load(Ordering::Acquire)
     }
 
     fn install_active(&self, sync: Arc<AttemptSync>, base_seq: u64) -> bool {
@@ -1755,8 +1875,9 @@ impl SentTracker {
     fn publish_terminal(
         &self,
         session_failure: AppendSessionError,
+        final_err: Option<AppendSessionError>,
         base_seq: u64,
-        outcomes: Vec<AppendSessionError>,
+        flags: Vec<BatchTerminalFlags>,
     ) {
         let mut state = self
             .state
@@ -1765,8 +1886,9 @@ impl SentTracker {
         if state.terminal.is_none() {
             state.terminal = Some(TerminalClassification {
                 session_failure,
+                final_err,
                 base_seq,
-                outcomes: Arc::from(outcomes),
+                flags: Arc::from(flags),
             });
         }
     }
@@ -2519,48 +2641,59 @@ impl AppendSessionTask {
         // A9: session failure is final_err, wrapped in IndefiniteAppendError if final_err is
         // definite and any batch's outcome was wrapped.
         let session_failure = final_err.clone().with_prior_uncertainty(any_batch_wrapped);
-        let closed_err = AppendSessionError::SessionClosed(SessionClosedError::new_with_context(
-            Some(session_failure.clone()),
-            self.context.clone(),
-        ));
-        let base_seq = self.state.inflight_appends.front().map_or(0, |a| a.seq);
-        let inflight_outcomes: Vec<AppendSessionError> = self
+        let distinct_final_err =
+            (any_batch_wrapped && final_err.has_no_side_effects()).then(|| final_err.clone());
+        let base_seq = self
+            .state
+            .inflight_appends
+            .front()
+            .map_or_else(|| self.sent_tracker.acked_watermark(), |a| a.seq);
+        let flags: Vec<BatchTerminalFlags> = self
             .state
             .inflight_appends
             .iter()
             .enumerate()
             .map(|(i, append)| {
-                let base = if gets_closed_err(i, append) {
-                    closed_err.clone()
-                } else {
-                    final_err.clone()
-                };
-                base.with_prior_uncertainty(append.prior_uncertainty)
+                BatchTerminalFlags::new(gets_closed_err(i, append), append.prior_uncertainty)
             })
             .collect();
 
         let (queued, wake) = {
             let _gate = self.gate.lock().unwrap();
-            // Publish exact per-batch terminal classifications BEFORE exposing `terminal_err` on
-            // `lifecycle` so a concurrent `ProducerTask::drop` never assigns the first batch's
-            // definite rejection to later in-flight batches (`A6a`, `A6b`, `A9`).
+            // Publish compact per-batch terminal classifications BEFORE exposing `terminal_err` on
+            // `lifecycle` so a concurrent `ProducerTask::drop` reads a coherent snapshot without
+            // retaining per-batch cloned errors (`A6a`, `A6b`, `A9`).
             self.sent_tracker.publish_terminal(
                 session_failure.clone(),
+                distinct_final_err,
                 base_seq,
-                inflight_outcomes.clone(),
+                flags.clone(),
             );
             let wake = self.lifecycle.set_terminal_err(session_failure.clone());
             (self.state.drain_queued_commands(), wake)
         };
         wake.fire();
 
-        for (append, outcome) in self.state.inflight_appends.drain(..).zip(inflight_outcomes) {
+        let closed_err = AppendSessionError::SessionClosed(SessionClosedError::new_with_context(
+            Some(session_failure.clone()),
+            self.context.clone(),
+        ));
+
+        for (append, batch_flags) in self.state.inflight_appends.drain(..).zip(flags) {
+            let base = if batch_flags.gets_closed_err() {
+                closed_err.clone()
+            } else {
+                final_err.clone()
+            };
             let InflightAppend {
                 ack_tx, _permit, ..
             } = append;
             drop(_permit);
             self.state.unacked_batches.fetch_sub(1, Ordering::Release);
-            send_oneshot_isolated(ack_tx, Err(outcome));
+            send_oneshot_isolated(
+                ack_tx,
+                Err(base.with_prior_uncertainty(batch_flags.prior_uncertainty())),
+            );
         }
 
         for cmd in queued {
@@ -2783,6 +2916,7 @@ impl AppendSessionTask {
                             match process_proto_ack(
                                 frame.msg,
                                 &mut self.state,
+                                Some(&self.sent_tracker),
                                 sent_unacked,
                                 &self.context,
                             ) {
@@ -3124,7 +3258,7 @@ fn abort_attempt(
     // `Pending` and drop an already-buffered ack during abort (`T10`).
     while let Some(Some(Ok(frame))) = tokio::task::coop::unconstrained(acks.next()).now_or_never() {
         let sent_unacked = batches_started.saturating_sub(*acked_in_attempt);
-        if process_proto_ack(frame.msg, state, sent_unacked, context).is_err() {
+        if process_proto_ack(frame.msg, state, Some(sent_tracker), sent_unacked, context).is_err() {
             break;
         }
         *acked_in_attempt += 1;
@@ -3141,6 +3275,7 @@ fn abort_attempt(
 fn process_proto_ack(
     proto_ack: proto::AppendAck,
     state: &mut SessionState,
+    sent_tracker: Option<&SentTracker>,
     sent_unacked: usize,
     context: &ErrorContext,
 ) -> Result<(), AppendSessionError> {
@@ -3178,7 +3313,10 @@ fn process_proto_ack(
     }
 
     let InflightAppend {
-        ack_tx, _permit, ..
+        seq,
+        ack_tx,
+        _permit,
+        ..
     } = state
         .inflight_appends
         .pop_front()
@@ -3191,6 +3329,9 @@ fn process_proto_ack(
     state.prev_ack_end = Some(ack.end);
 
     send_oneshot_isolated(ack_tx, Ok(ack));
+    if let Some(tracker) = sent_tracker {
+        tracker.mark_acked(seq);
+    }
 
     Ok(())
 }
@@ -3380,7 +3521,7 @@ mod tests {
             tail: pos(6),
         };
         assert!(matches!(
-            process_proto_ack(valid_ack, &mut state, 0, &ctx),
+            process_proto_ack(valid_ack, &mut state, None, 0, &ctx),
             Err(AppendSessionError::Protocol(_))
         ));
         assert_eq!(state.inflight_appends.len(), 1);
@@ -3393,7 +3534,7 @@ mod tests {
             tail: pos(5),
         };
         assert!(matches!(
-            process_proto_ack(overlapping, &mut state, 1, &ctx),
+            process_proto_ack(overlapping, &mut state, None, 1, &ctx),
             Err(AppendSessionError::Protocol(_))
         ));
         assert_eq!(state.inflight_appends.len(), 1);
@@ -3832,6 +3973,90 @@ mod tests {
             assert!(
                 dropped.saturating_duration_since(session_t0) < Duration::from_secs(1),
                 "body drop time must be stamped on session clock"
+            );
+        });
+    }
+
+    #[test]
+    fn acquire_guard_drop_with_panicking_waker_destructor_refunds_granted_capacity() {
+        use std::task::{Context, Wake, Waker};
+
+        use super::AppendPermits;
+
+        struct PanicDropWake;
+        #[allow(clippy::manual_noop_waker)]
+        impl Wake for PanicDropWake {
+            fn wake(self: Arc<Self>) {}
+            fn wake_by_ref(self: &Arc<Self>) {}
+        }
+        impl Drop for PanicDropWake {
+            fn drop(&mut self) {
+                panic!("simulated panicking waker destructor");
+            }
+        }
+
+        let permits = AppendPermits::new(Some(1), 100);
+        let p1 = permits.try_acquire(100).unwrap();
+        let mut fut = Box::pin(permits.acquire(50));
+        {
+            let waker = Waker::from(Arc::new(PanicDropWake));
+            assert!(
+                fut.as_mut()
+                    .poll(&mut Context::from_waker(&waker))
+                    .is_pending()
+            );
+        }
+        // Grant the pending reservation (delivering `GrantedPermit` into `rx`), then drop `fut`
+        // so `AcquireGuard::drop` runs while the receiver's custom waker panics on drop.
+        drop(p1);
+        drop(fut);
+        assert_eq!(
+            permits.in_flight_bytes(),
+            0,
+            "granted bytes must be refunded even if receiver waker destructor panics"
+        );
+        assert!(
+            permits.try_acquire(100).is_some(),
+            "batch slot and full byte capacity must be restored"
+        );
+    }
+
+    #[test]
+    fn attempt_sync_body_drop_during_tls_teardown_stamps_on_session_clock() {
+        use super::AttemptSync;
+
+        let rt_session = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .unwrap();
+        let sync = rt_session.block_on(async { AttemptSync::new() });
+        let sync_for_thread = sync.clone();
+
+        // Register HELD *before* touching Tokio's context TLS so LIFO TLS teardown destroys
+        // Tokio's context first, exercising `ATTEMPT_TIMESTAMP_NEEDS_STAMP` in `mark_body_dropped`.
+        let handle = std::thread::spawn(move || {
+            struct DropMark(Arc<AttemptSync>);
+            impl Drop for DropMark {
+                fn drop(&mut self) {
+                    self.0.mark_body_dropped();
+                }
+            }
+            thread_local! {
+                static HELD: std::cell::RefCell<Option<DropMark>> =
+                    const { std::cell::RefCell::new(None) };
+            }
+            HELD.with(|slot| *slot.borrow_mut() = Some(DropMark(sync_for_thread)));
+            let _ = tokio::runtime::Handle::try_current();
+        });
+        handle
+            .join()
+            .expect("AttemptSync body drop during TLS teardown must not panic");
+
+        rt_session.block_on(async {
+            assert!(
+                sync.body_dropped_at().is_some(),
+                "session task must stamp ATTEMPT_TIMESTAMP_NEEDS_STAMP on its own clock"
             );
         });
     }
