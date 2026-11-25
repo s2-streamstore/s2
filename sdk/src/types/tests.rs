@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use http::uri::{Authority, Scheme};
 #[cfg(feature = "_hidden")]
 use http::{HeaderMap, HeaderValue};
@@ -300,67 +302,96 @@ fn append_ack_from_proto_requires_all_positions() {
 
 #[test]
 fn http2_config_bounds() {
-    let cfg = Http2Config::new()
+    let http_endpoints = S2Endpoints::for_endpoint("http://localhost:8080").unwrap();
+    let new_client = |http2| {
+        crate::S2::new(
+            S2Config::new("token")
+                .with_endpoints(http_endpoints.clone())
+                .with_http2(http2),
+        )
+    };
+
+    let max_cfg = Http2Config::new()
         .with_max_concurrent_requests(Http2Config::MAX_CONCURRENT_REQUESTS)
-        .unwrap()
         .with_stream_receive_window(Http2Config::MAX_RECEIVE_WINDOW)
-        .unwrap()
-        .with_connection_receive_window(Http2Config::MIN_CONNECTION_RECEIVE_WINDOW)
-        .unwrap();
+        .with_connection_receive_window(Http2Config::MAX_RECEIVE_WINDOW);
     assert_eq!(
-        cfg.max_concurrent_requests(),
+        max_cfg.max_concurrent_requests(),
         Some(Http2Config::MAX_CONCURRENT_REQUESTS)
     );
     assert_eq!(
-        cfg.stream_receive_window(),
+        max_cfg.stream_receive_window(),
         Some(Http2Config::MAX_RECEIVE_WINDOW)
     );
     assert_eq!(
-        cfg.connection_receive_window(),
+        max_cfg.connection_receive_window(),
+        Some(Http2Config::MAX_RECEIVE_WINDOW)
+    );
+    assert!(new_client(max_cfg).is_ok());
+
+    let min_cfg = Http2Config::new()
+        .with_max_concurrent_requests(1)
+        .with_stream_receive_window(1)
+        .with_connection_receive_window(Http2Config::MIN_CONNECTION_RECEIVE_WINDOW);
+    assert_eq!(
+        min_cfg.connection_receive_window(),
         Some(Http2Config::MIN_CONNECTION_RECEIVE_WINDOW)
     );
+    assert!(new_client(min_cfg).is_ok());
     assert_eq!(Http2Config::new().max_concurrent_requests(), None);
 
-    assert!(Http2Config::new().with_max_concurrent_requests(0).is_err());
+    assert!(new_client(Http2Config::new().with_max_concurrent_requests(0)).is_err());
     assert!(
-        Http2Config::new()
-            .with_max_concurrent_requests(Http2Config::MAX_CONCURRENT_REQUESTS + 1)
-            .is_err()
+        new_client(
+            Http2Config::new()
+                .with_max_concurrent_requests(Http2Config::MAX_CONCURRENT_REQUESTS + 1)
+        )
+        .is_err()
     );
-    assert!(Http2Config::new().with_stream_receive_window(0).is_err());
+    assert!(new_client(Http2Config::new().with_stream_receive_window(0)).is_err());
     assert!(
-        Http2Config::new()
-            .with_stream_receive_window(Http2Config::MAX_RECEIVE_WINDOW + 1)
-            .is_err()
-    );
-    assert!(
-        Http2Config::new()
-            .with_connection_receive_window(Http2Config::MIN_CONNECTION_RECEIVE_WINDOW - 1)
-            .is_err()
+        new_client(
+            Http2Config::new().with_stream_receive_window(Http2Config::MAX_RECEIVE_WINDOW + 1)
+        )
+        .is_err()
     );
     assert!(
-        Http2Config::new()
-            .with_connection_receive_window(u32::MAX)
-            .is_err()
+        new_client(
+            Http2Config::new()
+                .with_connection_receive_window(Http2Config::MIN_CONNECTION_RECEIVE_WINDOW - 1)
+        )
+        .is_err()
     );
+    assert!(new_client(Http2Config::new().with_connection_receive_window(u32::MAX)).is_err());
 
     // Cross-field C13d validation rejects connection_receive_window < stream_receive_window.
     let smaller_conn = Http2Config::new()
-        .with_connection_receive_window(Http2Config::MIN_CONNECTION_RECEIVE_WINDOW)
-        .unwrap();
-    assert!(smaller_conn.validate().is_err());
-    assert!(
-        S2Config::new("token")
-            .with_http2(smaller_conn)
-            .validate()
-            .is_err()
-    );
+        .with_connection_receive_window(Http2Config::MIN_CONNECTION_RECEIVE_WINDOW);
+    assert!(new_client(smaller_conn).is_err());
     let matching_windows = Http2Config::new()
         .with_stream_receive_window(Http2Config::MIN_CONNECTION_RECEIVE_WINDOW)
-        .unwrap()
-        .with_connection_receive_window(Http2Config::MIN_CONNECTION_RECEIVE_WINDOW)
-        .unwrap();
-    assert!(matching_windows.validate().is_ok());
+        .with_connection_receive_window(Http2Config::MIN_CONNECTION_RECEIVE_WINDOW);
+    assert!(new_client(matching_windows).is_ok());
+}
+
+// spec: r1 C2
+#[test]
+fn s2_config_validates_timeouts_and_retry_at_client_construction() {
+    let http_endpoints = S2Endpoints::for_endpoint("http://localhost:8080").unwrap();
+    let base = || S2Config::new("token").with_endpoints(http_endpoints.clone());
+
+    assert!(crate::S2::new(base().with_connection_timeout(Duration::ZERO)).is_err());
+    assert!(crate::S2::new(base().with_request_timeout(Duration::ZERO)).is_err());
+    assert!(crate::S2::new(base().with_retry(RetryConfig::new().with_max_attempts(0))).is_err());
+    assert!(
+        crate::S2::new(
+            base()
+                .with_connection_timeout(Duration::from_millis(1))
+                .with_request_timeout(Duration::from_millis(1))
+                .with_retry(RetryConfig::new().with_max_attempts(1)),
+        )
+        .is_ok()
+    );
 }
 
 #[test]

@@ -97,8 +97,8 @@ impl S2 {
     ///
     /// # Errors
     ///
-    /// Returns [`ValidationError`] if the configuration (such as the access token, retry delays,
-    /// or TLS setup) is invalid.
+    /// Returns [`ValidationError`] if the configuration (such as the access token, timeouts,
+    /// retry settings, HTTP/2 settings, or TLS setup) is invalid.
     pub fn new(config: S2Config) -> Result<Self, ValidationError> {
         Self::init_with_op(config, "S2::new")
     }
@@ -180,7 +180,8 @@ impl S2 {
     ///
     /// # Errors
     ///
-    /// Returns [`ValidationError`] if `retry.min_base_delay() > retry.max_base_delay()`.
+    /// Returns [`ValidationError`] if `retry.max_attempts() == 0` or
+    /// `retry.min_base_delay() > retry.max_base_delay()`.
     pub fn with_retry(self, retry: RetryConfig) -> Result<Self, ValidationError> {
         let base = self
             .base
@@ -666,7 +667,8 @@ impl S2Basin {
     ///
     /// # Errors
     ///
-    /// Returns [`ValidationError`] if `retry.min_base_delay() > retry.max_base_delay()`.
+    /// Returns [`ValidationError`] if `retry.max_attempts() == 0` or
+    /// `retry.min_base_delay() > retry.max_base_delay()`.
     pub fn with_retry(self, retry: RetryConfig) -> Result<Self, ValidationError> {
         if let Err(err) = retry.validate() {
             return Err(self
@@ -888,7 +890,8 @@ impl S2Stream {
     ///
     /// # Errors
     ///
-    /// Returns [`ValidationError`] if `retry.min_base_delay() > retry.max_base_delay()`.
+    /// Returns [`ValidationError`] if `retry.max_attempts() == 0` or
+    /// `retry.min_base_delay() > retry.max_base_delay()`.
     pub fn with_retry(self, retry: RetryConfig) -> Result<Self, ValidationError> {
         if let Err(err) = retry.validate() {
             return Err(self

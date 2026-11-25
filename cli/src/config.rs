@@ -397,7 +397,6 @@ pub fn sdk_config(
         .with_user_agent(user_agent)
         .expect("valid user agent")
         .with_request_timeout(Duration::from_secs(30))
-        .expect("non-zero timeout")
         .with_compression(compression);
 
     match (&config.account_endpoint, &config.basin_endpoint) {

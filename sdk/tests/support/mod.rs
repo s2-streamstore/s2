@@ -383,15 +383,12 @@ pub fn query_pairs(uri: &http::Uri) -> BTreeMap<String, String> {
 }
 
 pub fn no_retry_config() -> RetryConfig {
-    RetryConfig::new()
-        .with_max_attempts(1)
-        .expect("max_attempts = 1")
+    RetryConfig::new().with_max_attempts(1)
 }
 
 pub fn fast_retry_config(max_attempts: u32) -> RetryConfig {
     RetryConfig::new()
         .with_max_attempts(max_attempts)
-        .expect("valid max_attempts")
         .with_min_base_delay(Duration::ZERO)
         .with_max_base_delay(Duration::ZERO)
 }

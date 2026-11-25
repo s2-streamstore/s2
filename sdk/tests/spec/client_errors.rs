@@ -736,9 +736,7 @@ async fn spec_c12_client_close_aborts_inflight_and_sessions_and_rejects_new_call
     let stall = StallingTlsServer::start().await;
     let stall_s2 = stall.client_with(|cfg| {
         cfg.with_connection_timeout(Duration::from_secs(10))
-            .unwrap()
             .with_request_timeout(Duration::from_secs(10))
-            .unwrap()
             .with_retry(no_retry_config())
     });
     let accepted = stall.wait_accepted();
@@ -764,9 +762,7 @@ async fn spec_t7a_connection_timeout_bounds_tls_handshake() {
     let stall = StallingTlsServer::start().await;
     let s2 = stall.client_with(|cfg| {
         cfg.with_connection_timeout(Duration::from_millis(150))
-            .unwrap()
             .with_request_timeout(Duration::from_secs(5))
-            .unwrap()
             .with_retry(no_retry_config())
     });
 
@@ -1330,7 +1326,7 @@ async fn spec_c13b_http2_keepalive_ping_timeout_maps_to_connection_lost_and_spil
     .await;
 
     let stream = pool_server.stream_with(|cfg| {
-        cfg.with_http2(Http2Config::new().with_max_concurrent_requests(1).unwrap())
+        cfg.with_http2(Http2Config::new().with_max_concurrent_requests(1))
             .with_retry(no_retry_config())
     });
 
@@ -1414,7 +1410,6 @@ async fn spec_c13b_http2_keepalive_ping_timeout_maps_to_connection_lost_and_spil
         S2Config::new("test-token")
             .with_endpoints(raw_endpoints)
             .with_request_timeout(Duration::from_secs(120))
-            .unwrap()
             .with_retry(no_retry_config()),
     )
     .unwrap();
@@ -1608,7 +1603,6 @@ async fn spec_t2_t7_t7b_m1_retry_safety_request_tokens_and_timeouts() {
 
     let stream_t = timeout_server.stream_with(|cfg| {
         cfg.with_request_timeout(Duration::from_millis(150))
-            .unwrap()
             .with_retry(fast_retry_3)
     });
 
@@ -1631,7 +1625,6 @@ async fn spec_t2_t7_t7b_m1_retry_safety_request_tokens_and_timeouts() {
     let mut sess = timeout_server
         .stream_with(|cfg| {
             cfg.with_request_timeout(Duration::from_millis(150))
-                .unwrap()
                 .with_retry(no_retry_config())
         })
         .read_session(ReadInput::new(), ReadSessionConfig::default())
@@ -1883,7 +1876,6 @@ async fn spec_t3_retry_backoff_delivers_bounded_exponential_delay() {
 
     let retry = RetryConfig::new()
         .with_max_attempts(3)
-        .unwrap()
         .with_min_base_delay(Duration::from_millis(40))
         .with_max_base_delay(Duration::from_millis(200));
     server.stream(retry).check_tail().await.unwrap();
@@ -2169,18 +2161,22 @@ async fn with_retry_overrides_pool_sharing_and_validation() {
 
     let (basin_name, stream_name) = test_basin_and_stream();
 
-    // 1. Validation: min_base_delay > max_base_delay fails with ValidationError on S2, S2Basin, and
-    //    S2Stream.
+    // 1. Validation: min_base_delay > max_base_delay and max_attempts == 0 fail with
+    //    ValidationError on S2, S2Basin, and S2Stream.
     let bad_retry = RetryConfig::new()
         .with_min_base_delay(Duration::from_millis(50))
         .with_max_base_delay(Duration::from_millis(10));
+    let zero_attempts = RetryConfig::new().with_max_attempts(0);
     let dummy_server = MockH2Server::from_responses([CannedResponse::new(200, "{}")]).await;
     let dummy_s2 = dummy_server.client(no_retry_config());
     let dummy_basin = dummy_s2.basin(basin_name.clone());
     let dummy_stream = dummy_basin.stream(stream_name.clone());
     assert!(dummy_s2.clone().with_retry(bad_retry).is_err());
     assert!(dummy_basin.clone().with_retry(bad_retry).is_err());
-    assert!(dummy_stream.with_retry(bad_retry).is_err());
+    assert!(dummy_stream.clone().with_retry(bad_retry).is_err());
+    assert!(dummy_s2.clone().with_retry(zero_attempts).is_err());
+    assert!(dummy_basin.clone().with_retry(zero_attempts).is_err());
+    assert!(dummy_stream.with_retry(zero_attempts).is_err());
 
     // 2. Unary op + backoff + sibling isolation + single shared HTTP/2 connection pool.
     let tail_calls = Arc::new(AtomicUsize::new(0));
@@ -2309,14 +2305,12 @@ async fn with_retry_overrides_pool_sharing_and_validation() {
     // Base S2 has max_attempts = 1 and AppendRetryPolicy::NoSideEffects.
     let base_retry = RetryConfig::new()
         .with_max_attempts(1)
-        .unwrap()
         .with_min_base_delay(Duration::from_millis(1))
         .with_max_base_delay(Duration::from_millis(1))
         .with_append_retry_policy(AppendRetryPolicy::NoSideEffects);
     let base_s2 = server.client(base_retry);
     let patient_retry = RetryConfig::new()
         .with_max_attempts(3)
-        .unwrap()
         .with_min_base_delay(Duration::from_millis(15))
         .with_max_base_delay(Duration::from_millis(15))
         .with_append_retry_policy(AppendRetryPolicy::All);
@@ -2353,7 +2347,6 @@ async fn with_retry_overrides_pool_sharing_and_validation() {
         .stream(stream_name.clone());
     let no_side_effects_3 = RetryConfig::new()
         .with_max_attempts(3)
-        .unwrap()
         .with_min_base_delay(Duration::from_millis(1))
         .with_max_base_delay(Duration::from_millis(1))
         .with_append_retry_policy(AppendRetryPolicy::NoSideEffects);

@@ -61,7 +61,7 @@ pub async fn provision_stream() -> eyre::Result<S2Stream> {
     let basin_name: BasinName = BASIN.parse()?;
     let stream_name: StreamName = STREAM.parse()?;
 
-    let retry = RetryConfig::new().with_max_attempts(PROVISION_ATTEMPTS)?;
+    let retry = RetryConfig::new().with_max_attempts(PROVISION_ATTEMPTS);
     let provisioner = client(retry)?;
     provisioner
         .ensure_basin(EnsureBasinInput::new(basin_name.clone()))
