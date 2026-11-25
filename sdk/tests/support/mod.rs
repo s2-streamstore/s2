@@ -294,6 +294,33 @@ impl S2sResponder {
     pub fn reset(&mut self, reason: h2::Reason) {
         self.0.send_reset(reason);
     }
+
+    /// Push `frame` chunks using HTTP/2 send flow control until the stream receive window is
+    /// completely exhausted (`capacity() == 0` and `poll_capacity` returns `Poll::Pending`),
+    /// proving the peer has buffered the full window without releasing credit. Returns the total
+    /// number of bytes pushed before exhaustion.
+    pub async fn saturate_stream_window(&mut self, frame: &Bytes) -> usize {
+        let mut total_sent = 0;
+        loop {
+            self.0.reserve_capacity(frame.len());
+            let poll_cap =
+                std::future::poll_fn(|cx| std::task::Poll::Ready(self.0.poll_capacity(cx)));
+            match poll_cap.await {
+                std::task::Poll::Ready(Some(Ok(cap))) if cap > 0 => {
+                    let n = cap.min(frame.len());
+                    let _ = self.0.send_data(frame.slice(..n), false);
+                    total_sent += n;
+                    // Yield so the h2 connection driver can flush DATA frames to the socket.
+                    tokio::task::yield_now().await;
+                }
+                std::task::Poll::Pending => {
+                    // Window is genuinely exhausted: 0 stream credit remaining.
+                    return total_sent;
+                }
+                _ => return total_sent,
+            }
+        }
+    }
 }
 
 pub fn send_json(mut respond: SendResponse<Bytes>, status: u16, body: impl Into<Bytes>) {

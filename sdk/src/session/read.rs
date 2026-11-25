@@ -15,7 +15,7 @@ use tokio::{
     sync::{Notify, futures::OwnedNotified},
     time::{Instant, Sleep},
 };
-use tokio_util::sync::WaitForCancellationFutureOwned;
+use tokio_util::{sync::WaitForCancellationFutureOwned, task::AbortOnDropHandle};
 use tracing::{Instrument, Span, debug, debug_span};
 
 use crate::{
@@ -299,11 +299,7 @@ impl Future for CaughtUp {
                 let mut wakes = PendingWakes::default();
                 {
                     let mut inner = this.state.inner.lock().unwrap();
-                    if inner.closed.is_none() {
-                        let err =
-                            AbortedError::new_with_context("client closed", inner.context.clone());
-                        inner.on_aborted(err, &mut wakes);
-                    }
+                    inner.abort_for_client_close(&mut wakes);
                 }
                 wakes.wake();
 
@@ -374,6 +370,9 @@ struct ReadStateInner {
     /// returns `None` so `is_caught_up()` stays `true` per `R7c`.
     closed: Option<TerminalClose>,
     context: ErrorContext,
+    /// Current retry attempt number (`E7`), updated on each attempt start and reset to `1` on
+    /// `T5a` progress so aborts from parked observers carry the accurate attempt count.
+    attempts: u32,
 }
 
 impl ReadStateInner {
@@ -385,7 +384,12 @@ impl ReadStateInner {
             catch_up: CatchUpSlot::pending(),
             closed: None,
             context,
+            attempts: 1,
         }
+    }
+
+    fn current_context(&self) -> ErrorContext {
+        self.context.clone().with_attempts(self.attempts)
     }
 
     fn compute_caught_up_tail(&self) -> Option<StreamPosition> {
@@ -582,14 +586,20 @@ impl ReadStateInner {
         true
     }
 
+    fn abort_for_client_close(&mut self, wakes: &mut PendingWakes) {
+        if self.closed.is_none() {
+            let err = AbortedError::new_with_context("client closed", self.current_context());
+            self.on_aborted(err, wakes);
+        }
+    }
+
     fn lock_in_abort_if_cancelled(
         &mut self,
         shutdown: &CancellationToken,
         wakes: &mut PendingWakes,
     ) -> Option<TerminalClose> {
-        if self.closed.is_none() && shutdown.is_cancelled() {
-            let err = AbortedError::new_with_context("client closed", self.context.clone());
-            self.on_aborted(err, wakes);
+        if shutdown.is_cancelled() {
+            self.abort_for_client_close(wakes);
         }
         self.closed.clone()
     }
@@ -697,9 +707,8 @@ impl ReadSessionState {
         let mut wakes = PendingWakes::default();
         let future = {
             let mut inner = self.inner.lock().unwrap();
-            if self.shutdown.is_cancelled() && inner.closed.is_none() {
-                let err = AbortedError::new_with_context("client closed", inner.context.clone());
-                inner.on_aborted(err, &mut wakes);
+            if self.shutdown.is_cancelled() {
+                inner.abort_for_client_close(&mut wakes);
             }
             inner.catch_up.future()
         };
@@ -710,6 +719,10 @@ impl ReadSessionState {
             waits: StdMutex::new(CaughtUpWaits::default()),
             done: false,
         }
+    }
+
+    fn set_attempt(&self, attempts: u32) {
+        self.inner.lock().unwrap().attempts = attempts;
     }
 
     fn closed_or_abort(&self) -> Option<TerminalClose> {
@@ -855,23 +868,34 @@ impl ReadSessionState {
     }
 }
 
+/// Immutable snapshot of per-attempt parameters captured when opening each request (`R11d`).
+#[derive(Clone, Copy)]
+struct AttemptSnapshot {
+    /// Whether the session had already resolved its start before *this* request was opened.
+    was_resumed: bool,
+    /// Absolute `seq_num` sent on *this* request (compared against `416` wire tail per `R11d`).
+    sent_seq_num: Option<u64>,
+    /// Whether *this* request was sent with no `wait` remaining (`R11d`).
+    no_wait_remaining: bool,
+}
+
 struct ActiveAttempt {
     stream: Streaming<proto::ReadBatch, ReadSessionError>,
+    snapshot: AttemptSnapshot,
     made_progress: bool,
     fetched_record: bool,
     last_chunks_received: u64,
 }
 
-type OpenAttemptFuture = Pin<
-    Box<
-        dyn Future<Output = Result<Streaming<proto::ReadBatch, ReadSessionError>, ReadSessionError>>
-            + Send,
-    >,
->;
+type OpenAttemptHandle =
+    AbortOnDropHandle<Result<Streaming<proto::ReadBatch, ReadSessionError>, ReadSessionError>>;
 
 enum DriverPhase {
     Idle,
-    Opening(OpenAttemptFuture),
+    Opening {
+        handle: OpenAttemptHandle,
+        snapshot: AttemptSnapshot,
+    },
     Active(ActiveAttempt),
     Backoff(Pin<Box<Sleep>>),
 }
@@ -1122,6 +1146,12 @@ impl ReadSessionCore {
     fn start_open_attempt(&mut self) {
         self.end.wait = remaining_wait(self.baseline_wait, self.idle_since);
         let attempt_num = self.retry_backoff.attempt_number();
+        self.state.set_attempt(attempt_num);
+        let snapshot = AttemptSnapshot {
+            was_resumed: self.has_received_response,
+            sent_seq_num: self.start.seq_num,
+            no_wait_remaining: has_no_wait_remaining(&self.end),
+        };
         debug!(
             attempt = attempt_num,
             next_seq_num = ?self.start.seq_num,
@@ -1142,7 +1172,14 @@ impl ReadSessionCore {
                 .await
         }
         .instrument(self.span.clone());
-        self.transport_mut().phase = DriverPhase::Opening(Box::pin(fut));
+        // Spawn the opening request behind `AbortOnDropHandle` so `T7a`/`T7b` (`connection_timeout`
+        // and `request_timeout` until `200` headers or full non-2xx error body) settle in real time
+        // even if the caller parks while `Opening`, while keeping body decoding, heartbeats, and
+        // retries strictly pull-driven (`R6b`) and aborting immediately if the session drops.
+        self.transport_mut().phase = DriverPhase::Opening {
+            handle: AbortOnDropHandle::new(tokio::spawn(fut)),
+            snapshot,
+        };
     }
 
     fn finish_clean_end_now(
@@ -1278,6 +1315,7 @@ impl ReadSessionCore {
         let had_response = self.has_received_response;
         self.has_received_response = true;
         self.retry_backoff.reset();
+        self.state.set_attempt(1);
 
         // R11c: restart idle clock only when a record is fetched; if no record has been fetched
         // yet, start the clock the first time we learn we are at the tail. Heartbeats never
@@ -1375,12 +1413,11 @@ impl ReadSessionCore {
         &mut self,
         err: ReadSessionError,
         made_progress: bool,
+        snapshot: AttemptSnapshot,
     ) -> Option<Option<Result<DecodedBatch, ReadSessionError>>> {
         // R11d: 416 on a resumed request with no remaining wait is a clean stop unless the
-        // reported tail regressed below our resume position.
-        if let Some(tail) =
-            resumed_unwritten_stop_tail(self.has_received_response, &self.start, &self.end, &err)
-        {
+        // reported tail regressed below the sequence number sent on that request.
+        if let Some(tail) = resumed_unwritten_stop_tail(snapshot, &err) {
             debug!(?tail, "read session reached tail on resumed stop condition");
             return Some(self.finish_clean_end_now(tail));
         }
@@ -1430,15 +1467,30 @@ impl ReadSessionCore {
                 DriverPhase::Idle => {
                     self.start_open_attempt();
                 }
-                DriverPhase::Opening(fut) => match fut.as_mut().poll(cx) {
+                DriverPhase::Opening { handle, snapshot } => match Pin::new(handle).poll(cx) {
                     Poll::Pending => return self.pending_or_abort(cx),
-                    Poll::Ready(res) => {
+                    Poll::Ready(join_res) => {
+                        let snapshot = *snapshot;
                         *phase = DriverPhase::Idle;
                         if self.shutdown.is_cancelled()
                             && let Some(outcome) = self.take_closed_or_abort()
                         {
                             return Poll::Ready(outcome.map(Err));
                         }
+                        let res = match join_res {
+                            Ok(res) => res,
+                            Err(err) if err.is_panic() => {
+                                std::panic::resume_unwind(err.into_panic())
+                            }
+                            Err(_) => {
+                                Err(ReadSessionError::Aborted(AbortedError::new_with_context(
+                                    "client closed",
+                                    self.context
+                                        .clone()
+                                        .with_attempts(self.retry_backoff.attempt_number()),
+                                )))
+                            }
+                        };
                         match res {
                             Ok(stream) => {
                                 let transport = self.transport_mut();
@@ -1446,18 +1498,14 @@ impl ReadSessionCore {
                                 let last_chunks_received = stream.chunks_received();
                                 transport.phase = DriverPhase::Active(ActiveAttempt {
                                     stream,
+                                    snapshot,
                                     made_progress: false,
                                     fetched_record: false,
                                     last_chunks_received,
                                 });
                             }
                             Err(err) => {
-                                if let Some(tail) = resumed_unwritten_stop_tail(
-                                    self.has_received_response,
-                                    &self.start,
-                                    &self.end,
-                                    &err,
-                                ) {
+                                if let Some(tail) = resumed_unwritten_stop_tail(snapshot, &err) {
                                     debug!(
                                         ?tail,
                                         "read session reached tail on resumed stop condition"
@@ -1497,9 +1545,12 @@ impl ReadSessionCore {
                         }
                         Poll::Ready(Some(Err(err))) => {
                             let made_progress = attempt.made_progress;
+                            let snapshot = attempt.snapshot;
                             *phase = DriverPhase::Idle;
                             heartbeat.reset();
-                            if let Some(result) = self.handle_stream_error(err, made_progress) {
+                            if let Some(result) =
+                                self.handle_stream_error(err, made_progress, snapshot)
+                            {
                                 return Poll::Ready(result);
                             }
                         }
@@ -1524,6 +1575,7 @@ impl ReadSessionCore {
                                 Poll::Pending => return self.pending_or_abort(cx),
                                 Poll::Ready(()) => {
                                     let made_progress = attempt.made_progress;
+                                    let snapshot = attempt.snapshot;
                                     attempt.stream.retire_connection();
                                     *phase = DriverPhase::Idle;
                                     heartbeat.reset();
@@ -1533,7 +1585,7 @@ impl ReadSessionCore {
                                             self.context.clone(),
                                         ));
                                     if let Some(result) =
-                                        self.handle_stream_error(err, made_progress)
+                                        self.handle_stream_error(err, made_progress, snapshot)
                                     {
                                         return Poll::Ready(result);
                                     }
@@ -1554,8 +1606,7 @@ impl Drop for ReadSessionCore {
             let mut inner = self.state.inner.lock().unwrap();
             if inner.closed.is_none() {
                 if self.shutdown.is_cancelled() {
-                    let err = AbortedError::new_with_context("client closed", self.context.clone());
-                    inner.on_aborted(err, &mut wakes);
+                    inner.abort_for_client_close(&mut wakes);
                 } else {
                     inner.closed = Some(TerminalClose::Clean);
                     inner.on_ended(None, &mut wakes);
@@ -1694,6 +1745,7 @@ impl Stream for ReadSession {
             } else {
                 None
             };
+            let committed_close = lock_in_close.is_some();
             if let Err(closed) = this
                 .core
                 .state
@@ -1702,6 +1754,11 @@ impl Stream for ReadSession {
                 this.current_batch = Vec::new().into_iter();
                 this.core.close_after_current_batch = None;
                 return Poll::Ready(this.core.finalize_closed(closed).map(Err));
+            }
+            if committed_close {
+                // Close reason is now locked in (`R9`), so no further request can open and
+                // dropping the last `BasinClient` cannot alter `ReadSessionState`.
+                this.core.client = None;
             }
             return Poll::Ready(Some(Ok(record)));
         }
@@ -1718,6 +1775,7 @@ impl Stream for ReadSession {
                 } else {
                     (None, decoded.close_after_batch)
                 };
+                let committed_close = lock_in_close.is_some();
                 if let Err(closed) = this.core.state.on_batch_decoded_and_delivered(
                     tail,
                     record.seq_num,
@@ -1725,6 +1783,9 @@ impl Stream for ReadSession {
                     lock_in_close,
                 ) {
                     return Poll::Ready(this.core.finalize_closed(closed).map(Err));
+                }
+                if committed_close {
+                    this.core.client = None;
                 }
                 this.current_batch = iter;
                 this.core.close_after_current_batch = remaining_close;
@@ -1858,6 +1919,7 @@ impl Stream for ReadBatchSession {
                     .last()
                     .expect("poll_next_batch only yields non-empty batches")
                     .seq_num;
+                let committed_close = decoded.close_after_batch.is_some();
                 if let Err(closed) = this.core.state.on_batch_decoded_and_delivered(
                     tail,
                     last_seq,
@@ -1865,6 +1927,9 @@ impl Stream for ReadBatchSession {
                     decoded.close_after_batch,
                 ) {
                     return Poll::Ready(this.core.finalize_closed(closed).map(Err));
+                }
+                if committed_close {
+                    this.core.client = None;
                 }
                 Poll::Ready(Some(Ok(decoded.batch)))
             }
@@ -1892,19 +1957,17 @@ fn range_not_satisfiable_tail(err: &ReadSessionError) -> Option<Option<StreamPos
 }
 
 /// Check whether an error is a clean `R11d` stop condition (resumed request with no remaining
-/// `wait` receiving `416` whose tail has not regressed below `start.seq_num`).
+/// `wait` receiving `416` whose tail has not regressed below the `seq_num` sent on that request).
 fn resumed_unwritten_stop_tail(
-    has_received_response: bool,
-    start: &ReadStart,
-    end: &ReadEnd,
+    snapshot: AttemptSnapshot,
     err: &ReadSessionError,
 ) -> Option<Option<StreamPosition>> {
-    if !has_received_response || !has_no_wait_remaining(end) {
+    if !snapshot.was_resumed || !snapshot.no_wait_remaining {
         return None;
     }
     let tail = range_not_satisfiable_tail(err)?;
-    if let (Some(tail_pos), Some(resume_seq)) = (tail, start.seq_num)
-        && tail_pos.seq_num < resume_seq
+    if let (Some(tail_pos), Some(sent_seq)) = (tail, snapshot.sent_seq_num)
+        && tail_pos.seq_num < sent_seq
     {
         return None;
     }
@@ -2154,8 +2217,14 @@ mod tests {
         let stream = Streaming::from_stream_for_test(futures_util::stream::poll_fn(move |cx| {
             rx.poll_recv(cx)
         }));
+        let snapshot = AttemptSnapshot {
+            was_resumed: false,
+            sent_seq_num: session.core.start.seq_num,
+            no_wait_remaining: has_no_wait_remaining(&session.core.end),
+        };
         session.core.transport_mut().phase = DriverPhase::Active(ActiveAttempt {
             stream,
+            snapshot,
             made_progress: false,
             fetched_record: false,
             last_chunks_received: 0,
@@ -2580,8 +2649,14 @@ mod tests {
         let stream = Streaming::from_stream_for_test(futures_util::stream::poll_fn(move |cx| {
             rx.poll_recv(cx)
         }));
+        let snapshot = AttemptSnapshot {
+            was_resumed: false,
+            sent_seq_num: session.core.start.seq_num,
+            no_wait_remaining: has_no_wait_remaining(&session.core.end),
+        };
         session.core.transport_mut().phase = DriverPhase::Active(ActiveAttempt {
             stream,
+            snapshot,
             made_progress: false,
             fetched_record: false,
             last_chunks_received: 0,
@@ -2851,8 +2926,14 @@ mod tests {
             futures_util::stream::poll_fn(move |cx| rx.poll_recv(cx)),
             chunks.clone(),
         );
+        let snapshot = AttemptSnapshot {
+            was_resumed: false,
+            sent_seq_num: session.core.start.seq_num,
+            no_wait_remaining: has_no_wait_remaining(&session.core.end),
+        };
         session.core.transport_mut().phase = DriverPhase::Active(ActiveAttempt {
             stream,
+            snapshot,
             made_progress: false,
             fetched_record: false,
             last_chunks_received: 0,
@@ -2879,6 +2960,228 @@ mod tests {
 
         // Retry budget was NOT reset by the empty frame (`T5a`).
         assert_eq!(session.core.retry_backoff.attempt_number(), 2);
+    }
+
+    // spec: r1 R11d, T9
+    #[tokio::test]
+    async fn initial_request_terminal_416_after_record_surfaces_read_unwritten_error() {
+        let (mut session, tx, state, _shutdown) = test_session_with_active_stream(
+            ReadInput::new()
+                .with_start(crate::types::ReadStart::SeqNum(0))
+                .with_count(10),
+        );
+
+        // Initial request delivers record 0 (setting has_received_response=true and advancing
+        // self.start to 1), then emits terminal 416 on the SAME initial request -> MUST NOT be
+        // misclassified as a resumed R11d clean stop!
+        tx.send(Ok(S2sFrame {
+            msg: proto_batch(&[0], Some(1)),
+            reconnect_advised: false,
+        }))
+        .unwrap();
+        tx.send(Err(ReadSessionError::ReadUnwritten(
+            crate::error::ReadUnwrittenError::new(position(1)),
+        )))
+        .unwrap();
+
+        assert_eq!(session.next().await.unwrap().unwrap().seq_num, 0);
+        assert!(matches!(
+            session.next().await,
+            Some(Err(ReadSessionError::ReadUnwritten(ref e))) if e.tail == position(1)
+        ));
+        assert_eq!(state.next_seq_num(), Some(1));
+        assert!(session.next().await.is_none());
+    }
+
+    // spec: r1 C12, R9a, R9c
+    #[tokio::test]
+    async fn client_is_released_immediately_on_final_ok_when_close_locks_in() {
+        // 1. Uncaught-up count=1 (ReadSession): client released immediately upon returning record
+        //    0.
+        let (mut session, tx, state, _shutdown) = test_session_with_active_stream(
+            ReadInput::new()
+                .with_start(crate::types::ReadStart::SeqNum(0))
+                .with_count(1),
+        );
+        tx.send(Ok(S2sFrame {
+            msg: proto_batch(&[0], Some(5)),
+            reconnect_advised: false,
+        }))
+        .unwrap();
+        assert_eq!(session.next().await.unwrap().unwrap().seq_num, 0);
+        assert!(session.core.client.is_none());
+        assert!(!state.is_caught_up());
+        assert!(session.next().await.is_none());
+
+        // 2. Caught-up count=1 (ReadSession): client released immediately, while `is_caught_up`
+        //    stays true until trailing `None` (`R7c`).
+        let (mut session, tx, state, _shutdown) = test_session_with_active_stream(
+            ReadInput::new()
+                .with_start(crate::types::ReadStart::SeqNum(0))
+                .with_count(1),
+        );
+        tx.send(Ok(S2sFrame {
+            msg: proto_batch(&[0], Some(1)),
+            reconnect_advised: false,
+        }))
+        .unwrap();
+        assert_eq!(session.next().await.unwrap().unwrap().seq_num, 0);
+        assert!(session.core.client.is_none());
+        assert!(state.is_caught_up());
+        assert!(session.next().await.is_none());
+        assert!(!state.is_caught_up());
+
+        // 3. Deferred mid-batch ProtocolError (`[7, u64::MAX]`): client released right after
+        //    yielding record 7, and next poll still surfaces ProtocolError.
+        let (mut session, tx, _state, _shutdown) = test_session_with_active_stream(
+            ReadInput::new().with_start(crate::types::ReadStart::SeqNum(7)),
+        );
+        tx.send(Ok(S2sFrame {
+            msg: proto_batch(&[7, u64::MAX], None),
+            reconnect_advised: false,
+        }))
+        .unwrap();
+        assert_eq!(session.next().await.unwrap().unwrap().seq_num, 7);
+        assert!(session.core.client.is_none());
+        assert!(matches!(
+            session.next().await,
+            Some(Err(ReadSessionError::Protocol(_)))
+        ));
+        assert!(session.next().await.is_none());
+
+        // 4. ReadBatchSession count=1: client released immediately on returning the final batch.
+        let (mut batch_sess, batch_tx, _state, _shutdown) = test_batch_session_with_active_stream(
+            ReadInput::new()
+                .with_start(crate::types::ReadStart::SeqNum(0))
+                .with_count(1),
+        );
+        batch_tx
+            .send(Ok(S2sFrame {
+                msg: proto_batch(&[0], Some(5)),
+                reconnect_advised: false,
+            }))
+            .unwrap();
+        assert_eq!(batch_sess.next().await.unwrap().unwrap().records.len(), 1);
+        assert!(batch_sess.core.client.is_none());
+        assert!(batch_sess.next().await.is_none());
+    }
+
+    // spec: r1 T7d
+    #[tokio::test(start_paused = true)]
+    async fn t7d_deterministic_buffered_frame_partial_chunk_and_fragmented_wait() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let make_session = || {
+            let config = S2Config::new("test-token")
+                .with_endpoints(S2Endpoints::for_endpoint("http://127.0.0.1:1").unwrap())
+                .with_retry(RetryConfig::new().with_max_attempts(1));
+            let base = BaseClient::init(&config).unwrap();
+            let basin = BasinClient::init(
+                "test-basin".parse().unwrap(),
+                &config.endpoints,
+                base.clone(),
+            );
+            let mut session = ReadSession::open(
+                basin,
+                "test-stream".parse().unwrap(),
+                StreamHeaders::default(),
+                ReadInput::new().with_start(crate::types::ReadStart::SeqNum(0)),
+                ReadSessionConfig::default(),
+            );
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let chunks = Arc::new(AtomicU64::new(0));
+            let stream = Streaming::from_stream_with_chunks_for_test(
+                futures_util::stream::poll_fn(move |cx| rx.poll_recv(cx)),
+                chunks.clone(),
+            );
+            let snapshot = AttemptSnapshot {
+                was_resumed: false,
+                sent_seq_num: Some(0),
+                no_wait_remaining: false,
+            };
+            session.core.transport_mut().phase = DriverPhase::Active(ActiveAttempt {
+                stream,
+                snapshot,
+                made_progress: false,
+                fetched_record: false,
+                last_chunks_received: 0,
+            });
+            (session, tx, chunks)
+        };
+
+        // 1. Raw StreamExt::next arms deadline, then a buffered frame arrives before resume past
+        //    20s -> resuming delivers the buffered frame before timing out.
+        {
+            use futures_util::StreamExt;
+            let (mut session, tx, chunks) = make_session();
+            let mut pending = Box::pin(StreamExt::next(&mut session));
+            assert!(poll!(pending.as_mut()).is_pending());
+            drop(pending);
+
+            chunks.fetch_add(1, Ordering::Relaxed);
+            tx.send(Ok(S2sFrame {
+                msg: proto_batch(&[0], Some(1)),
+                reconnect_advised: false,
+            }))
+            .unwrap();
+            tokio::time::advance(Duration::from_secs(30)).await;
+            assert_eq!(session.next().await.unwrap().unwrap().seq_num, 0);
+        }
+
+        // 2. Raw StreamExt::next arms deadline, then partial-frame bytes arrive (chunks_received
+        //    increments without completing a frame) before resume past 20s -> resets timer instead
+        //    of timing out, then completes the frame.
+        {
+            use futures_util::StreamExt;
+            let (mut session, tx, chunks) = make_session();
+            let mut pending = Box::pin(StreamExt::next(&mut session));
+            assert!(poll!(pending.as_mut()).is_pending());
+            drop(pending);
+
+            chunks.fetch_add(1, Ordering::Relaxed);
+            tokio::time::advance(Duration::from_secs(30)).await;
+            {
+                let mut resumed = Box::pin(StreamExt::next(&mut session));
+                assert!(poll!(resumed.as_mut()).is_pending());
+                drop(resumed);
+            }
+            chunks.fetch_add(1, Ordering::Relaxed);
+            tx.send(Ok(S2sFrame {
+                msg: proto_batch(&[0], Some(1)),
+                reconnect_advised: false,
+            }))
+            .unwrap();
+            assert_eq!(session.next().await.unwrap().unwrap().seq_num, 0);
+        }
+
+        // 3. Continuously pending fragmented frame: chunk progress every 12s stays alive past 20s,
+        //    then 21s of silence mid-frame fails with TimeoutError.
+        {
+            let (mut session, tx, chunks) = make_session();
+            let mut next = Box::pin(session.next());
+            assert!(poll!(next.as_mut()).is_pending());
+            tokio::time::advance(Duration::from_secs(12)).await;
+            assert!(poll!(next.as_mut()).is_pending());
+            chunks.fetch_add(1, Ordering::Relaxed);
+            assert!(poll!(next.as_mut()).is_pending());
+            tokio::time::advance(Duration::from_secs(12)).await;
+            assert!(poll!(next.as_mut()).is_pending());
+            chunks.fetch_add(1, Ordering::Relaxed);
+            tx.send(Ok(S2sFrame {
+                msg: proto_batch(&[0], Some(1)),
+                reconnect_advised: false,
+            }))
+            .unwrap();
+            assert_eq!(next.await.unwrap().unwrap().seq_num, 0);
+
+            let mut stalled = Box::pin(session.next());
+            assert!(poll!(stalled.as_mut()).is_pending());
+            tokio::time::advance(Duration::from_secs(21)).await;
+            assert!(matches!(
+                stalled.await,
+                Some(Err(ReadSessionError::Timeout(_)))
+            ));
+        }
     }
 
     // spec: r1 R5
