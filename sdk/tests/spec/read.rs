@@ -905,7 +905,7 @@ async fn spec_r11_t5_t5b_read_session_resume_clamp_wait_416_and_unbounded() {
     assert_eq!(unbounded_attempts.load(Ordering::SeqCst), 6);
 }
 
-// spec: r1 T6a
+// spec: r1 T6a, R7c, R8
 #[tokio::test]
 async fn spec_t6a_read_session_reconnect_advice_cooldown() {
     let seen_conns = Arc::new(Mutex::new(Vec::<usize>::new()));
@@ -923,14 +923,16 @@ async fn spec_t6a_read_session_reconnect_advice_cooldown() {
                     return;
                 };
                 if n == 0 {
-                    // Record 0 with reconnect-advised bit -> client reconnects on a new connection.
-                    s2s.send_regular(&proto_read_batch(0, 1), true, false);
+                    // Multi-record batch `[0, 1]` with `tail = 2` and reconnect-advised bit ->
+                    // catches up on final record 1 (`T6a`/`R7c`), drops `is_caught_up`, and opens
+                    // the replacement request lazily on the next pull on a different connection.
+                    s2s.send_regular(&proto_read_batch_records(&[0, 1], Some(2)), true, false);
                     std::future::pending::<()>().await;
                 } else {
-                    // Request 2: Record 1 WITH reconnect-advised bit (ignored within 60 s
-                    // cooldown!), then Record 2 on the SAME request before clean EOF.
-                    s2s.send_regular(&proto_read_batch(1, 2), true, false);
-                    s2s.send_regular(&proto_read_batch(2, 3), false, true);
+                    // Request 2: Record 2 WITH reconnect-advised bit (ignored within 60 s
+                    // cooldown!), then Record 3 on the SAME request before clean EOF.
+                    s2s.send_regular(&proto_read_batch(2, 3), true, false);
+                    s2s.send_regular(&proto_read_batch(3, 4), false, true);
                 }
             }
         }
@@ -942,16 +944,42 @@ async fn spec_t6a_read_session_reconnect_advice_cooldown() {
         .read_session(
             ReadInput::new()
                 .with_start(ReadStart::SeqNum(0))
-                .with_count(3),
+                .with_count(4),
             ReadSessionConfig::default(),
         )
         .unwrap();
 
-    let mut seqs = Vec::new();
+    let mut cu = session.caught_up();
+
+    // Record 0: still mid-batch, not yet caught up.
+    let rec0 = session.next().await.unwrap().unwrap();
+    assert_eq!(rec0.seq_num, 0);
+    assert_eq!(session.next_seq_num(), Some(1));
+    assert!(!session.is_caught_up());
+    assert!(futures_util::poll!(std::pin::Pin::new(&mut cu)).is_pending());
+
+    // Waiter created mid-batch also resolves when record 1 delivers the advised batch's tail.
+    let mid_cu = session.caught_up();
+    let rec1 = session.next().await.unwrap().unwrap();
+    assert_eq!(rec1.seq_num, 1);
+    assert_eq!(session.next_seq_num(), Some(2));
+    assert_eq!(cu.await.unwrap().seq_num, 2);
+    assert_eq!(mid_cu.await.unwrap().seq_num, 2);
+    assert!(
+        !session.is_caught_up(),
+        "T6a/R7c: is_caught_up must be false once final advised record is returned"
+    );
+    assert_eq!(
+        server.request_count(),
+        1,
+        "T6/R6b: replacement request must not open until iteration next pulls"
+    );
+
+    let mut seqs = vec![rec0.seq_num, rec1.seq_num];
     while let Some(res) = session.next().await {
         seqs.push(res.unwrap().seq_num);
     }
-    assert_eq!(seqs, vec![0, 1, 2]);
+    assert_eq!(seqs, vec![0, 1, 2, 3]);
     let conns = seen_conns.lock().unwrap().clone();
     assert_eq!(
         conns.len(),

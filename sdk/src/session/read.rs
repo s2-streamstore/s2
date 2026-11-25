@@ -1383,7 +1383,12 @@ impl ReadSessionCore {
         }
         let _entered = self.span.clone().entered();
         loop {
-            if let Some(outcome) = self.take_closed_or_abort() {
+            // Fast path: while `lifecycle == Active`, `inner.closed` can only be set by
+            // `AfterBatch::CloseClean` (which clears `self.client = None`) or `S2::close()`
+            // (`shutdown.is_cancelled()`), so steady-state polls avoid locking `state.inner`.
+            if (self.client.is_none() || self.state.shutdown.is_cancelled())
+                && let Some(outcome) = self.take_closed_or_abort()
+            {
                 return Poll::Ready(outcome.map(Err));
             }
 
@@ -1899,6 +1904,17 @@ fn validate_read_batch_order(
             )));
         }
         prev = Some(record.seq_num);
+    }
+    if let (Some(last_record), Some(tail)) = (batch.records.last(), batch.tail)
+        && tail.seq_num <= last_record.seq_num
+    {
+        return Err(ReadSessionError::Protocol(ProtocolError::new_with_context(
+            format!(
+                "read batch tail seq_num {} is not greater than last record seq_num {}",
+                tail.seq_num, last_record.seq_num
+            ),
+            context.clone().with_attempts(attempts),
+        )));
     }
     Ok(prev)
 }
@@ -2682,6 +2698,48 @@ mod tests {
         assert_eq!(batch_state.next_seq_num(), Some(7));
         assert_eq!(batch_state.last_observed_tail(), None);
         assert!(batch_sess.next().await.is_none());
+
+        // Both views atomically reject a non-empty batch whose `tail.seq_num <=
+        // last_record.seq_num` (such as `[0, 1, 2]` with `tail = 1` or `tail = 2`) without
+        // mid-batch catch-up (`R6`).
+        for bad_tail in [1, 2] {
+            let (mut session, tx, state, _shutdown) = test_session_with_active_stream(
+                ReadInput::new().with_start(crate::types::ReadStart::SeqNum(0)),
+            );
+            let cu = state.caught_up();
+            tx.send(Ok(S2sFrame {
+                msg: proto_batch(&[0, 1, 2], Some(bad_tail)),
+                reconnect_advised: true,
+            }))
+            .unwrap();
+            assert!(matches!(
+                session.next().await,
+                Some(Err(ReadSessionError::Protocol(_)))
+            ));
+            assert_eq!(state.next_seq_num(), Some(0));
+            assert_eq!(state.last_observed_tail(), None);
+            assert!(!state.is_caught_up());
+            assert!(matches!(cu.await, Err(ReadSessionError::Protocol(_))));
+            assert!(session.next().await.is_none());
+
+            let (mut batch_sess, batch_tx, batch_state, _shutdown) =
+                test_batch_session_with_active_stream(
+                    ReadInput::new().with_start(crate::types::ReadStart::SeqNum(0)),
+                );
+            batch_tx
+                .send(Ok(S2sFrame {
+                    msg: proto_batch(&[0, 1, 2], Some(bad_tail)),
+                    reconnect_advised: true,
+                }))
+                .unwrap();
+            assert!(matches!(
+                batch_sess.next().await,
+                Some(Err(ReadSessionError::Protocol(_)))
+            ));
+            assert_eq!(batch_state.next_seq_num(), Some(0));
+            assert_eq!(batch_state.last_observed_tail(), None);
+            assert!(batch_sess.next().await.is_none());
+        }
     }
 
     // spec: r1 R7c, T5a
