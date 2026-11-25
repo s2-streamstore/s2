@@ -557,7 +557,7 @@ impl BatchAccumulator {
     ) {
         if self.records.is_empty() {
             if self.next_cap > 0 {
-                self.records.reserve(self.next_cap);
+                self.records.reserve_exact(self.next_cap);
             }
             self.batch_match_seq = match_seq_num;
         }

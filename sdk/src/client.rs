@@ -880,7 +880,7 @@ pub(crate) fn uri_with_path(base: &Uri, path: impl AsRef<str>) -> Uri {
         let mut buf = String::with_capacity(1 + trimmed.len());
         buf.push('/');
         buf.push_str(trimmed);
-        buf.parse().expect("SDK-generated path is a valid URI")
+        buf.try_into().expect("SDK-generated path is a valid URI")
     };
     uri_with_path_and_query(base, pq).expect("SDK-generated path is a valid URI")
 }
@@ -902,7 +902,7 @@ fn uri_with_query(uri: &Uri, query: &str) -> Result<Uri, http::Error> {
         combined.push('&');
     }
     combined.push_str(query);
-    let pq: http::uri::PathAndQuery = combined.parse()?;
+    let pq: http::uri::PathAndQuery = combined.try_into()?;
     uri_with_path_and_query(uri, pq)
 }
 
@@ -1073,9 +1073,6 @@ fn decompress_body(
     mut bytes: Bytes,
     max_bytes: usize,
 ) -> Result<Bytes, HttpError> {
-    if !headers.contains_key(CONTENT_ENCODING) {
-        return Ok(bytes);
-    }
     let mut encodings = Vec::new();
     for raw in headers.get_all(CONTENT_ENCODING) {
         let s = raw.to_str().map_err(|e| {
