@@ -953,9 +953,10 @@ impl BasinClient {
                                     ctx.clone(),
                                 ))
                             })?;
-                            // Release any oversized backing allocation before yielding so a
-                            // parked session does not pin a 1–2.5 MiB BytesMut allocation
-                            // (even when `split_to` left `buffer.capacity() == 0`).
+                            // Release any oversized backing allocation when the buffer is empty at
+                            // a frame boundary so a parked session does not pin a 1–2.5 MiB
+                            // BytesMut allocation (even when `split_to` left
+                            // `buffer.capacity() == 0`).
                             release_excess_s2s_buffer(&mut buffer, &mut buffer_peak_bytes);
                             yield S2sFrame {
                                 msg: decoded,

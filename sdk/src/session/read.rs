@@ -432,14 +432,24 @@ impl ReadStateInner {
         }
     }
 
+    fn finish_batch_action(&mut self, after_batch: AfterBatch, wake: &mut PendingWake) {
+        match after_batch {
+            AfterBatch::None => {}
+            AfterBatch::CloseClean => self.lock_in_clean_close(wake),
+            AfterBatch::Disconnect => {
+                self.phase = RequestPhase::Connecting;
+                self.recompute_caught_up(wake);
+            }
+        }
+    }
+
     /// Record a freshly decoded non-empty batch together with immediate delivery of its first
     /// record (record view) or entire batch (batch view).
     fn on_batch_decoded_and_delivered(
         &mut self,
         tail: Option<StreamPosition>,
         delivered_last_seq: u64,
-        disconnected: bool,
-        lock_in_clean_close: bool,
+        after_batch: AfterBatch,
         wake: &mut PendingWake,
     ) {
         if self.phase == RequestPhase::Ended || self.closed.is_some() {
@@ -452,20 +462,14 @@ impl ReadStateInner {
         self.phase = RequestPhase::Open { latest_tail: tail };
         self.next_seq_num = Some(delivered_last_seq.saturating_add(1));
         self.recompute_caught_up(wake);
-        if disconnected {
-            self.phase = RequestPhase::Connecting;
-            self.recompute_caught_up(wake);
-        }
-        if lock_in_clean_close {
-            self.lock_in_clean_close(wake);
-        }
+        self.finish_batch_action(after_batch, wake);
     }
 
     /// Record delivery of a subsequent record from the current batch.
     fn on_record_delivered(
         &mut self,
         seq_num: u64,
-        lock_in_clean_close: bool,
+        after_batch: AfterBatch,
         wake: &mut PendingWake,
     ) {
         if self.phase == RequestPhase::Ended || self.closed.is_some() {
@@ -473,9 +477,7 @@ impl ReadStateInner {
         }
         self.next_seq_num = Some(seq_num.saturating_add(1));
         self.recompute_caught_up(wake);
-        if lock_in_clean_close {
-            self.lock_in_clean_close(wake);
-        }
+        self.finish_batch_action(after_batch, wake);
     }
 
     /// Record a decoded heartbeat (`records` empty, `tail` present). Because reading is on-demand
@@ -742,11 +744,11 @@ struct ActiveAttempt {
 }
 
 impl ActiveAttempt {
-    fn record_chunk_progress(&mut self, heartbeat: &mut HeartbeatTimer) {
+    fn record_chunk_progress(&mut self, heartbeat_deadline: &mut Option<Instant>) {
         let chunks_now = self.stream.chunks_received();
         if chunks_now != self.last_chunks_received {
             self.last_chunks_received = chunks_now;
-            heartbeat.reset();
+            *heartbeat_deadline = None;
         }
     }
 }
@@ -761,36 +763,52 @@ enum DriverPhase {
         snapshot: AttemptSnapshot,
     },
     Active(ActiveAttempt),
-    Backoff(Pin<Box<Sleep>>),
+    Backoff(Instant),
 }
 
-struct HeartbeatTimer {
+/// Reusable lazily-boxed Tokio [`Sleep`] shared by retry backoff and `T7d` heartbeat waits.
+///
+/// Boxing keeps [`ReadSession`] and [`ReadBatchSession`] `Unpin` (since `Sleep` is `!Unpin`),
+/// while reusing a single allocation via [`Sleep::reset`] avoids per-wait heap churn and avoids
+/// taking Tokio's timer-driver lock on every batch or chunk arrival.
+#[derive(Default)]
+struct ReusableSleep {
     sleep: Option<Pin<Box<Sleep>>>,
 }
 
-impl HeartbeatTimer {
-    fn new() -> Self {
-        Self { sleep: None }
+impl ReusableSleep {
+    fn poll_until(&mut self, deadline: Instant, cx: &mut Context<'_>) -> Poll<()> {
+        if Instant::now() >= deadline {
+            return Poll::Ready(());
+        }
+        let sleep = self
+            .sleep
+            .get_or_insert_with(|| Box::pin(tokio::time::sleep_until(deadline)));
+        if sleep.deadline() != deadline {
+            sleep.as_mut().reset(deadline);
+        }
+        sleep.as_mut().poll(cx)
     }
 
-    fn reset(&mut self) {
+    fn clear(&mut self) {
         self.sleep = None;
     }
+}
 
-    fn poll(&mut self, cx: &mut Context<'_>) -> Poll<()> {
-        self.sleep
-            .get_or_insert_with(|| Box::pin(tokio::time::sleep(HEARTBEAT_TIMEOUT)))
-            .as_mut()
-            .poll(cx)
-    }
+/// Transition applied once the final record of a decoded batch has been delivered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AfterBatch {
+    None,
+    /// Remaining `count` or `bytes` reached `0` (`R11c`): lock in clean close (`R9a`).
+    CloseClean,
+    /// `T6a` reconnect advice acted on: transition to `Connecting` after delivering the batch so
+    /// its tail still resolves pending `caught_up()` uniformly across views and batch sizes.
+    Disconnect,
 }
 
 struct DecodedBatch {
     batch: ReadBatch,
-    /// True when remaining `count` or `bytes` reached `0` (`R11c`), so clean close (`R9a`) locks
-    /// in once the final record of `batch` has been delivered.
-    close_after_batch: bool,
-    disconnected: bool,
+    after_batch: AfterBatch,
 }
 
 enum DriverStep {
@@ -815,7 +833,8 @@ enum StreamLifecycle {
 
 struct PollTransport {
     phase: DriverPhase,
-    heartbeat: HeartbeatTimer,
+    heartbeat_deadline: Option<Instant>,
+    sleep: ReusableSleep,
     shutdown_wait: Option<Pin<Box<WaitForCancellationFutureOwned>>>,
 }
 
@@ -823,14 +842,16 @@ impl PollTransport {
     fn new() -> Self {
         Self {
             phase: DriverPhase::Idle,
-            heartbeat: HeartbeatTimer::new(),
+            heartbeat_deadline: None,
+            sleep: ReusableSleep::default(),
             shutdown_wait: None,
         }
     }
 
     fn reset_to_idle(&mut self) {
         self.phase = DriverPhase::Idle;
-        self.heartbeat.reset();
+        self.heartbeat_deadline = None;
+        self.sleep.clear();
         self.shutdown_wait = None;
     }
 }
@@ -997,12 +1018,12 @@ impl ReadSessionCore {
     fn commit_record_delivered(
         &mut self,
         seq_num: u64,
-        lock_in_clean_close: bool,
+        after_batch: AfterBatch,
     ) -> Result<(), Option<ReadSessionError>> {
         self.update_open_or_finish(|inner, wake| {
-            inner.on_record_delivered(seq_num, lock_in_clean_close, wake);
+            inner.on_record_delivered(seq_num, after_batch, wake);
         })?;
-        if lock_in_clean_close {
+        if after_batch == AfterBatch::CloseClean {
             // Close reason is now locked in (`R9`), so no further request can open and dropping
             // the last `BasinClient` cannot alter `ReadSessionState`.
             self.client = None;
@@ -1014,19 +1035,12 @@ impl ReadSessionCore {
         &mut self,
         tail: Option<StreamPosition>,
         delivered_last_seq: u64,
-        disconnected: bool,
-        lock_in_clean_close: bool,
+        after_batch: AfterBatch,
     ) -> Result<(), Option<ReadSessionError>> {
         self.update_open_or_finish(|inner, wake| {
-            inner.on_batch_decoded_and_delivered(
-                tail,
-                delivered_last_seq,
-                disconnected,
-                lock_in_clean_close,
-                wake,
-            );
+            inner.on_batch_decoded_and_delivered(tail, delivered_last_seq, after_batch, wake);
         })?;
-        if lock_in_clean_close {
+        if after_batch == AfterBatch::CloseClean {
             self.client = None;
         }
         Ok(())
@@ -1137,8 +1151,7 @@ impl ReadSessionCore {
             self.retry_policy,
             self.refreshes_tokens,
         ) {
-            self.transport_mut().phase =
-                DriverPhase::Backoff(Box::pin(tokio::time::sleep(backoff)));
+            self.transport_mut().phase = DriverPhase::Backoff(Instant::now() + backoff);
             DriverStep::Continue
         } else {
             DriverStep::Done(self.finish_terminal_error(err))
@@ -1153,7 +1166,7 @@ impl ReadSessionCore {
         if reconnect_advised && self.advised_reconnects.should_reconnect() {
             let transport = self.transport_mut();
             transport.phase = DriverPhase::Idle;
-            transport.heartbeat.reset();
+            transport.heartbeat_deadline = None;
             self.advised_reconnects.record();
             self.state.on_disconnected();
             debug!(
@@ -1216,7 +1229,7 @@ impl ReadSessionCore {
 
         {
             let transport = self.transport_mut();
-            transport.heartbeat.reset();
+            transport.heartbeat_deadline = None;
             if let DriverPhase::Active(attempt) = &mut transport.phase {
                 attempt.made_progress = true;
                 if has_records {
@@ -1252,36 +1265,33 @@ impl ReadSessionCore {
         }
 
         let limits_exhausted = has_records && read_limits_exhausted(&self.end);
-        let mut disconnected_for_advice = false;
-
-        if limits_exhausted {
+        let after_batch = if limits_exhausted {
             // R11c / T10: stop condition met; end the underlying request immediately without
             // waiting for trailing EOF or opening another request.
             debug!("read session count/bytes limit exhausted");
             self.transport_mut().phase = DriverPhase::Idle;
+            AfterBatch::CloseClean
         } else if reconnect_advised && self.advised_reconnects.should_reconnect() {
             // T6a / T10: end the advised attempt immediately (releasing the retiring server) and
             // open the replacement request on the next transport pull (immediately for a
             // heartbeat, since iteration keeps pulling).
             self.transport_mut().phase = DriverPhase::Idle;
             self.advised_reconnects.record();
-            disconnected_for_advice = true;
             debug!(
                 next_seq_num = ?self.start.seq_num,
                 advised_reconnects = self.advised_reconnects.total(),
                 "reconnecting read session on server advice"
             );
-        }
+            AfterBatch::Disconnect
+        } else {
+            AfterBatch::None
+        };
 
         if has_records {
-            BatchStep::Yield(DecodedBatch {
-                batch,
-                close_after_batch: limits_exhausted,
-                disconnected: disconnected_for_advice,
-            })
+            BatchStep::Yield(DecodedBatch { batch, after_batch })
         } else if let Some(tail) = batch.tail {
             if let Err(outcome) = self.update_open_or_finish(|inner, wake| {
-                inner.on_heartbeat(tail, disconnected_for_advice, wake);
+                inner.on_heartbeat(tail, after_batch == AfterBatch::Disconnect, wake);
             }) {
                 return BatchStep::Done(outcome.map(Err));
             }
@@ -1366,7 +1376,10 @@ impl ReadSessionCore {
             }
 
             let PollTransport {
-                phase, heartbeat, ..
+                phase,
+                heartbeat_deadline,
+                sleep,
+                ..
             } = self
                 .transport
                 .get_mut()
@@ -1403,7 +1416,7 @@ impl ReadSessionCore {
                         match res {
                             Ok(stream) => {
                                 let transport = self.transport_mut();
-                                transport.heartbeat.reset();
+                                transport.heartbeat_deadline = None;
                                 let last_chunks_received = stream.chunks_received();
                                 transport.phase = DriverPhase::Active(ActiveAttempt {
                                     stream,
@@ -1428,7 +1441,7 @@ impl ReadSessionCore {
                         }
                     }
                 },
-                DriverPhase::Backoff(sleep) => match sleep.as_mut().poll(cx) {
+                DriverPhase::Backoff(deadline) => match sleep.poll_until(*deadline, cx) {
                     Poll::Pending => return self.pending_or_abort(cx),
                     Poll::Ready(()) => {
                         *phase = DriverPhase::Idle;
@@ -1439,7 +1452,7 @@ impl ReadSessionCore {
                     // messages already buffered by HTTP/2 are read before timing out.
                     match Pin::new(&mut attempt.stream).poll_next(cx) {
                         Poll::Ready(Some(Ok(frame))) => {
-                            attempt.record_chunk_progress(heartbeat);
+                            attempt.record_chunk_progress(heartbeat_deadline);
                             let made_progress = attempt.made_progress;
                             let batch = ReadBatch::from_proto(frame.msg);
                             let reconnect_advised = frame.reconnect_advised;
@@ -1454,7 +1467,7 @@ impl ReadSessionCore {
                             let made_progress = attempt.made_progress;
                             let snapshot = attempt.snapshot;
                             *phase = DriverPhase::Idle;
-                            heartbeat.reset();
+                            *heartbeat_deadline = None;
                             if let DriverStep::Done(result) =
                                 self.handle_stream_error(err, made_progress, snapshot)
                             {
@@ -1464,7 +1477,7 @@ impl ReadSessionCore {
                         Poll::Ready(None) => {
                             let fetched_record = attempt.fetched_record;
                             *phase = DriverPhase::Idle;
-                            heartbeat.reset();
+                            *heartbeat_deadline = None;
                             if let DriverStep::Done(result) = self.handle_eof(fetched_record) {
                                 return Poll::Ready(result);
                             }
@@ -1473,15 +1486,17 @@ impl ReadSessionCore {
                             // Forward transport byte progress on an incomplete (e.g.
                             // flow-controlled) frame counts as liveness so resuming a parked
                             // session mid-frame does not falsely time out (`T7d`).
-                            attempt.record_chunk_progress(heartbeat);
-                            match heartbeat.poll(cx) {
+                            attempt.record_chunk_progress(heartbeat_deadline);
+                            let deadline = *heartbeat_deadline
+                                .get_or_insert_with(|| Instant::now() + HEARTBEAT_TIMEOUT);
+                            match sleep.poll_until(deadline, cx) {
                                 Poll::Pending => return self.pending_or_abort(cx),
                                 Poll::Ready(()) => {
                                     let made_progress = attempt.made_progress;
                                     let snapshot = attempt.snapshot;
                                     attempt.stream.retire_connection();
                                     *phase = DriverPhase::Idle;
-                                    heartbeat.reset();
+                                    *heartbeat_deadline = None;
                                     let err =
                                         ReadSessionError::Timeout(TimeoutError::new_with_context(
                                             "heartbeat timeout",
@@ -1533,9 +1548,8 @@ impl Drop for ReadSessionCore {
 pub struct ReadSession {
     core: ReadSessionCore,
     current_batch: std::vec::IntoIter<SequencedRecord>,
-    /// True when remaining `count` or `bytes` hit `0` on `current_batch`, so clean close (`R9a`)
-    /// locks in once the final buffered record is delivered.
-    close_after_current_batch: bool,
+    /// Transition to apply once the final buffered record of `current_batch` is delivered.
+    after_current_batch: AfterBatch,
 }
 
 impl fmt::Debug for ReadSession {
@@ -1559,7 +1573,7 @@ impl ReadSession {
         Self {
             core: ReadSessionCore::open(client, name, headers, input, config, "read_session"),
             current_batch: Vec::new().into_iter(),
-            close_after_current_batch: false,
+            after_current_batch: AfterBatch::None,
         }
     }
 
@@ -1624,17 +1638,17 @@ impl Stream for ReadSession {
         }
 
         if let Some(record) = this.current_batch.next() {
-            let lock_in_clean_close =
-                this.current_batch.len() == 0 && this.close_after_current_batch;
-            if lock_in_clean_close {
-                this.close_after_current_batch = false;
-            }
+            let after_batch = if this.current_batch.len() == 0 {
+                std::mem::replace(&mut this.after_current_batch, AfterBatch::None)
+            } else {
+                AfterBatch::None
+            };
             if let Err(outcome) = this
                 .core
-                .commit_record_delivered(record.seq_num, lock_in_clean_close)
+                .commit_record_delivered(record.seq_num, after_batch)
             {
                 this.current_batch = Vec::new().into_iter();
-                this.close_after_current_batch = false;
+                this.after_current_batch = AfterBatch::None;
                 return Poll::Ready(outcome.map(Err));
             }
             return Poll::Ready(Some(Ok(record)));
@@ -1647,17 +1661,24 @@ impl Stream for ReadSession {
                 let record = iter
                     .next()
                     .expect("poll_next_batch only yields non-empty batches");
-                let lock_in_clean_close = iter.len() == 0 && decoded.close_after_batch;
-                if let Err(outcome) = this.core.commit_batch_delivered(
-                    tail,
-                    record.seq_num,
-                    decoded.disconnected,
-                    lock_in_clean_close,
-                ) {
+                let is_last = iter.len() == 0;
+                let after_this = if is_last {
+                    decoded.after_batch
+                } else {
+                    AfterBatch::None
+                };
+                if let Err(outcome) =
+                    this.core
+                        .commit_batch_delivered(tail, record.seq_num, after_this)
+                {
                     return Poll::Ready(outcome.map(Err));
                 }
                 this.current_batch = iter;
-                this.close_after_current_batch = decoded.close_after_batch && !lock_in_clean_close;
+                this.after_current_batch = if is_last {
+                    AfterBatch::None
+                } else {
+                    decoded.after_batch
+                };
                 Poll::Ready(Some(Ok(record)))
             }
             Poll::Ready(Some(Err(err))) => Poll::Ready(Some(Err(err))),
@@ -1776,12 +1797,10 @@ impl Stream for ReadBatchSession {
                     .last()
                     .expect("poll_next_batch only yields non-empty batches")
                     .seq_num;
-                if let Err(outcome) = this.core.commit_batch_delivered(
-                    tail,
-                    last_seq,
-                    decoded.disconnected,
-                    decoded.close_after_batch,
-                ) {
+                if let Err(outcome) =
+                    this.core
+                        .commit_batch_delivered(tail, last_seq, decoded.after_batch)
+                {
                     return Poll::Ready(outcome.map(Err));
                 }
                 Poll::Ready(Some(Ok(decoded.batch)))
@@ -2392,13 +2411,13 @@ mod tests {
         );
         shutdown.cancel();
         assert!(matches!(
-            session.core.commit_record_delivered(0, false),
+            session.core.commit_record_delivered(0, AfterBatch::None),
             Err(Some(ReadSessionError::Aborted(_)))
         ));
         assert!(matches!(
             session
                 .core
-                .commit_batch_delivered(Some(position(1)), 0, false, false),
+                .commit_batch_delivered(Some(position(1)), 0, AfterBatch::None),
             Err(Some(ReadSessionError::Aborted(_)))
         ));
         assert_eq!(state.next_seq_num(), Some(0));
@@ -3046,8 +3065,9 @@ mod tests {
         ));
         assert!(session.next().await.is_none());
 
-        // T6a / T10: A batch carrying `reconnect_advised` that reaches `tail` resolves pending
-        // `caught_up()` before transitioning to `Connecting` (matching `on_heartbeat`).
+        // T6a / T10 / R6a: A batch carrying `reconnect_advised` that reaches `tail` resolves
+        // pending `caught_up()` uniformly across batch view and record view (regardless of batch
+        // size), then transitions to `Connecting` so `is_caught_up()` is false.
         let (mut batch_sess, batch_tx, batch_state, _shutdown) =
             test_batch_session_with_active_stream(
                 ReadInput::new().with_start(crate::types::ReadStart::SeqNum(0)),
@@ -3062,6 +3082,175 @@ mod tests {
         assert_eq!(batch_sess.next().await.unwrap().unwrap().records.len(), 2);
         assert_eq!(pending_cu.await.unwrap(), position(2));
         assert!(!batch_state.is_caught_up());
+
+        // Record view with a 2-record advised batch `[0, 1]` and tail `2`: record 0 does not yet
+        // catch up; record 1 resolves pending `caught_up()` to `2` and then drops `is_caught_up`.
+        let (mut rec_sess, rec_tx, rec_state, _shutdown) = test_session_with_active_stream(
+            ReadInput::new().with_start(crate::types::ReadStart::SeqNum(0)),
+        );
+        let mut pending_cu = rec_state.caught_up();
+        rec_tx
+            .send(Ok(S2sFrame {
+                msg: proto_batch(&[0, 1], Some(2)),
+                reconnect_advised: true,
+            }))
+            .unwrap();
+        assert_eq!(rec_sess.next().await.unwrap().unwrap().seq_num, 0);
+        assert_eq!(rec_state.next_seq_num(), Some(1));
+        assert!(!rec_state.is_caught_up());
+        assert!(poll!(Pin::new(&mut pending_cu)).is_pending());
+        // A waiter registered between record 0 and record 1 also resolves on record 1.
+        let mid_batch_cu = rec_state.caught_up();
+        assert_eq!(rec_sess.next().await.unwrap().unwrap().seq_num, 1);
+        assert_eq!(rec_state.next_seq_num(), Some(2));
+        assert_eq!(pending_cu.await.unwrap(), position(2));
+        assert_eq!(mid_batch_cu.await.unwrap(), position(2));
+        assert!(!rec_state.is_caught_up());
+        let mut post_handover_cu = rec_state.caught_up();
+        assert!(poll!(Pin::new(&mut post_handover_cu)).is_pending());
+
+        // Record view with a 1-record advised batch `[0]` and tail `1` behaves identically.
+        let (mut one_sess, one_tx, one_state, _shutdown) = test_session_with_active_stream(
+            ReadInput::new().with_start(crate::types::ReadStart::SeqNum(0)),
+        );
+        let pending_cu = one_state.caught_up();
+        one_tx
+            .send(Ok(S2sFrame {
+                msg: proto_batch(&[0], Some(1)),
+                reconnect_advised: true,
+            }))
+            .unwrap();
+        assert_eq!(one_sess.next().await.unwrap().unwrap().seq_num, 0);
+        assert_eq!(pending_cu.await.unwrap(), position(1));
+        assert!(!one_state.is_caught_up());
+    }
+
+    // spec: r1 T7d
+    #[tokio::test(start_paused = true)]
+    async fn reusable_sleep_reuses_single_allocation_across_heartbeat_and_backoff_and_clears_on_close()
+     {
+        let config = S2Config::new("test-token")
+            .with_endpoints(S2Endpoints::for_endpoint("http://127.0.0.1:1").unwrap())
+            .with_retry(
+                RetryConfig::new()
+                    .with_max_attempts(2)
+                    .with_min_base_delay(Duration::from_millis(200))
+                    .with_max_base_delay(Duration::from_millis(200)),
+            );
+        let base = BaseClient::init(&config).unwrap();
+        let basin = BasinClient::init(
+            "test-basin".parse().unwrap(),
+            &config.endpoints,
+            base.clone(),
+        );
+        let mut session = ReadSession::open(
+            basin,
+            "test-stream".parse().unwrap(),
+            StreamHeaders::default(),
+            ReadInput::new().with_start(crate::types::ReadStart::SeqNum(0)),
+            ReadSessionConfig::default(),
+        );
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let stream = Streaming::from_stream_for_test(futures_util::stream::poll_fn(move |cx| {
+            rx.poll_recv(cx)
+        }));
+        let snapshot = AttemptSnapshot {
+            was_resumed: false,
+            sent_seq_num: Some(0),
+            no_wait_remaining: false,
+        };
+        session.core.transport_mut().phase = DriverPhase::Active(ActiveAttempt {
+            stream,
+            snapshot,
+            made_progress: false,
+            fetched_record: false,
+            last_chunks_received: 0,
+        });
+
+        // No Sleep is allocated until the session actually blocks.
+        assert!(session.core.transport_mut().sleep.sleep.is_none());
+        tx.send(Ok(S2sFrame {
+            msg: proto_batch(&[0], Some(1)),
+            reconnect_advised: false,
+        }))
+        .unwrap();
+        assert_eq!(session.next().await.unwrap().unwrap().seq_num, 0);
+        assert!(session.core.transport_mut().sleep.sleep.is_none());
+
+        // First Pending poll allocates a single Box<Sleep>.
+        {
+            let mut next = Box::pin(session.next());
+            assert!(poll!(next.as_mut()).is_pending());
+        }
+        let sleep_addr = session
+            .core
+            .transport_mut()
+            .sleep
+            .sleep
+            .as_ref()
+            .expect("sleep allocated on first pending heartbeat")
+            .as_ref()
+            .get_ref() as *const Sleep as usize;
+
+        // Progress clears the deadline without freeing the Sleep box; the next Pending poll reuses
+        // the exact same allocation with an extended deadline.
+        tokio::time::advance(Duration::from_secs(10)).await;
+        tx.send(Ok(S2sFrame {
+            msg: proto_batch(&[1], Some(2)),
+            reconnect_advised: false,
+        }))
+        .unwrap();
+        assert_eq!(session.next().await.unwrap().unwrap().seq_num, 1);
+        assert!(session.core.transport_mut().heartbeat_deadline.is_none());
+        {
+            let mut next = Box::pin(session.next());
+            assert!(poll!(next.as_mut()).is_pending());
+        }
+        let reused_addr = session
+            .core
+            .transport_mut()
+            .sleep
+            .sleep
+            .as_ref()
+            .unwrap()
+            .as_ref()
+            .get_ref() as *const Sleep as usize;
+        assert_eq!(reused_addr, sleep_addr);
+
+        // Extended deadline does not fire at 15s (25s since start), then fires past 20s and enters
+        // retry backoff reusing the same Sleep box.
+        tokio::time::advance(Duration::from_secs(15)).await;
+        {
+            let mut next = Box::pin(session.next());
+            assert!(poll!(next.as_mut()).is_pending());
+        }
+        tokio::time::advance(Duration::from_secs(6)).await;
+        {
+            let mut next = Box::pin(session.next());
+            assert!(poll!(next.as_mut()).is_pending());
+        }
+        assert!(matches!(
+            session.core.transport_mut().phase,
+            DriverPhase::Backoff(_)
+        ));
+        let backoff_addr = session
+            .core
+            .transport_mut()
+            .sleep
+            .sleep
+            .as_ref()
+            .unwrap()
+            .as_ref()
+            .get_ref() as *const Sleep as usize;
+        assert_eq!(backoff_addr, sleep_addr);
+
+        // Closing the session clears and drops the Sleep box immediately.
+        session.core.state.shutdown.cancel();
+        assert!(matches!(
+            session.next().await,
+            Some(Err(ReadSessionError::Aborted(_)))
+        ));
+        assert!(session.core.transport_mut().sleep.sleep.is_none());
     }
 
     // spec: r1 R5

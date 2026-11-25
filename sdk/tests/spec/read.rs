@@ -1905,3 +1905,105 @@ async fn spec_t7b_parked_opening_request_timeout_and_e7_abort_attempt_count() {
     );
     assert!(abort_sess.next().await.is_none());
 }
+
+// spec: r1 R6b, T8
+#[tokio::test]
+async fn spec_r6b_t8_partial_frame_survives_canceled_wait() {
+    let frame0 = encode_s2s_regular_frame(&proto_read_batch_records(&[0], Some(1)), false);
+    let frame1 = encode_s2s_regular_frame(&proto_read_batch_records(&[1], Some(2)), false);
+    let frame2 = encode_s2s_regular_frame(&proto_read_batch_records(&[2], Some(3)), false);
+    let mid1 = frame1.len() / 2;
+    let mid2 = frame2.len() / 2;
+
+    let send_rest_1 = Arc::new(tokio::sync::Notify::new());
+    let send_half_2 = Arc::new(tokio::sync::Notify::new());
+    let half_2_sent = Arc::new(tokio::sync::Notify::new());
+    let send_rest_2 = Arc::new(tokio::sync::Notify::new());
+
+    let server = MockH2Server::start({
+        let send_rest_1 = send_rest_1.clone();
+        let send_half_2 = send_half_2.clone();
+        let half_2_sent = half_2_sent.clone();
+        let send_rest_2 = send_rest_2.clone();
+        move |_conn_id, _req, respond| {
+            let frame0 = frame0.clone();
+            let frame1 = frame1.clone();
+            let frame2 = frame2.clone();
+            let send_rest_1 = send_rest_1.clone();
+            let send_half_2 = send_half_2.clone();
+            let half_2_sent = half_2_sent.clone();
+            let send_rest_2 = send_rest_2.clone();
+            async move {
+                let Some(mut s2s) = S2sResponder::open(respond) else {
+                    return;
+                };
+                // Case 1: send frame0 plus the first half of frame1 together so the decoder buffer
+                // holds a trailing partial frame before the caller cancels the next wait.
+                let mut combined = Vec::with_capacity(frame0.len() + mid1);
+                combined.extend_from_slice(&frame0);
+                combined.extend_from_slice(&frame1[..mid1]);
+                s2s.send_raw(bytes::Bytes::from(combined), false);
+
+                send_rest_1.notified().await;
+                s2s.send_raw(frame1.slice(mid1..), false);
+
+                // Case 2: send the first half of frame2 on its own while the caller awaits and
+                // then cancels mid-frame.
+                send_half_2.notified().await;
+                s2s.send_raw(frame2.slice(..mid2), false);
+                half_2_sent.notify_one();
+
+                send_rest_2.notified().await;
+                s2s.send_raw(frame2.slice(mid2..), false);
+                std::future::pending::<()>().await;
+            }
+        }
+    })
+    .await;
+
+    let mut session = server
+        .stream(no_retry_config())
+        .read_session(
+            ReadInput::new().with_start(ReadStart::SeqNum(0)),
+            ReadSessionConfig::default(),
+        )
+        .unwrap();
+
+    let rec0 = session.next().await.unwrap().unwrap();
+    assert_eq!(rec0.seq_num, 0);
+    assert_eq!(rec0.body.as_ref(), b"rec-0");
+
+    // Cancel a pending wait while the first half of frame1 is already buffered.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), session.next())
+            .await
+            .is_err()
+    );
+    send_rest_1.notify_one();
+    let rec1 = tokio::time::timeout(Duration::from_secs(2), session.next())
+        .await
+        .expect("second half of frame1 must complete record 1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(rec1.seq_num, 1);
+    assert_eq!(rec1.body.as_ref(), b"rec-1");
+
+    // Send first half of frame2, poll so the session consumes it into its frame buffer, then
+    // cancel the wait (`T8`), send the remainder, and verify record 2 decodes intact.
+    send_half_2.notify_one();
+    half_2_sent.notified().await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), session.next())
+            .await
+            .is_err()
+    );
+    send_rest_2.notify_one();
+    let rec2 = tokio::time::timeout(Duration::from_secs(2), session.next())
+        .await
+        .expect("second half of frame2 must complete record 2")
+        .unwrap()
+        .unwrap();
+    assert_eq!(rec2.seq_num, 2);
+    assert_eq!(rec2.body.as_ref(), b"rec-2");
+    assert_eq!(server.request_count(), 1);
+}
