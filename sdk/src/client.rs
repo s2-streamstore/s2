@@ -2291,7 +2291,7 @@ mod tests {
     // spec: r1 C13
     #[tokio::test]
     async fn retire_evicts_only_targeted_connection_preserving_siblings() {
-        let http2 = Http2Config::new().with_max_concurrent_requests(1).unwrap();
+        let http2 = Http2Config::new().with_max_concurrent_requests(1);
         let connector = DuplexH2Connector::new();
         let pool = test_pool_with(connector.clone(), http2);
         let (id1, p1) = checkout_permit(&pool, TEST_ORIGIN).await;
@@ -2652,24 +2652,18 @@ mod tests {
         );
 
         // Raising max_concurrent_requests without setting connection_receive_window scales up.
-        let cfg = Http2Config::new()
-            .with_max_concurrent_requests(100)
-            .unwrap();
+        let cfg = Http2Config::new().with_max_concurrent_requests(100);
         assert_eq!(effective_receive_windows(cfg), (4 * MIB, 400 * MIB));
 
         // Raising stream_receive_window without setting connection_receive_window scales up.
-        let cfg = Http2Config::new()
-            .with_stream_receive_window(16 * MIB)
-            .unwrap();
+        let cfg = Http2Config::new().with_stream_receive_window(16 * MIB);
         assert_eq!(effective_receive_windows(cfg), (16 * MIB, 800 * MIB));
 
         // Scaling clamps to HTTP/2's 2^31 - 1 ceiling without overflowing, and effective
         // per-connection concurrency clamps to keep auto-sized windows isolated (`C13d`).
         let cfg = Http2Config::new()
             .with_max_concurrent_requests(100)
-            .unwrap()
-            .with_stream_receive_window(64 * MIB)
-            .unwrap();
+            .with_stream_receive_window(64 * MIB);
         assert_eq!(
             effective_receive_windows(cfg),
             (64 * MIB, Http2Config::MAX_RECEIVE_WINDOW)
@@ -2679,9 +2673,7 @@ mod tests {
         // Explicit connection_receive_window override is always honored verbatim.
         let cfg = Http2Config::new()
             .with_max_concurrent_requests(100)
-            .unwrap()
-            .with_connection_receive_window(64 * MIB)
-            .unwrap();
+            .with_connection_receive_window(64 * MIB);
         assert_eq!(effective_receive_windows(cfg), (4 * MIB, 64 * MIB));
         assert_eq!(effective_max_concurrent_requests(cfg), 100);
     }
@@ -2693,7 +2685,7 @@ mod tests {
         connector.max_concurrent_streams = Some(1);
         let pool = Arc::new(test_pool_with(
             connector.clone(),
-            Http2Config::new().with_max_concurrent_requests(50).unwrap(),
+            Http2Config::new().with_max_concurrent_requests(50),
         ));
 
         // Complete one fast request so the first connection processes the server's initial
@@ -2801,7 +2793,7 @@ mod tests {
         let connector = DuplexH2Connector::new();
         let pool = test_pool_with(
             connector.clone(),
-            Http2Config::new().with_max_concurrent_requests(1).unwrap(),
+            Http2Config::new().with_max_concurrent_requests(1),
         );
 
         let (id1, p1) = checkout_permit(&pool, TEST_ORIGIN).await;

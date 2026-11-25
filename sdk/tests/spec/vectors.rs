@@ -431,7 +431,10 @@ fn spec_vectors_numbers() {
                 }),
                 "client.max_attempts" => match raw.parse::<u32>() {
                     Ok(v) => {
-                        let res = RetryConfig::new().with_max_attempts(v);
+                        let res = S2::new(
+                            S2Config::new("token")
+                                .with_retry(RetryConfig::new().with_max_attempts(v)),
+                        );
                         assert_eq!(res.is_ok(), expect_valid, "{label}");
                     }
                     Err(_) => assert!(!expect_valid, "{label}"),
@@ -541,11 +544,12 @@ fn spec_vectors_numbers() {
                         let dur = Duration::from_millis(ms);
                         match other {
                             "client.connection_timeout" => {
-                                let res = S2Config::new("token").with_connection_timeout(dur);
+                                let res =
+                                    S2::new(S2Config::new("token").with_connection_timeout(dur));
                                 assert_eq!(res.is_ok(), expect_valid, "{label}");
                             }
                             "client.request_timeout" => {
-                                let res = S2Config::new("token").with_request_timeout(dur);
+                                let res = S2::new(S2Config::new("token").with_request_timeout(dur));
                                 assert_eq!(res.is_ok(), expect_valid, "{label}");
                             }
                             "client.min_base_delay" => {

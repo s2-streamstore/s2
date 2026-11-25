@@ -1107,8 +1107,7 @@ mod tests {
         let retry = RetryConfig::new()
             .with_min_base_delay(Duration::ZERO)
             .with_max_base_delay(Duration::ZERO)
-            .with_max_attempts(2)
-            .unwrap();
+            .with_max_attempts(2);
         let base = base_with_executor(&config, executor.clone(), retry);
 
         let account_uri: Uri = "http://example.test/v1/basins".parse().unwrap();
@@ -1409,8 +1408,7 @@ mod tests {
         let retry = RetryConfig::new()
             .with_min_base_delay(Duration::ZERO)
             .with_max_base_delay(Duration::ZERO)
-            .with_max_attempts(2)
-            .unwrap();
+            .with_max_attempts(2);
         let client = BaseClient {
             inner: Arc::new(BaseClientInner {
                 client: executor.clone(),

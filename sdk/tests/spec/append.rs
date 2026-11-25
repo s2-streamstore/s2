@@ -1229,7 +1229,6 @@ async fn spec_t7c_oldest_batch_ack_timeout() {
     let session = timeout_server
         .stream_with(|cfg| {
             cfg.with_request_timeout(Duration::from_secs(10))
-                .unwrap()
                 .with_retry(no_retry_config())
         })
         .append_session(AppendSessionConfig::new())
@@ -1305,11 +1304,9 @@ async fn spec_t7c_stalled_append_write_times_out_and_slow_progressing_upload_suc
     let session = stall_server
         .stream_with(|cfg| {
             cfg.with_request_timeout(Duration::from_millis(150))
-                .unwrap()
                 .with_retry(
                     RetryConfig::new()
                         .with_max_attempts(2)
-                        .unwrap()
                         .with_min_base_delay(Duration::from_millis(10))
                         .with_max_base_delay(Duration::from_millis(10))
                         .with_append_retry_policy(AppendRetryPolicy::All),
@@ -1347,7 +1344,6 @@ async fn spec_t7c_stalled_append_write_times_out_and_slow_progressing_upload_suc
     let session = permanent_stall
         .stream_with(|cfg| {
             cfg.with_request_timeout(Duration::from_millis(120))
-                .unwrap()
                 .with_retry(no_retry_config())
         })
         .append_session(AppendSessionConfig::new())
@@ -1409,7 +1405,6 @@ async fn spec_t7c_stalled_append_write_times_out_and_slow_progressing_upload_suc
     let session = slow_server
         .stream_with(|cfg| {
             cfg.with_request_timeout(Duration::from_millis(250))
-                .unwrap()
                 .with_retry(no_retry_config())
         })
         .append_session(AppendSessionConfig::new())

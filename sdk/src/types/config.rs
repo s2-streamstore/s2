@@ -2,7 +2,6 @@ use std::{
     env::VarError,
     fmt,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
-    num::NonZeroU32,
     str::FromStr,
     sync::Arc,
     time::Duration,
@@ -702,7 +701,7 @@ impl fmt::Display for AppendRetryPolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[must_use]
 pub struct RetryConfig {
-    pub(crate) max_attempts: NonZeroU32,
+    pub(crate) max_attempts: u32,
     pub(crate) min_base_delay: Duration,
     pub(crate) max_base_delay: Duration,
     pub(crate) append_retry_policy: AppendRetryPolicy,
@@ -711,7 +710,7 @@ pub struct RetryConfig {
 impl Default for RetryConfig {
     fn default() -> Self {
         Self {
-            max_attempts: NonZeroU32::new(3).expect("valid non-zero u32"),
+            max_attempts: 3,
             min_base_delay: Duration::from_millis(100),
             max_base_delay: Duration::from_secs(1),
             append_retry_policy: AppendRetryPolicy::All,
@@ -726,13 +725,13 @@ impl RetryConfig {
     }
 
     pub(crate) fn max_retries(&self) -> u32 {
-        self.max_attempts.get() - 1
+        self.max_attempts.saturating_sub(1)
     }
 
     /// Return the total number of attempts including the initial try.
     #[must_use]
     pub fn max_attempts(&self) -> u32 {
-        self.max_attempts.get()
+        self.max_attempts
     }
 
     /// Return the minimum base delay for retries.
@@ -755,18 +754,15 @@ impl RetryConfig {
 
     /// Set the total number of attempts including the initial try.
     ///
+    /// Must be at least `1`; passing `0` fails with [`ValidationError`] in
+    /// [`S2::new`](crate::S2::new) or `with_retry`.
+    ///
     /// Defaults to `3`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ValidationError`] if `max_attempts` is `0`.
-    pub fn with_max_attempts(self, max_attempts: u32) -> Result<Self, ValidationError> {
-        let max_attempts = NonZeroU32::new(max_attempts)
-            .ok_or_else(|| ValidationError("max_attempts must be at least 1".into()))?;
-        Ok(Self {
+    pub fn with_max_attempts(self, max_attempts: u32) -> Self {
+        Self {
             max_attempts,
             ..self
-        })
+        }
     }
 
     /// Set the minimum base delay for retries.
@@ -803,6 +799,9 @@ impl RetryConfig {
     }
 
     pub(crate) fn validate(&self) -> Result<(), ValidationError> {
+        if self.max_attempts == 0 {
+            return Err("max_attempts must be at least 1".into());
+        }
         if self.min_base_delay > self.max_base_delay {
             return Err("min_base_delay must not exceed max_base_delay".into());
         }
@@ -868,71 +867,65 @@ impl Http2Config {
     /// bodies finish or are dropped. Additional requests use another pooled
     /// connection.
     ///
-    /// # Errors
+    /// Must be between 1 and [`Self::MAX_CONCURRENT_REQUESTS`]; out-of-range
+    /// values fail with [`ValidationError`] in [`S2::new`](crate::S2::new).
+    /// Requests beyond the server's stream limit would queue on the connection
+    /// instead of spilling over to another one.
+    pub fn with_max_concurrent_requests(self, max_concurrent_requests: usize) -> Self {
+        Self {
+            max_concurrent_requests: Some(max_concurrent_requests),
+            ..self
+        }
+    }
+
+    /// Set the initial per-stream receive window in bytes.
     ///
-    /// Must be between 1 and [`Self::MAX_CONCURRENT_REQUESTS`]. Requests beyond
-    /// the server's stream limit would queue on the connection instead of
-    /// spilling over to another one.
-    pub fn with_max_concurrent_requests(
-        self,
-        max_concurrent_requests: usize,
-    ) -> Result<Self, ValidationError> {
-        if !(1..=Self::MAX_CONCURRENT_REQUESTS).contains(&max_concurrent_requests) {
+    /// Must be between 1 and [`Self::MAX_RECEIVE_WINDOW`]; out-of-range values
+    /// fail with [`ValidationError`] in [`S2::new`](crate::S2::new).
+    pub fn with_stream_receive_window(self, stream_receive_window: u32) -> Self {
+        Self {
+            stream_receive_window: Some(stream_receive_window),
+            ..self
+        }
+    }
+
+    /// Set the connection-level receive window in bytes, shared by all streams
+    /// on the connection.
+    ///
+    /// Must be between [`Self::MIN_CONNECTION_RECEIVE_WINDOW`] and
+    /// [`Self::MAX_RECEIVE_WINDOW`], and at least the per-stream receive
+    /// window; out-of-range values fail with [`ValidationError`] in
+    /// [`S2::new`](crate::S2::new).
+    pub fn with_connection_receive_window(self, connection_receive_window: u32) -> Self {
+        Self {
+            connection_receive_window: Some(connection_receive_window),
+            ..self
+        }
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), ValidationError> {
+        if let Some(max_concurrent_requests) = self.max_concurrent_requests
+            && !(1..=Self::MAX_CONCURRENT_REQUESTS).contains(&max_concurrent_requests)
+        {
             return Err(format!(
                 "HTTP/2 concurrent request limit must be between 1 and {}",
                 Self::MAX_CONCURRENT_REQUESTS
             )
             .into());
         }
-        Ok(Self {
-            max_concurrent_requests: Some(max_concurrent_requests),
-            ..self
-        })
-    }
-
-    /// Set the initial per-stream receive window in bytes.
-    ///
-    /// # Errors
-    ///
-    /// Must be between 1 and [`Self::MAX_RECEIVE_WINDOW`].
-    pub fn with_stream_receive_window(
-        self,
-        stream_receive_window: u32,
-    ) -> Result<Self, ValidationError> {
-        if !(1..=Self::MAX_RECEIVE_WINDOW).contains(&stream_receive_window) {
+        if let Some(stream_receive_window) = self.stream_receive_window
+            && !(1..=Self::MAX_RECEIVE_WINDOW).contains(&stream_receive_window)
+        {
             return Err("HTTP/2 stream receive window must be between 1 and 2^31 - 1 bytes".into());
         }
-        Ok(Self {
-            stream_receive_window: Some(stream_receive_window),
-            ..self
-        })
-    }
-
-    /// Set the connection-level receive window in bytes, shared by all streams
-    /// on the connection.
-    ///
-    /// # Errors
-    ///
-    /// Must be between [`Self::MIN_CONNECTION_RECEIVE_WINDOW`] and
-    /// [`Self::MAX_RECEIVE_WINDOW`].
-    pub fn with_connection_receive_window(
-        self,
-        connection_receive_window: u32,
-    ) -> Result<Self, ValidationError> {
-        if !(Self::MIN_CONNECTION_RECEIVE_WINDOW..=Self::MAX_RECEIVE_WINDOW)
-            .contains(&connection_receive_window)
+        if let Some(connection_receive_window) = self.connection_receive_window
+            && !(Self::MIN_CONNECTION_RECEIVE_WINDOW..=Self::MAX_RECEIVE_WINDOW)
+                .contains(&connection_receive_window)
         {
             return Err(
                 "HTTP/2 connection receive window must be between 65,535 and 2^31 - 1 bytes".into(),
             );
         }
-        Ok(Self {
-            connection_receive_window: Some(connection_receive_window),
-            ..self
-        })
-    }
-
-    pub(crate) fn validate(&self) -> Result<(), ValidationError> {
         let stream_window = self
             .stream_receive_window
             .unwrap_or(crate::client::DEFAULT_STREAM_RECEIVE_WINDOW);
@@ -1095,6 +1088,12 @@ impl S2Config {
     }
 
     pub(crate) fn validate(&self) -> Result<(), ValidationError> {
+        if self.connection_timeout.is_zero() {
+            return Err("connection_timeout must be greater than zero".into());
+        }
+        if self.request_timeout.is_zero() {
+            return Err("request_timeout must be greater than zero".into());
+        }
         self.retry.validate()?;
         self.http2.validate()
     }
@@ -1170,39 +1169,28 @@ impl S2Config {
 
     /// Set the timeout for establishing a connection to the server.
     ///
+    /// Must be greater than zero; a zero duration fails with [`ValidationError`]
+    /// in [`S2::new`](crate::S2::new).
+    ///
     /// Defaults to `3s`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ValidationError`] if `connection_timeout` is zero.
-    pub fn with_connection_timeout(
-        self,
-        connection_timeout: Duration,
-    ) -> Result<Self, ValidationError> {
-        if connection_timeout.is_zero() {
-            return Err("connection_timeout must be greater than zero".into());
-        }
-        Ok(Self {
+    pub fn with_connection_timeout(self, connection_timeout: Duration) -> Self {
+        Self {
             connection_timeout,
             ..self
-        })
+        }
     }
 
     /// Set the timeout for requests.
     ///
+    /// Must be greater than zero; a zero duration fails with [`ValidationError`]
+    /// in [`S2::new`](crate::S2::new).
+    ///
     /// Defaults to `5s`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ValidationError`] if `request_timeout` is zero.
-    pub fn with_request_timeout(self, request_timeout: Duration) -> Result<Self, ValidationError> {
-        if request_timeout.is_zero() {
-            return Err("request_timeout must be greater than zero".into());
-        }
-        Ok(Self {
+    pub fn with_request_timeout(self, request_timeout: Duration) -> Self {
+        Self {
             request_timeout,
             ..self
-        })
+        }
     }
 
     /// Set the retry configuration for requests.

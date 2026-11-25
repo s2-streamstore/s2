@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use http::uri::{Authority, Scheme};
 #[cfg(feature = "_hidden")]
 use http::{HeaderMap, HeaderValue};
@@ -302,11 +304,8 @@ fn append_ack_from_proto_requires_all_positions() {
 fn http2_config_bounds() {
     let cfg = Http2Config::new()
         .with_max_concurrent_requests(Http2Config::MAX_CONCURRENT_REQUESTS)
-        .unwrap()
         .with_stream_receive_window(Http2Config::MAX_RECEIVE_WINDOW)
-        .unwrap()
-        .with_connection_receive_window(Http2Config::MIN_CONNECTION_RECEIVE_WINDOW)
-        .unwrap();
+        .with_connection_receive_window(Http2Config::MIN_CONNECTION_RECEIVE_WINDOW);
     assert_eq!(
         cfg.max_concurrent_requests(),
         Some(Http2Config::MAX_CONCURRENT_REQUESTS)
@@ -321,33 +320,46 @@ fn http2_config_bounds() {
     );
     assert_eq!(Http2Config::new().max_concurrent_requests(), None);
 
-    assert!(Http2Config::new().with_max_concurrent_requests(0).is_err());
+    assert!(
+        Http2Config::new()
+            .with_max_concurrent_requests(0)
+            .validate()
+            .is_err()
+    );
     assert!(
         Http2Config::new()
             .with_max_concurrent_requests(Http2Config::MAX_CONCURRENT_REQUESTS + 1)
+            .validate()
             .is_err()
     );
-    assert!(Http2Config::new().with_stream_receive_window(0).is_err());
+    assert!(
+        Http2Config::new()
+            .with_stream_receive_window(0)
+            .validate()
+            .is_err()
+    );
     assert!(
         Http2Config::new()
             .with_stream_receive_window(Http2Config::MAX_RECEIVE_WINDOW + 1)
+            .validate()
             .is_err()
     );
     assert!(
         Http2Config::new()
             .with_connection_receive_window(Http2Config::MIN_CONNECTION_RECEIVE_WINDOW - 1)
+            .validate()
             .is_err()
     );
     assert!(
         Http2Config::new()
             .with_connection_receive_window(u32::MAX)
+            .validate()
             .is_err()
     );
 
     // Cross-field C13d validation rejects connection_receive_window < stream_receive_window.
     let smaller_conn = Http2Config::new()
-        .with_connection_receive_window(Http2Config::MIN_CONNECTION_RECEIVE_WINDOW)
-        .unwrap();
+        .with_connection_receive_window(Http2Config::MIN_CONNECTION_RECEIVE_WINDOW);
     assert!(smaller_conn.validate().is_err());
     assert!(
         S2Config::new("token")
@@ -357,10 +369,38 @@ fn http2_config_bounds() {
     );
     let matching_windows = Http2Config::new()
         .with_stream_receive_window(Http2Config::MIN_CONNECTION_RECEIVE_WINDOW)
-        .unwrap()
-        .with_connection_receive_window(Http2Config::MIN_CONNECTION_RECEIVE_WINDOW)
-        .unwrap();
+        .with_connection_receive_window(Http2Config::MIN_CONNECTION_RECEIVE_WINDOW);
     assert!(matching_windows.validate().is_ok());
+}
+
+#[test]
+fn s2_config_validates_timeouts_and_retry_at_client_construction() {
+    assert!(
+        S2Config::new("token")
+            .with_connection_timeout(Duration::ZERO)
+            .validate()
+            .is_err()
+    );
+    assert!(
+        S2Config::new("token")
+            .with_request_timeout(Duration::ZERO)
+            .validate()
+            .is_err()
+    );
+    assert!(
+        S2Config::new("token")
+            .with_retry(RetryConfig::new().with_max_attempts(0))
+            .validate()
+            .is_err()
+    );
+    assert!(
+        S2Config::new("token")
+            .with_connection_timeout(Duration::from_millis(1))
+            .with_request_timeout(Duration::from_millis(1))
+            .with_retry(RetryConfig::new().with_max_attempts(1))
+            .validate()
+            .is_ok()
+    );
 }
 
 #[test]
