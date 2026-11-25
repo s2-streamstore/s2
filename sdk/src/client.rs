@@ -12,8 +12,8 @@ use std::{
 };
 
 use async_trait::async_trait;
-use bytes::{Bytes, BytesMut};
-use flate2::{Compression as FlateCompression, read::MultiGzDecoder, write::GzEncoder};
+use bytes::Bytes;
+use flate2::{Compression as FlateCompression, bufread::MultiGzDecoder, write::GzEncoder};
 use futures_core::Stream;
 use futures_util::StreamExt;
 use http::{
@@ -231,23 +231,6 @@ impl Request {
             headers,
             ..self
         })
-    }
-
-    fn origin(&self) -> String {
-        let scheme = self
-            .uri
-            .scheme_str()
-            .unwrap_or("https")
-            .to_ascii_lowercase();
-        let host = self.uri.host().unwrap_or("").to_ascii_lowercase();
-        let port = self
-            .uri
-            .port_u16()
-            .filter(|&p| !((scheme == "http" && p == 80) || (scheme == "https" && p == 443)));
-        match port {
-            Some(port) => format!("{scheme}://{host}:{port}"),
-            None => format!("{scheme}://{host}"),
-        }
     }
 
     pub(crate) fn try_clone(&self) -> Option<Self> {
@@ -584,7 +567,7 @@ where
 
     let collect = async {
         let mut first: Option<Bytes> = None;
-        let mut buf: Option<BytesMut> = None;
+        let mut buf: Option<Vec<u8>> = None;
         let mut total: usize = 0;
 
         while let Some(frame) = body.frame().await {
@@ -602,7 +585,13 @@ where
             if let Some(buf) = buf.as_mut() {
                 buf.extend_from_slice(&data);
             } else if let Some(prev) = first.take() {
-                let mut combined = BytesMut::with_capacity(total);
+                let remaining_hint =
+                    body.size_hint()
+                        .upper()
+                        .unwrap_or_else(|| body.size_hint().lower())
+                        .min((limit - total) as u64)
+                        .min(total.saturating_mul(4) as u64) as usize;
+                let mut combined = Vec::with_capacity(total + remaining_hint);
                 combined.extend_from_slice(&prev);
                 combined.extend_from_slice(&data);
                 buf = Some(combined);
@@ -612,7 +601,11 @@ where
         }
 
         Ok(match buf {
-            Some(buf) => buf.freeze(),
+            Some(mut buf) => {
+                let max_slack = (buf.len() / 8).max(4096);
+                shrink_if_excess_slack(&mut buf, max_slack);
+                Bytes::from(buf)
+            }
             None => first.unwrap_or_default(),
         })
     };
@@ -879,27 +872,114 @@ fn build_http_request(
 
 /// Builds a URI from `base`'s scheme and authority, replacing any path/query.
 pub(crate) fn uri_with_path(base: &Uri, path: impl AsRef<str>) -> Uri {
-    let path = path.as_ref().trim_start_matches('/');
-    uri_with_path_and_query(base, &format!("/{path}")).expect("SDK-generated path is a valid URI")
-}
-
-fn uri_with_query(uri: &Uri, query: &str) -> Result<Uri, http::uri::InvalidUri> {
-    let path_and_query = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
-    let (path, existing_query) = path_and_query
-        .split_once('?')
-        .map_or((path_and_query, ""), |(path, query)| (path, query));
-    let path_and_query = if existing_query.is_empty() {
-        format!("{path}?{query}")
+    let path = path.as_ref();
+    let pq: http::uri::PathAndQuery = if path.starts_with('/') && !path.starts_with("//") {
+        path.parse().expect("SDK-generated path is a valid URI")
     } else {
-        format!("{path}?{existing_query}&{query}")
+        let trimmed = path.trim_start_matches('/');
+        let mut buf = String::with_capacity(1 + trimmed.len());
+        buf.push('/');
+        buf.push_str(trimmed);
+        buf.try_into().expect("SDK-generated path is a valid URI")
     };
-    uri_with_path_and_query(uri, &path_and_query)
+    uri_with_path_and_query(base, pq).expect("SDK-generated path is a valid URI")
 }
 
-fn uri_with_path_and_query(uri: &Uri, path_and_query: &str) -> Result<Uri, http::uri::InvalidUri> {
+fn uri_with_query(uri: &Uri, query: &str) -> Result<Uri, http::Error> {
+    let pq = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
+    let (path, existing_query) = pq.split_once('?').unwrap_or((pq, ""));
+    let mut combined = String::with_capacity(
+        path.len()
+            + 1
+            + existing_query.len()
+            + usize::from(!existing_query.is_empty())
+            + query.len(),
+    );
+    combined.push_str(path);
+    combined.push('?');
+    if !existing_query.is_empty() {
+        combined.push_str(existing_query);
+        combined.push('&');
+    }
+    combined.push_str(query);
+    let pq: http::uri::PathAndQuery = combined.try_into()?;
+    uri_with_path_and_query(uri, pq)
+}
+
+fn uri_with_path_and_query(
+    uri: &Uri,
+    path_and_query: http::uri::PathAndQuery,
+) -> Result<Uri, http::Error> {
+    let mut parts = http::uri::Parts::default();
+    parts.scheme = uri.scheme().cloned().or(Some(http::uri::Scheme::HTTPS));
+    parts.authority = uri.authority().cloned();
+    parts.path_and_query = Some(path_and_query);
+    Uri::from_parts(parts).map_err(http::Error::from)
+}
+
+/// Format the normalized `scheme://host[:port]` origin key into a stack buffer for typical hosts,
+/// falling back to a heap `String` only for unusually long authorities.
+fn with_origin_key<R>(uri: &Uri, f: impl FnOnce(&str) -> R) -> R {
     let scheme = uri.scheme_str().unwrap_or("https");
-    let authority = uri.authority().map(|a| a.as_str()).unwrap_or("");
-    format!("{scheme}://{authority}{path_and_query}").parse()
+    let host = uri.host().unwrap_or("");
+    let is_http = scheme.eq_ignore_ascii_case("http");
+    let is_https = scheme.eq_ignore_ascii_case("https");
+    let port = uri
+        .port_u16()
+        .filter(|&p| !((is_http && p == 80) || (is_https && p == 443)));
+
+    // Maximum decimal length of a u16 port with leading ':' is 6 bytes (":65535").
+    let max_len = scheme.len() + 3 + host.len() + usize::from(port.is_some()) * 6;
+    if max_len <= 256 {
+        let mut buf = [0u8; 256];
+        let mut pos = 0;
+        for &b in scheme.as_bytes() {
+            buf[pos] = b.to_ascii_lowercase();
+            pos += 1;
+        }
+        buf[pos..pos + 3].copy_from_slice(b"://");
+        pos += 3;
+        for &b in host.as_bytes() {
+            buf[pos] = b.to_ascii_lowercase();
+            pos += 1;
+        }
+        if let Some(p) = port {
+            buf[pos] = b':';
+            pos += 1;
+            let mut digits = [0u8; 5];
+            let mut n = p;
+            let mut dlen = 0;
+            loop {
+                digits[dlen] = b'0' + (n % 10) as u8;
+                dlen += 1;
+                n /= 10;
+                if n == 0 {
+                    break;
+                }
+            }
+            for i in (0..dlen).rev() {
+                buf[pos] = digits[i];
+                pos += 1;
+            }
+        }
+        let s = std::str::from_utf8(&buf[..pos])
+            .expect("ASCII-lowercased scheme, host, and port are valid UTF-8");
+        return f(s);
+    }
+
+    let scheme = scheme.to_ascii_lowercase();
+    let host = host.to_ascii_lowercase();
+    let owned = match port {
+        Some(port) => format!("{scheme}://{host}:{port}"),
+        None => format!("{scheme}://{host}"),
+    };
+    f(&owned)
+}
+
+fn shrink_if_excess_slack(buf: &mut Vec<u8>, max_slack: usize) {
+    if buf.capacity().saturating_sub(buf.len()) > max_slack {
+        buf.shrink_to_fit();
+    }
 }
 
 fn compress_body(
@@ -914,24 +994,33 @@ fn compress_body(
             "streaming request bodies cannot be compressed".into(),
         ));
     };
+    let initial_capacity = data.len() + (data.len() >> 8) + 64;
     match compression {
         Compression::None => unreachable!(),
         Compression::Gzip => {
-            let mut encoder = GzEncoder::new(Vec::new(), FlateCompression::fast());
+            let mut encoder = GzEncoder::new(
+                Vec::with_capacity(initial_capacity),
+                FlateCompression::fast(),
+            );
             encoder
                 .write_all(data)
                 .map_err(|e| HttpError::RequestCompression(e.to_string()))?;
-            let compressed = encoder
+            let mut compressed = encoder
                 .finish()
                 .map_err(|e| HttpError::RequestCompression(e.to_string()))?;
+            let max_slack = (compressed.len() / 8).max(4096);
+            shrink_if_excess_slack(&mut compressed, max_slack);
             Ok((
                 Body::from(compressed),
                 Some(HeaderValue::from_static("gzip")),
             ))
         }
         Compression::Zstd => {
-            let compressed = zstd::stream::encode_all(data, 1)
+            let mut compressed = Vec::with_capacity(initial_capacity);
+            zstd::stream::copy_encode(data, &mut compressed, 1)
                 .map_err(|e| HttpError::RequestCompression(e.to_string()))?;
+            let max_slack = (compressed.len() / 8).max(4096);
+            shrink_if_excess_slack(&mut compressed, max_slack);
             Ok((
                 Body::from(compressed),
                 Some(HeaderValue::from_static("zstd")),
@@ -940,9 +1029,13 @@ fn compress_body(
     }
 }
 
-fn read_bounded(reader: impl std::io::Read, max_bytes: usize) -> Result<Bytes, HttpError> {
+fn read_bounded(
+    reader: impl std::io::Read,
+    initial_capacity: usize,
+    max_bytes: usize,
+) -> Result<Bytes, HttpError> {
     let limit = (max_bytes as u64) + 1;
-    let mut decompressed = Vec::new();
+    let mut decompressed = Vec::with_capacity(initial_capacity.min(max_bytes));
     reader
         .take(limit)
         .read_to_end(&mut decompressed)
@@ -950,17 +1043,29 @@ fn read_bounded(reader: impl std::io::Read, max_bytes: usize) -> Result<Bytes, H
     if decompressed.len() > max_bytes {
         return Err(HttpError::ResponseTooLarge(max_bytes));
     }
+    let max_slack = (decompressed.len() / 8).max(4096);
+    shrink_if_excess_slack(&mut decompressed, max_slack);
     Ok(Bytes::from(decompressed))
 }
 
 fn decompress_single(encoding: &str, bytes: Bytes, max_bytes: usize) -> Result<Bytes, HttpError> {
+    let initial_capacity = bytes.len().saturating_mul(2).min(max_bytes);
     match encoding {
         "" | "identity" => Ok(bytes),
-        "gzip" => read_bounded(MultiGzDecoder::new(bytes.as_ref()), max_bytes),
+        "gzip" => read_bounded(
+            MultiGzDecoder::new(bytes.as_ref()),
+            initial_capacity,
+            max_bytes,
+        ),
         "zstd" => {
-            let decoder = zstd::stream::Decoder::new(bytes.as_ref())
+            let mut decoder = zstd::stream::Decoder::with_buffer(bytes.as_ref())
                 .map_err(|e| HttpError::ResponseCompression(e.to_string()))?;
-            read_bounded(decoder, max_bytes)
+            // 16 MiB max window covers standard streaming zstd encoders (e.g. 8 MiB default
+            // windowLog=23) while bounding decoder memory well below libzstd's 128 MiB default.
+            decoder
+                .window_log_max(24)
+                .map_err(|e| HttpError::ResponseCompression(e.to_string()))?;
+            read_bounded(decoder, initial_capacity, max_bytes)
         }
         other => Err(HttpError::ResponseCompression(format!(
             "unsupported content-encoding: {other}"
@@ -1671,22 +1776,20 @@ where
             .clone())
     }
 
-    fn checkout_for_origin(
-        &self,
-        origin: &str,
-        fallback_uri: &Uri,
-    ) -> Result<(Arc<HostPool<C>>, Checkout), HttpError> {
-        loop {
-            let pool = self.get_or_create_host_pool(origin, fallback_uri)?;
-            if let Some(checkout) = pool.checkout() {
-                return Ok((pool, checkout));
+    fn checkout_for_origin(&self, uri: &Uri) -> Result<(Arc<HostPool<C>>, Checkout), HttpError> {
+        with_origin_key(uri, |origin| {
+            loop {
+                let pool = self.get_or_create_host_pool(origin, uri)?;
+                if let Some(checkout) = pool.checkout() {
+                    return Ok((pool, checkout));
+                }
+                // The host pool was detached concurrently by the idle reaper or close(); loop to
+                // re-check closed state or allocate a fresh host pool.
             }
-            // The host pool was detached concurrently by the idle reaper or close(); loop to
-            // re-check closed state or allocate a fresh host pool.
-        }
+        })
     }
 
-    /// Acquire a live, ready HTTP/2 `SendRequest` for `origin`.
+    /// Acquire a live, ready HTTP/2 `SendRequest` for `uri`'s origin.
     ///
     /// Phase 1 (`T7a`): connection establishment (DNS/TCP/TLS/H2 handshake) is bounded by
     /// `connection_timeout`, completely independent of `request_timeout`.
@@ -1696,15 +1799,14 @@ where
     /// dial a fresh connection so the caller sees no spurious error.
     async fn checkout_ready(
         &self,
-        origin: &str,
-        fallback_uri: &Uri,
+        uri: &Uri,
         request_timeout: Option<Duration>,
     ) -> Result<CheckedOutSender, HttpError> {
         loop {
             if self.shutdown.is_cancelled() {
                 return Err(HttpError::Closed);
             }
-            let (pool, checkout) = self.checkout_for_origin(origin, fallback_uri)?;
+            let (pool, checkout) = self.checkout_for_origin(uri)?;
             let (id, mut sender, permit, reused) = match checkout {
                 Checkout::Ready { id, sender, permit } => (id, sender, permit, true),
                 Checkout::Connecting { id, mut rx, permit } => {
@@ -1748,7 +1850,7 @@ where
                     drop(permit);
                     if reused {
                         tracing::debug!(
-                            origin = %origin,
+                            origin = %pool.origin,
                             connection = id.0,
                             err = %format_error_chain(&err),
                             "evicted stale pooled HTTP/2 connection; redialing"
@@ -1770,7 +1872,6 @@ where
             return Err(HttpError::Closed);
         }
         self.ensure_reaper_started();
-        let origin = request.origin();
         let request_timeout = request.timeout;
         let shutdown = self.shutdown.clone();
         tokio::select! {
@@ -1778,7 +1879,7 @@ where
             _ = shutdown.cancelled() => Err(HttpError::Closed),
             res = async {
                 let checked_out = self
-                    .checkout_ready(&origin, &request.uri, request_timeout)
+                    .checkout_ready(&request.uri, request_timeout)
                     .await?;
                 run(checked_out, request).await
             } => res,
@@ -2126,7 +2227,7 @@ mod tests {
         origin: &str,
     ) -> (ConnectionId, RequestPermit) {
         let uri: Uri = origin.parse().unwrap();
-        let (_host_pool, checkout) = pool.checkout_for_origin(origin, &uri).unwrap();
+        let (_host_pool, checkout) = pool.checkout_for_origin(&uri).unwrap();
         match checkout {
             Checkout::Ready { id, permit, .. } => (id, permit),
             Checkout::Connecting { id, mut rx, permit } => {
@@ -2197,7 +2298,7 @@ mod tests {
             ("https://a.s2.dev:8443/v1", "https://a.s2.dev:8443"),
         ] {
             let r = RequestBuilder::get(raw.parse().unwrap()).build().unwrap();
-            assert_eq!(r.origin(), expected);
+            assert_eq!(with_origin_key(&r.uri, str::to_owned), expected);
         }
     }
 
@@ -2551,6 +2652,31 @@ mod tests {
         }
     }
 
+    #[test]
+    fn decompress_zstd_enforces_window_log_max() {
+        let encode_with_window_log = |window_log: u32, payload: &[u8]| -> Bytes {
+            let mut encoder = zstd::stream::write::Encoder::new(Vec::new(), 1).unwrap();
+            encoder.window_log(window_log).unwrap();
+            encoder.write_all(payload).unwrap();
+            Bytes::from(encoder.finish().unwrap())
+        };
+
+        let payload = b"bounded zstd window test payload";
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_ENCODING, HeaderValue::from_static("zstd"));
+
+        let within_limit = encode_with_window_log(24, payload);
+        let decoded = decompress_body(&headers, within_limit, MAX_RESPONSE_BYTES).unwrap();
+        assert_eq!(decoded.as_ref(), payload);
+
+        let exceeds_limit = encode_with_window_log(25, payload);
+        let err = decompress_body(&headers, exceeds_limit, MAX_RESPONSE_BYTES).unwrap_err();
+        assert!(
+            matches!(err, HttpError::ResponseCompression(_)),
+            "expected ResponseCompression error for window_log=25, got {err:?}"
+        );
+    }
+
     #[tokio::test]
     async fn collect_bounded_body_enforces_limit_across_single_and_multiple_frames() {
         // Empty body.
@@ -2817,5 +2943,66 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(connector.dials.load(Ordering::SeqCst), 3);
         pool.close();
+    }
+
+    #[test]
+    fn with_origin_key_and_uri_helpers_preserve_normalization() {
+        let cases = [
+            ("https://Example.COM:443/v1/x", "https://example.com"),
+            ("HTTP://Example.COM:80/v1/x", "http://example.com"),
+            ("https://Example.COM:8443/v1/x", "https://example.com:8443"),
+            ("http://[::1]:8080/v1/x", "http://[::1]:8080"),
+            ("https://[::1]:443/v1/x", "https://[::1]"),
+        ];
+        for (raw, expected) in cases {
+            let uri: Uri = raw.parse().unwrap();
+            let got = with_origin_key(&uri, str::to_owned);
+            assert_eq!(got, expected);
+        }
+
+        // Long hostnames exceeding the 256-byte stack fast path fall back cleanly to String.
+        let long_host = "a".repeat(260);
+        let long_uri: Uri = format!("https://{long_host}:9000/v1/x").parse().unwrap();
+        assert_eq!(
+            with_origin_key(&long_uri, str::to_owned),
+            format!("https://{long_host}:9000")
+        );
+
+        let base: Uri = "https://example.com:8443".parse().unwrap();
+        assert_eq!(
+            uri_with_path(&base, "/v1/streams"),
+            "https://example.com:8443/v1/streams"
+        );
+        assert_eq!(
+            uri_with_path(&base, "v1/streams"),
+            "https://example.com:8443/v1/streams"
+        );
+        assert_eq!(
+            uri_with_path(&base, "//v1/streams"),
+            "https://example.com:8443/v1/streams"
+        );
+        let with_q1 = uri_with_query(&uri_with_path(&base, "/v1/streams"), "a=1").unwrap();
+        assert_eq!(with_q1, "https://example.com:8443/v1/streams?a=1");
+        let with_q2 = uri_with_query(&with_q1, "b=2").unwrap();
+        assert_eq!(with_q2, "https://example.com:8443/v1/streams?a=1&b=2");
+    }
+
+    #[test]
+    fn shrink_if_excess_slack_reduces_only_when_above_threshold() {
+        let mut oversized = Vec::with_capacity(64 * 1024);
+        oversized.extend_from_slice(&[0xAB; 512]);
+        assert!(oversized.capacity() >= 64 * 1024);
+        shrink_if_excess_slack(&mut oversized, 4096);
+        assert!(
+            oversized.capacity() < 4096,
+            "expected capacity to shrink, got {}",
+            oversized.capacity()
+        );
+
+        let mut within_budget = Vec::with_capacity(4096);
+        within_budget.extend_from_slice(&[0xCD; 2048]);
+        let before = within_budget.capacity();
+        shrink_if_excess_slack(&mut within_budget, 4096);
+        assert_eq!(within_budget.capacity(), before);
     }
 }

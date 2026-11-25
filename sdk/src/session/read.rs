@@ -1,5 +1,4 @@
 use std::{
-    collections::VecDeque,
     fmt,
     future::Future,
     ops::ControlFlow,
@@ -837,7 +836,7 @@ impl Drop for ReadSessionCore {
 #[must_use = "read sessions close immediately when dropped"]
 pub struct ReadSession {
     core: ReadSessionCore,
-    current_batch: VecDeque<SequencedRecord>,
+    current_batch: std::vec::IntoIter<SequencedRecord>,
 }
 
 impl fmt::Debug for ReadSession {
@@ -860,7 +859,7 @@ impl ReadSession {
     ) -> Self {
         Self {
             core: ReadSessionCore::open(client, name, headers, input, config, "read_session"),
-            current_batch: VecDeque::new(),
+            current_batch: Vec::new().into_iter(),
         }
     }
 
@@ -920,21 +919,21 @@ impl Stream for ReadSession {
         // R9 / R9d / C12: if already closed or aborted by client close, finalize immediately
         // (dropping any buffered records on abort, and ignoring late aborts after R9a/R9c close).
         if let Some(outcome) = this.core.take_closed_or_abort() {
-            this.current_batch.clear();
+            this.current_batch = Vec::new().into_iter();
             return Poll::Ready(outcome.map(Err));
         }
 
-        if let Some(record) = this.current_batch.pop_front() {
+        if let Some(record) = this.current_batch.next() {
             this.core.state.on_records_delivered(record.seq_num, 1);
             return Poll::Ready(Some(Ok(record)));
         }
 
         match this.core.poll_next_batch(cx) {
             Poll::Ready(Some(Ok(batch))) => {
-                this.current_batch = batch.records.into();
+                this.current_batch = batch.records.into_iter();
                 let record = this
                     .current_batch
-                    .pop_front()
+                    .next()
                     .expect("poll_next_batch filters empty batches");
                 this.core.state.on_records_delivered(record.seq_num, 1);
                 Poll::Ready(Some(Ok(record)))
@@ -1291,21 +1290,27 @@ impl ReadDriver {
         }
     }
 
-    async fn recv_next_item(
+    async fn recv_next_item<SF, CF>(
         &mut self,
         mut heartbeat_sleep: Pin<&mut Sleep>,
-    ) -> ControlFlow<(), Result<Option<(ReadBatch, bool)>, ReadSessionError>> {
+        mut shutdown_fut: Pin<&mut SF>,
+        mut tx_closed_fut: Pin<&mut CF>,
+    ) -> ControlFlow<(), Result<Option<(ReadBatch, bool)>, ReadSessionError>>
+    where
+        SF: Future<Output = ()>,
+        CF: Future<Output = ()>,
+    {
         heartbeat_sleep
             .as_mut()
             .reset(Instant::now() + HEARTBEAT_TIMEOUT);
         let attempt = self.active.as_mut().expect("active stream must be Some");
         let item = tokio::select! {
             biased;
-            _ = self.shutdown.cancelled() => {
+            _ = shutdown_fut.as_mut() => {
                 self.abort();
                 return ControlFlow::Break(());
             }
-            _ = self.tx.closed() => return ControlFlow::Break(()),
+            _ = tx_closed_fut.as_mut() => return ControlFlow::Break(()),
             res = attempt.stream.next() => match res {
                 Some(Ok(frame)) => Ok(Some((
                     ReadBatch::from_proto(frame.msg),
@@ -1507,6 +1512,10 @@ impl ReadDriver {
             context: self.context.clone(),
         };
         let mut heartbeat_sleep = pin!(tokio::time::sleep(HEARTBEAT_TIMEOUT));
+        let shutdown = self.shutdown.clone();
+        let mut shutdown_fut = pin!(shutdown.cancelled());
+        let tx_for_closed = self.tx.clone();
+        let mut tx_closed_fut = pin!(tx_for_closed.closed());
 
         loop {
             if self.shutdown.is_cancelled() {
@@ -1531,7 +1540,7 @@ impl ReadDriver {
             // timeout.
             let permit = tokio::select! {
                 biased;
-                _ = self.shutdown.cancelled() => {
+                _ = shutdown_fut.as_mut() => {
                     self.abort();
                     return;
                 }
@@ -1541,7 +1550,14 @@ impl ReadDriver {
                 },
             };
 
-            let item = match self.recv_next_item(heartbeat_sleep.as_mut()).await {
+            let item = match self
+                .recv_next_item(
+                    heartbeat_sleep.as_mut(),
+                    shutdown_fut.as_mut(),
+                    tx_closed_fut.as_mut(),
+                )
+                .await
+            {
                 ControlFlow::Continue(item) => item,
                 ControlFlow::Break(()) => {
                     drop(permit);
@@ -1805,7 +1821,7 @@ mod tests {
                 terminated: false,
                 _driver: AbortOnDropHandle::new(driver),
             },
-            current_batch: VecDeque::new(),
+            current_batch: Vec::new().into_iter(),
         };
         (session, tx, state, shutdown)
     }
