@@ -21,3 +21,12 @@ A released client must keep parsing responses from a newer service.
 - `s2-cli`: flag enums stay closed; output prints an unknown value by its wire name.
 - Enums that are only ever sent by a client stay closed.
 - Returning a new value in an existing field still breaks clients released before that field was tolerant, so check which released versions parse it as closed.
+
+## SDK Specification
+
+`s2-sdk` conforms to the unified SDK spec in `api/specs/sdk/` (`spec.md`, `rationale.md`, `vectors/`).
+
+- Check the spec before changing `sdk/` APIs, errors, retries, sessions, or validation; do not silently diverge from spec rules.
+- Keep conformance and shared vector tests (`sdk/tests/conformance.rs`, `sdk/tests/spec/`) passing, tagging spec-governed tests with `// spec: r1 <RULE_ID>`.
+- When a change reveals a spec gap, ambiguity, or cross-SDK improvement, propose an update to `s2-specs` instead of working around it in Rust.
+- Land spec changes in `s2-specs` first, then bump the `api/specs` submodule.
