@@ -1,4 +1,4 @@
-use std::task::Waker;
+use std::{task::Waker, time::Duration};
 
 pub mod append;
 pub mod read;
@@ -9,6 +9,36 @@ pub(crate) use append::{
     validate_max_unacked_bytes, validate_reserve_bytes,
 };
 pub(crate) use read::{ReadBatchSession, ReadSession, ReadSessionConfig};
+
+/// Sample `tokio::time::Instant::now()` on `owner_handle`'s Tokio clock without panicking if the
+/// current thread's Tokio TLS context has already been destroyed (or cannot be entered).
+///
+/// Returns `None` only when TLS is torn down or entering `owner_handle` fails.
+pub(crate) fn try_now_on_runtime(
+    owner_handle: Option<&tokio::runtime::Handle>,
+) -> Option<tokio::time::Instant> {
+    let Some(owner) = owner_handle else {
+        return Some(tokio::time::Instant::now());
+    };
+    match tokio::runtime::Handle::try_current() {
+        Ok(cur) if cur.id() == owner.id() => Some(tokio::time::Instant::now()),
+        Err(e) if e.is_thread_local_destroyed() => None,
+        _ => std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _enter = owner.enter();
+            tokio::time::Instant::now()
+        }))
+        .ok(),
+    }
+}
+
+/// Compute elapsed time since `epoch` on `owner_handle`'s Tokio clock without panicking during
+/// thread-local teardown.
+pub(crate) fn try_elapsed_on_runtime(
+    owner_handle: Option<&tokio::runtime::Handle>,
+    epoch: tokio::time::Instant,
+) -> Option<Duration> {
+    try_now_on_runtime(owner_handle).map(|now| now.saturating_duration_since(epoch))
+}
 
 /// Fixed-index slab of registered [`Waker`] slots with O(1) slot reuse.
 ///

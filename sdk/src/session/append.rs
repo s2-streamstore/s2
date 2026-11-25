@@ -829,6 +829,24 @@ impl AppendSessionCore {
         self.sent_tracker.freeze_sent_watermark()
     }
 
+    /// Return the exact per-batch terminal error classification if `settle_terminal_error` has
+    /// published one (`A6a`, `A6b`, `A9`).
+    pub(crate) fn terminal_classification(&self) -> Option<TerminalClassification> {
+        self.sent_tracker.terminal_classification()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn publish_terminal_for_test(
+        &self,
+        session_failure: AppendSessionError,
+        base_seq: u64,
+        outcomes: Vec<AppendSessionError>,
+    ) {
+        self.sent_tracker
+            .publish_terminal(session_failure.clone(), base_seq, outcomes);
+        self.lifecycle.set_terminal_err(session_failure).fire();
+    }
+
     fn session_closed_err_on_submit(&self) -> AppendSessionError {
         let failure = self.lifecycle.terminal_err().or_else(|| {
             if self.unacked_batches.load(Ordering::Acquire) > 0 && self.abort.is_cancelled() {
@@ -1500,11 +1518,18 @@ impl AppendPermits {
                 if self.acquired {
                     return;
                 }
-                // Close `rx` BEFORE inspecting `try_recv()` so any concurrent `deliver_grants`
-                // send either landed before `close()` (making `try_recv()` return `Ok(())` so we
-                // refund here) or lands after `close()` (returning `Err(())` so `deliver_grants`
-                // refunds there). Exactly one side refunds, with zero leak or double-refund.
-                self.rx.close();
+                // Close AND inspect `rx` strictly BEFORE acquiring `self.inner.state`: Tokio's
+                // `oneshot::Receiver::close()` / `try_recv()` can drop the registered custom
+                // `Waker` inline, and a custom waker destructor calling `unacked_bytes()` would
+                // deadlock if `self.inner.state` were held. Closing before `try_recv()` still
+                // guarantees mutual exclusion between refunding here vs in `deliver_grants`.
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    self.rx.close();
+                }));
+                let received = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    self.rx.try_recv().is_ok()
+                }))
+                .unwrap_or(false);
                 let (removed_waiter, grants) = {
                     let mut state = self
                         .inner
@@ -1515,7 +1540,7 @@ impl AppendPermits {
                         let removed = state.waiters.remove(pos);
                         let grants = state.take_ready_grants(&self.inner.has_waiters);
                         (removed, grants)
-                    } else if self.rx.try_recv().is_ok() {
+                    } else if received {
                         state.release_units(self.bytes, 1);
                         let grants = state.take_ready_grants(&self.inner.has_waiters);
                         (None, grants)
@@ -1645,6 +1670,28 @@ enum Command {
     Close,
 }
 
+#[derive(Clone)]
+pub(crate) struct TerminalClassification {
+    pub(crate) session_failure: AppendSessionError,
+    base_seq: u64,
+    outcomes: Arc<[AppendSessionError]>,
+}
+
+impl TerminalClassification {
+    pub(crate) fn outcome_for(&self, seq: u64, context: &ErrorContext) -> AppendSessionError {
+        if let Some(offset) = seq.checked_sub(self.base_seq) {
+            if let Some(outcome) = self.outcomes.get(offset as usize) {
+                return outcome.clone();
+            }
+            return AppendSessionError::SessionClosed(SessionClosedError::new_with_context(
+                Some(self.session_failure.clone()),
+                context.clone(),
+            ));
+        }
+        self.session_failure.clone()
+    }
+}
+
 struct ActiveAttemptTracker {
     sync: Arc<AttemptSync>,
     base_seq: u64,
@@ -1653,10 +1700,12 @@ struct ActiveAttemptTracker {
 struct SentTrackerState {
     frozen: bool,
     active: Option<ActiveAttemptTracker>,
+    terminal: Option<TerminalClassification>,
 }
 
-/// Synchronizes the monotonic `sent_watermark` (`max(seq + 1)` across all started batches)
-/// between `AppendSessionTask` and `ProducerTask::drop` (`A6a`, `A8c`).
+/// Synchronizes the monotonic `sent_watermark` (`max(seq + 1)` across all started batches) and
+/// exact per-batch terminal classifications between `AppendSessionTask` and `ProducerTask::drop`
+/// (`A6a`, `A6b`, `A8c`, `A9`).
 struct SentTracker {
     sent_watermark: AtomicU64,
     state: StdMutex<SentTrackerState>,
@@ -1669,6 +1718,7 @@ impl SentTracker {
             state: StdMutex::new(SentTrackerState {
                 frozen: false,
                 active: None,
+                terminal: None,
             }),
         })
     }
@@ -1702,6 +1752,33 @@ impl SentTracker {
         batches_started
     }
 
+    fn publish_terminal(
+        &self,
+        session_failure: AppendSessionError,
+        base_seq: u64,
+        outcomes: Vec<AppendSessionError>,
+    ) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.terminal.is_none() {
+            state.terminal = Some(TerminalClassification {
+                session_failure,
+                base_seq,
+                outcomes: Arc::from(outcomes),
+            });
+        }
+    }
+
+    fn terminal_classification(&self) -> Option<TerminalClassification> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .terminal
+            .clone()
+    }
+
     fn freeze_sent_watermark(&self) -> u64 {
         let mut state = self
             .state
@@ -1733,15 +1810,23 @@ struct FinishLog {
     times_ns: VecDeque<u64>,
 }
 
+const ATTEMPT_TIMESTAMP_NEEDS_STAMP: u64 = u64::MAX;
+const ATTEMPT_MAX_ELAPSED_NS: u64 = u64::MAX - 2;
+
 /// Shared lock-free gate and lazy timeout telemetry between `AppendSessionTask::run_attempt` and
 /// `AttemptBodyStream` (`Terms: Sent`, `T6a`, `T7c`, `T10`).
 struct AttemptSync {
+    /// Owning Tokio runtime of `AppendSessionTask` so timestamps recorded by `AttemptBodyStream`
+    /// on a pooled connection's runtime still use the session watchdog's clock.
+    owner_handle: Option<tokio::runtime::Handle>,
     epoch: Instant,
     /// Bit 63: STOPPED, Bit 62: DRAINING, Bits 0..62: `batches_started`.
     gate: AtomicU64,
-    /// Latest chunk write progress in nanoseconds since `epoch`.
+    /// Latest chunk write progress in nanoseconds since `epoch`, or
+    /// `ATTEMPT_TIMESTAMP_NEEDS_STAMP`.
     last_write_progress_ns: AtomicU64,
-    /// `0` while body stream is alive; `elapsed_nanos + 1` once dropped by hyper.
+    /// `0` while body stream is alive; `elapsed_nanos + 1` once dropped by hyper, or
+    /// `ATTEMPT_TIMESTAMP_NEEDS_STAMP` if dropped during TLS teardown.
     body_dropped_at_ns: AtomicU64,
     /// Per-batch last-byte handoff timestamps (nanos since `epoch`), indexed by attempt batch idx.
     finish_log: StdMutex<FinishLog>,
@@ -1749,7 +1834,9 @@ struct AttemptSync {
 
 impl AttemptSync {
     fn new() -> Arc<Self> {
+        let owner_handle = tokio::runtime::Handle::try_current().ok();
         Arc::new(Self {
+            owner_handle,
             epoch: Instant::now(),
             gate: AtomicU64::new(0),
             last_write_progress_ns: AtomicU64::new(0),
@@ -1761,8 +1848,16 @@ impl AttemptSync {
         })
     }
 
-    fn elapsed_ns(&self) -> u64 {
-        self.epoch.elapsed().as_nanos().min((u64::MAX - 1) as u128) as u64
+    fn try_elapsed_ns(&self) -> Option<u64> {
+        crate::session::try_elapsed_on_runtime(self.owner_handle.as_ref(), self.epoch)
+            .map(|d| d.as_nanos().min(u128::from(ATTEMPT_MAX_ELAPSED_NS)) as u64)
+    }
+
+    fn owner_elapsed_ns(&self) -> u64 {
+        self.epoch
+            .elapsed()
+            .as_nanos()
+            .min(u128::from(ATTEMPT_MAX_ELAPSED_NS)) as u64
     }
 
     fn stop(&self) -> usize {
@@ -1813,25 +1908,43 @@ impl AttemptSync {
     }
 
     fn record_write_progress(&self) {
-        self.last_write_progress_ns
-            .store(self.elapsed_ns(), Ordering::Release);
+        let ns = self
+            .try_elapsed_ns()
+            .unwrap_or(ATTEMPT_TIMESTAMP_NEEDS_STAMP);
+        self.last_write_progress_ns.store(ns, Ordering::Release);
     }
 
     fn last_write_progress(&self) -> Instant {
         let ns = self.last_write_progress_ns.load(Ordering::Acquire);
-        self.epoch + Duration::from_nanos(ns)
+        if ns == ATTEMPT_TIMESTAMP_NEEDS_STAMP {
+            let stamped = self.owner_elapsed_ns();
+            let _ = self.last_write_progress_ns.compare_exchange(
+                ATTEMPT_TIMESTAMP_NEEDS_STAMP,
+                stamped,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
+            self.epoch + Duration::from_nanos(stamped)
+        } else {
+            self.epoch + Duration::from_nanos(ns)
+        }
     }
 
     fn record_batch_finished(&self) {
-        let ns = self.elapsed_ns();
+        let ns = self
+            .try_elapsed_ns()
+            .unwrap_or(ATTEMPT_TIMESTAMP_NEEDS_STAMP);
         self.finish_log.lock().unwrap().times_ns.push_back(ns);
     }
 
     fn finish_time(&self, batch_idx: usize) -> Option<Instant> {
-        let log = self.finish_log.lock().unwrap();
+        let mut log = self.finish_log.lock().unwrap();
         let offset = batch_idx.checked_sub(log.base_idx)?;
-        let ns = *log.times_ns.get(offset)?;
-        Some(self.epoch + Duration::from_nanos(ns))
+        let slot = log.times_ns.get_mut(offset)?;
+        if *slot == ATTEMPT_TIMESTAMP_NEEDS_STAMP {
+            *slot = self.owner_elapsed_ns();
+        }
+        Some(self.epoch + Duration::from_nanos(*slot))
     }
 
     fn prune_finished(&self, acked_in_attempt: usize) {
@@ -1846,7 +1959,9 @@ impl AttemptSync {
     }
 
     fn mark_body_dropped(&self) {
-        let encoded = self.elapsed_ns() + 1;
+        let encoded = self
+            .try_elapsed_ns()
+            .map_or(ATTEMPT_TIMESTAMP_NEEDS_STAMP, |ns| ns + 1);
         let _ = self.body_dropped_at_ns.compare_exchange(
             0,
             encoded,
@@ -1859,6 +1974,16 @@ impl AttemptSync {
         let encoded = self.body_dropped_at_ns.load(Ordering::Acquire);
         if encoded == 0 {
             None
+        } else if encoded == ATTEMPT_TIMESTAMP_NEEDS_STAMP {
+            let ns = self.owner_elapsed_ns();
+            let stamped = ns + 1;
+            let _ = self.body_dropped_at_ns.compare_exchange(
+                ATTEMPT_TIMESTAMP_NEEDS_STAMP,
+                stamped,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
+            Some(self.epoch + Duration::from_nanos(ns))
         } else {
             Some(self.epoch + Duration::from_nanos(encoded - 1))
         }
@@ -2394,33 +2519,48 @@ impl AppendSessionTask {
         // A9: session failure is final_err, wrapped in IndefiniteAppendError if final_err is
         // definite and any batch's outcome was wrapped.
         let session_failure = final_err.clone().with_prior_uncertainty(any_batch_wrapped);
-
-        let (queued, wake) = {
-            let _gate = self.gate.lock().unwrap();
-            let wake = self.lifecycle.set_terminal_err(session_failure.clone());
-            (self.state.drain_queued_commands(), wake)
-        };
-        wake.fire();
         let closed_err = AppendSessionError::SessionClosed(SessionClosedError::new_with_context(
             Some(session_failure.clone()),
             self.context.clone(),
         ));
+        let base_seq = self.state.inflight_appends.front().map_or(0, |a| a.seq);
+        let inflight_outcomes: Vec<AppendSessionError> = self
+            .state
+            .inflight_appends
+            .iter()
+            .enumerate()
+            .map(|(i, append)| {
+                let base = if gets_closed_err(i, append) {
+                    closed_err.clone()
+                } else {
+                    final_err.clone()
+                };
+                base.with_prior_uncertainty(append.prior_uncertainty)
+            })
+            .collect();
 
-        for (i, append) in self.state.inflight_appends.drain(..).enumerate() {
-            let base = if gets_closed_err(i, &append) {
-                closed_err.clone()
-            } else {
-                final_err.clone()
-            };
+        let (queued, wake) = {
+            let _gate = self.gate.lock().unwrap();
+            // Publish exact per-batch terminal classifications BEFORE exposing `terminal_err` on
+            // `lifecycle` so a concurrent `ProducerTask::drop` never assigns the first batch's
+            // definite rejection to later in-flight batches (`A6a`, `A6b`, `A9`).
+            self.sent_tracker.publish_terminal(
+                session_failure.clone(),
+                base_seq,
+                inflight_outcomes.clone(),
+            );
+            let wake = self.lifecycle.set_terminal_err(session_failure.clone());
+            (self.state.drain_queued_commands(), wake)
+        };
+        wake.fire();
+
+        for (append, outcome) in self.state.inflight_appends.drain(..).zip(inflight_outcomes) {
             let InflightAppend {
-                ack_tx,
-                _permit,
-                prior_uncertainty,
-                ..
+                ack_tx, _permit, ..
             } = append;
             drop(_permit);
             self.state.unacked_batches.fetch_sub(1, Ordering::Release);
-            send_oneshot_isolated(ack_tx, Err(base.with_prior_uncertainty(prior_uncertainty)));
+            send_oneshot_isolated(ack_tx, Err(outcome));
         }
 
         for cmd in queued {
@@ -3588,5 +3728,111 @@ mod tests {
             ),
             "{err1:?}"
         );
+    }
+
+    #[test]
+    fn acquire_guard_drop_with_reentrant_waker_destructor_does_not_deadlock() {
+        use std::task::{Context, Wake, Waker};
+
+        use super::AppendPermits;
+
+        struct ReentrantDropWake {
+            permits: AppendPermits,
+            observed_on_drop: Arc<AtomicUsize>,
+        }
+        #[allow(clippy::manual_noop_waker)]
+        impl Wake for ReentrantDropWake {
+            fn wake(self: Arc<Self>) {}
+            fn wake_by_ref(self: &Arc<Self>) {}
+        }
+        impl Drop for ReentrantDropWake {
+            fn drop(&mut self) {
+                let bytes = self.permits.in_flight_bytes();
+                self.observed_on_drop.store(bytes, Ordering::SeqCst);
+            }
+        }
+
+        let permits = AppendPermits::new(Some(1), 100);
+        let p1 = permits.try_acquire(100).unwrap();
+
+        let observed = Arc::new(AtomicUsize::new(usize::MAX));
+        let mut fut = Box::pin(permits.acquire(50));
+        {
+            let hook = Arc::new(ReentrantDropWake {
+                permits: permits.clone(),
+                observed_on_drop: observed.clone(),
+            });
+            let waker = Waker::from(hook);
+            assert!(
+                fut.as_mut()
+                    .poll(&mut Context::from_waker(&waker))
+                    .is_pending()
+            );
+        }
+        // Grant the waiting future by dropping p1, leaving Tokio's oneshot receiver as the sole
+        // owner of the custom waker, then cancel the granted `acquire` future.
+        drop(p1);
+        // Dropping `fut` triggers `AcquireGuard::drop`: closing/inspecting `rx` must drop the
+        // receiver's waker strictly outside `PermitsState` mutex so `in_flight_bytes()` does not
+        // deadlock.
+        drop(fut);
+        assert_ne!(
+            observed.load(Ordering::SeqCst),
+            usize::MAX,
+            "waker destructor must have run and read in_flight_bytes()"
+        );
+        assert_eq!(permits.in_flight_bytes(), 0);
+        assert!(permits.try_acquire(100).is_some());
+    }
+
+    #[test]
+    fn attempt_sync_timestamps_use_session_runtime_clock_across_runtimes() {
+        use std::time::Duration;
+
+        use super::AttemptSync;
+
+        let rt_session = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .unwrap();
+        let rt_conn = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .unwrap();
+
+        let (sync, session_t0) = rt_session.block_on(async {
+            let t0 = tokio::time::Instant::now();
+            (AttemptSync::new(), t0)
+        });
+
+        // Advance pooled connection runtime by one full hour, then invoke body-stream callbacks
+        // from that runtime.
+        rt_conn.block_on(async {
+            tokio::time::advance(Duration::from_secs(3600)).await;
+            sync.record_write_progress();
+            sync.record_batch_finished();
+            sync.mark_body_dropped();
+        });
+
+        rt_session.block_on(async {
+            assert!(
+                sync.last_write_progress()
+                    .saturating_duration_since(session_t0)
+                    < Duration::from_secs(1),
+                "write progress must be stamped on session clock"
+            );
+            let fin = sync.finish_time(0).expect("finish time recorded");
+            assert!(
+                fin.saturating_duration_since(session_t0) < Duration::from_secs(1),
+                "batch finish time must be stamped on session clock"
+            );
+            let dropped = sync.body_dropped_at().expect("body dropped recorded");
+            assert!(
+                dropped.saturating_duration_since(session_t0) < Duration::from_secs(1),
+                "body drop time must be stamped on session clock"
+            );
+        });
     }
 }

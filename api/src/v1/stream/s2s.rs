@@ -6,7 +6,7 @@ use std::{
 };
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use flate2::{Compression, bufread::GzDecoder, write::GzEncoder};
+use flate2::{Compression, bufread::MultiGzDecoder, write::GzEncoder};
 use futures_core::Stream;
 use strum::FromRepr;
 
@@ -483,7 +483,7 @@ impl CompressedData {
                 Ok(self.payload)
             }
             CompressionAlgorithm::Gzip => {
-                let mut decoder = GzDecoder::new(&self.payload[..]);
+                let mut decoder = MultiGzDecoder::new(&self.payload[..]);
                 read_to_end_limited(&mut decoder, initial_capacity)
             }
             CompressionAlgorithm::Zstd => {
@@ -1399,5 +1399,49 @@ mod test {
             assert!(compressed.payload.len() < 4096);
             assert_eq!(compressed.try_into_proto::<TestProto>().unwrap(), proto);
         }
+    }
+
+    #[test]
+    fn gzip_s2s_decodes_multi_member_payload_and_enforces_total_limit() {
+        let gzip_chunk = |data: &[u8]| {
+            let mut enc = GzEncoder::new(Vec::new(), Compression::default());
+            enc.write_all(data).unwrap();
+            enc.finish().unwrap()
+        };
+        let gzip_frame = |payload: &[u8]| {
+            let mut raw = Vec::with_capacity(4 + payload.len());
+            let body_len = 1 + payload.len();
+            raw.extend_from_slice(&(body_len as u32).to_be_bytes()[1..]);
+            raw.push((CompressionAlgorithm::Gzip as u8) << 5);
+            raw.extend_from_slice(payload);
+            Bytes::from(raw)
+        };
+        let decode_regular = |raw: Bytes| -> CompressedData {
+            let mut buf = BytesMut::from(raw.as_ref());
+            match FrameDecoder.decode(&mut buf).unwrap().unwrap() {
+                SessionMessage::Regular(data) => data,
+                SessionMessage::Terminal(_) => panic!("expected regular frame"),
+            }
+        };
+
+        let mut multi = gzip_chunk(b"first-");
+        multi.extend_from_slice(&gzip_chunk(b"second"));
+        assert_eq!(
+            decode_regular(gzip_frame(&multi))
+                .decompressed()
+                .unwrap()
+                .as_ref(),
+            b"first-second"
+        );
+
+        // Total output across all gzip members must still enforce MAX_DECOMPRESSED_PAYLOAD_BYTES.
+        let half_over = vec![0x55u8; MAX_DECOMPRESSED_PAYLOAD_BYTES / 2 + 1024];
+        let mut oversized_multi = gzip_chunk(&half_over);
+        oversized_multi.extend_from_slice(&gzip_chunk(&half_over));
+        assert!(
+            decode_regular(gzip_frame(&oversized_multi))
+                .decompressed()
+                .is_err()
+        );
     }
 }

@@ -1396,14 +1396,17 @@ fn decompress_body(
 
 /// Bit 63 clear: active request count in bits `0..63`.
 /// Bit 63 set: connection is idle; bits `0..63` hold nanoseconds since `epoch` on `owner_handle`'s
-/// Tokio clock.
+/// Tokio clock, or `PERMIT_IDLE_NEEDS_STAMP` when the last permit dropped during TLS teardown and
+/// the owner task must stamp the idle time on its own clock.
 const PERMIT_IDLE_BIT: u64 = 1 << 63;
+const PERMIT_IDLE_NEEDS_STAMP: u64 = u64::MAX;
+const PERMIT_MAX_ELAPSED_NANOS: u64 = (PERMIT_IDLE_NEEDS_STAMP & !PERMIT_IDLE_BIT) - 1;
 
 struct PermitState {
-    /// Owning Tokio runtime handle (captured when the connection is spawned). Entering this
-    /// handle before calling `epoch.elapsed()` in `RequestPermit::drop` ensures idle timestamps
-    /// are always measured on the connection owner's clock even when a permit is dropped on
-    /// another runtime with an independently paused clock.
+    /// Owning Tokio runtime handle (captured when the connection is spawned). Sampling
+    /// `epoch.elapsed()` on `owner_handle`'s clock keeps idle deadlines accurate across paused
+    /// runtimes, while falling back to `PERMIT_IDLE_NEEDS_STAMP` during thread-local teardown so
+    /// `RequestPermit::drop` never panics or aborts.
     owner_handle: Option<tokio::runtime::Handle>,
     epoch: Instant,
     packed: AtomicU64,
@@ -1457,13 +1460,46 @@ impl PermitState {
         }
     }
 
-    fn idle_deadline(&self, idle_timeout: Duration) -> Option<Instant> {
-        let cur = self.packed.load(Ordering::Acquire);
-        if cur & PERMIT_IDLE_BIT != 0 {
-            let elapsed_nanos = cur & !PERMIT_IDLE_BIT;
+    fn decode_deadline(&self, raw: u64, idle_timeout: Duration) -> Option<Instant> {
+        if raw & PERMIT_IDLE_BIT != 0 && raw != PERMIT_IDLE_NEEDS_STAMP {
+            let elapsed_nanos = raw & !PERMIT_IDLE_BIT;
             Some(self.epoch + Duration::from_nanos(elapsed_nanos) + idle_timeout)
         } else {
             None
+        }
+    }
+
+    /// Return the connection's idle expiry deadline on the owning runtime's clock.
+    ///
+    /// Called exclusively on the connection owner task (or unit tests on a live runtime). If the
+    /// last permit dropped during TLS teardown (`PERMIT_IDLE_NEEDS_STAMP`), atomically stamps the
+    /// idle transition on the owner clock now.
+    fn idle_deadline(&self, idle_timeout: Duration) -> Option<Instant> {
+        let mut cur = self.packed.load(Ordering::Acquire);
+        loop {
+            if cur == PERMIT_IDLE_NEEDS_STAMP {
+                let elapsed_nanos =
+                    self.epoch
+                        .elapsed()
+                        .as_nanos()
+                        .min(u128::from(PERMIT_MAX_ELAPSED_NANOS)) as u64;
+                let stamped = PERMIT_IDLE_BIT | elapsed_nanos;
+                match self.packed.compare_exchange_weak(
+                    cur,
+                    stamped,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => {
+                        return Some(
+                            self.epoch + Duration::from_nanos(elapsed_nanos) + idle_timeout,
+                        );
+                    }
+                    Err(actual) => cur = actual,
+                }
+            } else {
+                return self.decode_deadline(cur, idle_timeout);
+            }
         }
     }
 }
@@ -1488,19 +1524,17 @@ impl Drop for RequestPermit {
                     Err(actual) => cur = actual,
                 }
             } else {
-                let elapsed_nanos = {
-                    let _enter = self
-                        .state
-                        .owner_handle
-                        .as_ref()
-                        .map(tokio::runtime::Handle::enter);
-                    self.state
-                        .epoch
-                        .elapsed()
-                        .as_nanos()
-                        .min((PERMIT_IDLE_BIT - 1) as u128) as u64
+                let next = match crate::session::try_elapsed_on_runtime(
+                    self.state.owner_handle.as_ref(),
+                    self.state.epoch,
+                ) {
+                    Some(elapsed) => {
+                        let elapsed_nanos =
+                            elapsed.as_nanos().min(u128::from(PERMIT_MAX_ELAPSED_NANOS)) as u64;
+                        PERMIT_IDLE_BIT | elapsed_nanos
+                    }
+                    None => PERMIT_IDLE_NEEDS_STAMP,
                 };
-                let next = PERMIT_IDLE_BIT | elapsed_nanos;
                 match self.state.packed.compare_exchange_weak(
                     cur,
                     next,
@@ -3611,5 +3645,81 @@ mod tests {
             drop(resp2);
             pool.close();
         });
+    }
+
+    #[test]
+    fn request_permit_dropped_during_tls_teardown_does_not_panic_and_still_reaps() {
+        let connector = DuplexH2Connector::new();
+        let pool = test_pool_with(connector.clone(), Http2Config::new());
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .unwrap();
+
+        let resp = rt.block_on(async {
+            let req = RequestBuilder::get("http://origin-tls:8080/stream".parse().unwrap())
+                .build()
+                .unwrap();
+            pool.init_streaming(req).await.unwrap()
+        });
+        assert_eq!(host_connection_count(&pool, "http://origin-tls:8080"), 1);
+
+        // Drop the response (and its last RequestPermit) inside a thread-local destructor after
+        // touching Tokio's context TLS on that thread so Tokio's TLS can tear down first.
+        let handle = std::thread::spawn(move || {
+            thread_local! {
+                static HELD: std::cell::RefCell<Option<StreamingResponse>> =
+                    const { std::cell::RefCell::new(None) };
+            }
+            let _ = tokio::runtime::Handle::try_current();
+            HELD.with(|slot| *slot.borrow_mut() = Some(resp));
+            let _ = tokio::runtime::Handle::try_current();
+        });
+        handle
+            .join()
+            .expect("TLS destructor thread must exit cleanly without panicking or aborting");
+
+        // Owner runtime still observes the idle transition and reaps after IDLE_TIMEOUT.
+        rt.block_on(async {
+            tokio::task::yield_now().await;
+            tokio::time::advance(IDLE_TIMEOUT + Duration::from_secs(1)).await;
+            for _ in 0..10 {
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(host_connection_count(&pool, "http://origin-tls:8080"), 0);
+            assert_eq!(connector.active_connections.load(Ordering::SeqCst), 0);
+            pool.close();
+        });
+
+        // Also test a `thread_local!` current-thread Tokio runtime dropping a live task holding
+        // the last `RequestPermit` during TLS destruction without firing any panic.
+        let handle2 = std::thread::spawn(move || {
+            thread_local! {
+                static RT: tokio::runtime::Runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+            }
+            RT.with(|rt| {
+                rt.block_on(async {
+                    let conn = DuplexH2Connector::new();
+                    let p = test_pool_with(conn, Http2Config::new());
+                    let req = RequestBuilder::get("http://origin-tls2:8080/s".parse().unwrap())
+                        .build()
+                        .unwrap();
+                    let resp = p.init_streaming(req).await.unwrap();
+                    tokio::spawn(async move {
+                        let _hold = resp;
+                        std::future::pending::<()>().await;
+                    });
+                    tokio::task::yield_now().await;
+                });
+            });
+        });
+        handle2
+            .join()
+            .expect("thread-local Runtime teardown must not panic in RequestPermit::drop");
     }
 }

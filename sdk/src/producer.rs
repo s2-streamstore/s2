@@ -528,7 +528,7 @@ impl PartialBatch {
                 self.records = std::mem::take(&mut *recycled);
             }
             self.batch_match_seq = match_seq_num;
-            let now = Instant::now();
+            let now = shared.owner_now();
             self.started_at = Some(now);
             let (writer, outcome) = BatchOutcomeWriter::new(
                 shared.lifecycle.clone(),
@@ -615,6 +615,10 @@ struct ProducerShared {
     cmd_tx: mpsc::UnboundedSender<Command>,
     permits: AppendPermits,
     max_batch_bytes: usize,
+    linger_duration: Duration,
+    /// Owning Tokio runtime of `ProducerTask` so linger timestamps and expiration checks under
+    /// `gate` always use the producer driver's clock rather than a caller's clock.
+    owner_handle: Option<tokio::runtime::Handle>,
     fencing_token_len: usize,
     match_seq_exhausted: AtomicBool,
     has_partial: AtomicBool,
@@ -629,7 +633,19 @@ struct ProducerShared {
     context: ErrorContext,
 }
 
+fn drop_records_isolated(mut records: Vec<AppendRecord>) {
+    while let Some(record) = records.pop() {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            drop(record);
+        }));
+    }
+}
+
 impl ProducerShared {
+    fn owner_now(&self) -> Instant {
+        crate::session::try_now_on_runtime(self.owner_handle.as_ref()).unwrap_or_else(Instant::now)
+    }
+
     fn is_closing_or_closed(&self) -> bool {
         // Ignore a clean `session_lifecycle` close here: if `client.close()` aborts an idle owned
         // session while the producer still holds a partial batch, `ProducerTask` drives
@@ -657,7 +673,13 @@ impl ProducerShared {
     }
 
     fn recycle_records(&self, mut records: Vec<AppendRecord>) {
-        records.clear();
+        // Isolate each record's destructor so a panicking `Bytes::from_owner` payload cannot abort
+        // `ProducerTask` or leak subsequent records.
+        while let Some(record) = records.pop() {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                drop(record);
+            }));
+        }
         if records.capacity() == 0 {
             return;
         }
@@ -675,9 +697,11 @@ impl ProducerShared {
             permit,
             ..
         } = batch;
-        drop(records);
         drop(permit);
         outcome_writer.resolve(Err(err.clone()));
+        // Isolate payload destruction AFTER settling tickets so a panicking `Bytes::from_owner`
+        // destructor can never skip settling remaining batches or `lifecycle.finish`.
+        drop_records_isolated(records);
     }
 
     fn submit_with_permit(
@@ -714,12 +738,18 @@ impl ProducerShared {
                 self.match_seq_exhausted.store(true, Ordering::Release);
             }
 
+            let partial_expired = !self.linger_duration.is_zero()
+                && gate.partial.started_at.is_some_and(|started_at| {
+                    started_at
+                        .checked_add(self.linger_duration)
+                        .is_some_and(|deadline| self.owner_now() >= deadline)
+                });
+
             if !gate.partial.is_empty()
-                && gate.partial.would_overflow(metered)
-                && let Some(overflow_batch) =
-                    gate.take_partial(&self.has_partial, &self.next_batch_id)
+                && (gate.partial.would_overflow(metered) || partial_expired)
+                && let Some(cut_batch) = gate.take_partial(&self.has_partial, &self.next_batch_id)
                 && let Err(mpsc::error::SendError(Command::Batch(unsent))) =
-                    self.cmd_tx.send(Command::Batch(overflow_batch))
+                    self.cmd_tx.send(Command::Batch(cut_batch))
             {
                 let err = self.session_closed_err(true);
                 unsent_to_fail = Some((unsent, err.clone()));
@@ -856,6 +886,8 @@ impl Producer {
             cmd_tx,
             permits,
             max_batch_bytes,
+            linger_duration: config.linger,
+            owner_handle: tokio::runtime::Handle::try_current().ok(),
             fencing_token_len,
             match_seq_exhausted,
             has_partial: AtomicBool::new(false),
@@ -1209,6 +1241,7 @@ struct UnsubmittedBatch {
     /// Declared before `outcome_writer` so implicit drop releases bytes before settling tickets.
     _permit: AppendPermit,
     outcome_writer: BatchOutcomeWriter,
+    submit_err: Box<AppendSessionError>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1349,9 +1382,28 @@ impl Drop for ProducerTask {
         self.session.abort_dropped();
         let sent_watermark = self.session.freeze_sent_watermark();
 
-        let session_fallback_err = self
-            .session
-            .terminal_err()
+        // Snapshot remaining ticket outcomes newest-to-oldest BEFORE settling in FIFO order.
+        // Because `AppendSessionTask` settles strictly in submission order, reverse polling
+        // guarantees the resolved set is always a contiguous prefix and cannot invert batch k
+        // (fallback) before batch k+1 (`Ok`) (`A6a`, `A6d`, `A10c`).
+        let mut snapshot: Vec<_> = self
+            .pending_batch_acks
+            .iter_mut()
+            .rev()
+            .map(|p| p.ticket.try_ack())
+            .collect();
+
+        // Read the session's terminal classification and terminal error AFTER the reverse snapshot
+        // so any concurrent `settle_terminal_error` that raced with the snapshot provides exact
+        // per-batch classifications (`A6a`, `A6b`, `A9`).
+        let terminal = self.session.terminal_classification();
+        let session_err_now = terminal
+            .as_ref()
+            .map(|t| t.session_failure.clone())
+            .or_else(|| self.session.terminal_err());
+
+        let session_fallback_err = session_err_now
+            .clone()
             .or_else(|| existing_err.clone())
             .or_else(|| errors.first_non_closed.clone())
             .or_else(|| errors.first_closed_cause.clone())
@@ -1364,7 +1416,7 @@ impl Drop for ProducerTask {
 
         let mut had_unresolved_pending = false;
         while let Some(mut pending) = self.pending_batch_acks.pop_front() {
-            let batch_ack = match pending.ticket.try_ack() {
+            let batch_ack = match snapshot.pop().expect("one snapshot per pending batch") {
                 Some(res) => {
                     if let Err(err) = &res {
                         errors.record(err);
@@ -1373,7 +1425,9 @@ impl Drop for ProducerTask {
                 }
                 None => {
                     had_unresolved_pending = true;
-                    if pending.ticket.submit_seq() < sent_watermark {
+                    if let Some(ref t) = terminal {
+                        Err(t.outcome_for(pending.ticket.submit_seq(), &self.shared.context))
+                    } else if pending.ticket.submit_seq() < sent_watermark {
                         Err(session_fallback_err.clone())
                     } else {
                         Err(unsent_fallback_err.clone())
@@ -1399,12 +1453,16 @@ impl Drop for ProducerTask {
             );
         }
 
+        let non_closed_unsub_err = unsubmitted.as_ref().and_then(|u| {
+            (!matches!(u.submit_err.as_ref(), AppendSessionError::SessionClosed(_)))
+                .then(|| (*u.submit_err).clone())
+        });
+
         // Producer `close()` and `flush()` report the owned session's terminal failure (`A9`),
         // never promoting a per-batch `SessionClosedError` above it.
-        let final_result = if let Some(err) = self
-            .session
-            .terminal_err()
+        let final_result = if let Some(err) = session_err_now
             .or(existing_err)
+            .or(non_closed_unsub_err)
             .or(errors.first_non_closed)
             .or(errors.first_closed_cause)
         {
@@ -1462,8 +1520,9 @@ impl ProducerTask {
         let res =
             self.session
                 .submit_parts(&records, match_seq_num, self.fencing_token.as_deref(), None);
-        self.shared.recycle_records(records);
-        match res {
+        // Register the batch ticket/writer BEFORE recycling `records` so a panicking
+        // `Bytes::from_owner` payload destructor can never lose the ticket or misclassify it.
+        let outcome = match res {
             Ok(ticket) => {
                 self.pending_batch_acks.push_back(PendingBatchAck {
                     ticket,
@@ -1473,11 +1532,14 @@ impl ProducerTask {
                 });
                 Ok(())
             }
-            Err(_) => Err(UnsubmittedBatch {
+            Err(submit_err) => Err(UnsubmittedBatch {
                 _permit: permit,
                 outcome_writer,
+                submit_err: Box::new(submit_err),
             }),
-        }
+        };
+        self.shared.recycle_records(records);
+        outcome
     }
 
     /// Inspect `gate.partial` and cut/submit it if eligible and strictly ordered after all
@@ -1616,10 +1678,16 @@ impl ProducerTask {
         if let Some(UnsubmittedBatch {
             _permit,
             outcome_writer,
+            submit_err,
         }) = unsubmitted
         {
             drop(_permit);
-            outcome_writer.resolve(Err(unsent_err.clone()));
+            let batch_err = if matches!(submit_err.as_ref(), AppendSessionError::SessionClosed(_)) {
+                unsent_err.clone()
+            } else {
+                *submit_err
+            };
+            outcome_writer.resolve(Err(batch_err));
         }
 
         let acked = self.shared.acked_through_id.load(Ordering::Acquire);
@@ -1890,6 +1958,11 @@ impl ProducerTask {
 
         let session_res = self.session.close().await;
 
+        let non_closed_submit_err = self.detached_unsubmitted.as_ref().and_then(|u| {
+            (!matches!(u.submit_err.as_ref(), AppendSessionError::SessionClosed(_)))
+                .then(|| (*u.submit_err).clone())
+        });
+
         let (queued_cmds, partial_batch, has_unsubmitted, wake) = {
             let mut gate = self.shared.gate.lock().unwrap();
             let queued = drain_queued_commands(&mut self.cmd_rx);
@@ -1899,6 +1972,10 @@ impl ProducerTask {
                 || queued.iter().any(|cmd| matches!(cmd, Command::Batch(_)));
             let wake = match &session_res {
                 Err(err) => self.shared.lifecycle.set_terminal_err(err.clone()),
+                Ok(()) if non_closed_submit_err.is_some() => self
+                    .shared
+                    .lifecycle
+                    .set_terminal_err(non_closed_submit_err.clone().expect("checked is_some")),
                 Ok(()) if has_unsubmitted => {
                     self.shared
                         .lifecycle
@@ -1917,9 +1994,13 @@ impl ProducerTask {
 
         // Obtain the owned session's exact failure (A9). If the owned session closed cleanly on
         // abort (`A8c`), preserve `Ok(())` when this producer also has no unsubmitted work, and
-        // fail with `AbortedError` (`E6`) only if unsubmitted work was lost.
+        // fail with `AbortedError` (`E6`) (or the direct submit error if frame encoding failed)
+        // only if unsubmitted work was lost.
         let final_result = match session_res {
             Err(err) => Err(err),
+            Ok(()) if non_closed_submit_err.is_some() => {
+                Err(non_closed_submit_err.expect("checked is_some"))
+            }
             Ok(()) if has_unsubmitted => {
                 Err(AppendSessionError::Aborted(AbortedError::new_with_context(
                     self.shared.abort.reason(),
@@ -2453,6 +2534,8 @@ mod tests {
             cmd_tx: cmd_tx.clone(),
             permits,
             max_batch_bytes: config.max_batch_bytes,
+            linger_duration: config.linger,
+            owner_handle: tokio::runtime::Handle::try_current().ok(),
             fencing_token_len: 0,
             match_seq_exhausted: AtomicBool::new(false),
             has_partial: AtomicBool::new(false),
@@ -2654,6 +2737,9 @@ mod tests {
         let mut term_fut = Box::pin(task2.terminate(Some(UnsubmittedBatch {
             _permit: p_unsub,
             outcome_writer: w_unsub,
+            submit_err: Box::new(AppendSessionError::SessionClosed(SessionClosedError::new(
+                None,
+            ))),
         })));
         assert!(
             term_fut
@@ -2690,5 +2776,242 @@ mod tests {
             .wait_closed()
             .await
             .expect("explicitly aborting an idle producer via terminate(None) must close cleanly");
+    }
+
+    #[tokio::test]
+    async fn producer_task_drop_preserves_per_batch_terminal_classification_on_concurrent_rejection()
+     {
+        use http::StatusCode;
+
+        use crate::error::ServerError;
+
+        let (mut task, shared, _cmd_tx) = test_producer_task_parts();
+        let forbidden = AppendSessionError::Server(
+            ServerError::new(StatusCode::FORBIDDEN, "permission denied")
+                .with_code("permission_denied"),
+        );
+        let closed_forbidden = AppendSessionError::SessionClosed(
+            SessionClosedError::new_with_context(Some(forbidden.clone()), shared.context.clone()),
+        );
+
+        let (tx0, rx0) = oneshot::channel();
+        let (tx1, rx1) = oneshot::channel();
+        let (_hold0, _hold1) = (tx0, tx1);
+
+        let p0 = shared.permits.try_acquire(16).unwrap();
+        let (mut w0, o0) = BatchOutcomeWriter::new(
+            shared.lifecycle.clone(),
+            shared.unacked_records.clone(),
+            shared.context.clone(),
+        );
+        w0.record_count = 1;
+        shared.unacked_records.fetch_add(1, Ordering::Release);
+        let mut rt0 = RecordSubmitTicket::new(o0, 0);
+
+        let p1 = shared.permits.try_acquire(16).unwrap();
+        let (mut w1, o1) = BatchOutcomeWriter::new(
+            shared.lifecycle.clone(),
+            shared.unacked_records.clone(),
+            shared.context.clone(),
+        );
+        w1.record_count = 1;
+        shared.unacked_records.fetch_add(1, Ordering::Release);
+        let mut rt1 = RecordSubmitTicket::new(o1, 0);
+
+        task.pending_batch_acks.push_back(PendingBatchAck {
+            ticket: BatchSubmitTicket::for_test(
+                rx0,
+                0,
+                shared.session_lifecycle.clone(),
+                shared.context.clone(),
+            ),
+            batch_max_id: 1,
+            permit: Some(p0),
+            outcome_writer: Some(w0),
+        });
+        task.pending_batch_acks.push_back(PendingBatchAck {
+            ticket: BatchSubmitTicket::for_test(
+                rx1,
+                1,
+                shared.session_lifecycle.clone(),
+                shared.context.clone(),
+            ),
+            batch_max_id: 2,
+            permit: Some(p1),
+            outcome_writer: Some(w1),
+        });
+
+        // Simulate `AppendSessionTask::settle_terminal_error` having published terminal
+        // classification & terminal_err before sending individual batch oneshots.
+        task.session.publish_terminal_for_test(
+            forbidden.clone(),
+            0,
+            vec![forbidden.clone(), closed_forbidden],
+        );
+
+        drop(task);
+
+        let e0 = rt0.try_ack().expect("b0 settled").unwrap_err();
+        let e1 = rt1.try_ack().expect("b1 settled").unwrap_err();
+        assert!(matches!(e0, AppendSessionError::Server(_)), "{e0:?}");
+        assert!(
+            matches!(
+                e1,
+                AppendSessionError::SessionClosed(ref sc)
+                    if matches!(sc.failure(), Some(AppendSessionError::Server(_)))
+            ),
+            "second batch must receive SessionClosed(Some(Server)), got: {e1:?}"
+        );
+        assert!(e1.has_no_side_effects());
+        assert!(matches!(
+            shared.lifecycle.wait_closed().await.unwrap_err(),
+            AppendSessionError::Server(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn panicking_record_payload_destructor_never_strands_close_or_misclassifies_ticket() {
+        struct PanicPayload(&'static [u8]);
+        impl AsRef<[u8]> for PanicPayload {
+            fn as_ref(&self) -> &[u8] {
+                self.0
+            }
+        }
+        impl Drop for PanicPayload {
+            fn drop(&mut self) {
+                panic!("simulated user Bytes::from_owner panic");
+            }
+        }
+
+        // 1. Partial-batch teardown during ProducerTask::drop isolates payload panic and still
+        //    completes lifecycle & settles ticket.
+        {
+            let (task, shared, _cmd_tx) = test_producer_task_parts();
+            let body = bytes::Bytes::from_owner(PanicPayload(b"boom-partial"));
+            let rec = AppendRecord::new(body).unwrap();
+            let metered = rec.metered_bytes();
+            let permit = shared.permits.try_acquire(metered).unwrap();
+            let ticket = shared.submit_with_permit(permit, rec, metered).unwrap();
+
+            drop(task);
+
+            assert!(shared.lifecycle.is_closed());
+            assert_eq!(shared.unacked_records.load(Ordering::Acquire), 0);
+            assert_eq!(shared.permits.in_flight_bytes(), 0);
+            let err = ticket.await.unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    AppendSessionError::SessionClosed(ref sc)
+                        if matches!(sc.failure(), Some(AppendSessionError::Aborted(_)))
+                ),
+                "{err:?}"
+            );
+        }
+
+        // 2. Post-submit `submit_ready_batch` registers ticket before recycling records and
+        //    isolates payload panic so unsent classification stays `SessionClosed`.
+        {
+            let (mut task, shared, _cmd_tx) = test_producer_task_parts();
+            let body = bytes::Bytes::from_owner(PanicPayload(b"boom-submitted"));
+            let rec = AppendRecord::new(body).unwrap();
+            let metered = rec.metered_bytes();
+            let permit = shared.permits.try_acquire(metered).unwrap();
+            let ticket = shared.submit_with_permit(permit, rec, metered).unwrap();
+            let ready = {
+                let mut gate = shared.gate.lock().unwrap();
+                gate.take_partial(&shared.has_partial, &shared.next_batch_id)
+                    .unwrap()
+            };
+            assert!(task.submit_ready_batch(ready).is_ok());
+            assert_eq!(task.pending_batch_acks.len(), 1);
+            drop(task);
+
+            assert!(shared.lifecycle.is_closed());
+            assert_eq!(shared.unacked_records.load(Ordering::Acquire), 0);
+            let err = ticket.await.unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    AppendSessionError::SessionClosed(ref sc)
+                        if matches!(sc.failure(), Some(AppendSessionError::Aborted(_)))
+                ),
+                "submitted-but-unsent batch must stay SessionClosed(Some(Aborted)), got: {err:?}"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn expired_linger_partial_batch_cuts_before_accepting_late_record() {
+        let (mut task, shared, _cmd_tx) = test_producer_task_parts();
+        let rec1 = AppendRecord::new("first").unwrap();
+        let m1 = rec1.metered_bytes();
+        let p1 = shared.permits.try_acquire(m1).unwrap();
+        let _t1 = shared.submit_with_permit(p1, rec1, m1).unwrap();
+
+        // Advance well past default 5ms linger without polling ProducerTask.
+        tokio::time::advance(Duration::from_millis(30)).await;
+
+        let rec2 = AppendRecord::new("second").unwrap();
+        let m2 = rec2.metered_bytes();
+        let p2 = shared.permits.try_acquire(m2).unwrap();
+        let _t2 = shared.submit_with_permit(p2, rec2, m2).unwrap();
+
+        // First record must have been cut into its own Command::Batch (batch_id 0) before the
+        // second record started batch_id 1.
+        let mut saw_batch0 = false;
+        while let Ok(cmd) = task.cmd_rx.try_recv() {
+            if let Command::Batch(b) = cmd {
+                assert_eq!(b.batch_id, 0);
+                assert_eq!(b.records.len(), 1);
+                saw_batch0 = true;
+            }
+        }
+        assert!(
+            saw_batch0,
+            "expired partial batch must be cut before accepting later record"
+        );
+        let gate = shared.gate.lock().unwrap();
+        assert_eq!(gate.next_batch_id, 1);
+        assert_eq!(gate.partial.records.len(), 1);
+    }
+
+    #[test]
+    fn producer_linger_uses_owner_runtime_clock_not_caller_clock() {
+        let rt_owner = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .unwrap();
+        let rt_caller = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .unwrap();
+
+        let (task, shared, _cmd_tx) = rt_owner.block_on(async { test_producer_task_parts() });
+        let owner_t0 = rt_owner.block_on(async { Instant::now() });
+
+        // Advance caller runtime by one full hour before submitting.
+        rt_caller.block_on(async {
+            tokio::time::advance(Duration::from_secs(3600)).await;
+            let rec = AppendRecord::new("cross-rt").unwrap();
+            let m = rec.metered_bytes();
+            let p = shared.permits.try_acquire(m).unwrap();
+            let _t = shared.submit_with_permit(p, rec, m).unwrap();
+        });
+
+        // `started_at` must be stamped on the owner runtime's clock (near `owner_t0`), NOT 1 hour
+        // in the future.
+        rt_owner.block_on(async {
+            let started_at = shared.gate.lock().unwrap().partial.started_at.unwrap();
+            assert!(
+                started_at.saturating_duration_since(owner_t0) < Duration::from_secs(1),
+                "started_at must track owner clock, not caller's +1h clock"
+            );
+            tokio::time::advance(Duration::from_millis(10)).await;
+            assert!(Instant::now() >= started_at + shared.linger_duration);
+            drop(task);
+        });
     }
 }
