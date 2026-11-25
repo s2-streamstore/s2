@@ -369,6 +369,7 @@ fn spec_vectors_numbers() {
     assert!(!file.cases.is_empty());
 
     let dummy_batch = AppendRecordBatch::try_from_iter([AppendRecord::new("").unwrap()]).unwrap();
+    let http_endpoints = S2Endpoints::for_endpoint("http://localhost:8080").unwrap();
 
     for case in &file.cases {
         let label = format!(
@@ -433,6 +434,7 @@ fn spec_vectors_numbers() {
                     Ok(v) => {
                         let res = S2::new(
                             S2Config::new("token")
+                                .with_endpoints(http_endpoints.clone())
                                 .with_retry(RetryConfig::new().with_max_attempts(v)),
                         );
                         assert_eq!(res.is_ok(), expect_valid, "{label}");
@@ -544,12 +546,19 @@ fn spec_vectors_numbers() {
                         let dur = Duration::from_millis(ms);
                         match other {
                             "client.connection_timeout" => {
-                                let res =
-                                    S2::new(S2Config::new("token").with_connection_timeout(dur));
+                                let res = S2::new(
+                                    S2Config::new("token")
+                                        .with_endpoints(http_endpoints.clone())
+                                        .with_connection_timeout(dur),
+                                );
                                 assert_eq!(res.is_ok(), expect_valid, "{label}");
                             }
                             "client.request_timeout" => {
-                                let res = S2::new(S2Config::new("token").with_request_timeout(dur));
+                                let res = S2::new(
+                                    S2Config::new("token")
+                                        .with_endpoints(http_endpoints.clone())
+                                        .with_request_timeout(dur),
+                                );
                                 assert_eq!(res.is_ok(), expect_valid, "{label}");
                             }
                             "client.min_base_delay" => {
@@ -583,13 +592,24 @@ fn spec_vectors_numbers() {
     let bad_retry = RetryConfig::new()
         .with_min_base_delay(Duration::from_secs(2))
         .with_max_base_delay(Duration::from_secs(1));
-    let _err: ValidationError = S2::new(S2Config::new("token").with_retry(bad_retry))
-        .expect_err("min_base_delay > max_base_delay must fail S2::new");
+    let _err: ValidationError = S2::new(
+        S2Config::new("token")
+            .with_endpoints(http_endpoints.clone())
+            .with_retry(bad_retry),
+    )
+    .expect_err("min_base_delay > max_base_delay must fail S2::new");
 
     let equal_retry = RetryConfig::new()
         .with_min_base_delay(Duration::ZERO)
         .with_max_base_delay(Duration::ZERO);
-    assert!(S2::new(S2Config::new("token").with_retry(equal_retry)).is_ok());
+    assert!(
+        S2::new(
+            S2Config::new("token")
+                .with_endpoints(http_endpoints)
+                .with_retry(equal_retry),
+        )
+        .is_ok()
+    );
 }
 
 // ---------------------------------------------------------------------------

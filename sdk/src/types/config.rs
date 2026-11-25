@@ -755,7 +755,9 @@ impl RetryConfig {
     /// Set the total number of attempts including the initial try.
     ///
     /// Must be at least `1`; passing `0` fails with [`ValidationError`] in
-    /// [`S2::new`](crate::S2::new) or `with_retry`.
+    /// [`S2::new`](crate::S2::new), [`S2::with_retry`](crate::S2::with_retry),
+    /// [`S2Basin::with_retry`](crate::S2Basin::with_retry), or
+    /// [`S2Stream::with_retry`](crate::S2Stream::with_retry).
     ///
     /// Defaults to `3`.
     pub fn with_max_attempts(self, max_attempts: u32) -> Self {
