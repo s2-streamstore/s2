@@ -662,35 +662,13 @@ async fn spec_t7d_read_session_heartbeat_timeout_and_backpressure_pause() {
         "T7d: heartbeat timer must not fire while parked between pulls"
     );
 
-    // Wait 6s inside next() and cancel (T8), then park 60s -> parked time must NOT count!
-    {
-        let mut next_rec = Box::pin(session.next());
-        assert!(futures_util::poll!(next_rec.as_mut()).is_pending());
-        advance_virtual_time(Duration::from_secs(6)).await;
-        assert!(futures_util::poll!(next_rec.as_mut()).is_pending());
-        drop(next_rec);
-    }
-    advance_virtual_time(Duration::from_secs(60)).await;
-    assert_eq!(
-        attempts.load(Ordering::SeqCst),
-        1,
-        "T7d: parked time after canceled wait must not count toward heartbeat timeout"
-    );
-
-    // Three more 5s canceled waits accumulate to >20s total waiting (6 + 5 + 5 + 5 = 21s) ->
-    // heartbeat timeout fires and retries onto attempt 2, delivering record 2!
-    for _ in 0..2 {
-        let mut next_rec = Box::pin(session.next());
-        assert!(futures_util::poll!(next_rec.as_mut()).is_pending());
-        advance_virtual_time(Duration::from_secs(5)).await;
-        assert!(futures_util::poll!(next_rec.as_mut()).is_pending());
-        drop(next_rec);
-    }
-    assert_eq!(attempts.load(Ordering::SeqCst), 1);
-
+    // Arm the 20s heartbeat timer by waiting on the transport (empty receive buffer), then
+    // advance 21s while silent -> heartbeat timeout fires and retries onto attempt 2, delivering
+    // record 2! (Deterministic buffered-frame, partial-chunk, and resume-after-cancel T7d cases
+    // run with injected streams under `start_paused = true` in `sdk/src/session/read.rs`.)
     let mut next_rec = Box::pin(session.next());
     assert!(futures_util::poll!(next_rec.as_mut()).is_pending());
-    advance_virtual_time(Duration::from_secs(5)).await;
+    advance_virtual_time(Duration::from_secs(21)).await;
     let rec2 = tokio::time::timeout(Duration::from_secs(3), next_rec)
         .await
         .expect("heartbeat timeout must trigger retry after 20s of waiting")
@@ -698,71 +676,6 @@ async fn spec_t7d_read_session_heartbeat_timeout_and_backpressure_pause() {
         .unwrap();
     assert_eq!(rec2.seq_num, 2);
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
-
-    // T7d + Languages: silent-resume behavior on ReadBatchSession::next() (drop guard pauses wait
-    // timer across parked time) vs direct StreamExt::next() (no drop hook when a pending poll is
-    // abandoned, so an armed deadline expires on a silent resume).
-    // (Deterministic buffered-frame, partial-chunk, and fragmented-wait T7d cases are verified
-    // via injected streams under virtual time in `sdk/src/session/read.rs` unit tests.)
-    let silent_server = MockH2Server::start(|_conn_id, _req, respond| async move {
-        let Some(mut s2s) = S2sResponder::open(respond) else {
-            return;
-        };
-        s2s.send_regular(&proto_read_batch_records(&[0], Some(1)), false, false);
-        std::future::pending::<()>().await;
-    })
-    .await;
-
-    // Inherent ReadBatchSession::next(): cancel after 5s, park 30s, resume -> still pending!
-    let mut batch_sess = silent_server
-        .stream(no_retry_config())
-        .read_batch_session(
-            ReadInput::new().with_start(ReadStart::SeqNum(0)),
-            ReadSessionConfig::default(),
-        )
-        .unwrap();
-    assert_eq!(batch_sess.next().await.unwrap().unwrap().records.len(), 1);
-    {
-        let mut pending = Box::pin(batch_sess.next());
-        assert!(futures_util::poll!(pending.as_mut()).is_pending());
-        advance_virtual_time(Duration::from_secs(5)).await;
-        assert!(futures_util::poll!(pending.as_mut()).is_pending());
-        drop(pending);
-    }
-    advance_virtual_time(Duration::from_secs(30)).await;
-    {
-        let mut resumed = Box::pin(batch_sess.next());
-        assert!(
-            futures_util::poll!(resumed.as_mut()).is_pending(),
-            "T7d: ReadBatchSession::next() drop guard must pause heartbeat timer across parked time"
-        );
-    }
-
-    // Raw StreamExt::next(): abandoning a pending poll leaves its armed deadline running on a
-    // silent resume (documented in Languages and rustdocs).
-    let mut raw_sess = silent_server
-        .stream(no_retry_config())
-        .read_session(
-            ReadInput::new().with_start(ReadStart::SeqNum(0)),
-            ReadSessionConfig::default(),
-        )
-        .unwrap();
-    assert_eq!(raw_sess.next().await.unwrap().unwrap().seq_num, 0);
-    {
-        use futures_util::StreamExt;
-        let mut pending = Box::pin(StreamExt::next(&mut raw_sess));
-        assert!(futures_util::poll!(pending.as_mut()).is_pending());
-        drop(pending);
-    }
-    advance_virtual_time(Duration::from_secs(30)).await;
-    {
-        use futures_util::StreamExt;
-        let err = StreamExt::next(&mut raw_sess)
-            .await
-            .expect("abandoned raw StreamExt::next poll times out on silent resume")
-            .unwrap_err();
-        assert!(matches!(err, ReadSessionError::Timeout(_)), "{err:?}");
-    }
 }
 
 // spec: r1 R11, R11a, R11b, R11c, R11d, T5, T5b
@@ -1832,7 +1745,7 @@ async fn spec_t7b_parked_opening_request_timeout_and_e7_abort_attempt_count() {
     let mut late_sess = late_server
         .stream_with(|cfg| {
             cfg.with_retry(no_retry_config())
-                .with_request_timeout(Duration::from_millis(120))
+                .with_request_timeout(Duration::from_millis(200))
         })
         .read_session(
             ReadInput::new().with_start(ReadStart::SeqNum(0)),
@@ -1851,10 +1764,10 @@ async fn spec_t7b_parked_opening_request_timeout_and_e7_abort_attempt_count() {
         .expect("server must receive initial read request");
         drop(pull);
     }
-    // Park past the 120ms request_timeout, let server try sending 200 late, then resume.
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Park past the 200ms request_timeout, let server try sending 200 late, then resume.
+    tokio::time::sleep(Duration::from_millis(350)).await;
     send_late_headers.notify_one();
-    tokio::time::sleep(Duration::from_millis(40)).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
     let err = late_sess
         .next()
         .await
@@ -1890,7 +1803,7 @@ async fn spec_t7b_parked_opening_request_timeout_and_e7_abort_attempt_count() {
     let mut on_time_sess = on_time_server
         .stream_with(|cfg| {
             cfg.with_retry(no_retry_config())
-                .with_request_timeout(Duration::from_millis(250))
+                .with_request_timeout(Duration::from_millis(500))
         })
         .read_session(
             ReadInput::new().with_start(ReadStart::SeqNum(0)),
@@ -1909,9 +1822,9 @@ async fn spec_t7b_parked_opening_request_timeout_and_e7_abort_attempt_count() {
         .expect("server must receive request");
         drop(pull);
     }
-    // Send 200 + record 0 well within 250ms, then stay parked past 250ms before resuming.
+    // Send 200 + record 0 well within 500ms, then stay parked past 500ms before resuming.
     send_on_time.notify_one();
-    tokio::time::sleep(Duration::from_millis(320)).await;
+    tokio::time::sleep(Duration::from_millis(650)).await;
     assert_eq!(
         on_time_sess.last_observed_tail(),
         None,

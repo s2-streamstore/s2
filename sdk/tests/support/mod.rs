@@ -314,7 +314,22 @@ impl S2sResponder {
                     tokio::task::yield_now().await;
                 }
                 std::task::Poll::Pending => {
-                    // Window is genuinely exhausted: 0 stream credit remaining.
+                    // Confirm capacity stays exhausted briefly rather than seeing a transient
+                    // `Pending` while a `WINDOW_UPDATE` is still in flight.
+                    let reopened = tokio::time::timeout(
+                        Duration::from_millis(20),
+                        std::future::poll_fn(|cx| self.0.poll_capacity(cx)),
+                    )
+                    .await;
+                    if let Ok(Some(Ok(cap))) = reopened
+                        && cap > 0
+                    {
+                        let n = cap.min(frame.len());
+                        let _ = self.0.send_data(frame.slice(..n), false);
+                        total_sent += n;
+                        tokio::task::yield_now().await;
+                        continue;
+                    }
                     return total_sent;
                 }
                 _ => return total_sent,
