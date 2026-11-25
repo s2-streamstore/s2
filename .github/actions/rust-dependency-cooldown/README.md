@@ -24,9 +24,12 @@ rejected. The action prints the crate, version, advisory, and reason whenever it
 uses an exception. The exception waives only publication age; other dependency
 checks, including `cargo deny`, continue to apply.
 
-The exception file is distributed with this action. After merging an exception,
-update consuming repositories' pinned action or reusable-workflow commit to pick
-it up. Future releases of the same crate still have to satisfy the cooldown.
+Exceptions are loaded from this action's `security-exceptions.toml` and merged
+with repo-local exceptions from `.cargo/cooldown-exceptions.toml` (when present)
+or the path passed via the `exceptions` input. Consuming repositories can add a
+reviewed exception and bump `Cargo.lock` in the same PR without waiting on a
+central action update. Future releases of the same crate still have to satisfy
+the cooldown.
 
 Entries need no expiry field: an approved release follows the normal age check
 once it is old enough. Old entries may be removed in a later cleanup. An empty

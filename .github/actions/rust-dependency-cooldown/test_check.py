@@ -96,11 +96,13 @@ class CooldownSecurityExceptionTests(unittest.TestCase):
     def run_gate(
         self,
         publication_times: dict[str, dict[str, datetime]] | None = None,
+        extra_args: list[str] | None = None,
     ) -> tuple[int, str, str, list[str]]:
         published = publication_times or {
             "rustls": {"0.23.45": NOW - timedelta(days=1)},
         }
         output, errors = io.StringIO(), io.StringIO()
+        argv = ["check.py", "--repo-root", str(self.repo), *(extra_args or []), "HEAD"]
         with ExitStack() as stack:
             for name, value in {
                 "ACTION_ROOT": self.action,
@@ -110,9 +112,7 @@ class CooldownSecurityExceptionTests(unittest.TestCase):
                 "SECURITY_EXCEPTIONS": self.exceptions,
             }.items():
                 stack.enter_context(patch.object(check, name, value))
-            stack.enter_context(
-                patch.object(sys, "argv", ["check.py", "--repo-root", str(self.repo), "HEAD"])
-            )
+            stack.enter_context(patch.object(sys, "argv", argv))
             clock = stack.enter_context(patch.object(check, "datetime", wraps=datetime))
             clock.now.return_value = NOW
             lookup = stack.enter_context(
@@ -157,18 +157,42 @@ class CooldownSecurityExceptionTests(unittest.TestCase):
         self.assertIn("another-crate 1.0.0", errors)
         self.assertNotIn("rustls 0.23.45", errors)
 
-    def test_consumer_repository_cannot_supply_its_own_exception(self) -> None:
-        unapproved = {**APPROVED_EXCEPTION, "version": "0.23.46"}
-        consumer_action = self.repo / ".github" / "actions" / "rust-dependency-cooldown"
-        consumer_action.mkdir(parents=True)
-        for directory in [self.repo, self.repo / ".cargo", consumer_action]:
-            (directory / "security-exceptions.toml").write_text(exception_document(unapproved))
+    def test_consumer_repo_exceptions_file_is_loaded_and_validated(self) -> None:
+        repo_exception = {**APPROVED_EXCEPTION, "version": "0.23.46"}
+        repo_file = self.repo / ".cargo" / "cooldown-exceptions.toml"
+        repo_file.write_text(exception_document(repo_exception))
         self.write_lock(("rustls", "0.23.46", check.CRATES_IO_SOURCE))
+        status, output, errors, _ = self.run_gate(
+            {"rustls": {"0.23.46": NOW - timedelta(days=1)}}
+        )
+        self.assertEqual(status, 0, errors)
+        self.assertIn("rustls 0.23.46", output)
+
+        # Malformed repo exceptions fail closed.
+        repo_file.write_text("[[exception]")
         status, _, errors, _ = self.run_gate(
             {"rustls": {"0.23.46": NOW - timedelta(days=1)}}
         )
-        self.assertEqual(status, 1)
-        self.assertIn("rustls 0.23.46", errors)
+        self.assertEqual(status, 2)
+        self.assertIn("minimum-publish-age error", errors)
+
+        # Explicit --exceptions path is loaded and fails closed if missing.
+        repo_file.unlink()
+        custom = self.repo / ".github" / "exceptions.toml"
+        custom.parent.mkdir(parents=True)
+        custom.write_text(exception_document(repo_exception))
+        status, _, errors, _ = self.run_gate(
+            {"rustls": {"0.23.46": NOW - timedelta(days=1)}},
+            extra_args=["--exceptions", ".github/exceptions.toml"],
+        )
+        self.assertEqual(status, 0, errors)
+
+        status, _, errors, _ = self.run_gate(
+            {"rustls": {"0.23.46": NOW - timedelta(days=1)}},
+            extra_args=["--exceptions", ".github/missing.toml"],
+        )
+        self.assertEqual(status, 2)
+        self.assertIn("minimum-publish-age error", errors)
 
     def test_malformed_security_exceptions_fail_closed(self) -> None:
         documents = {

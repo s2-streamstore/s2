@@ -5,6 +5,10 @@ inputs:
   base-sha:
     description: Pull request base commit
     required: true
+  exceptions:
+    description: Optional repo-relative path to a TOML file of security exceptions (defaults to .cargo/cooldown-exceptions.toml if present)
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -14,12 +18,19 @@ runs:
       env:
         ACTION_PATH: ${{ github.action_path }}
         BASE_SHA: ${{ inputs.base-sha }}
+        EXCEPTIONS_PATH: ${{ inputs.exceptions }}
       run: |
+        args=(
+          --repo-root "$GITHUB_WORKSPACE"
+          --config "$GITHUB_WORKSPACE/.cargo/config.toml"
+          --allowlist "$ACTION_PATH/first-party-crates.txt"
+        )
+        if [ -n "$EXCEPTIONS_PATH" ]; then
+          args+=(--exceptions="$EXCEPTIONS_PATH")
+        fi
         env -i \
           HOME="$RUNNER_TEMP" \
           PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
           python3 "$ACTION_PATH/check.py" \
-            --repo-root "$GITHUB_WORKSPACE" \
-            --config "$GITHUB_WORKSPACE/.cargo/config.toml" \
-            --allowlist "$ACTION_PATH/first-party-crates.txt" \
+            "${args[@]}" \
             "$BASE_SHA"
