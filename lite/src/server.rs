@@ -237,7 +237,7 @@ fn cli_env_hint(protocol: ServerProtocol, ip: IpAddr, port: u16, dashboard: bool
     ];
 
     if protocol.requires_ssl_no_verify() {
-        lines.push("export S2_SSL_NO_VERIFY=1".to_string());
+        lines.push("export S2_SSL_NO_VERIFY=true".to_string());
     }
 
     if dashboard {
@@ -1027,7 +1027,7 @@ mod tests {
                 "export S2_ACCOUNT_ENDPOINT=https://localhost:8443\n",
                 "export S2_BASIN_ENDPOINT=https://localhost:8443\n",
                 "export S2_ACCESS_TOKEN=ignored\n",
-                "export S2_SSL_NO_VERIFY=1",
+                "export S2_SSL_NO_VERIFY=true",
             )
         );
     }
