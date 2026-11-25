@@ -60,6 +60,8 @@ struct JsonDiff<'a> {
     left: &'a str,
     right: &'a str,
     differences: &'a [FieldDiff],
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    unresolved: Vec<&'static str>,
 }
 
 pub fn validate_args(args: &DiffArgs) -> Result<(), CliError> {
@@ -75,40 +77,48 @@ pub async fn run(s2: &s2_sdk::S2, args: DiffArgs) -> Result<DiffOutcome, CliErro
         right_label,
     } = resolve_args(&args)?;
 
-    let (left_view, right_view) = match (left, right) {
+    let (left_view, right_view, storage_class_unresolved) = match (left, right) {
         (DiffResource::Basin(left), DiffResource::Basin(right)) => {
             let (left_config, right_config) = tokio::try_join!(
                 ops::get_basin_config(s2, &left),
                 ops::get_basin_config(s2, &right),
             )?;
-            (basin_view(left_config)?, basin_view(right_config)?)
+            (basin_view(left_config)?, basin_view(right_config)?, false)
         }
         (DiffResource::Stream(left), DiffResource::Stream(right)) => {
             let (left_config, right_config) = tokio::try_join!(
                 ops::get_stream_config(s2, left),
                 ops::get_stream_config(s2, right),
             )?;
-            (stream_view(left_config)?, stream_view(right_config)?)
+            (stream_view(left_config)?, stream_view(right_config)?, false)
         }
         (DiffResource::Basin(basin), DiffResource::Stream(stream)) => {
             let (basin_config, stream_config) = tokio::try_join!(
                 ops::get_basin_config(s2, &basin),
                 ops::get_stream_config(s2, stream),
             )?;
-            (
-                basin_stream_defaults_view(basin_config)?,
-                stream_view(stream_config)?,
-            )
+            let default_sc =
+                if needs_default_storage_class_for_stream_diff(&basin_config, &stream_config) {
+                    ops::basin_default_storage_class(s2, &basin).await?
+                } else {
+                    None
+                };
+            stream_vs_basin_defaults_views(basin_config, stream_config, default_sc.as_deref())?
         }
         (DiffResource::Stream(stream), DiffResource::Basin(basin)) => {
             let (stream_config, basin_config) = tokio::try_join!(
                 ops::get_stream_config(s2, stream),
                 ops::get_basin_config(s2, &basin),
             )?;
-            (
-                stream_view(stream_config)?,
-                basin_stream_defaults_view(basin_config)?,
-            )
+            let default_sc =
+                if needs_default_storage_class_for_stream_diff(&basin_config, &stream_config) {
+                    ops::basin_default_storage_class(s2, &basin).await?
+                } else {
+                    None
+                };
+            let (basin_view, stream_view, unresolved) =
+                stream_vs_basin_defaults_views(basin_config, stream_config, default_sc.as_deref())?;
+            (stream_view, basin_view, unresolved)
         }
         (DiffResource::AccessToken(left), DiffResource::AccessToken(right)) => {
             let (left_info, right_info) = tokio::try_join!(
@@ -118,6 +128,7 @@ pub async fn run(s2: &s2_sdk::S2, args: DiffArgs) -> Result<DiffOutcome, CliErro
             (
                 access_token_view(left_info)?,
                 access_token_view(right_info)?,
+                false,
             )
         }
         _ => unreachable!("diff arguments are resolved to matching resource types"),
@@ -125,9 +136,19 @@ pub async fn run(s2: &s2_sdk::S2, args: DiffArgs) -> Result<DiffOutcome, CliErro
 
     let differences = field_diffs(&left_view, &right_view);
     let has_differences = !differences.is_empty();
+    let unresolved = if storage_class_unresolved {
+        vec!["storage_class"]
+    } else {
+        Vec::new()
+    };
 
     match args.output {
-        DiffOutput::Text => print_text_diff(&left_label, &right_label, &differences),
+        DiffOutput::Text => print_text_diff(
+            &left_label,
+            &right_label,
+            &differences,
+            storage_class_unresolved,
+        ),
         DiffOutput::Json => println!(
             "{}",
             serde_json::to_string_pretty(&JsonDiff {
@@ -135,6 +156,7 @@ pub async fn run(s2: &s2_sdk::S2, args: DiffArgs) -> Result<DiffOutcome, CliErro
                 left: &args.left,
                 right: &args.right,
                 differences: &differences,
+                unresolved,
             })?
         ),
     }
@@ -461,6 +483,56 @@ fn basin_view(config: BasinConfig) -> Result<Value, CliError> {
     Ok(serde_json::to_value(BasinConfigView::from(config))?)
 }
 
+fn needs_default_storage_class_for_stream_diff(
+    basin_config: &BasinConfig,
+    stream_config: &StreamConfig,
+) -> bool {
+    basin_config
+        .default_stream_config()
+        .and_then(|c| c.storage_class())
+        .is_none()
+        && stream_config.storage_class().is_some()
+}
+
+/// Renders a basin's effective stream defaults and a concrete stream config for comparison.
+///
+/// When the basin leaves `default_stream_config.storage_class` unset so streams inherit the
+/// location default, fill in `default_storage_class` if known. If discovery is unavailable while
+/// the stream carries a server-resolved storage class, omit `storage_class` from both views and
+/// return `storage_class_unresolved = true` so inherited defaults are not reported as drift.
+fn stream_vs_basin_defaults_views(
+    basin_config: BasinConfig,
+    stream_config: StreamConfig,
+    default_storage_class: Option<&str>,
+) -> Result<(Value, Value, bool), CliError> {
+    let mut basin_defaults = basin_config
+        .default_stream_config()
+        .cloned()
+        .unwrap_or_default();
+    let mut storage_class_unresolved = false;
+
+    if basin_defaults.storage_class().is_none() {
+        if let Some(sc) = default_storage_class {
+            basin_defaults = basin_defaults.with_storage_class(sc.to_owned());
+        } else if stream_config.storage_class().is_some() {
+            storage_class_unresolved = true;
+        }
+    }
+
+    let mut basin_view = stream_view(basin_defaults)?;
+    let mut stream_view = stream_view(stream_config)?;
+    if storage_class_unresolved {
+        if let Some(map) = basin_view.as_object_mut() {
+            map.remove("storage_class");
+        }
+        if let Some(map) = stream_view.as_object_mut() {
+            map.remove("storage_class");
+        }
+    }
+    Ok((basin_view, stream_view, storage_class_unresolved))
+}
+
+#[cfg(test)]
 /// Renders a basin's effective stream defaults for comparison against a concrete stream.
 fn basin_stream_defaults_view(config: BasinConfig) -> Result<Value, CliError> {
     stream_view(config.default_stream_config().cloned().unwrap_or_default())
@@ -526,13 +598,24 @@ fn compact_duration(duration: std::time::Duration) -> String {
     rendered
 }
 
-fn print_text_diff(left_label: &str, right_label: &str, differences: &[FieldDiff]) {
+fn print_text_diff(
+    left_label: &str,
+    right_label: &str,
+    differences: &[FieldDiff],
+    storage_class_unresolved: bool,
+) {
     println!("{}", format!("--- {left_label}").red().bold());
     println!("{}", format!("+++ {right_label}").green().bold());
 
     if differences.is_empty() {
         println!();
         println!("{}", "✓ No differences".green().bold());
+        if storage_class_unresolved {
+            println!(
+                "{}",
+                "  (storage_class not compared: location default unavailable)".dimmed()
+            );
+        }
         return;
     }
 
@@ -541,6 +624,14 @@ fn print_text_diff(left_label: &str, right_label: &str, differences: &[FieldDiff
         println!("{}", difference.path.bold());
         print_value("-", difference.left.as_ref(), true);
         print_value("+", difference.right.as_ref(), false);
+    }
+
+    if storage_class_unresolved {
+        println!();
+        println!(
+            "{}",
+            "storage_class: not compared (location default unavailable)".dimmed()
+        );
     }
 }
 
@@ -949,5 +1040,65 @@ mod tests {
     #[test]
     fn omits_unchanged_fields() {
         assert!(field_diffs(&json!({"same": [1, 2]}), &json!({"same": [1, 2]})).is_empty());
+    }
+
+    #[test]
+    fn stream_vs_basin_defaults_uses_discovered_location_default() {
+        let basin = s2_sdk::types::BasinConfig::new();
+        let matching_stream = s2_sdk::types::StreamConfig::new().with_storage_class("express");
+        let (left, right, unresolved) =
+            super::stream_vs_basin_defaults_views(basin.clone(), matching_stream, Some("express"))
+                .expect("views render");
+        assert!(!unresolved);
+        assert!(field_diffs(&left, &right).is_empty());
+
+        let differing_stream = s2_sdk::types::StreamConfig::new().with_storage_class("standard");
+        let (left, right, unresolved) =
+            super::stream_vs_basin_defaults_views(basin, differing_stream, Some("express"))
+                .expect("views render");
+        assert!(!unresolved);
+        let diffs = field_diffs(&left, &right);
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(diffs[0].path, "storage_class");
+        assert_eq!(diffs[0].left, Some(json!("express")));
+        assert_eq!(diffs[0].right, Some(json!("standard")));
+    }
+
+    #[test]
+    fn stream_vs_basin_defaults_skips_unresolved_storage_class_without_discovery() {
+        let basin = s2_sdk::types::BasinConfig::new();
+        let stream = s2_sdk::types::StreamConfig::new().with_storage_class("express");
+        let (left, right, unresolved) =
+            super::stream_vs_basin_defaults_views(basin.clone(), stream, None)
+                .expect("views render");
+        assert!(unresolved);
+        assert!(field_diffs(&left, &right).is_empty());
+
+        let stream_with_other_diff = s2_sdk::types::StreamConfig::new()
+            .with_storage_class("express")
+            .with_retention_policy(s2_sdk::types::RetentionPolicy::Infinite);
+        let (left, right, unresolved) =
+            super::stream_vs_basin_defaults_views(basin, stream_with_other_diff, None)
+                .expect("views render");
+        assert!(unresolved);
+        let diffs = field_diffs(&left, &right);
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(diffs[0].path, "retention_policy");
+    }
+
+    #[test]
+    fn stream_vs_basin_defaults_compares_explicit_basin_storage_class_without_discovery() {
+        let basin = s2_sdk::types::BasinConfig::new().with_default_stream_config(
+            s2_sdk::types::StreamConfig::new().with_storage_class("standard"),
+        );
+        let stream = s2_sdk::types::StreamConfig::new().with_storage_class("express");
+        let (left, right, unresolved) =
+            super::stream_vs_basin_defaults_views(basin, stream, None).expect("views render");
+        assert!(!unresolved);
+        let diffs = field_diffs(&left, &right);
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(diffs[0].path, "storage_class");
+        assert_eq!(diffs[0].left, Some(json!("standard")));
+        assert_eq!(diffs[0].right, Some(json!("express")));
     }
 }

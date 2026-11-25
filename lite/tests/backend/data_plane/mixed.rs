@@ -6,7 +6,10 @@ use s2_common::{
     read_extent::{ReadLimit, ReadUntil},
     stream::{AppendInput, ListStreamsRequest, ReadEnd, ReadFrom, ReadStart},
 };
-use s2_lite::backend::error::{AppendError, CheckTailError, ListStreamsError, ReadError};
+use s2_lite::backend::error::{
+    AppendError, CheckTailError, DeleteStreamError, GetStreamConfigError, ListStreamsError,
+    ReadError,
+};
 use tokio::sync::Notify;
 
 use super::common::*;
@@ -45,18 +48,32 @@ async fn test_operations_on_nonexistent_basin() {
     .await;
     assert!(matches!(append_result, Err(AppendError::BasinNotFound(_))));
 
-    let check_tail_result = check_tail(&backend, basin_name.clone(), stream_name).await;
+    let check_tail_result = check_tail(&backend, basin_name.clone(), stream_name.clone()).await;
     assert!(matches!(
         check_tail_result,
         Err(CheckTailError::BasinNotFound(_))
     ));
 
     let list_streams_result = backend
-        .list_streams(basin_name, ListStreamsRequest::default())
+        .list_streams(basin_name.clone(), ListStreamsRequest::default())
         .await;
     assert!(matches!(
         list_streams_result,
         Err(ListStreamsError::BasinNotFound(_))
+    ));
+
+    let get_stream_config_result = backend
+        .get_stream_config(basin_name.clone(), stream_name.clone())
+        .await;
+    assert!(matches!(
+        get_stream_config_result,
+        Err(GetStreamConfigError::BasinNotFound(_))
+    ));
+
+    let delete_stream_result = backend.delete_stream(basin_name, stream_name).await;
+    assert!(matches!(
+        delete_stream_result,
+        Err(DeleteStreamError::BasinNotFound(_))
     ));
 }
 
