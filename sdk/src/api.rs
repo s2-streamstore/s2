@@ -6,7 +6,7 @@ use std::{
 };
 
 use async_stream::try_stream;
-use bytes::BytesMut;
+use bytes::Bytes;
 use futures_core::Stream;
 use futures_util::StreamExt;
 use http::{
@@ -22,7 +22,6 @@ use s2_api::v1::stream::{
 use s2_common::{basin::BASIN_HEADER, resources::PROVISION_RESULT_HEADER};
 use secrecy::ExposeSecret;
 use serde::de::DeserializeOwned;
-use tokio_util::codec::Decoder;
 use tracing::{Instrument, debug, debug_span};
 
 use crate::{
@@ -891,6 +890,18 @@ impl BasinClient {
     }
 }
 
+/// Reserve capacity for an in-progress straddled S2S frame in geometric steps bounded by 4x the
+/// bytes actually received so far, clamping to exact `total_size` once reached. This prevents a
+/// stalled 3-byte prefix from pre-allocating a 2.5 MiB buffer while keeping completed straddled
+/// frames at 1.0x capacity.
+fn reserve_for_partial_frame(buffer: &mut Vec<u8>, total_size: usize, incoming_len: usize) {
+    let next_len = buffer.len().saturating_add(incoming_len);
+    if next_len > buffer.capacity() {
+        let target = total_size.min(next_len.saturating_mul(4)).max(next_len);
+        buffer.reserve_exact(target.saturating_sub(buffer.len()));
+    }
+}
+
 fn decode_s2s_stream<T, E, S>(
     bytes_stream: S,
     stream_retire: Option<client::RetireHandle>,
@@ -901,12 +912,11 @@ fn decode_s2s_stream<T, E, S>(
 where
     T: Message + Default + 'static,
     E: TransportError + Send + 'static,
-    S: Stream<Item = Result<bytes::Bytes, client::HttpError>> + Send + 'static,
+    S: Stream<Item = Result<Bytes, client::HttpError>> + Send + 'static,
 {
     Box::pin(try_stream! {
         let mut bytes_stream = std::pin::pin!(bytes_stream);
-        let mut buffer = BytesMut::new();
-        let mut decoder = FrameDecoder;
+        let mut buffer = Vec::<u8>::new();
 
         while let Some(chunk) = bytes_stream.next().await {
             let mut chunk = chunk.map_err(|e| E::from_http(e, ctx.clone()))?;
@@ -934,13 +944,23 @@ where
                 };
                 let needed = total_size.saturating_sub(buffer.len());
                 if chunk.len() < needed {
-                    buffer.extend_from_slice(&chunk);
+                    if !chunk.is_empty() {
+                        reserve_for_partial_frame(&mut buffer, total_size, chunk.len());
+                        buffer.extend_from_slice(&chunk);
+                    }
                     continue;
                 }
                 if needed > 0 {
+                    buffer.reserve_exact(needed);
                     buffer.extend_from_slice(&chunk.split_to(needed));
                 }
-                match decoder.decode(&mut buffer) {
+                let mut frame = std::mem::take(&mut buffer);
+                let max_slack = (frame.len() / 8).max(4096);
+                if frame.capacity().saturating_sub(frame.len()) > max_slack {
+                    frame.shrink_to_fit();
+                }
+                let mut frame_bytes = Bytes::from(frame);
+                match FrameDecoder::decode_bytes(&mut frame_bytes) {
                     Ok(Some(msg)) => {
                         yield decode_s2s_message::<T, E>(
                             msg,
@@ -950,13 +970,13 @@ where
                             &ctx,
                         )?;
                     }
-                    Ok(None) => unreachable!("buffer holds complete frame"),
+                    Ok(None) => unreachable!("frame buffer holds complete frame"),
                     Err(err) => Err(E::from(ProtocolError::new_with_context(
                         format!("s2s frame decode: {err}"),
                         ctx.clone(),
                     )))?,
                 }
-                debug_assert!(buffer.is_empty());
+                debug_assert!(frame_bytes.is_empty());
             }
 
             loop {
@@ -978,6 +998,9 @@ where
                 }
             }
             if !chunk.is_empty() {
+                if let Ok(Some(total_size)) = FrameDecoder::peek_total_frame_len(&chunk) {
+                    reserve_for_partial_frame(&mut buffer, total_size, chunk.len());
+                }
                 buffer.extend_from_slice(&chunk);
             }
         }
@@ -1682,11 +1705,14 @@ mod tests {
         combined.extend_from_slice(&f0[2..]);
         combined.extend_from_slice(&f1);
         combined.extend_from_slice(&f2[..2]);
+        let combined_bytes = Bytes::from(combined);
+        let combined_start = combined_bytes.as_ptr() as usize;
+        let combined_end = combined_start + combined_bytes.len();
         let chunks = vec![
             Ok(Bytes::copy_from_slice(&f0[..1])),
             Ok(Bytes::copy_from_slice(&f0[1..2])),
             Ok(Bytes::new()),
-            Ok(Bytes::from(combined)),
+            Ok(combined_bytes),
             Ok(Bytes::copy_from_slice(&f2[2..])),
         ];
         let mut stream = decode_s2s_stream::<ReadBatch, crate::error::ReadSessionError, _>(
@@ -1701,6 +1727,14 @@ mod tests {
             decoded.push(item.unwrap().msg);
         }
         assert_eq!(decoded, vec![b0.clone(), b1.clone(), b2.clone()]);
+        // Verify f1 decoded zero-copy directly out of the `combined` chunk.
+        let b1_body = &decoded[1].records[0].body;
+        let body_start = b1_body.as_ptr() as usize;
+        let body_end = body_start + b1_body.len();
+        assert!(
+            body_start >= combined_start && body_end <= combined_end,
+            "expected f1 body to alias incoming chunk"
+        );
 
         // 2. Exhaustively verify every single 2-way split offset across the 3-frame wire buffer.
         for split in 0..=wire.len() {
@@ -1726,7 +1760,43 @@ mod tests {
             );
         }
 
-        // 3. Truncated trailing bytes must report ConnectionLost with the exact remaining count.
+        // 3. Single-byte chunks across all three frames and a large multi-chunk straddled frame
+        //    (exercises the multi-chunk accumulate branch).
+        let byte_chunks: Vec<_> = wire
+            .iter()
+            .map(|&b| Ok(Bytes::copy_from_slice(&[b])))
+            .collect();
+        let mut stream = decode_s2s_stream::<ReadBatch, crate::error::ReadSessionError, _>(
+            futures_util::stream::iter(byte_chunks),
+            None,
+            auth_client.clone(),
+            None,
+            ctx.clone(),
+        );
+        let mut decoded = Vec::new();
+        while let Some(item) = stream.next().await {
+            decoded.push(item.unwrap().msg);
+        }
+        assert_eq!(decoded, vec![b0.clone(), b1.clone(), b2.clone()]);
+
+        let large_batch = make_batch(99, &vec![0x5Au8; 300 * 1024]);
+        let large_frame = encode_regular_frame(CompressionAlgorithm::None, &large_batch).unwrap();
+        let large_chunks: Vec<_> = large_frame
+            .chunks(16 * 1024)
+            .map(|c| Ok(Bytes::copy_from_slice(c)))
+            .collect();
+        assert!(large_chunks.len() > 10);
+        let mut stream = decode_s2s_stream::<ReadBatch, crate::error::ReadSessionError, _>(
+            futures_util::stream::iter(large_chunks),
+            None,
+            auth_client.clone(),
+            None,
+            ctx.clone(),
+        );
+        assert_eq!(stream.next().await.unwrap().unwrap().msg, large_batch);
+        assert!(stream.next().await.is_none());
+
+        // 4. Truncated trailing bytes must report ConnectionLost with the exact remaining count.
         let truncated = vec![Ok(Bytes::copy_from_slice(&wire[..wire.len() - 3]))];
         let mut stream = decode_s2s_stream::<ReadBatch, crate::error::ReadSessionError, _>(
             futures_util::stream::iter(truncated),
@@ -1742,5 +1812,36 @@ mod tests {
             matches!(err, crate::error::ReadSessionError::ConnectionLost(ref c) if c.message.contains(&format!("{} bytes remaining", f2.len() - 3))),
             "unexpected error: {err:?}"
         );
+    }
+
+    #[test]
+    fn reserve_for_partial_frame_bounds_stalled_prefixes_and_converges_to_exact_size() {
+        // Stalled 3-byte prefix claiming a 2.5 MiB frame must not pre-allocate 2.5 MiB.
+        let mut stalled = Vec::new();
+        reserve_for_partial_frame(&mut stalled, 2_500_000, 3);
+        assert!(
+            stalled.capacity() <= 64,
+            "unexpected pre-allocation on 3-byte prefix: {}",
+            stalled.capacity()
+        );
+
+        // Multi-chunk frames (307 KiB and 1 MiB + 5) arriving in 16 KiB chunks converge to exact
+        // frame size without 2x over-allocation.
+        for total_size in [307 * 1024, 1024 * 1024 + 5] {
+            let mut buf = Vec::new();
+            let mut remaining = total_size;
+            while remaining > 0 {
+                let take = remaining.min(16 * 1024);
+                reserve_for_partial_frame(&mut buf, total_size, take);
+                buf.resize(buf.len() + take, 0);
+                remaining -= take;
+            }
+            assert_eq!(buf.len(), total_size);
+            assert!(
+                buf.capacity() <= total_size + 64,
+                "total_size={total_size} retained capacity={}",
+                buf.capacity()
+            );
+        }
     }
 }
