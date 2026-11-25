@@ -92,14 +92,6 @@ impl<R, E> Streaming<R, E> {
     }
 
     #[cfg(test)]
-    pub(crate) fn from_stream_for_test<S>(stream: S) -> Self
-    where
-        S: Stream<Item = Result<S2sFrame<R>, E>> + Send + 'static,
-    {
-        Self::from_stream_with_chunks_for_test(stream, Arc::new(AtomicU64::new(0)))
-    }
-
-    #[cfg(test)]
     pub(crate) fn from_stream_with_chunks_for_test<S>(
         stream: S,
         chunks_received: Arc<AtomicU64>,
@@ -928,7 +920,7 @@ impl BasinClient {
         let stream_chunks = chunks_received.clone();
 
         let mut buffer = BytesMut::new();
-        let mut buffer_peak_bytes: usize = 0;
+        let mut buffer_peak_capacity: usize = 0;
         let mut decoder = FrameDecoder;
 
         let stream = Box::pin(try_stream! {
@@ -938,7 +930,7 @@ impl BasinClient {
                     stream_chunks.fetch_add(1, Ordering::Relaxed);
                 }
                 buffer.extend_from_slice(&chunk);
-                buffer_peak_bytes = buffer_peak_bytes.max(buffer.len()).max(buffer.capacity());
+                buffer_peak_capacity = buffer_peak_capacity.max(buffer.capacity());
 
                 loop {
                     match decoder.decode(&mut buffer) {
@@ -957,7 +949,7 @@ impl BasinClient {
                             // a frame boundary so a parked session does not pin a 1–2.5 MiB
                             // BytesMut allocation (even when `split_to` left
                             // `buffer.capacity() == 0`).
-                            release_excess_s2s_buffer(&mut buffer, &mut buffer_peak_bytes);
+                            release_excess_s2s_buffer(&mut buffer, &mut buffer_peak_capacity);
                             yield S2sFrame {
                                 msg: decoded,
                                 reconnect_advised,
@@ -975,7 +967,7 @@ impl BasinClient {
                             Err::<(), E>(error)?;
                         }
                         Ok(None) => {
-                            release_excess_s2s_buffer(&mut buffer, &mut buffer_peak_bytes);
+                            release_excess_s2s_buffer(&mut buffer, &mut buffer_peak_capacity);
                             break;
                         }
                         Err(err) => Err(E::from(ProtocolError::new_with_context(
@@ -1041,10 +1033,10 @@ impl BasinClient {
     }
 }
 
-fn release_excess_s2s_buffer(buffer: &mut BytesMut, peak_bytes: &mut usize) {
-    if *peak_bytes > S2S_READ_BUFFER_MAX_IDLE_CAPACITY && buffer.is_empty() {
+fn release_excess_s2s_buffer(buffer: &mut BytesMut, peak_capacity: &mut usize) {
+    if *peak_capacity > S2S_READ_BUFFER_MAX_IDLE_CAPACITY && buffer.is_empty() {
         *buffer = BytesMut::new();
-        *peak_bytes = 0;
+        *peak_capacity = 0;
     }
 }
 
@@ -1654,7 +1646,7 @@ mod tests {
         // allocation; tracking peak size ensures it is released once drained.
         let mut buf = BytesMut::with_capacity(256 * 1024);
         buf.resize(256 * 1024, 0xAB);
-        let mut peak = buf.len().max(buf.capacity());
+        let mut peak = buf.capacity();
         let frame = buf.split_to(256 * 1024);
         assert!(buf.is_empty());
         drop(frame);
@@ -1674,7 +1666,7 @@ mod tests {
         let mut with_tail = BytesMut::with_capacity(256 * 1024 + 16);
         with_tail.resize(256 * 1024, 0xAB);
         with_tail.extend_from_slice(&[0x42; 16]);
-        let mut with_tail_peak = with_tail.len().max(with_tail.capacity());
+        let mut with_tail_peak = with_tail.capacity();
         let _big_frame = with_tail.split_to(256 * 1024);
         release_excess_s2s_buffer(&mut with_tail, &mut with_tail_peak);
         assert_eq!(with_tail.as_ref(), &[0x42; 16]);
@@ -1683,7 +1675,7 @@ mod tests {
         // Small buffers within the idle threshold stay reusable without resetting.
         let mut small = BytesMut::with_capacity(1024);
         small.resize(512, 0xCD);
-        let mut small_peak = small.len().max(small.capacity());
+        let mut small_peak = small.capacity();
         let _ = small.split_to(512);
         release_excess_s2s_buffer(&mut small, &mut small_peak);
         assert!(small.capacity() >= 512);

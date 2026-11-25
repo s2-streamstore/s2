@@ -426,17 +426,10 @@ impl ReadStateInner {
     }
 
     fn update_observed_tail(&mut self, candidate: StreamPosition) {
-        match self.last_observed_tail {
-            Some(prev) => {
-                if candidate.seq_num > prev.seq_num
-                    || (candidate.seq_num == prev.seq_num && candidate.timestamp >= prev.timestamp)
-                {
-                    self.last_observed_tail = Some(candidate);
-                }
-            }
-            None => {
-                self.last_observed_tail = Some(candidate);
-            }
+        if self.last_observed_tail.is_none_or(|prev| {
+            (candidate.seq_num, candidate.timestamp) >= (prev.seq_num, prev.timestamp)
+        }) {
+            self.last_observed_tail = Some(candidate);
         }
     }
 
@@ -2053,43 +2046,66 @@ mod tests {
 
     type FrameTx = mpsc::UnboundedSender<Result<S2sFrame<proto::ReadBatch>, ReadSessionError>>;
 
-    fn test_session_with_active_stream(
-        input: ReadInput,
-    ) -> (ReadSession, FrameTx, ReadSessionState, CancellationToken) {
+    fn test_basin_client(retry: RetryConfig) -> BasinClient {
         let config = S2Config::new("test-token")
             .with_endpoints(S2Endpoints::for_endpoint("http://127.0.0.1:1").unwrap())
-            .with_retry(RetryConfig::new().with_max_attempts(1));
+            .with_retry(retry);
         let base = BaseClient::init(&config).unwrap();
-        let basin = BasinClient::init(
-            "test-basin".parse().unwrap(),
-            &config.endpoints,
-            base.clone(),
-        );
-        let mut session = ReadSession::open(
-            basin,
-            "test-stream".parse().unwrap(),
-            StreamHeaders::default(),
-            input,
-            ReadSessionConfig::default(),
-        );
+        BasinClient::init("test-basin".parse().unwrap(), &config.endpoints, base)
+    }
+
+    fn attach_test_stream(
+        core: &mut ReadSessionCore,
+    ) -> (FrameTx, Arc<std::sync::atomic::AtomicU64>) {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let stream = Streaming::from_stream_for_test(futures_util::stream::poll_fn(move |cx| {
-            rx.poll_recv(cx)
-        }));
+        let chunks = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let stream = Streaming::from_stream_with_chunks_for_test(
+            futures_util::stream::poll_fn(move |cx| rx.poll_recv(cx)),
+            chunks.clone(),
+        );
         let snapshot = AttemptSnapshot {
             was_resumed: false,
-            sent_seq_num: session.core.start.seq_num,
-            no_wait_remaining: has_no_wait_remaining(&session.core.end),
+            sent_seq_num: core.start.seq_num,
+            no_wait_remaining: has_no_wait_remaining(&core.end),
         };
-        session.core.transport_mut().phase = DriverPhase::Active(ActiveAttempt {
+        core.transport_mut().phase = DriverPhase::Active(ActiveAttempt {
             stream,
             snapshot,
             made_progress: false,
             fetched_record: false,
             last_chunks_received: 0,
         });
+        (tx, chunks)
+    }
+
+    fn test_session_with_retry(
+        input: ReadInput,
+        retry: RetryConfig,
+    ) -> (
+        ReadSession,
+        FrameTx,
+        Arc<std::sync::atomic::AtomicU64>,
+        ReadSessionState,
+        CancellationToken,
+    ) {
+        let mut session = ReadSession::open(
+            test_basin_client(retry),
+            "test-stream".parse().unwrap(),
+            StreamHeaders::default(),
+            input,
+            ReadSessionConfig::default(),
+        );
+        let (tx, chunks) = attach_test_stream(&mut session.core);
         let state = session.state();
         let shutdown = session.core.state.shutdown.clone();
+        (session, tx, chunks, state, shutdown)
+    }
+
+    fn test_session_with_active_stream(
+        input: ReadInput,
+    ) -> (ReadSession, FrameTx, ReadSessionState, CancellationToken) {
+        let (session, tx, _chunks, state, shutdown) =
+            test_session_with_retry(input, RetryConfig::new().with_max_attempts(1));
         (session, tx, state, shutdown)
     }
 
@@ -2490,38 +2506,14 @@ mod tests {
         ReadSessionState,
         CancellationToken,
     ) {
-        let config = S2Config::new("test-token")
-            .with_endpoints(S2Endpoints::for_endpoint("http://127.0.0.1:1").unwrap())
-            .with_retry(RetryConfig::new().with_max_attempts(1));
-        let base = BaseClient::init(&config).unwrap();
-        let basin = BasinClient::init(
-            "test-basin".parse().unwrap(),
-            &config.endpoints,
-            base.clone(),
-        );
         let mut session = ReadBatchSession::open(
-            basin,
+            test_basin_client(RetryConfig::new().with_max_attempts(1)),
             "test-stream".parse().unwrap(),
             StreamHeaders::default(),
             input,
             ReadSessionConfig::default(),
         );
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let stream = Streaming::from_stream_for_test(futures_util::stream::poll_fn(move |cx| {
-            rx.poll_recv(cx)
-        }));
-        let snapshot = AttemptSnapshot {
-            was_resumed: false,
-            sent_seq_num: session.core.start.seq_num,
-            no_wait_remaining: has_no_wait_remaining(&session.core.end),
-        };
-        session.core.transport_mut().phase = DriverPhase::Active(ActiveAttempt {
-            stream,
-            snapshot,
-            made_progress: false,
-            fetched_record: false,
-            last_chunks_received: 0,
-        });
+        let (tx, _chunks) = attach_test_stream(&mut session.core);
         let state = session.state();
         let shutdown = session.core.state.shutdown.clone();
         (session, tx, state, shutdown)
@@ -2793,46 +2785,15 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn empty_frame_with_chunk_progress_resets_heartbeat_timer_without_resetting_retry_budget()
     {
-        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::atomic::Ordering;
 
-        let config = S2Config::new("test-token")
-            .with_endpoints(S2Endpoints::for_endpoint("http://127.0.0.1:1").unwrap())
-            .with_retry(RetryConfig::new().with_max_attempts(2));
-        let base = BaseClient::init(&config).unwrap();
-        let basin = BasinClient::init(
-            "test-basin".parse().unwrap(),
-            &config.endpoints,
-            base.clone(),
-        );
-        let mut session = ReadSession::open(
-            basin,
-            "test-stream".parse().unwrap(),
-            StreamHeaders::default(),
+        let (mut session, tx, chunks, _state, _shutdown) = test_session_with_retry(
             ReadInput::new().with_start(crate::types::ReadStart::SeqNum(0)),
-            ReadSessionConfig::default(),
+            RetryConfig::new().with_max_attempts(2),
         );
         // Simulate one failed attempt already consumed so retry budget is on attempt 2.
         assert!(session.core.retry_backoff.next().is_some());
         assert_eq!(session.core.retry_backoff.attempt_number(), 2);
-
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let chunks = Arc::new(AtomicU64::new(0));
-        let stream = Streaming::from_stream_with_chunks_for_test(
-            futures_util::stream::poll_fn(move |cx| rx.poll_recv(cx)),
-            chunks.clone(),
-        );
-        let snapshot = AttemptSnapshot {
-            was_resumed: false,
-            sent_seq_num: session.core.start.seq_num,
-            no_wait_remaining: has_no_wait_remaining(&session.core.end),
-        };
-        session.core.transport_mut().phase = DriverPhase::Active(ActiveAttempt {
-            stream,
-            snapshot,
-            made_progress: false,
-            fetched_record: false,
-            last_chunks_received: 0,
-        });
 
         let mut next = Box::pin(session.next());
         assert!(poll!(next.as_mut()).is_pending());
@@ -2946,43 +2907,13 @@ mod tests {
     // spec: r1 T7d
     #[tokio::test(start_paused = true)]
     async fn t7d_deterministic_buffered_frame_partial_chunk_and_fragmented_wait() {
-        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::atomic::Ordering;
 
         let make_session = || {
-            let config = S2Config::new("test-token")
-                .with_endpoints(S2Endpoints::for_endpoint("http://127.0.0.1:1").unwrap())
-                .with_retry(RetryConfig::new().with_max_attempts(1));
-            let base = BaseClient::init(&config).unwrap();
-            let basin = BasinClient::init(
-                "test-basin".parse().unwrap(),
-                &config.endpoints,
-                base.clone(),
-            );
-            let mut session = ReadSession::open(
-                basin,
-                "test-stream".parse().unwrap(),
-                StreamHeaders::default(),
+            let (session, tx, chunks, _state, _shutdown) = test_session_with_retry(
                 ReadInput::new().with_start(crate::types::ReadStart::SeqNum(0)),
-                ReadSessionConfig::default(),
+                RetryConfig::new().with_max_attempts(1),
             );
-            let (tx, mut rx) = mpsc::unbounded_channel();
-            let chunks = Arc::new(AtomicU64::new(0));
-            let stream = Streaming::from_stream_with_chunks_for_test(
-                futures_util::stream::poll_fn(move |cx| rx.poll_recv(cx)),
-                chunks.clone(),
-            );
-            let snapshot = AttemptSnapshot {
-                was_resumed: false,
-                sent_seq_num: Some(0),
-                no_wait_remaining: false,
-            };
-            session.core.transport_mut().phase = DriverPhase::Active(ActiveAttempt {
-                stream,
-                snapshot,
-                made_progress: false,
-                fetched_record: false,
-                last_chunks_received: 0,
-            });
             (session, tx, chunks)
         };
 
@@ -3089,9 +3020,9 @@ mod tests {
     #[tokio::test]
     async fn client_close_after_caught_up_r9a_clears_is_caught_up_and_advised_batch_resolves_caught_up()
      {
-        // S1: After caught-up R9a lock-in, S2::close() ends caught-up observation immediately
-        // while keeping the clean outcome (`None` on iteration, SessionClosedError on new
-        // caught_up(), prior resolved caught_up() retained).
+        // R7 / R7c / R9 / R9a: After caught-up R9a lock-in, S2::close() ends caught-up observation
+        // immediately while keeping the clean outcome (`None` on iteration, SessionClosedError on
+        // new caught_up(), prior resolved caught_up() retained).
         let (mut session, tx, state, shutdown) = test_session_with_active_stream(
             ReadInput::new()
                 .with_start(crate::types::ReadStart::SeqNum(0))
@@ -3179,43 +3110,13 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn reusable_sleep_reuses_single_allocation_across_heartbeat_and_backoff_and_clears_on_close()
      {
-        let config = S2Config::new("test-token")
-            .with_endpoints(S2Endpoints::for_endpoint("http://127.0.0.1:1").unwrap())
-            .with_retry(
-                RetryConfig::new()
-                    .with_max_attempts(2)
-                    .with_min_base_delay(Duration::from_millis(200))
-                    .with_max_base_delay(Duration::from_millis(200)),
-            );
-        let base = BaseClient::init(&config).unwrap();
-        let basin = BasinClient::init(
-            "test-basin".parse().unwrap(),
-            &config.endpoints,
-            base.clone(),
-        );
-        let mut session = ReadSession::open(
-            basin,
-            "test-stream".parse().unwrap(),
-            StreamHeaders::default(),
+        let (mut session, tx, _chunks, _state, _shutdown) = test_session_with_retry(
             ReadInput::new().with_start(crate::types::ReadStart::SeqNum(0)),
-            ReadSessionConfig::default(),
+            RetryConfig::new()
+                .with_max_attempts(2)
+                .with_min_base_delay(Duration::from_millis(200))
+                .with_max_base_delay(Duration::from_millis(200)),
         );
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let stream = Streaming::from_stream_for_test(futures_util::stream::poll_fn(move |cx| {
-            rx.poll_recv(cx)
-        }));
-        let snapshot = AttemptSnapshot {
-            was_resumed: false,
-            sent_seq_num: Some(0),
-            no_wait_remaining: false,
-        };
-        session.core.transport_mut().phase = DriverPhase::Active(ActiveAttempt {
-            stream,
-            snapshot,
-            made_progress: false,
-            fetched_record: false,
-            last_chunks_received: 0,
-        });
 
         // No Sleep is allocated until the session actually blocks.
         assert!(session.core.transport_mut().sleep.sleep.is_none());
@@ -3304,43 +3205,13 @@ mod tests {
 
         // Extreme retry backoff (`Duration::MAX`) must not panic when computing the deadline,
         // and still aborts cleanly on client close.
-        let max_delay_cfg = S2Config::new("test-token")
-            .with_endpoints(S2Endpoints::for_endpoint("http://127.0.0.1:1").unwrap())
-            .with_retry(
-                RetryConfig::new()
-                    .with_max_attempts(2)
-                    .with_min_base_delay(Duration::MAX)
-                    .with_max_base_delay(Duration::MAX),
-            );
-        let max_base = BaseClient::init(&max_delay_cfg).unwrap();
-        let max_basin = BasinClient::init(
-            "test-basin".parse().unwrap(),
-            &max_delay_cfg.endpoints,
-            max_base,
-        );
-        let mut max_session = ReadSession::open(
-            max_basin,
-            "test-stream".parse().unwrap(),
-            StreamHeaders::default(),
+        let (mut max_session, max_tx, _chunks, _state, _shutdown) = test_session_with_retry(
             ReadInput::new().with_start(crate::types::ReadStart::SeqNum(0)),
-            ReadSessionConfig::default(),
+            RetryConfig::new()
+                .with_max_attempts(2)
+                .with_min_base_delay(Duration::MAX)
+                .with_max_base_delay(Duration::MAX),
         );
-        let (max_tx, mut max_rx) = mpsc::unbounded_channel();
-        let max_stream =
-            Streaming::from_stream_for_test(futures_util::stream::poll_fn(move |cx| {
-                max_rx.poll_recv(cx)
-            }));
-        max_session.core.transport_mut().phase = DriverPhase::Active(ActiveAttempt {
-            stream: max_stream,
-            snapshot: AttemptSnapshot {
-                was_resumed: false,
-                sent_seq_num: Some(0),
-                no_wait_remaining: false,
-            },
-            made_progress: false,
-            fetched_record: false,
-            last_chunks_received: 0,
-        });
         max_tx
             .send(Err(ReadSessionError::ConnectionLost(
                 ConnectionLostError::new_with_context(
