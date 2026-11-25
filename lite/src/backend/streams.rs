@@ -247,16 +247,23 @@ impl Backend {
         basin: BasinName,
         stream: StreamName,
     ) -> Result<StreamConfig, GetStreamConfigError> {
-        let meta = self
-            .db_get(
+        let (basin_meta, meta) = tokio::try_join!(
+            self.db_get(kv::basin_meta::ser_key(&basin), kv::basin_meta::deser_value),
+            self.db_get(
                 kv::stream_meta::ser_key(&basin, &stream),
                 kv::stream_meta::deser_value,
-            )
-            .await?
-            .ok_or_else(|| StreamNotFoundError {
-                basin: basin.clone(),
-                stream: stream.clone(),
-            })?;
+            ),
+        )?;
+        let basin_meta = basin_meta.ok_or_else(|| BasinNotFoundError {
+            basin: basin.clone(),
+        })?;
+        if basin_meta.deleted_at.is_some() {
+            return Err(BasinDeletionPendingError { basin }.into());
+        }
+        let meta = meta.ok_or_else(|| StreamNotFoundError {
+            basin: basin.clone(),
+            stream: stream.clone(),
+        })?;
         if meta.deleted_at.is_some() {
             return Err(StreamDeletionPendingError.into());
         }
@@ -355,6 +362,15 @@ impl Backend {
         basin: BasinName,
         stream: StreamName,
     ) -> Result<(), DeleteStreamError> {
+        let Some(basin_meta) = self
+            .db_get(kv::basin_meta::ser_key(&basin), kv::basin_meta::deser_value)
+            .await?
+        else {
+            return Err(BasinNotFoundError { basin }.into());
+        };
+        if basin_meta.deleted_at.is_some() {
+            return Err(BasinDeletionPendingError { basin }.into());
+        }
         self.delete_stream_with_condition(basin, stream, TerminalTrimCondition::Always)
             .await
             .map(|_| ())

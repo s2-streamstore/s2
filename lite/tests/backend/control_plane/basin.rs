@@ -496,6 +496,12 @@ async fn test_delete_basin_marks_deleting_and_blocks_create() {
         .expect("Deleted basin should appear in listing");
     assert!(info.deleted_at.is_some());
 
+    let get_config_result = backend.get_basin_config(basin_name.clone()).await;
+    assert!(matches!(
+        get_config_result,
+        Err(GetBasinConfigError::BasinDeletionPending(_))
+    ));
+
     let reconfigure_result = backend
         .reconfigure_basin(basin_name.clone(), BasinReconfiguration::default())
         .await;
