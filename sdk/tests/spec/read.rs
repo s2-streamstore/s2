@@ -758,6 +758,80 @@ async fn spec_t7d_read_session_heartbeat_timeout_and_backpressure_pause() {
     // Resuming must read the buffered record 1 on the SAME attempt rather than timing out!
     assert_eq!(buf_sess.next().await.unwrap().unwrap().seq_num, 1);
     assert_eq!(buf_attempts.load(Ordering::SeqCst), 1);
+
+    // T7d: partial-frame transport bytes arriving while paused also reset the heartbeat timer
+    // (preventing false timeouts when resuming mid-frame over a small receive window).
+    let partial_attempts = Arc::new(AtomicUsize::new(0));
+    let send_part2 = Arc::new(tokio::sync::Notify::new());
+    let send_part3 = Arc::new(tokio::sync::Notify::new());
+    let part2_sent = Arc::new(tokio::sync::Notify::new());
+    let partial_server = MockH2Server::start({
+        let partial_attempts = partial_attempts.clone();
+        let send_part2 = send_part2.clone();
+        let send_part3 = send_part3.clone();
+        let part2_sent = part2_sent.clone();
+        move |_conn_id, _req, respond| {
+            let partial_attempts = partial_attempts.clone();
+            let send_part2 = send_part2.clone();
+            let send_part3 = send_part3.clone();
+            let part2_sent = part2_sent.clone();
+            async move {
+                partial_attempts.fetch_add(1, Ordering::SeqCst);
+                let Some(mut s2s) = S2sResponder::open(respond) else {
+                    return;
+                };
+                s2s.send_regular(&proto_read_batch_records(&[0], Some(1)), false, false);
+                // Split record 1's S2S frame across three separate HTTP/2 DATA chunks.
+                let frame =
+                    encode_s2s_regular_frame(&proto_read_batch_records(&[1], Some(2)), false);
+                let split1 = 4;
+                let split2 = (frame.len() + split1) / 2;
+                s2s.send_raw(frame.slice(..split1), false);
+                send_part2.notified().await;
+                s2s.send_raw(frame.slice(split1..split2), false);
+                part2_sent.notify_one();
+                send_part3.notified().await;
+                s2s.send_raw(frame.slice(split2..), false);
+                std::future::pending::<()>().await;
+            }
+        }
+    })
+    .await;
+
+    let mut partial_sess = partial_server
+        .stream(no_retry_config())
+        .read_session(
+            ReadInput::new().with_start(ReadStart::SeqNum(0)),
+            ReadSessionConfig::default(),
+        )
+        .unwrap();
+    assert_eq!(partial_sess.next().await.unwrap().unwrap().seq_num, 0);
+
+    // Poll via direct `StreamExt::next` to consume part 1 and arm the deadline without drop-pause.
+    {
+        use futures_util::StreamExt;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let mut pending = Box::pin(StreamExt::next(&mut partial_sess));
+        assert!(futures_util::poll!(pending.as_mut()).is_pending());
+        drop(pending);
+    }
+    // Deliver part 2 (still incomplete!) into hyper's receive buffer, then advance past 20s!
+    send_part2.notify_one();
+    part2_sent.notified().await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    advance_virtual_time(Duration::from_secs(30)).await;
+
+    // Resuming reads part 2 (transport progress -> resets heartbeat timer instead of timing out!),
+    // then finishes receiving part 3 on the SAME attempt.
+    {
+        use futures_util::StreamExt;
+        let mut pending = Box::pin(StreamExt::next(&mut partial_sess));
+        assert!(futures_util::poll!(pending.as_mut()).is_pending());
+        drop(pending);
+    }
+    send_part3.notify_one();
+    assert_eq!(partial_sess.next().await.unwrap().unwrap().seq_num, 1);
+    assert_eq!(partial_attempts.load(Ordering::SeqCst), 1);
 }
 
 // spec: r1 R11, R11a, R11b, R11c, R11d, T5, T5b

@@ -641,6 +641,7 @@ struct ActiveAttempt {
     stream: Streaming<proto::ReadBatch, ReadSessionError>,
     made_progress: bool,
     fetched_record: bool,
+    last_chunks_received: u64,
 }
 
 type OpenAttemptFuture = Pin<
@@ -1110,10 +1111,12 @@ impl ReadSessionCore {
                         match res {
                             Ok(stream) => {
                                 self.heartbeat.reset();
+                                let last_chunks_received = stream.chunks_received();
                                 self.phase = DriverPhase::Active(ActiveAttempt {
                                     stream,
                                     made_progress: false,
                                     fetched_record: false,
+                                    last_chunks_received,
                                 });
                             }
                             Err(err) => {
@@ -1147,6 +1150,7 @@ impl ReadSessionCore {
                     // messages already buffered by HTTP/2 are read before timing out.
                     match Pin::new(&mut attempt.stream).poll_next(cx) {
                         Poll::Ready(Some(Ok(frame))) => {
+                            attempt.last_chunks_received = attempt.stream.chunks_received();
                             let batch = ReadBatch::from_proto(frame.msg);
                             let reconnect_advised = frame.reconnect_advised;
                             match self.handle_decoded_batch(batch, reconnect_advised) {
@@ -1171,23 +1175,35 @@ impl ReadSessionCore {
                                 return Poll::Ready(result);
                             }
                         }
-                        Poll::Pending => match self.heartbeat.poll(cx) {
-                            Poll::Pending => return self.pending_or_abort(cx),
-                            Poll::Ready(()) => {
-                                let made_progress = attempt.made_progress;
-                                attempt.stream.retire_connection();
-                                self.phase = DriverPhase::Idle;
+                        Poll::Pending => {
+                            let chunks_now = attempt.stream.chunks_received();
+                            if chunks_now != attempt.last_chunks_received {
+                                // Forward transport byte progress on an incomplete (e.g.
+                                // flow-controlled) frame counts as liveness so resuming a parked
+                                // session mid-frame does not falsely time out (`T7d`).
+                                attempt.last_chunks_received = chunks_now;
                                 self.heartbeat.reset();
-                                let err =
-                                    ReadSessionError::Timeout(TimeoutError::new_with_context(
-                                        "heartbeat timeout",
-                                        self.context.clone(),
-                                    ));
-                                if let Some(result) = self.handle_stream_error(err, made_progress) {
-                                    return Poll::Ready(result);
+                            }
+                            match self.heartbeat.poll(cx) {
+                                Poll::Pending => return self.pending_or_abort(cx),
+                                Poll::Ready(()) => {
+                                    let made_progress = attempt.made_progress;
+                                    attempt.stream.retire_connection();
+                                    self.phase = DriverPhase::Idle;
+                                    self.heartbeat.reset();
+                                    let err =
+                                        ReadSessionError::Timeout(TimeoutError::new_with_context(
+                                            "heartbeat timeout",
+                                            self.context.clone(),
+                                        ));
+                                    if let Some(result) =
+                                        self.handle_stream_error(err, made_progress)
+                                    {
+                                        return Poll::Ready(result);
+                                    }
                                 }
                             }
-                        },
+                        }
                     }
                 }
             }
@@ -1712,6 +1728,7 @@ mod tests {
             stream,
             made_progress: false,
             fetched_record: false,
+            last_chunks_received: 0,
         });
         let state = session.state();
         let shutdown = session.core.shutdown.clone();

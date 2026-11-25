@@ -1,6 +1,9 @@
 use std::{
     pin::Pin,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     task::{Context, Poll},
     time::Duration,
 };
@@ -45,6 +48,12 @@ pub(crate) const APPLICATION_PROTOBUF: HeaderValue =
     HeaderValue::from_static("application/protobuf");
 const S2_ATTEMPT: HeaderName = HeaderName::from_static("s2-attempt");
 const RETRY_AFTER_MS_HEADER: HeaderName = HeaderName::from_static("retry-after-ms");
+/// Maximum idle backing allocation retained by an empty S2S frame decode buffer.
+///
+/// Matches the default HTTP/2 `SETTINGS_MAX_FRAME_SIZE` (16 KiB) so small frames reuse their
+/// buffer without reallocating while large frames (up to 2.5 MiB) do not remain pinned across
+/// idle or parked sessions after `BytesMut::split_to`.
+const S2S_READ_BUFFER_MAX_IDLE_CAPACITY: usize = 16 * 1024;
 
 fn attempt_header_value(attempt: u32) -> HeaderValue {
     match attempt {
@@ -70,11 +79,16 @@ pub(crate) struct S2sFrame<T> {
 pub(crate) struct Streaming<R, E> {
     stream: Pin<Box<dyn Send + Stream<Item = Result<S2sFrame<R>, E>>>>,
     retire_handle: client::RetireHandle,
+    chunks_received: Arc<AtomicU64>,
 }
 
 impl<R, E> Streaming<R, E> {
     pub(crate) fn retire_connection(&self) {
         self.retire_handle.retire();
+    }
+
+    pub(crate) fn chunks_received(&self) -> u64 {
+        self.chunks_received.load(Ordering::Relaxed)
     }
 
     #[cfg(test)]
@@ -85,6 +99,7 @@ impl<R, E> Streaming<R, E> {
         Self {
             stream: Box::pin(stream),
             retire_handle: client::RetireHandle::noop(),
+            chunks_received: Arc::new(AtomicU64::new(0)),
         }
     }
 }
@@ -894,14 +909,21 @@ impl BasinClient {
         let (mut bytes_stream, retire_handle) = response.into_stream();
         let stream_retire = retire_handle.clone();
         let auth_client = self.base.clone();
+        let chunks_received = Arc::new(AtomicU64::new(0));
+        let stream_chunks = chunks_received.clone();
 
         let mut buffer = BytesMut::new();
+        let mut buffer_peak_bytes: usize = 0;
         let mut decoder = FrameDecoder;
 
         let stream = Box::pin(try_stream! {
             while let Some(chunk) = bytes_stream.next().await {
                 let chunk = chunk.map_err(|e| E::from_http(e, ctx.clone()))?;
+                if !chunk.is_empty() {
+                    stream_chunks.fetch_add(1, Ordering::Relaxed);
+                }
                 buffer.extend_from_slice(&chunk);
+                buffer_peak_bytes = buffer_peak_bytes.max(buffer.len()).max(buffer.capacity());
 
                 loop {
                     match decoder.decode(&mut buffer) {
@@ -916,6 +938,10 @@ impl BasinClient {
                                     ctx.clone(),
                                 ))
                             })?;
+                            // Release any oversized backing allocation before yielding so a
+                            // parked session does not pin a 1–2.5 MiB BytesMut allocation
+                            // (even when `split_to` left `buffer.capacity() == 0`).
+                            release_excess_s2s_buffer(&mut buffer, &mut buffer_peak_bytes);
                             yield S2sFrame {
                                 msg: decoded,
                                 reconnect_advised,
@@ -932,7 +958,10 @@ impl BasinClient {
                             );
                             Err::<(), E>(error)?;
                         }
-                        Ok(None) => break,
+                        Ok(None) => {
+                            release_excess_s2s_buffer(&mut buffer, &mut buffer_peak_bytes);
+                            break;
+                        }
                         Err(err) => Err(E::from(ProtocolError::new_with_context(
                             format!("s2s frame decode: {err}"),
                             ctx.clone(),
@@ -954,6 +983,7 @@ impl BasinClient {
         Ok(Streaming {
             stream,
             retire_handle,
+            chunks_received,
         })
     }
 
@@ -992,6 +1022,13 @@ impl BasinClient {
             .query(&start)
             .query(&end);
         self.open_s2s(builder, headers, attempt, ctx).await
+    }
+}
+
+fn release_excess_s2s_buffer(buffer: &mut BytesMut, peak_bytes: &mut usize) {
+    if buffer.is_empty() && *peak_bytes > S2S_READ_BUFFER_MAX_IDLE_CAPACITY {
+        *buffer = BytesMut::new();
+        *peak_bytes = 0;
     }
 }
 
@@ -1593,5 +1630,37 @@ mod tests {
         let valid = authorization_header("secret-token").unwrap();
         assert_eq!(valid, "Bearer secret-token");
         assert!(valid.is_sensitive());
+    }
+
+    #[test]
+    fn release_excess_s2s_buffer_drops_large_backing_even_when_split_to_leaves_zero_capacity() {
+        // Exact-size split_to leaves `buffer.capacity() == 0` while still pinning the backing
+        // allocation via `BytesMut`'s `Shared` Arc; tracking peak size guarantees it is released.
+        let mut buf = BytesMut::with_capacity(256 * 1024);
+        buf.resize(256 * 1024, 0xAB);
+        let mut peak = buf.len().max(buf.capacity());
+        let frame = buf.split_to(256 * 1024);
+        assert!(buf.is_empty());
+        assert_eq!(buf.capacity(), 0);
+        drop(frame);
+
+        release_excess_s2s_buffer(&mut buf, &mut peak);
+        assert_eq!(peak, 0);
+        assert_eq!(buf.capacity(), 0);
+        // Appending 1 byte after release allocates a small buffer, NOT the reclaimed 256 KiB one!
+        buf.extend_from_slice(&[1]);
+        assert!(
+            buf.capacity() <= S2S_READ_BUFFER_MAX_IDLE_CAPACITY,
+            "expected small buffer after release, got capacity {}",
+            buf.capacity()
+        );
+
+        // Small buffers within the idle threshold stay reusable without resetting.
+        let mut small = BytesMut::with_capacity(1024);
+        small.resize(512, 0xCD);
+        let mut small_peak = small.len().max(small.capacity());
+        let _ = small.split_to(512);
+        release_excess_s2s_buffer(&mut small, &mut small_peak);
+        assert!(small.capacity() >= 512);
     }
 }
