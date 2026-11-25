@@ -866,7 +866,7 @@ fn diff_and_apply_dry_run_use_basin_location_not_account_default() {
         ),
         ("GET", "/v1/locations") => (
             200,
-            r#"[{"name":"aws:us-east-1","is_private":false,"default_storage_class":"express"},{"name":"aws:eu-west-1","is_private":false,"default_storage_class":"standard"}]"#
+            r#"[{"name":"aws:eu-west-1","is_private":false,"default_storage_class":"standard"},{"name":"aws:us-east-1","is_private":false,"default_storage_class":"express"}]"#
                 .to_owned(),
         ),
         ("GET", "/v1/locations/default") => {
