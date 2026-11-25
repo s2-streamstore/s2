@@ -669,3 +669,263 @@ fn only_account_endpoint_set_fails_closed() {
         "stderr should explain the missing basin endpoint, got: {stderr}"
     );
 }
+
+/// Multi-request HTTP/2 prior-knowledge stub server for end-to-end CLI command tests.
+struct StubServer {
+    endpoint: String,
+    shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl StubServer {
+    fn start(handler: impl Fn(&str, &str) -> (u16, String) + Send + Sync + 'static) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind stub server");
+        let endpoint = format!("http://{}", listener.local_addr().expect("stub address"));
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let handler = Arc::new(handler);
+        let handle = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("stub runtime");
+            rt.block_on(async move {
+                listener
+                    .set_nonblocking(true)
+                    .expect("non-blocking stub listener");
+                let listener =
+                    tokio::net::TcpListener::from_std(listener).expect("tokio stub listener");
+                tokio::pin!(shutdown_rx);
+                loop {
+                    tokio::select! {
+                        _ = &mut shutdown_rx => break,
+                        accepted = listener.accept() => {
+                            let Ok((stream, _)) = accepted else { break };
+                            let handler = handler.clone();
+                            tokio::spawn(async move {
+                                let service = hyper::service::service_fn(
+                                    move |req: hyper::Request<hyper::body::Incoming>| {
+                                        let handler = handler.clone();
+                                        async move {
+                                            let method = req.method().as_str().to_owned();
+                                            let uri = req
+                                                .uri()
+                                                .path_and_query()
+                                                .map(|pq| pq.as_str().to_owned())
+                                                .unwrap_or_else(|| "/".to_owned());
+                                            let (status, body) = handler(&method, &uri);
+                                            Ok::<_, Infallible>(
+                                                hyper::Response::builder()
+                                                    .status(status)
+                                                    .header("content-type", "application/json")
+                                                    .body(http_body_util::Full::new(
+                                                        bytes::Bytes::from(body),
+                                                    ))
+                                                    .expect("build stub response"),
+                                            )
+                                        }
+                                    },
+                                );
+                                let _ = hyper::server::conn::http2::Builder::new(
+                                    hyper_util::rt::TokioExecutor::new(),
+                                )
+                                .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
+                                .await;
+                            });
+                        }
+                    }
+                }
+            });
+        });
+        Self {
+            endpoint,
+            shutdown: Some(shutdown_tx),
+            handle: Some(handle),
+        }
+    }
+}
+
+impl Drop for StubServer {
+    fn drop(&mut self) {
+        if let Some(tx) = self.shutdown.take() {
+            let _ = tx.send(());
+        }
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+#[test]
+fn diff_stream_vs_basin_defaults_handles_unavailable_discovery() {
+    let server = StubServer::start(|method, uri| {
+        match (method, uri) {
+        ("GET", "/v1/basins/test-basin") => (200, r#"{"default_stream_config":{}}"#.to_owned()),
+        ("GET", "/v1/streams/matching") => {
+            (200, r#"{"storage_class":"express"}"#.to_owned())
+        }
+        ("GET", "/v1/streams/different") => (
+            200,
+            r#"{"storage_class":"express","retention_policy":{"infinite":{}}}"#.to_owned(),
+        ),
+        ("GET", u) if u.starts_with("/v1/basins?") => (
+            200,
+            r#"{"basins":[{"name":"test-basin","location":"aws:us-east-1","created_at":"2026-01-01T00:00:00Z","state":"active"}],"has_more":false}"#
+                .to_owned(),
+        ),
+        ("GET", "/v1/locations") => (
+            501,
+            r#"{"code":"not_implemented","message":"not implemented"}"#.to_owned(),
+        ),
+        other => panic!("unexpected stub request: {other:?}"),
+    }
+    });
+
+    let env = TestEnv::new();
+    let run = |args: &[&str]| {
+        let mut cmd = env.s2();
+        cmd.env("S2_ACCESS_TOKEN", "test-token")
+            .env("S2_ACCOUNT_ENDPOINT", &server.endpoint)
+            .env("S2_BASIN_ENDPOINT", &server.endpoint)
+            .args(args);
+        cmd
+    };
+
+    run(&[
+        "diff",
+        "s2://test-basin",
+        "s2://test-basin/matching",
+        "--exit-code",
+    ])
+    .assert()
+    .success()
+    .stdout(
+        predicate::str::contains("✓ No differences")
+            .and(predicate::str::contains("storage_class not compared")),
+    );
+
+    let json_matching = run(&[
+        "diff",
+        "s2://test-basin",
+        "s2://test-basin/matching",
+        "--output",
+        "json",
+        "--exit-code",
+    ])
+    .assert()
+    .success();
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&json_matching.get_output().stdout).expect("valid json");
+    assert_eq!(parsed["differences"], serde_json::json!([]));
+    assert_eq!(parsed["unresolved"], serde_json::json!(["storage_class"]));
+
+    run(&[
+        "diff",
+        "s2://test-basin",
+        "s2://test-basin/different",
+        "--exit-code",
+    ])
+    .assert()
+    .code(1)
+    .stdout(
+        predicate::str::contains("retention_policy")
+            .and(predicate::str::contains("storage_class: not compared")),
+    );
+
+    let json_different = run(&[
+        "diff",
+        "s2://test-basin",
+        "s2://test-basin/different",
+        "--output",
+        "json",
+        "--exit-code",
+    ])
+    .assert()
+    .code(1);
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&json_different.get_output().stdout).expect("valid json");
+    assert_eq!(parsed["differences"].as_array().map(Vec::len), Some(1));
+    assert_eq!(parsed["differences"][0]["path"], "retention_policy");
+    assert_eq!(parsed["unresolved"], serde_json::json!(["storage_class"]));
+}
+
+#[test]
+fn diff_and_apply_dry_run_use_basin_location_not_account_default() {
+    let server = StubServer::start(|method, uri| {
+        match (method, uri) {
+        ("GET", "/v1/basins/loc-basin") => (200, r#"{"default_stream_config":{}}"#.to_owned()),
+        ("GET", "/v1/streams/express-stream") => {
+            (200, r#"{"storage_class":"express"}"#.to_owned())
+        }
+        ("GET", "/v1/streams/standard-stream") => {
+            (200, r#"{"storage_class":"standard"}"#.to_owned())
+        }
+        ("GET", u) if u.starts_with("/v1/basins?") => (
+            200,
+            r#"{"basins":[{"name":"loc-basin","location":"aws:us-east-1","created_at":"2026-01-01T00:00:00Z","state":"active"}],"has_more":false}"#
+                .to_owned(),
+        ),
+        ("GET", "/v1/locations") => (
+            200,
+            r#"[{"name":"aws:eu-west-1","is_private":false,"default_storage_class":"standard"},{"name":"aws:us-east-1","is_private":false,"default_storage_class":"express"}]"#
+                .to_owned(),
+        ),
+        ("GET", "/v1/locations/default") => {
+            panic!("should resolve from basin's location rather than account default location")
+        }
+        other => panic!("unexpected stub request: {other:?}"),
+    }
+    });
+
+    let env = TestEnv::new();
+    let run = |args: &[&str]| {
+        let mut cmd = env.s2();
+        cmd.env("S2_ACCESS_TOKEN", "test-token")
+            .env("S2_ACCOUNT_ENDPOINT", &server.endpoint)
+            .env("S2_BASIN_ENDPOINT", &server.endpoint)
+            .args(args);
+        cmd
+    };
+
+    run(&[
+        "diff",
+        "s2://loc-basin",
+        "s2://loc-basin/express-stream",
+        "--exit-code",
+    ])
+    .assert()
+    .success()
+    .stdout(
+        predicate::str::contains("✓ No differences")
+            .and(predicate::str::contains("not compared").not()),
+    );
+
+    run(&[
+        "diff",
+        "s2://loc-basin",
+        "s2://loc-basin/standard-stream",
+        "--exit-code",
+    ])
+    .assert()
+    .code(1)
+    .stdout(
+        predicate::str::contains("storage_class")
+            .and(predicate::str::contains("- express"))
+            .and(predicate::str::contains("+ standard")),
+    );
+
+    let spec_path = env.home.path().join("spec.json");
+    std::fs::write(
+        &spec_path,
+        r#"{"basins":[{"name":"loc-basin","streams":[{"name":"express-stream"}]}]}"#,
+    )
+    .expect("write spec");
+
+    run(&["apply", "--dry-run", "-f", spec_path.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("= basin loc-basin").and(predicate::str::contains(
+                "= stream loc-basin/express-stream",
+            )),
+        );
+}
