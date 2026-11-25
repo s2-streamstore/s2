@@ -967,21 +967,20 @@ impl S2Stream {
         input: AppendInput,
         stream_config: Option<&StreamConfig>,
     ) -> Result<AppendAck, AppendError> {
-        use prost::Message as _;
-
         let scope = self.client.stream_scope("append", &self.name, false);
         input
             .validate_for_write()
             .map_err(|e| scope.context(1).format_validation(e))?;
         let expected_records = input.records().len() as u64;
-        let proto_input = input.into_proto();
+        let mut body = Vec::with_capacity(input.proto_encoded_len());
+        input.encode_proto_to(&mut body);
         let headers = self.headers(stream_config);
         let req = self
             .client
             .post(stream_records_path(&self.name))
             .header(CONTENT_TYPE, APPLICATION_PROTOBUF)
             .header(ACCEPT, APPLICATION_PROTOBUF)
-            .body(proto_input.encode_to_vec())
+            .body(body)
             .build()
             .map(|mut req| {
                 headers.apply(&mut req);

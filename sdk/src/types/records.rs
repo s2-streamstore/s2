@@ -169,6 +169,7 @@ impl Header {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn into_proto(self) -> api::stream::proto::Header {
         api::stream::proto::Header {
             name: self.name,
@@ -305,6 +306,7 @@ impl AppendRecord {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn into_proto(self) -> api::stream::proto::AppendRecord {
         api::stream::proto::AppendRecord {
             timestamp: self.timestamp,
@@ -657,6 +659,24 @@ impl AppendInput {
         }
     }
 
+    pub(crate) fn encode_proto_to(&self, buf: &mut impl bytes::BufMut) {
+        encode_append_input_parts(
+            &self.records.records,
+            self.match_seq_num,
+            self.fencing_token.as_deref(),
+            buf,
+        );
+    }
+
+    pub(crate) fn proto_encoded_len(&self) -> usize {
+        append_input_parts_encoded_len(
+            &self.records.records,
+            self.match_seq_num,
+            self.fencing_token.as_deref(),
+        )
+    }
+
+    #[cfg(test)]
     pub(crate) fn into_proto(self) -> api::stream::proto::AppendInput {
         api::stream::proto::AppendInput {
             records: self
@@ -667,6 +687,101 @@ impl AppendInput {
             match_seq_num: self.match_seq_num,
             fencing_token: self.fencing_token.map(|t| t.0),
         }
+    }
+}
+
+fn header_proto_encoded_len(header: &Header) -> usize {
+    let mut len = 0;
+    if !header.name.is_empty() {
+        len += prost::encoding::bytes::encoded_len(1, &header.name);
+    }
+    if !header.value.is_empty() {
+        len += prost::encoding::bytes::encoded_len(2, &header.value);
+    }
+    len
+}
+
+fn encode_header_proto(header: &Header, buf: &mut impl bytes::BufMut) {
+    if !header.name.is_empty() {
+        prost::encoding::bytes::encode(1, &header.name, buf);
+    }
+    if !header.value.is_empty() {
+        prost::encoding::bytes::encode(2, &header.value, buf);
+    }
+}
+
+fn append_record_proto_encoded_len(record: &AppendRecord) -> usize {
+    let mut len = 0;
+    if let Some(timestamp) = record.timestamp {
+        len += prost::encoding::uint64::encoded_len(1, &timestamp);
+    }
+    for header in &record.headers {
+        let hlen = header_proto_encoded_len(header);
+        len +=
+            prost::encoding::key_len(2) + prost::encoding::encoded_len_varint(hlen as u64) + hlen;
+    }
+    if !record.body.is_empty() {
+        len += prost::encoding::bytes::encoded_len(3, &record.body);
+    }
+    len
+}
+
+fn encode_append_record_proto(record: &AppendRecord, buf: &mut impl bytes::BufMut) {
+    if let Some(timestamp) = record.timestamp {
+        prost::encoding::uint64::encode(1, &timestamp, buf);
+    }
+    for header in &record.headers {
+        let hlen = header_proto_encoded_len(header);
+        prost::encoding::encode_key(2, prost::encoding::WireType::LengthDelimited, buf);
+        prost::encoding::encode_varint(hlen as u64, buf);
+        encode_header_proto(header, buf);
+    }
+    if !record.body.is_empty() {
+        prost::encoding::bytes::encode(3, &record.body, buf);
+    }
+}
+
+fn append_input_parts_encoded_len(
+    records: &[AppendRecord],
+    match_seq_num: Option<u64>,
+    fencing_token: Option<&str>,
+) -> usize {
+    let mut len = 0;
+    for record in records {
+        let rlen = append_record_proto_encoded_len(record);
+        len +=
+            prost::encoding::key_len(1) + prost::encoding::encoded_len_varint(rlen as u64) + rlen;
+    }
+    if let Some(seq) = match_seq_num {
+        len += prost::encoding::uint64::encoded_len(2, &seq);
+    }
+    if let Some(token) = fencing_token {
+        len += prost::encoding::key_len(3)
+            + prost::encoding::encoded_len_varint(token.len() as u64)
+            + token.len();
+    }
+    len
+}
+
+fn encode_append_input_parts(
+    records: &[AppendRecord],
+    match_seq_num: Option<u64>,
+    fencing_token: Option<&str>,
+    buf: &mut impl bytes::BufMut,
+) {
+    for record in records {
+        let rlen = append_record_proto_encoded_len(record);
+        prost::encoding::encode_key(1, prost::encoding::WireType::LengthDelimited, buf);
+        prost::encoding::encode_varint(rlen as u64, buf);
+        encode_append_record_proto(record, buf);
+    }
+    if let Some(seq) = match_seq_num {
+        prost::encoding::uint64::encode(2, &seq, buf);
+    }
+    if let Some(token) = fencing_token {
+        prost::encoding::encode_key(3, prost::encoding::WireType::LengthDelimited, buf);
+        prost::encoding::encode_varint(token.len() as u64, buf);
+        buf.put_slice(token.as_bytes());
     }
 }
 
@@ -947,6 +1062,10 @@ impl ReadInput {
 }
 
 /// Record that is durably sequenced on a stream.
+///
+/// Note: `body` and header `Bytes` slices may share the backing allocation of the batch frame they
+/// were decoded from. Clone into an owned `Vec<u8>` (or `Bytes::copy_from_slice`) if retaining
+/// small records long-term independently of their batch.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct SequencedRecord {
@@ -1078,5 +1197,140 @@ impl ReadBatch {
 impl MeteredBytes for ReadBatch {
     fn metered_bytes(&self) -> usize {
         Self::metered_bytes(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use prost::Message;
+
+    use super::*;
+
+    #[test]
+    fn direct_append_input_proto_encode_matches_prost_byte_for_byte() {
+        let cases = vec![
+            AppendInput::new(AppendRecord::new("").unwrap()),
+            AppendInput::new(
+                AppendRecord::new("hello")
+                    .unwrap()
+                    .with_timestamp(0)
+                    .with_headers([
+                        Header::new("", ""),
+                        Header::new("k", ""),
+                        Header::new("", "v"),
+                        Header::new("name", "value"),
+                    ])
+                    .unwrap(),
+            )
+            .with_match_seq_num(0)
+            .with_fencing_token(FencingToken::try_from("").unwrap()),
+            AppendInput::new(
+                AppendRecordBatch::try_from_iter([
+                    AppendRecord::new(vec![0xAB; 4096])
+                        .unwrap()
+                        .with_timestamp(u64::MAX)
+                        .with_headers([Header::new("h1", "v1"), Header::new("h2", "v2")])
+                        .unwrap(),
+                    AppendRecord::from(CommandRecord::fence(
+                        FencingToken::try_from("tok-123").unwrap(),
+                    )),
+                    AppendRecord::from(CommandRecord::trim(42)).with_timestamp(123456),
+                    AppendRecord::new(Bytes::new()).unwrap(),
+                ])
+                .unwrap(),
+            )
+            .with_match_seq_num(u64::MAX - 4)
+            .with_fencing_token(FencingToken::try_from("fence-token").unwrap()),
+        ];
+
+        for input in cases {
+            let expected_proto = input.clone().into_proto();
+            let expected_bytes = expected_proto.encode_to_vec();
+
+            let encoded_len = input.proto_encoded_len();
+            assert_eq!(encoded_len, expected_bytes.len());
+
+            let mut actual_bytes = Vec::with_capacity(encoded_len);
+            input.encode_proto_to(&mut actual_bytes);
+            assert_eq!(actual_bytes, expected_bytes);
+
+            let decoded =
+                api::stream::proto::AppendInput::decode(Bytes::from(actual_bytes)).unwrap();
+            assert_eq!(decoded, expected_proto);
+        }
+
+        // Deterministic randomized property check across 200 varied AppendInput shapes.
+        let mut seed: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next_u64 = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+
+        for _ in 0..200 {
+            let num_records = (next_u64() % 8) as usize + 1;
+            let mut records = Vec::with_capacity(num_records);
+            for _ in 0..num_records {
+                let body_len = match next_u64() % 6 {
+                    0 => 0,
+                    1 => 1,
+                    2 => 127,
+                    3 => 128,
+                    _ => (next_u64() % 512) as usize,
+                };
+                let body: Vec<u8> = (0..body_len).map(|_| (next_u64() & 0xFF) as u8).collect();
+                let mut rec = AppendRecord::new(body).unwrap();
+                match next_u64() % 4 {
+                    0 => {}
+                    1 => rec = rec.with_timestamp(0),
+                    2 => rec = rec.with_timestamp(u64::MAX),
+                    _ => rec = rec.with_timestamp(next_u64()),
+                }
+                let num_headers = (next_u64() % 5) as usize;
+                let mut headers = Vec::with_capacity(num_headers);
+                for _ in 0..num_headers {
+                    let nlen = (next_u64() % 16) as usize;
+                    let vlen = (next_u64() % 24) as usize;
+                    let name: Vec<u8> = (0..nlen).map(|_| (next_u64() & 0xFF) as u8).collect();
+                    let value: Vec<u8> = (0..vlen).map(|_| (next_u64() & 0xFF) as u8).collect();
+                    if num_headers > 1 && name.is_empty() {
+                        headers.push(Header::new(b"k".as_slice(), value));
+                    } else {
+                        headers.push(Header::new(name, value));
+                    }
+                }
+                if !headers.is_empty() {
+                    rec = rec.with_headers(headers).unwrap();
+                }
+                records.push(rec);
+            }
+            let mut input = AppendInput::new(AppendRecordBatch::try_from_iter(records).unwrap());
+            match next_u64() % 3 {
+                0 => {}
+                1 => input = input.with_match_seq_num(0),
+                _ => input = input.with_match_seq_num(next_u64()),
+            }
+            match next_u64() % 3 {
+                0 => {}
+                1 => input = input.with_fencing_token(FencingToken::try_from("").unwrap()),
+                _ => {
+                    let flen = (next_u64() % 20) as usize + 1;
+                    let tok: String = (0..flen)
+                        .map(|_| (b'a' + (next_u64() % 26) as u8) as char)
+                        .collect();
+                    input = input.with_fencing_token(FencingToken::try_from(tok).unwrap());
+                }
+            }
+
+            let expected_proto = input.clone().into_proto();
+            let expected_bytes = expected_proto.encode_to_vec();
+            let encoded_len = input.proto_encoded_len();
+            assert_eq!(encoded_len, expected_bytes.len());
+
+            let mut actual_bytes = Vec::with_capacity(encoded_len);
+            input.encode_proto_to(&mut actual_bytes);
+            assert_eq!(actual_bytes, expected_bytes);
+        }
     }
 }

@@ -589,15 +589,16 @@ impl AppendSessionCore {
         // Encode and compress on the caller task before taking the gate so the session task stays
         // focused on network I/O and state transitions.
         let record_count = input.records().len() as u64;
-        let api_input = input.into_proto();
-        let frame = s2s::SessionMessage::regular(self.compression, &api_input)
+        let frame =
+            s2s::encode_regular_frame_with(self.compression, input.proto_encoded_len(), |buf| {
+                input.encode_proto_to(buf);
+            })
             .map_err(|err| {
                 AppendSessionError::Protocol(ProtocolError::new_definite(
                     format!("failed to encode append frame: {err}"),
                     self.context.clone(),
                 ))
-            })?
-            .encode();
+            })?;
 
         let (ack_tx, ack_rx) = oneshot::channel();
         {

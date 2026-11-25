@@ -848,37 +848,67 @@ impl BasinClient {
 
         let stream = Box::pin(try_stream! {
             while let Some(chunk) = bytes_stream.next().await {
-                let chunk = chunk.map_err(|e| E::from_http(e, ctx.clone()))?;
-                buffer.extend_from_slice(&chunk);
+                let mut chunk = chunk.map_err(|e| E::from_http(e, ctx.clone()))?;
+                if chunk.is_empty() {
+                    continue;
+                }
+
+                // When a partial frame straddles chunks, copy only the exact bytes needed to
+                // finish that single frame so trailing frames in `chunk` still decode zero-copy.
+                if !buffer.is_empty() {
+                    if buffer.len() < 3 {
+                        let header_needed = (3 - buffer.len()).min(chunk.len());
+                        buffer.extend_from_slice(&chunk.split_to(header_needed));
+                        if buffer.len() < 3 {
+                            continue;
+                        }
+                    }
+                    let total_size = match FrameDecoder::peek_total_frame_len(&buffer) {
+                        Ok(Some(total_size)) => total_size,
+                        Ok(None) => unreachable!("buffer has at least 3 bytes"),
+                        Err(err) => Err(E::from(ProtocolError::new_with_context(
+                            format!("s2s frame decode: {err}"),
+                            ctx.clone(),
+                        )))?,
+                    };
+                    let needed = total_size.saturating_sub(buffer.len());
+                    if chunk.len() < needed {
+                        buffer.reserve(needed);
+                        buffer.extend_from_slice(&chunk);
+                        continue;
+                    }
+                    if needed > 0 {
+                        buffer.extend_from_slice(&chunk.split_to(needed));
+                    }
+                    match decoder.decode(&mut buffer) {
+                        Ok(Some(msg)) => {
+                            yield decode_s2s_message::<T, E>(
+                                msg,
+                                &stream_retire,
+                                &auth_client,
+                                access_token.as_deref(),
+                                &ctx,
+                            )?;
+                        }
+                        Ok(None) => unreachable!("buffer holds complete frame"),
+                        Err(err) => Err(E::from(ProtocolError::new_with_context(
+                            format!("s2s frame decode: {err}"),
+                            ctx.clone(),
+                        )))?,
+                    }
+                    debug_assert!(buffer.is_empty());
+                }
 
                 loop {
-                    match decoder.decode(&mut buffer) {
-                        Ok(Some(SessionMessage::Regular(msg))) => {
-                            let reconnect_advised = msg.reconnect_advised();
-                            if reconnect_advised {
-                                stream_retire.retire();
-                            }
-                            let decoded = msg.try_into_proto().map_err(|e| {
-                                E::from(ProtocolError::new_with_context(
-                                    format!("protobuf decode: {e}"),
-                                    ctx.clone(),
-                                ))
-                            })?;
-                            yield S2sFrame {
-                                msg: decoded,
-                                reconnect_advised,
-                            };
-                        }
-                        Ok(Some(SessionMessage::Terminal(msg))) => {
-                            let error = E::from_terminal_message(msg, ctx.clone());
-                            if error.should_retire_connection() {
-                                stream_retire.retire();
-                            }
-                            auth_client.invalidate_access_token_if_rejected(
-                                &error,
+                    match FrameDecoder::decode_bytes(&mut chunk) {
+                        Ok(Some(msg)) => {
+                            yield decode_s2s_message::<T, E>(
+                                msg,
+                                &stream_retire,
+                                &auth_client,
                                 access_token.as_deref(),
-                            );
-                            Err::<(), E>(error)?;
+                                &ctx,
+                            )?;
                         }
                         Ok(None) => break,
                         Err(err) => Err(E::from(ProtocolError::new_with_context(
@@ -886,6 +916,12 @@ impl BasinClient {
                             ctx.clone(),
                         )))?,
                     }
+                }
+                if !chunk.is_empty() {
+                    if let Ok(Some(total_size)) = FrameDecoder::peek_total_frame_len(&chunk) {
+                        buffer.reserve(total_size);
+                    }
+                    buffer.extend_from_slice(&chunk);
                 }
             }
             if !buffer.is_empty() {
@@ -940,6 +976,45 @@ impl BasinClient {
             .query(&start)
             .query(&end);
         self.open_s2s(builder, headers, attempt, ctx).await
+    }
+}
+
+fn decode_s2s_message<T, E>(
+    msg: SessionMessage,
+    stream_retire: &client::RetireHandle,
+    auth_client: &BaseClient,
+    access_token: Option<&str>,
+    ctx: &ErrorContext,
+) -> Result<S2sFrame<T>, E>
+where
+    T: Message + Default,
+    E: TransportError,
+{
+    match msg {
+        SessionMessage::Regular(msg) => {
+            let reconnect_advised = msg.reconnect_advised();
+            if reconnect_advised {
+                stream_retire.retire();
+            }
+            let decoded = msg.try_into_proto().map_err(|e| {
+                E::from(ProtocolError::new_with_context(
+                    format!("protobuf decode: {e}"),
+                    ctx.clone(),
+                ))
+            })?;
+            Ok(S2sFrame {
+                msg: decoded,
+                reconnect_advised,
+            })
+        }
+        SessionMessage::Terminal(msg) => {
+            let error = E::from_terminal_message(msg, ctx.clone());
+            if error.should_retire_connection() {
+                stream_retire.retire();
+            }
+            auth_client.invalidate_access_token_if_rejected(&error, access_token);
+            Err(error)
+        }
     }
 }
 
