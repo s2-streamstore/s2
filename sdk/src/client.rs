@@ -1179,17 +1179,19 @@ fn compress_body(
             encoder
                 .write_all(data)
                 .map_err(|e| HttpError::RequestCompression(e.to_string()))?;
-            let compressed = encoder
+            let mut compressed = encoder
                 .finish()
                 .map_err(|e| HttpError::RequestCompression(e.to_string()))?;
+            maybe_shrink_vec(&mut compressed, 4096);
             Ok((
                 Body::from(compressed),
                 Some(HeaderValue::from_static("gzip")),
             ))
         }
         Compression::Zstd => {
-            let compressed = compress_zstd_unary(data)
+            let mut compressed = compress_zstd_unary(data)
                 .map_err(|e| HttpError::RequestCompression(e.to_string()))?;
+            maybe_shrink_vec(&mut compressed, 4096);
             Ok((
                 Body::from(compressed),
                 Some(HeaderValue::from_static("zstd")),

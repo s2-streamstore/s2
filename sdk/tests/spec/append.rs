@@ -2486,3 +2486,79 @@ async fn producer_burst_over_32_queued_batches_delivers_every_record() {
     assert_eq!(producer.unacked_records(), 0);
     producer.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn producer_zero_linger_burst_over_coop_budget_does_not_hang() {
+    let server = auto_ack_s2s_server().await;
+    let stream = server.stream(no_retry_config());
+    let producer = stream
+        .producer(
+            ProducerConfig::new()
+                .with_linger(Duration::ZERO)
+                .with_max_batch_bytes(300)
+                .unwrap(),
+        )
+        .unwrap();
+
+    // Each record is 268 metered bytes (8 overhead + 260 body, >= h2's 256-byte small-DATA-frame
+    // threshold so the loopback mock server's default DATA-frame budget is not tripped), so each
+    // subsequent submit overflows `max_batch_bytes(300)` and enqueues a 1-record `Command::Batch`
+    // while leaving the newest record in `gate.partial`. Submitting 160 records queues 159
+    // `Command::Batch` + 160 `Command::PartialStarted` entries in `cmd_rx` plus a trailing partial
+    // batch, exceeding Tokio's 128 cooperative scheduling budget on this current-thread runtime.
+    let mut tickets = Vec::with_capacity(160);
+    for i in 0..160 {
+        let mut body = vec![b'a'; 260];
+        let tag = format!("rec-{i:08}");
+        body[..tag.len()].copy_from_slice(tag.as_bytes());
+        tickets.push(
+            producer
+                .submit(AppendRecord::new(body).unwrap())
+                .await
+                .expect("submit accepted"),
+        );
+    }
+    for (i, ticket) in tickets.into_iter().enumerate() {
+        let ack = tokio::time::timeout(Duration::from_secs(5), ticket)
+            .await
+            .unwrap_or_else(|_| panic!("record {i} timed out (zero-linger livelock)"))
+            .unwrap_or_else(|e| panic!("record {i} failed: {e}"));
+        assert_eq!(ack.seq_num, i as u64);
+    }
+    assert_eq!(producer.unacked_records(), 0);
+    producer.close().await.unwrap();
+}
+
+#[test]
+fn producer_runtime_shutdown_before_first_poll_resolves_partial_ticket() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (_producer, mut ticket) = rt.block_on(async {
+        let client = s2_sdk::S2::new(s2_sdk::types::S2Config::new("test-token").with_endpoints(
+            s2_sdk::types::S2Endpoints::for_endpoint("http://127.0.0.1:1").unwrap(),
+        ))
+        .unwrap();
+        let stream = client
+            .basin("test-basin".parse().unwrap())
+            .stream("test-stream".parse().unwrap());
+        let producer = stream
+            .producer(ProducerConfig::new().with_linger(Duration::from_secs(60)))
+            .unwrap();
+        // `submit` completes synchronously via `try_acquire` without ever yielding to
+        // `ProducerTask`.
+        let ticket = producer
+            .submit(AppendRecord::new("before-first-poll").unwrap())
+            .await
+            .expect("accepted into partial batch");
+        (producer, ticket)
+    });
+    // Shut down the runtime while `_producer` is still held and `ProducerTask` was never polled.
+    drop(rt);
+    let err = ticket
+        .try_ack()
+        .expect("partial batch ticket must resolve when unpolled task is dropped on shutdown")
+        .unwrap_err();
+    assert!(matches!(err, AppendSessionError::Aborted(_)), "{err:?}");
+}

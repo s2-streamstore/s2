@@ -1961,11 +1961,29 @@ impl AppendSessionTask {
                 return AttemptResult::Closed;
             }
 
+            // Check abort BEFORE handing any unsent frames to `AttemptBodyStream` so an
+            // already-aborted session cannot start transmitting an unsent batch (`A8c`).
+            if let Some(reason) = self.check_abort() {
+                drain_ready_acks(
+                    &mut acks,
+                    &mut self.state,
+                    &sync,
+                    &mut acked_in_attempt,
+                    &mut send_cursor,
+                    &self.context,
+                );
+                finish_attempt_gate(&sync, acked_in_attempt, &mut self.state);
+                return AttemptResult::Aborted(reason);
+            }
+
             // Eagerly enqueue ready frames into the bounded body channel without entering
             // `select!` when slots are available.
             if !draining_for_reconnect && let Some(tx) = input_tx.as_ref() {
                 let mut closed = false;
                 while send_cursor < self.state.inflight_appends.len() {
+                    if self.abort.is_cancelled() {
+                        break;
+                    }
                     let frame = self.state.inflight_appends[send_cursor].frame.clone();
                     match tx.try_send(frame) {
                         Ok(()) => send_cursor += 1,

@@ -45,7 +45,7 @@ const DROPPED_ABORT_MSG: &str = "producer dropped without calling close";
 /// Per-batch shared outcome resolved once for all [`RecordSubmitTicket`]s belonging to a batch.
 struct BatchOutcome {
     result: OnceLock<Result<AppendAck, AppendSessionError>>,
-    waiters: StdMutex<Option<Vec<Waker>>>,
+    waiters: StdMutex<Option<Vec<Option<Waker>>>>,
 }
 
 impl BatchOutcome {
@@ -60,7 +60,7 @@ impl BatchOutcome {
         let _ = self.result.set(result);
         let waiters = self.waiters.lock().unwrap().take();
         if let Some(waiters) = waiters {
-            for waker in waiters {
+            for waker in waiters.into_iter().flatten() {
                 waker.wake();
             }
         }
@@ -174,10 +174,13 @@ impl Future for RecordSubmitTicket {
         let mut waiters = this.outcome.waiters.lock().unwrap();
         if let Some(list) = waiters.as_mut() {
             match this.waker_slot {
-                Some(idx) => list[idx].clone_from(cx.waker()),
+                Some(idx) => match &mut list[idx] {
+                    Some(existing) => existing.clone_from(cx.waker()),
+                    slot @ None => *slot = Some(cx.waker().clone()),
+                },
                 None => {
                     this.waker_slot = Some(list.len());
-                    list.push(cx.waker().clone());
+                    list.push(Some(cx.waker().clone()));
                 }
             }
             return Poll::Pending;
@@ -190,6 +193,20 @@ impl Future for RecordSubmitTicket {
             .expect("result stored before waiters closed");
         this.done = true;
         Poll::Ready(map_record_outcome(res, this.offset))
+    }
+}
+
+impl Drop for RecordSubmitTicket {
+    fn drop(&mut self) {
+        if let Some(idx) = self.waker_slot
+            && !self.done
+            && self.outcome.result.get().is_none()
+            && let Ok(mut guard) = self.outcome.waiters.lock()
+            && let Some(list) = guard.as_mut()
+            && let Some(slot) = list.get_mut(idx)
+        {
+            *slot = None;
+        }
     }
 }
 
@@ -510,9 +527,14 @@ struct ProducerGate {
 }
 
 impl ProducerGate {
-    fn take_partial(&mut self, has_partial: &AtomicBool) -> Option<ReadyBatch> {
+    fn take_partial(
+        &mut self,
+        has_partial: &AtomicBool,
+        next_batch_id: &AtomicU64,
+    ) -> Option<ReadyBatch> {
         let batch = self.partial.take(self.next_batch_id)?;
         self.next_batch_id += 1;
+        next_batch_id.store(self.next_batch_id, Ordering::Release);
         has_partial.store(false, Ordering::Release);
         Some(batch)
     }
@@ -529,6 +551,7 @@ struct ProducerShared {
     fencing_token_len: usize,
     match_seq_exhausted: AtomicBool,
     has_partial: AtomicBool,
+    next_batch_id: AtomicU64,
     unacked_records: AtomicUsize,
     acked_through_id: AtomicU64,
     lifecycle: Arc<SessionLifecycle>,
@@ -618,7 +641,7 @@ impl ProducerShared {
 
         if !gate.partial.is_empty()
             && gate.partial.would_overflow(metered)
-            && let Some(overflow_batch) = gate.take_partial(&self.has_partial)
+            && let Some(overflow_batch) = gate.take_partial(&self.has_partial, &self.next_batch_id)
             && let Err(mpsc::error::SendError(Command::Batch(unsent))) =
                 self.cmd_tx.send(Command::Batch(overflow_batch))
         {
@@ -641,7 +664,7 @@ impl ProducerShared {
 
         if gate.partial.is_full() {
             let ready_batch = gate
-                .take_partial(&self.has_partial)
+                .take_partial(&self.has_partial, &self.next_batch_id)
                 .expect("full partial batch must be non-empty");
             if let Err(mpsc::error::SendError(Command::Batch(unsent))) =
                 self.cmd_tx.send(Command::Batch(ready_batch))
@@ -660,7 +683,7 @@ impl ProducerShared {
                     started_at,
                 })
                 .is_err()
-                && let Some(unsent) = gate.take_partial(&self.has_partial)
+                && let Some(unsent) = gate.take_partial(&self.has_partial, &self.next_batch_id)
             {
                 let err = self.session_closed_err(true);
                 self.fail_unsent_batch(unsent, &err);
@@ -749,6 +772,7 @@ impl Producer {
             fencing_token_len,
             match_seq_exhausted,
             has_partial: AtomicBool::new(false),
+            next_batch_id: AtomicU64::new(0),
             unacked_records: AtomicUsize::new(0),
             acked_through_id: AtomicU64::new(0),
             lifecycle,
@@ -915,7 +939,8 @@ impl Producer {
             if self.shared.lifecycle.is_closed() || self.shared.cmd_tx.is_closed() {
                 Err(target_id)
             } else {
-                if let Some(batch) = gate.take_partial(&self.shared.has_partial)
+                if let Some(batch) =
+                    gate.take_partial(&self.shared.has_partial, &self.shared.next_batch_id)
                     && let Err(mpsc::error::SendError(Command::Batch(unsent))) =
                         self.shared.cmd_tx.send(Command::Batch(batch))
                 {
@@ -985,7 +1010,8 @@ impl Producer {
         {
             let mut gate = self.shared.gate.lock().unwrap();
             if !self.shared.abort.is_cancelled() && self.shared.lifecycle.mark_closing() {
-                if let Some(batch) = gate.take_partial(&self.shared.has_partial)
+                if let Some(batch) =
+                    gate.take_partial(&self.shared.has_partial, &self.shared.next_batch_id)
                     && let Err(mpsc::error::SendError(Command::Batch(unsent))) =
                         self.shared.cmd_tx.send(Command::Batch(batch))
                 {
@@ -1093,6 +1119,10 @@ enum CutReason {
 }
 
 struct ProducerTask {
+    /// Stored on the task struct (constructed before `tokio::spawn`) and declared first so that
+    /// even if the task is dropped before its first poll on a single-threaded runtime, `lifecycle`
+    /// finishes and any buffered partial batch fails before `cmd_rx` / `pending_batch_acks` drop.
+    _finish_guard: ProducerFinishOnDrop,
     shared: Arc<ProducerShared>,
     session: AppendSessionCore,
     fencing_token: Option<FencingToken>,
@@ -1111,7 +1141,11 @@ impl ProducerTask {
         config: ProducerConfig,
         cmd_rx: mpsc::UnboundedReceiver<Command>,
     ) -> Self {
+        let _finish_guard = ProducerFinishOnDrop {
+            shared: shared.clone(),
+        };
         Self {
+            _finish_guard,
             shared,
             session,
             fencing_token: config.fencing_token,
@@ -1161,16 +1195,18 @@ impl ProducerTask {
 
     /// Inspect `gate.partial` and cut/submit it if eligible and strictly ordered after all
     /// `Command::Batch` entries already queued in `cmd_rx`.
-    fn try_cut_partial(&mut self, reason: CutReason) -> Result<(), UnsubmittedBatch> {
+    ///
+    /// Returns `Ok(false)` only when deferred because an earlier batch is still queued in `cmd_rx`.
+    fn try_cut_partial(&mut self, reason: CutReason) -> Result<bool, UnsubmittedBatch> {
         let ready_batch = {
             let mut gate = self.shared.gate.lock().unwrap();
             // If an earlier batch is still sitting in `cmd_rx`, defer so FIFO batch order holds.
             if gate.next_batch_id != self.received_batches {
-                return Ok(());
+                return Ok(false);
             }
             if gate.partial.is_empty() {
                 self.linger.disarm();
-                return Ok(());
+                return Ok(true);
             }
             if reason == CutReason::Linger {
                 let started_at = gate
@@ -1181,16 +1217,16 @@ impl ProducerTask {
                     && Instant::now() < deadline
                 {
                     self.linger.arm_from(started_at);
-                    return Ok(());
+                    return Ok(true);
                 }
             }
-            gate.take_partial(&self.shared.has_partial)
+            gate.take_partial(&self.shared.has_partial, &self.shared.next_batch_id)
         };
         self.linger.disarm();
         if let Some(batch) = ready_batch {
             self.submit_ready_batch(batch)?;
         }
-        Ok(())
+        Ok(true)
     }
 
     /// Cut the partial batch when backpressure is waiting and no other batch is in flight (`A5a`).
@@ -1328,9 +1364,6 @@ impl ProducerTask {
     }
 
     async fn run(mut self) {
-        let _finish_guard = ProducerFinishOnDrop {
-            shared: self.shared.clone(),
-        };
         let mut closing = false;
         let abort = self.shared.abort.clone();
         let mut abort_fut = pin!(abort.cancelled());
@@ -1344,8 +1377,12 @@ impl ProducerTask {
                 break;
             }
 
+            let no_earlier_batches =
+                self.shared.next_batch_id.load(Ordering::Acquire) == self.received_batches;
+
             // For positive linger, flush before pulling more commands if deadline already elapsed.
-            if self.shared.has_partial.load(Ordering::Acquire)
+            if no_earlier_batches
+                && self.shared.has_partial.load(Ordering::Acquire)
                 && !self.linger.is_zero()
                 && self.linger.elapsed()
             {
@@ -1360,7 +1397,9 @@ impl ProducerTask {
 
             let has_pending_acks = !self.pending_batch_acks.is_empty();
             let has_partial = self.shared.has_partial.load(Ordering::Acquire);
-            let linger_active = has_partial && self.linger.is_armed();
+            let no_earlier_batches =
+                self.shared.next_batch_id.load(Ordering::Acquire) == self.received_batches;
+            let linger_active = has_partial && no_earlier_batches && self.linger.is_armed();
 
             tokio::select! {
                 biased;
@@ -1497,11 +1536,17 @@ impl ProducerTask {
                 }
 
                 // When `linger == 0`, coalesce any immediately-queued commands above, then submit
-                // as soon as the command channel is drained without touching the timer wheel.
-                _ = std::future::ready(()), if self.linger.is_zero() && has_partial => {
-                    if let Err(unsubmitted) = self.try_cut_partial(CutReason::ZeroLinger) {
-                        self.terminate(Some(unsubmitted)).await;
-                        return;
+                // as soon as no earlier batches are queued without touching the timer wheel.
+                // Guarding on `no_earlier_batches` prevents `ready(())` from starving `cmd_rx.recv()`
+                // if Tokio's cooperative budget is exhausted mid-burst.
+                _ = std::future::ready(()), if self.linger.is_zero() && has_partial && no_earlier_batches => {
+                    match self.try_cut_partial(CutReason::ZeroLinger) {
+                        Ok(true) => {}
+                        Ok(false) => tokio::task::yield_now().await,
+                        Err(unsubmitted) => {
+                            self.terminate(Some(unsubmitted)).await;
+                            return;
+                        }
                     }
                 }
 
@@ -1528,7 +1573,7 @@ impl ProducerTask {
             let mut gate = self.shared.gate.lock().unwrap();
             self.shared.lifecycle.mark_closing();
             let queued = drain_queued_commands(&mut self.cmd_rx);
-            let partial = gate.take_partial(&self.shared.has_partial);
+            let partial = gate.take_partial(&self.shared.has_partial, &self.shared.next_batch_id);
             (queued, partial)
         };
         debug!(ok = session_close_res.is_ok(), "producer closed");
@@ -1569,7 +1614,7 @@ impl ProducerTask {
                 .lifecycle
                 .set_terminal_err(session_failure.clone());
             let queued = drain_queued_commands(&mut self.cmd_rx);
-            let partial = gate.take_partial(&self.shared.has_partial);
+            let partial = gate.take_partial(&self.shared.has_partial, &self.shared.next_batch_id);
             (queued, partial)
         };
         self.settle_remaining(
@@ -1588,7 +1633,7 @@ impl ProducerTask {
         let (queued_cmds, partial_batch) = {
             let mut gate = self.shared.gate.lock().unwrap();
             let queued = drain_queued_commands(&mut self.cmd_rx);
-            let partial = gate.take_partial(&self.shared.has_partial);
+            let partial = gate.take_partial(&self.shared.has_partial, &self.shared.next_batch_id);
             let has_unsubmitted =
                 partial.is_some() || queued.iter().any(|cmd| matches!(cmd, Command::Batch(_)));
             if has_unsubmitted {
@@ -1688,7 +1733,7 @@ impl Drop for ProducerFinishOnDrop {
                 .gate
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            gate.take_partial(&self.shared.has_partial)
+            gate.take_partial(&self.shared.has_partial, &self.shared.next_batch_id)
         };
         self.shared.gate.clear_poison();
         if let Some(batch) = partial {
@@ -1826,6 +1871,7 @@ mod tests {
             fencing_token_len: 0,
             match_seq_exhausted: AtomicBool::new(false),
             has_partial: AtomicBool::new(false),
+            next_batch_id: AtomicU64::new(0),
             unacked_records: AtomicUsize::new(0),
             acked_through_id: AtomicU64::new(0),
             lifecycle,
@@ -1854,5 +1900,57 @@ mod tests {
             .expect("partial batch ticket must be resolved on task drop")
             .unwrap_err();
         assert!(matches!(err, AppendSessionError::Aborted(_)));
+    }
+
+    #[test]
+    fn dropped_ticket_clears_waker_slot_without_shifting_siblings() {
+        let lifecycle = Arc::new(SessionLifecycle::new());
+        let ctx = ErrorContext::default();
+        let (writer, outcome) = BatchOutcomeWriter::new(lifecycle, ctx);
+        let mut t0 = RecordSubmitTicket::new(outcome.clone(), 0);
+        let mut t1 = RecordSubmitTicket::new(outcome.clone(), 1);
+
+        let c0 = Arc::new(CountingWake(AtomicUsize::new(0)));
+        let c1 = Arc::new(CountingWake(AtomicUsize::new(0)));
+        {
+            let w0 = Waker::from(c0.clone());
+            let w1 = Waker::from(c1.clone());
+            assert!(
+                Pin::new(&mut t0)
+                    .poll(&mut Context::from_waker(&w0))
+                    .is_pending()
+            );
+            assert!(
+                Pin::new(&mut t1)
+                    .poll(&mut Context::from_waker(&w1))
+                    .is_pending()
+            );
+        }
+        assert_eq!(Arc::strong_count(&c0), 2);
+        assert_eq!(Arc::strong_count(&c1), 2);
+
+        // Dropping pending t0 releases its waker immediately without disturbing t1's slot.
+        drop(t0);
+        assert_eq!(Arc::strong_count(&c0), 1);
+        assert_eq!(Arc::strong_count(&c1), 2);
+
+        let ack = AppendAck {
+            start: StreamPosition {
+                seq_num: 5,
+                timestamp: 1,
+            },
+            end: StreamPosition {
+                seq_num: 7,
+                timestamp: 2,
+            },
+            tail: StreamPosition {
+                seq_num: 7,
+                timestamp: 2,
+            },
+        };
+        writer.resolve(Ok(ack.clone()));
+        assert_eq!(c0.0.load(Ordering::SeqCst), 0);
+        assert_eq!(c1.0.load(Ordering::SeqCst), 1);
+        assert_eq!(t1.try_ack().unwrap().unwrap().seq_num, 6);
     }
 }

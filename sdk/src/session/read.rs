@@ -338,6 +338,10 @@ impl ReadStateShared {
         };
         match caught_up_tail {
             Some(tail) => {
+                // Publish `caught_up = true` before waking `caught_up()` waiters so a caller
+                // checking `is_caught_up()` immediately after `caught_up().await` cannot observe
+                // `false` on a multi-threaded runtime.
+                self.caught_up.store(true, Ordering::Release);
                 if !matches!(inner.catch_up, CatchUpSlot::CaughtUp { tail: prev, .. } if prev == tail)
                 {
                     let prev = std::mem::replace(
@@ -354,7 +358,6 @@ impl ReadStateShared {
                         let _ = tx.send(Ok(tail));
                     }
                 }
-                self.caught_up.store(true, Ordering::Release);
             }
             None => {
                 if inner.catch_up.is_caught_up() {
