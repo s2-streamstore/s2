@@ -5,12 +5,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import posixpath
 import re
 import subprocess
 import sys
 import time
 import tomllib
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -100,13 +102,89 @@ def security_exceptions() -> dict[tuple[str, str], dict[str, str]]:
     return exceptions
 
 
+def is_crates_io_source(source: str) -> bool:
+    if (
+        not source
+        or not source.isascii()
+        or any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in source)
+    ):
+        raise ValueError(f"invalid package source {source!r}")
+
+    kind, separator, rest = source.partition("+")
+    if not separator or not kind or not rest:
+        raise ValueError(f"invalid package source {source!r}")
+
+    if kind in {"git", "path"}:
+        return False
+    if kind not in {"registry", "sparse"}:
+        raise ValueError(f"unsupported package source kind in {source!r}")
+
+    # Match WHATWG URL parsing (used by Cargo's `url` crate), where backslashes
+    # act as path separators for special schemes.
+    parsed = urllib.parse.urlsplit(rest.replace("\\", "/"))
+    if not parsed.scheme or not parsed.hostname:
+        raise ValueError(f"invalid registry source URL {source!r}")
+    # Access `port` to reject malformed or out-of-range ports.
+    _ = parsed.port
+
+    host = urllib.parse.unquote(parsed.hostname)
+    if (
+        not host
+        or not host.isascii()
+        or any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in host)
+    ):
+        raise ValueError(f"invalid registry host in {source!r}")
+    host = host.rstrip(".").lower()
+
+    raw_path = urllib.parse.unquote(parsed.path).replace("\\", "/")
+    collapsed_path = re.sub(r"/+", "/", raw_path)
+    if collapsed_path:
+        norm_path = posixpath.normpath(collapsed_path)
+        if not norm_path.startswith("/"):
+            norm_path = f"/{norm_path}"
+        norm_path = norm_path.rstrip("/").lower()
+    else:
+        norm_path = ""
+
+    if host == "github.com" and norm_path in {
+        "/rust-lang/crates.io-index",
+        "/rust-lang/crates.io-index.git",
+    }:
+        return True
+    if host == "index.crates.io" and norm_path == "":
+        return True
+    return False
+
+
 def crates_io_versions(lock_text: str) -> set[tuple[str, str]]:
-    packages = tomllib.loads(lock_text).get("package", [])
-    return {
-        (package["name"], package["version"])
-        for package in packages
-        if package.get("source") == CRATES_IO_SOURCE
-    }
+    document = tomllib.loads(lock_text)
+    packages = document.get("package", [])
+    if not isinstance(packages, list):
+        raise ValueError("Cargo.lock package field must be a list")
+
+    versions: set[tuple[str, str]] = set()
+    for index, package in enumerate(packages, start=1):
+        if not isinstance(package, dict):
+            raise ValueError(f"Cargo.lock package {index} must be a table")
+        name = package.get("name")
+        version = package.get("version")
+        if not isinstance(name, str) or not name or not isinstance(version, str) or not version:
+            raise ValueError(f"Cargo.lock package {index} is missing name or version")
+
+        if "source" not in package:
+            if "checksum" in package:
+                raise ValueError(
+                    f"Cargo.lock package {name} {version} has a checksum without a source"
+                )
+            continue
+
+        source = package["source"]
+        if not isinstance(source, str):
+            raise ValueError(f"Cargo.lock package {name} {version} has a non-string source")
+
+        if is_crates_io_source(source):
+            versions.add((name, version))
+    return versions
 
 
 def run_git(*args: str) -> subprocess.CompletedProcess[str]:
