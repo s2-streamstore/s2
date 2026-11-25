@@ -1916,42 +1916,37 @@ async fn spec_r6b_t8_partial_frame_survives_canceled_wait() {
     let mid2 = frame2.len() / 2;
 
     let send_rest_1 = Arc::new(tokio::sync::Notify::new());
-    let send_half_2 = Arc::new(tokio::sync::Notify::new());
-    let half_2_sent = Arc::new(tokio::sync::Notify::new());
     let send_rest_2 = Arc::new(tokio::sync::Notify::new());
 
     let server = MockH2Server::start({
         let send_rest_1 = send_rest_1.clone();
-        let send_half_2 = send_half_2.clone();
-        let half_2_sent = half_2_sent.clone();
         let send_rest_2 = send_rest_2.clone();
         move |_conn_id, _req, respond| {
             let frame0 = frame0.clone();
             let frame1 = frame1.clone();
             let frame2 = frame2.clone();
             let send_rest_1 = send_rest_1.clone();
-            let send_half_2 = send_half_2.clone();
-            let half_2_sent = half_2_sent.clone();
             let send_rest_2 = send_rest_2.clone();
             async move {
                 let Some(mut s2s) = S2sResponder::open(respond) else {
                     return;
                 };
-                // Case 1: send frame0 plus the first half of frame1 together so the decoder buffer
-                // holds a trailing partial frame before the caller cancels the next wait.
-                let mut combined = Vec::with_capacity(frame0.len() + mid1);
-                combined.extend_from_slice(&frame0);
-                combined.extend_from_slice(&frame1[..mid1]);
-                s2s.send_raw(bytes::Bytes::from(combined), false);
+                // Send frame0 plus the first half of frame1 in one HTTP/2 DATA chunk so decoding
+                // frame0 deterministically leaves frame1's partial bytes in the decoder buffer
+                // before the caller cancels the next wait.
+                let mut chunk1 = Vec::with_capacity(frame0.len() + mid1);
+                chunk1.extend_from_slice(&frame0);
+                chunk1.extend_from_slice(&frame1[..mid1]);
+                s2s.send_raw(bytes::Bytes::from(chunk1), false);
 
+                // Likewise, send the remainder of frame1 together with the first half of frame2
+                // so decoding frame1 leaves frame2's partial bytes buffered across a second
+                // canceled wait.
                 send_rest_1.notified().await;
-                s2s.send_raw(frame1.slice(mid1..), false);
-
-                // Case 2: send the first half of frame2 on its own while the caller awaits and
-                // then cancels mid-frame.
-                send_half_2.notified().await;
-                s2s.send_raw(frame2.slice(..mid2), false);
-                half_2_sent.notify_one();
+                let mut chunk2 = Vec::with_capacity((frame1.len() - mid1) + mid2);
+                chunk2.extend_from_slice(&frame1[mid1..]);
+                chunk2.extend_from_slice(&frame2[..mid2]);
+                s2s.send_raw(bytes::Bytes::from(chunk2), false);
 
                 send_rest_2.notified().await;
                 s2s.send_raw(frame2.slice(mid2..), false);
@@ -1973,9 +1968,9 @@ async fn spec_r6b_t8_partial_frame_survives_canceled_wait() {
     assert_eq!(rec0.seq_num, 0);
     assert_eq!(rec0.body.as_ref(), b"rec-0");
 
-    // Cancel a pending wait while the first half of frame1 is already buffered.
+    // Cancel a pending wait (`T8`) while the first half of frame1 is buffered in the decoder.
     assert!(
-        tokio::time::timeout(Duration::from_millis(30), session.next())
+        tokio::time::timeout(Duration::from_millis(20), session.next())
             .await
             .is_err()
     );
@@ -1988,12 +1983,9 @@ async fn spec_r6b_t8_partial_frame_survives_canceled_wait() {
     assert_eq!(rec1.seq_num, 1);
     assert_eq!(rec1.body.as_ref(), b"rec-1");
 
-    // Send first half of frame2, poll so the session consumes it into its frame buffer, then
-    // cancel the wait (`T8`), send the remainder, and verify record 2 decodes intact.
-    send_half_2.notify_one();
-    half_2_sent.notified().await;
+    // Cancel a second pending wait while the first half of frame2 is buffered, then complete it.
     assert!(
-        tokio::time::timeout(Duration::from_millis(30), session.next())
+        tokio::time::timeout(Duration::from_millis(20), session.next())
             .await
             .is_err()
     );

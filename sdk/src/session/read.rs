@@ -756,6 +756,15 @@ impl ActiveAttempt {
 type OpenAttemptHandle =
     AbortOnDropHandle<Result<Streaming<proto::ReadBatch, ReadSessionError>, ReadSessionError>>;
 
+/// Cap timer delays at ~30 years (matching Tokio's internal `safe_delay`) so extreme caller
+/// retry delays (such as `Duration::MAX`) never overflow `Instant + Duration` or Tokio's
+/// millisecond tick conversion.
+const MAX_TIMER_DELAY: Duration = Duration::from_secs(86_400 * 365 * 30);
+
+fn deadline_after(duration: Duration) -> Option<Instant> {
+    Instant::now().checked_add(duration.min(MAX_TIMER_DELAY))
+}
+
 enum DriverPhase {
     Idle,
     Opening {
@@ -763,14 +772,17 @@ enum DriverPhase {
         snapshot: AttemptSnapshot,
     },
     Active(ActiveAttempt),
-    Backoff(Instant),
+    Backoff(Option<Instant>),
 }
 
 /// Reusable lazily-boxed Tokio [`Sleep`] shared by retry backoff and `T7d` heartbeat waits.
 ///
 /// Boxing keeps [`ReadSession`] and [`ReadBatchSession`] `Unpin` (since `Sleep` is `!Unpin`),
 /// while reusing a single allocation via [`Sleep::reset`] avoids per-wait heap churn and avoids
-/// taking Tokio's timer-driver lock on every batch or chunk arrival.
+/// taking Tokio's timer-driver lock on every batch or chunk arrival. Trade-off: clearing
+/// `heartbeat_deadline` on progress leaves the prior timer entry in Tokio's wheel until it is
+/// next extended, dropped on close/drop, or expires once (at most one harmless stray wake if the
+/// session parks immediately after receiving a frame).
 #[derive(Default)]
 struct ReusableSleep {
     sleep: Option<Pin<Box<Sleep>>>,
@@ -1151,7 +1163,7 @@ impl ReadSessionCore {
             self.retry_policy,
             self.refreshes_tokens,
         ) {
-            self.transport_mut().phase = DriverPhase::Backoff(Instant::now() + backoff);
+            self.transport_mut().phase = DriverPhase::Backoff(deadline_after(backoff));
             DriverStep::Continue
         } else {
             DriverStep::Done(self.finish_terminal_error(err))
@@ -1441,11 +1453,14 @@ impl ReadSessionCore {
                         }
                     }
                 },
-                DriverPhase::Backoff(deadline) => match sleep.poll_until(*deadline, cx) {
-                    Poll::Pending => return self.pending_or_abort(cx),
-                    Poll::Ready(()) => {
-                        *phase = DriverPhase::Idle;
-                    }
+                DriverPhase::Backoff(deadline) => match deadline {
+                    Some(deadline) => match sleep.poll_until(*deadline, cx) {
+                        Poll::Pending => return self.pending_or_abort(cx),
+                        Poll::Ready(()) => {
+                            *phase = DriverPhase::Idle;
+                        }
+                    },
+                    None => return self.pending_or_abort(cx),
                 },
                 DriverPhase::Active(attempt) => {
                     // T7d: always poll the transport BEFORE checking the heartbeat timer so any
@@ -3251,6 +3266,68 @@ mod tests {
             Some(Err(ReadSessionError::Aborted(_)))
         ));
         assert!(session.core.transport_mut().sleep.sleep.is_none());
+
+        // Extreme retry backoff (`Duration::MAX`) must not panic when computing the deadline,
+        // and still aborts cleanly on client close.
+        let max_delay_cfg = S2Config::new("test-token")
+            .with_endpoints(S2Endpoints::for_endpoint("http://127.0.0.1:1").unwrap())
+            .with_retry(
+                RetryConfig::new()
+                    .with_max_attempts(2)
+                    .with_min_base_delay(Duration::MAX)
+                    .with_max_base_delay(Duration::MAX),
+            );
+        let max_base = BaseClient::init(&max_delay_cfg).unwrap();
+        let max_basin = BasinClient::init(
+            "test-basin".parse().unwrap(),
+            &max_delay_cfg.endpoints,
+            max_base,
+        );
+        let mut max_session = ReadSession::open(
+            max_basin,
+            "test-stream".parse().unwrap(),
+            StreamHeaders::default(),
+            ReadInput::new().with_start(crate::types::ReadStart::SeqNum(0)),
+            ReadSessionConfig::default(),
+        );
+        let (max_tx, mut max_rx) = mpsc::unbounded_channel();
+        let max_stream =
+            Streaming::from_stream_for_test(futures_util::stream::poll_fn(move |cx| {
+                max_rx.poll_recv(cx)
+            }));
+        max_session.core.transport_mut().phase = DriverPhase::Active(ActiveAttempt {
+            stream: max_stream,
+            snapshot: AttemptSnapshot {
+                was_resumed: false,
+                sent_seq_num: Some(0),
+                no_wait_remaining: false,
+            },
+            made_progress: false,
+            fetched_record: false,
+            last_chunks_received: 0,
+        });
+        max_tx
+            .send(Err(ReadSessionError::ConnectionLost(
+                ConnectionLostError::new_with_context(
+                    "transient",
+                    true,
+                    ErrorContext::default().into_read_only(),
+                ),
+            )))
+            .unwrap();
+        {
+            let mut next = Box::pin(max_session.next());
+            assert!(poll!(next.as_mut()).is_pending());
+        }
+        assert!(matches!(
+            max_session.core.transport_mut().phase,
+            DriverPhase::Backoff(_)
+        ));
+        max_session.core.state.shutdown.cancel();
+        assert!(matches!(
+            max_session.next().await,
+            Some(Err(ReadSessionError::Aborted(_)))
+        ));
     }
 
     // spec: r1 R5
