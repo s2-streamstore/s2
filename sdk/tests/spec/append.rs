@@ -2530,12 +2530,86 @@ async fn producer_zero_linger_burst_over_coop_budget_does_not_hang() {
 }
 
 #[test]
-fn producer_runtime_shutdown_before_first_poll_resolves_partial_ticket() {
+fn producer_runtime_shutdown_before_first_poll_resolves_partial_and_full_batches() {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
-    let (_producer, mut ticket) = rt.block_on(async {
+    let (partial_producer, mut partial_ticket, full_producer, mut full_ticket) =
+        rt.block_on(async {
+            let client =
+                s2_sdk::S2::new(s2_sdk::types::S2Config::new("test-token").with_endpoints(
+                    s2_sdk::types::S2Endpoints::for_endpoint("http://127.0.0.1:1").unwrap(),
+                ))
+                .unwrap();
+            let stream = client
+                .basin("test-basin".parse().unwrap())
+                .stream("test-stream".parse().unwrap());
+            let partial_producer = stream
+                .producer(ProducerConfig::new().with_linger(Duration::from_secs(60)))
+                .unwrap();
+            // `submit` completes synchronously via `try_acquire` without ever yielding to
+            // `ProducerTask`.
+            let partial_ticket = partial_producer
+                .submit(AppendRecord::new("before-first-poll").unwrap())
+                .await
+                .expect("accepted into partial batch");
+
+            let full_producer = stream
+                .producer(ProducerConfig::new().with_max_batch_records(1).unwrap())
+                .unwrap();
+            let full_ticket = full_producer
+                .submit(AppendRecord::new("queued-full-batch").unwrap())
+                .await
+                .expect("accepted into queued full batch");
+
+            (partial_producer, partial_ticket, full_producer, full_ticket)
+        });
+    // Shut down the runtime while both producers are still held and neither task was ever polled.
+    drop(rt);
+
+    for (label, producer, ticket) in [
+        ("partial", &partial_producer, &mut partial_ticket),
+        ("full", &full_producer, &mut full_ticket),
+    ] {
+        let err = ticket
+            .try_ack()
+            .unwrap_or_else(|| panic!("{label} batch ticket must resolve on shutdown"))
+            .unwrap_err();
+        assert!(
+            matches!(err, AppendSessionError::Aborted(_)),
+            "{label}: {err:?}"
+        );
+        assert_eq!(producer.unacked_records(), 0, "{label}: unacked_records");
+        assert_eq!(producer.unacked_bytes(), 0, "{label}: unacked_bytes");
+    }
+
+    // `close()` on another runtime returns immediately with the abort error.
+    let rt2 = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt2.block_on(async {
+        let err = tokio::time::timeout(Duration::from_secs(1), partial_producer.close())
+            .await
+            .expect("partial producer close must not hang")
+            .unwrap_err();
+        assert!(matches!(err, AppendSessionError::Aborted(_)), "{err:?}");
+        let err = tokio::time::timeout(Duration::from_secs(1), full_producer.close())
+            .await
+            .expect("full producer close must not hang")
+            .unwrap_err();
+        assert!(matches!(err, AppendSessionError::Aborted(_)), "{err:?}");
+    });
+}
+
+#[test]
+fn append_session_runtime_shutdown_before_first_poll_settles_close_and_tickets() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (idle_session, busy_session, mut ticket) = rt.block_on(async {
         let client = s2_sdk::S2::new(s2_sdk::types::S2Config::new("test-token").with_endpoints(
             s2_sdk::types::S2Endpoints::for_endpoint("http://127.0.0.1:1").unwrap(),
         ))
@@ -2543,22 +2617,38 @@ fn producer_runtime_shutdown_before_first_poll_resolves_partial_ticket() {
         let stream = client
             .basin("test-basin".parse().unwrap())
             .stream("test-stream".parse().unwrap());
-        let producer = stream
-            .producer(ProducerConfig::new().with_linger(Duration::from_secs(60)))
-            .unwrap();
-        // `submit` completes synchronously via `try_acquire` without ever yielding to
-        // `ProducerTask`.
-        let ticket = producer
-            .submit(AppendRecord::new("before-first-poll").unwrap())
+        let idle_session = stream.append_session(AppendSessionConfig::new()).unwrap();
+        let busy_session = stream.append_session(AppendSessionConfig::new()).unwrap();
+        let ticket = busy_session
+            .submit(sample_append_input())
             .await
-            .expect("accepted into partial batch");
-        (producer, ticket)
+            .expect("accepted before first poll");
+        (idle_session, busy_session, ticket)
     });
-    // Shut down the runtime while `_producer` is still held and `ProducerTask` was never polled.
     drop(rt);
+
     let err = ticket
         .try_ack()
-        .expect("partial batch ticket must resolve when unpolled task is dropped on shutdown")
+        .expect("queued append ticket must resolve on shutdown")
         .unwrap_err();
     assert!(matches!(err, AppendSessionError::Aborted(_)), "{err:?}");
+    assert_eq!(busy_session.unacked_batches(), 0);
+    assert_eq!(busy_session.unacked_bytes(), 0);
+
+    let rt2 = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt2.block_on(async {
+        let err = tokio::time::timeout(Duration::from_secs(1), idle_session.close())
+            .await
+            .expect("idle session close must not hang after shutdown before first poll")
+            .unwrap_err();
+        assert!(matches!(err, AppendSessionError::Aborted(_)), "{err:?}");
+        let err = tokio::time::timeout(Duration::from_secs(1), busy_session.close())
+            .await
+            .expect("busy session close must not hang after shutdown before first poll")
+            .unwrap_err();
+        assert!(matches!(err, AppendSessionError::Aborted(_)), "{err:?}");
+    });
 }

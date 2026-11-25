@@ -43,38 +43,6 @@ use crate::{
 /// progress tracks HTTP/2 flow control (`T7c`, `T10`).
 const FRAME_CHUNK_BYTES: usize = 16 * 1024;
 
-/// Ensures a session's [`SessionLifecycle`] reaches `Closed` with an [`AbortedError`] if its
-/// background task panics or is externally cancelled before finishing normally.
-pub(crate) struct FinishOnDrop {
-    lifecycle: Arc<SessionLifecycle>,
-    context: ErrorContext,
-    msg: &'static str,
-}
-
-impl FinishOnDrop {
-    pub(crate) fn new(
-        lifecycle: Arc<SessionLifecycle>,
-        context: ErrorContext,
-        msg: &'static str,
-    ) -> Self {
-        Self {
-            lifecycle,
-            context,
-            msg,
-        }
-    }
-}
-
-impl Drop for FinishOnDrop {
-    fn drop(&mut self) {
-        if !self.lifecycle.is_closed() {
-            self.lifecycle.finish(Err(AppendSessionError::Aborted(
-                AbortedError::new_with_context(self.msg, self.context.clone()),
-            )));
-        }
-    }
-}
-
 pub(crate) fn validate_max_unacked_bytes(
     max_unacked_bytes: usize,
 ) -> Result<usize, ValidationError> {
@@ -1559,17 +1527,47 @@ struct AppendSessionTask {
     state: SessionState,
 }
 
+impl Drop for AppendSessionTask {
+    fn drop(&mut self) {
+        if self.lifecycle.is_closed() {
+            return;
+        }
+        let aborted = AppendSessionError::Aborted(AbortedError::new_with_context(
+            self.abort.dropped_msg(),
+            self.context.clone(),
+        ));
+        let (queued, err) = {
+            let _gate = self
+                .gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.gate.clear_poison();
+            let err = self.lifecycle.terminal_err().unwrap_or(aborted);
+            self.lifecycle.set_terminal_err(err.clone());
+            (self.state.drain_queued_commands(), err)
+        };
+        for append in self.state.inflight_appends.drain(..) {
+            drop(append._permit);
+            self.state.unacked_batches.fetch_sub(1, Ordering::Release);
+            let _ = append.ack_tx.send(Err(err.clone()));
+        }
+        for cmd in queued {
+            if let Command::Submit { ack_tx, permit, .. } = cmd {
+                drop(permit);
+                self.state.unacked_batches.fetch_sub(1, Ordering::Release);
+                let _ = ack_tx.send(Err(err.clone()));
+            }
+        }
+        self.lifecycle.finish(Err(err));
+    }
+}
+
 impl AppendSessionTask {
     fn check_abort(&self) -> Option<&'static str> {
         self.abort.is_cancelled().then(|| self.abort.reason())
     }
 
     async fn run(mut self) {
-        let _finish_guard = FinishOnDrop::new(
-            self.lifecycle.clone(),
-            self.context.clone(),
-            self.abort.dropped_msg(),
-        );
         let refreshes_tokens = self.client.base().refreshes_tokens();
         let retry_config = self.client.base().retry_config();
         let mut retry_backoff = RetryBackoff::from_config(&retry_config);
@@ -1964,7 +1962,7 @@ impl AppendSessionTask {
             // Check abort BEFORE handing any unsent frames to `AttemptBodyStream` so an
             // already-aborted session cannot start transmitting an unsent batch (`A8c`).
             if let Some(reason) = self.check_abort() {
-                drain_ready_acks(
+                abort_attempt(
                     &mut acks,
                     &mut self.state,
                     &sync,
@@ -1972,7 +1970,6 @@ impl AppendSessionTask {
                     &mut send_cursor,
                     &self.context,
                 );
-                finish_attempt_gate(&sync, acked_in_attempt, &mut self.state);
                 return AttemptResult::Aborted(reason);
             }
 
@@ -1981,8 +1978,16 @@ impl AppendSessionTask {
             if !draining_for_reconnect && let Some(tx) = input_tx.as_ref() {
                 let mut closed = false;
                 while send_cursor < self.state.inflight_appends.len() {
-                    if self.abort.is_cancelled() {
-                        break;
+                    if let Some(reason) = self.check_abort() {
+                        abort_attempt(
+                            &mut acks,
+                            &mut self.state,
+                            &sync,
+                            &mut acked_in_attempt,
+                            &mut send_cursor,
+                            &self.context,
+                        );
+                        return AttemptResult::Aborted(reason);
                     }
                     let frame = self.state.inflight_appends[send_cursor].frame.clone();
                     match tx.try_send(frame) {
@@ -2033,8 +2038,12 @@ impl AppendSessionTask {
                 ack = acks.next() => {
                     match ack {
                         Some(Ok(frame)) => {
-                            let sent_unacked = sync.batches_started()
-                                .saturating_sub(acked_in_attempt);
+                            let batches_started = if self.abort.is_cancelled() {
+                                sync.stop()
+                            } else {
+                                sync.batches_started()
+                            };
+                            let sent_unacked = batches_started.saturating_sub(acked_in_attempt);
                             match process_proto_ack(
                                 frame.msg,
                                 &mut self.state,
@@ -2154,7 +2163,7 @@ impl AppendSessionTask {
                 }
 
                 _ = abort_fut.as_mut() => {
-                    drain_ready_acks(
+                    abort_attempt(
                         &mut acks,
                         &mut self.state,
                         &sync,
@@ -2162,7 +2171,6 @@ impl AppendSessionTask {
                         &mut send_cursor,
                         &self.context,
                     );
-                    finish_attempt_gate(&sync, acked_in_attempt, &mut self.state);
                     return AttemptResult::Aborted(self.abort.reason());
                 }
 
@@ -2275,7 +2283,7 @@ impl AppendSessionTask {
                                 break;
                             }
                             None => {
-                                drain_ready_acks(
+                                abort_attempt(
                                     &mut acks,
                                     &mut self.state,
                                     &sync,
@@ -2283,7 +2291,6 @@ impl AppendSessionTask {
                                     &mut send_cursor,
                                     &self.context,
                                 );
-                                finish_attempt_gate(&sync, acked_in_attempt, &mut self.state);
                                 return AttemptResult::Aborted(self.abort.dropped_msg());
                             }
                         }
@@ -2321,8 +2328,10 @@ fn finish_attempt_gate(
     unacked_sent
 }
 
-/// Drain any acks already buffered in `acks` before an abort ends the attempt (`T10`).
-fn drain_ready_acks(
+/// Stop the attempt gate immediately so `AttemptBodyStream` cannot start any unsent batch queued
+/// in the body channel, then drain any already-buffered acks against the frozen started count and
+/// classify the remaining unacked batches (`A8c`, `T10`).
+fn abort_attempt(
     acks: &mut Streaming<proto::AppendAck, AppendSessionError>,
     state: &mut SessionState,
     sync: &AttemptSync,
@@ -2330,15 +2339,22 @@ fn drain_ready_acks(
     send_cursor: &mut usize,
     context: &ErrorContext,
 ) {
+    let batches_started = sync.stop();
     // Use `coop::unconstrained` so Tokio cooperative preemption cannot spuriously return
     // `Pending` and drop an already-buffered ack during abort (`T10`).
     while let Some(Some(Ok(frame))) = tokio::task::coop::unconstrained(acks.next()).now_or_never() {
-        let sent_unacked = sync.batches_started().saturating_sub(*acked_in_attempt);
+        let sent_unacked = batches_started.saturating_sub(*acked_in_attempt);
         if process_proto_ack(frame.msg, state, sent_unacked, context).is_err() {
             break;
         }
         *acked_in_attempt += 1;
         *send_cursor = send_cursor.saturating_sub(1);
+    }
+    let unacked_sent = batches_started
+        .saturating_sub(*acked_in_attempt)
+        .min(state.inflight_appends.len());
+    for append in state.inflight_appends.iter_mut().take(unacked_sent) {
+        append.sent_ever = true;
     }
 }
 

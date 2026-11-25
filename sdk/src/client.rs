@@ -5,8 +5,8 @@ use std::{
     io::{Read as _, Write as _},
     pin::{Pin, pin},
     sync::{
-        Arc, OnceLock, RwLock as StdRwLock, Weak,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        Arc, Mutex as StdMutex, RwLock as StdRwLock, Weak,
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     task::{Context, Poll},
     time::Duration,
@@ -700,7 +700,9 @@ async fn race_deadline<F: Future>(
             return Poll::Ready(Ok(out));
         }
         if let Some(sleep) = sleep.as_mut()
-            && sleep.as_mut().poll(cx).is_ready()
+            && Pin::new(&mut tokio::task::coop::unconstrained(sleep.as_mut()))
+                .poll(cx)
+                .is_ready()
         {
             return Poll::Ready(Err(()));
         }
@@ -1263,9 +1265,30 @@ fn decompress_zstd_with_dctx(
     read_bounded(decoder, fallback_capacity, max_bytes)
 }
 
+/// Returns the exact total decompressed size when every frame in `data` declares its
+/// `Frame_Content_Size` (stepping over skippable frames). Returns `None` if any frame omits its
+/// content size, if `data` is malformed, or if the total overflows `usize`.
+///
+/// Unlike `zstd::bulk::Decompressor::upper_bound`, this never falls back to `ZSTD_decompressBound`
+/// when a downstream crate enables `zstd/experimental`, so conservative block-size bounds can never
+/// falsely reject valid below-limit streaming responses.
+fn exact_zstd_decompressed_size(mut data: &[u8]) -> Option<usize> {
+    if data.is_empty() {
+        return None;
+    }
+    let mut total = 0u64;
+    while !data.is_empty() {
+        let frame_len = zstd::zstd_safe::find_frame_compressed_size(data).ok()?;
+        let content = zstd::zstd_safe::get_frame_content_size(data).ok()??;
+        total = total.checked_add(content)?;
+        data = data.get(frame_len..)?;
+    }
+    usize::try_from(total).ok()
+}
+
 fn decompress_zstd(bytes: Bytes, max_bytes: usize) -> Result<Bytes, HttpError> {
     let fallback_capacity = bytes.len().saturating_mul(2).max(1024).min(max_bytes);
-    let exact_size = match zstd::bulk::Decompressor::upper_bound(bytes.as_ref()) {
+    let exact_size = match exact_zstd_decompressed_size(bytes.as_ref()) {
         Some(exact) if exact > max_bytes => return Err(HttpError::ResponseTooLarge(max_bytes)),
         other => other,
     };
@@ -2028,7 +2051,8 @@ pub(crate) struct Pool<C> {
     connector: C,
     shutdown: CancellationToken,
     reaper_notify: Arc<Notify>,
-    reaper: OnceLock<AbortOnDropHandle<()>>,
+    reaper_alive: Arc<AtomicBool>,
+    reaper: StdMutex<Option<AbortOnDropHandle<()>>>,
 }
 
 impl<C> Drop for Pool<C> {
@@ -2061,48 +2085,63 @@ where
             connector,
             shutdown,
             reaper_notify: Arc::new(Notify::new()),
-            reaper: OnceLock::new(),
+            reaper_alive: Arc::new(AtomicBool::new(false)),
+            reaper: StdMutex::new(None),
         }
     }
 
     fn ensure_reaper_started(&self) {
-        self.reaper.get_or_init(|| {
-            let hosts = self.hosts.clone();
-            let shutdown = self.shutdown.clone();
-            let notify = self.reaper_notify.clone();
-            AbortOnDropHandle::new(tokio::spawn(async move {
-                let mut shutdown_fut = pin!(shutdown.cancelled());
-                loop {
-                    let next_deadline = reap_idle_connections(&hosts, Instant::now(), IDLE_TIMEOUT);
-                    match next_deadline {
-                        Some(deadline) => {
-                            // `IDLE_TIMEOUT` is uniform across all connections, so no newly-idle
-                            // connection can expire earlier than `deadline`; sleep until then
-                            // rather than waking on every request completion.
-                            tokio::select! {
-                                biased;
-                                _ = &mut shutdown_fut => break,
-                                _ = tokio::time::sleep_until(deadline) => {}
-                            }
+        if self.shutdown.is_cancelled() || self.reaper_alive.load(Ordering::Acquire) {
+            return;
+        }
+        let mut slot = self.reaper.lock().unwrap();
+        if self.shutdown.is_cancelled() || self.reaper_alive.load(Ordering::Acquire) {
+            return;
+        }
+        struct ReaperAliveGuard(Arc<AtomicBool>);
+        impl Drop for ReaperAliveGuard {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::Release);
+            }
+        }
+        self.reaper_alive.store(true, Ordering::Release);
+        let alive_guard = ReaperAliveGuard(self.reaper_alive.clone());
+        let hosts = self.hosts.clone();
+        let shutdown = self.shutdown.clone();
+        let notify = self.reaper_notify.clone();
+        *slot = Some(AbortOnDropHandle::new(tokio::spawn(async move {
+            let _alive_guard = alive_guard;
+            let mut shutdown_fut = pin!(shutdown.cancelled());
+            loop {
+                let next_deadline = reap_idle_connections(&hosts, Instant::now(), IDLE_TIMEOUT);
+                match next_deadline {
+                    Some(deadline) => {
+                        // `IDLE_TIMEOUT` is uniform across all connections, so no newly-idle
+                        // connection can expire earlier than `deadline`; sleep until then
+                        // rather than waking on every request completion.
+                        tokio::select! {
+                            biased;
+                            _ = &mut shutdown_fut => break,
+                            _ = tokio::time::sleep_until(deadline) => {}
                         }
-                        None => {
-                            tokio::select! {
-                                biased;
-                                _ = &mut shutdown_fut => break,
-                                _ = notify.notified() => {}
-                            }
-                            // Wait one full `IDLE_TIMEOUT` before scanning so rapid sequential
-                            // requests do not trigger a reaper wakeup storm on every completion.
-                            tokio::select! {
-                                biased;
-                                _ = &mut shutdown_fut => break,
-                                _ = tokio::time::sleep(IDLE_TIMEOUT) => {}
-                            }
+                    }
+                    None => {
+                        tokio::select! {
+                            biased;
+                            _ = &mut shutdown_fut => break,
+                            _ = notify.notified() => {}
+                        }
+                        // Wait one full `IDLE_TIMEOUT` before scanning so rapid sequential
+                        // requests do not trigger a reaper wakeup storm on every completion.
+                        tokio::select! {
+                            biased;
+                            _ = &mut shutdown_fut => break,
+                            _ = tokio::time::sleep(IDLE_TIMEOUT) => {}
                         }
                     }
                 }
-            }))
-        });
+            }
+        })));
     }
 
     fn get_or_create_host_pool(
@@ -3394,5 +3433,88 @@ mod tests {
             decompress_zstd(Bytes::from(multi), 1024).unwrap(),
             Bytes::from_static(b"part-one-part-two")
         );
+
+        // Streaming zstd frame with many flushed tiny chunks (no declared content size) decodes.
+        let mut enc = zstd::stream::write::Encoder::new(Vec::new(), 1).unwrap();
+        for b in 0u8..24 {
+            enc.write_all(&[b]).unwrap();
+            enc.flush().unwrap();
+        }
+        let flushed = enc.finish().unwrap();
+        assert_eq!(exact_zstd_decompressed_size(&flushed), None);
+        assert_eq!(
+            decompress_zstd(Bytes::from(flushed), 1024)
+                .unwrap()
+                .as_ref(),
+            &(0u8..24).collect::<Vec<_>>()[..]
+        );
+    }
+
+    #[tokio::test]
+    async fn race_deadline_fires_even_when_inner_exhausts_coop_budget() {
+        // Yield repeatedly using Tokio's cooperative yield so the task budget is depleted before
+        // returning Pending, against an already-expired deadline.
+        let busy = async {
+            for _ in 0..512 {
+                tokio::task::yield_now().await;
+            }
+            42usize
+        };
+        let mut sleep = pin!(tokio::time::sleep_until(Instant::now()));
+        let res = race_deadline(busy, Some(sleep.as_mut())).await;
+        assert!(
+            res.is_err(),
+            "expired deadline must fire even when inner future exhausts coop budget"
+        );
+    }
+
+    #[test]
+    fn pool_reaper_restarts_after_previous_runtime_shuts_down() {
+        let connector = DuplexH2Connector::new();
+        let pool = test_pool_with(connector.clone(), Http2Config::new());
+
+        let rt_a = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt_a.block_on(async {
+            let req = RequestBuilder::get("http://localhost:8080/a".parse().unwrap())
+                .build()
+                .unwrap();
+            let resp = pool.execute_unary(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+        });
+        assert!(pool.reaper_alive.load(Ordering::Acquire));
+        drop(rt_a);
+        assert!(
+            !pool.reaper_alive.load(Ordering::Acquire),
+            "reaper_alive must clear when runtime A drops"
+        );
+
+        let rt_b = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .unwrap();
+        rt_b.block_on(async {
+            let req = RequestBuilder::get("http://localhost:8080/b".parse().unwrap())
+                .build()
+                .unwrap();
+            let resp = pool.execute_unary(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            assert!(pool.reaper_alive.load(Ordering::Acquire));
+            assert_eq!(host_connection_count(&pool, TEST_ORIGIN), 1);
+
+            tokio::time::advance(IDLE_TIMEOUT * 3).await;
+            for _ in 0..10 {
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(
+                host_connection_count(&pool, TEST_ORIGIN),
+                0,
+                "restarted reaper on runtime B must evict idle connections"
+            );
+            pool.close();
+        });
     }
 }

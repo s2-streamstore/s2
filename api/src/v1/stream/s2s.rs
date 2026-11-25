@@ -158,8 +158,29 @@ fn decompress_zstd_with_dctx(
     read_to_end_limited(&mut decoder, fallback_capacity)
 }
 
+/// Returns the exact total decompressed size when every frame in `data` declares its
+/// `Frame_Content_Size` (stepping over skippable frames). Returns `None` if any frame omits its
+/// content size, if `data` is malformed, or if the total overflows `usize`.
+///
+/// Unlike `zstd::bulk::Decompressor::upper_bound`, this never falls back to `ZSTD_decompressBound`
+/// when a downstream crate enables `zstd/experimental`, so conservative block-size bounds can never
+/// falsely reject valid below-limit streaming frames.
+fn exact_zstd_decompressed_size(mut data: &[u8]) -> Option<usize> {
+    if data.is_empty() {
+        return None;
+    }
+    let mut total = 0u64;
+    while !data.is_empty() {
+        let frame_len = zstd::zstd_safe::find_frame_compressed_size(data).ok()?;
+        let content = zstd::zstd_safe::get_frame_content_size(data).ok()??;
+        total = total.checked_add(content)?;
+        data = data.get(frame_len..)?;
+    }
+    usize::try_from(total).ok()
+}
+
 fn decompress_zstd_limited(src: &[u8], fallback_capacity: usize) -> std::io::Result<Bytes> {
-    let exact_size = match zstd::bulk::Decompressor::upper_bound(src) {
+    let exact_size = match exact_zstd_decompressed_size(src) {
         Some(exact) if exact > MAX_DECOMPRESSED_PAYLOAD_BYTES => {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -419,11 +440,14 @@ impl CompressedData {
                 let mut encoder =
                     GzEncoder::new(Vec::with_capacity(data.len()), Compression::default());
                 encoder.write_all(data.as_slice())?;
-                Bytes::from(encoder.finish()?)
+                let mut buf = encoder.finish()?;
+                maybe_shrink_vec(&mut buf, 4096);
+                Bytes::from(buf)
             }
             CompressionAlgorithm::Zstd => {
                 let mut buf = Vec::with_capacity(zstd::compress_bound(data.len()));
                 compress_zstd_into(data.as_slice(), &mut buf)?;
+                maybe_shrink_vec(&mut buf, 4096);
                 Bytes::from(buf)
             }
             CompressionAlgorithm::None => unreachable!("handled above"),
@@ -1348,5 +1372,32 @@ mod test {
                 .unwrap(),
             Bytes::new()
         );
+
+        // 4. Streaming zstd frame with many flushed tiny chunks (no declared content size) must
+        //    still decode cleanly even if a downstream crate enables `zstd/experimental`.
+        let mut enc = zstd::stream::write::Encoder::new(Vec::new(), 1).unwrap();
+        for b in 0u8..24 {
+            enc.write_all(&[b]).unwrap();
+            enc.flush().unwrap();
+        }
+        let flushed = enc.finish().unwrap();
+        assert_eq!(exact_zstd_decompressed_size(&flushed), None);
+        assert_eq!(
+            decode_regular_bytes(zstd_s2s_frame(&flushed))
+                .decompressed()
+                .unwrap()
+                .as_ref(),
+            &(0u8..24).collect::<Vec<_>>()[..]
+        );
+    }
+
+    #[test]
+    fn compressed_data_for_proto_trims_slack_on_highly_compressible_payload() {
+        let proto = TestProto::new(vec![0u8; 256 * 1024]);
+        for alg in [CompressionAlgorithm::Gzip, CompressionAlgorithm::Zstd] {
+            let compressed = CompressedData::for_proto(alg, &proto).unwrap();
+            assert!(compressed.payload.len() < 4096);
+            assert_eq!(compressed.try_into_proto::<TestProto>().unwrap(), proto);
+        }
     }
 }

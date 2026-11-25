@@ -1148,22 +1148,6 @@ impl FusedStream for ReadBatchSession {
     }
 }
 
-/// Ensures pending [`CaughtUp`] waiters wake with [`AbortedError`] if [`ReadDriver::run`] panics
-/// or is cancelled unexpectedly while the session is still open.
-struct ReadFinishOnDrop {
-    state: ReadSessionState,
-    context: ErrorContext,
-}
-
-impl Drop for ReadFinishOnDrop {
-    fn drop(&mut self) {
-        self.state.on_aborted(AbortedError::new_with_context(
-            "read session task ended unexpectedly",
-            self.context.clone(),
-        ));
-    }
-}
-
 struct ActiveAttempt {
     stream: Streaming<proto::ReadBatch, ReadSessionError>,
     made_progress: bool,
@@ -1190,6 +1174,18 @@ struct ReadDriver {
     has_received_response: bool,
     last_fetched_seq: Option<u64>,
     active: Option<ActiveAttempt>,
+}
+
+impl Drop for ReadDriver {
+    fn drop(&mut self) {
+        // Ensures pending `CaughtUp` waiters wake with `AbortedError` if the driver task is
+        // cancelled or dropped before its first poll (e.g. runtime shutdown) or panics before
+        // recording a terminal state.
+        self.state.on_aborted(AbortedError::new_with_context(
+            "read session task ended unexpectedly",
+            self.context.clone(),
+        ));
+    }
 }
 
 impl ReadDriver {
@@ -1634,10 +1630,6 @@ impl ReadDriver {
     }
 
     async fn run(mut self, tx: mpsc::Sender<DriverEvent>) {
-        let _finish_guard = ReadFinishOnDrop {
-            state: self.state.clone(),
-            context: self.context.clone(),
-        };
         let shutdown = self.shutdown.clone();
         let mut shutdown_fut = pin!(shutdown.cancelled());
         let tx_for_closed = tx.clone();

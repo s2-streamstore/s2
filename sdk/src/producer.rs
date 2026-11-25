@@ -67,21 +67,30 @@ impl BatchOutcome {
     }
 }
 
-/// Panic-safe writer handle for a [`BatchOutcome`]. If dropped before [`resolve`](Self::resolve),
-/// automatically settles waiting tickets with the session's terminal error or [`AbortedError`].
+/// Panic-safe writer handle for a [`BatchOutcome`]. Owns the batch's `unacked_records`
+/// accounting so success, failure, and implicit drop each decrement `unacked_records` exactly
+/// once before publishing the outcome to waiting tickets.
 struct BatchOutcomeWriter {
     outcome: Arc<BatchOutcome>,
     lifecycle: Arc<SessionLifecycle>,
+    unacked_records: Arc<AtomicUsize>,
+    record_count: usize,
     context: ErrorContext,
     resolved: bool,
 }
 
 impl BatchOutcomeWriter {
-    fn new(lifecycle: Arc<SessionLifecycle>, context: ErrorContext) -> (Self, Arc<BatchOutcome>) {
+    fn new(
+        lifecycle: Arc<SessionLifecycle>,
+        unacked_records: Arc<AtomicUsize>,
+        context: ErrorContext,
+    ) -> (Self, Arc<BatchOutcome>) {
         let outcome = BatchOutcome::new();
         let writer = Self {
             outcome: outcome.clone(),
             lifecycle,
+            unacked_records,
+            record_count: 0,
             context,
             resolved: false,
         };
@@ -90,6 +99,10 @@ impl BatchOutcomeWriter {
 
     fn resolve(mut self, result: Result<AppendAck, AppendSessionError>) {
         self.resolved = true;
+        if self.record_count > 0 {
+            self.unacked_records
+                .fetch_sub(self.record_count, Ordering::Release);
+        }
         self.outcome.resolve(result);
     }
 }
@@ -97,6 +110,11 @@ impl BatchOutcomeWriter {
 impl Drop for BatchOutcomeWriter {
     fn drop(&mut self) {
         if !self.resolved {
+            self.resolved = true;
+            if self.record_count > 0 {
+                self.unacked_records
+                    .fetch_sub(self.record_count, Ordering::Release);
+            }
             let err = self.lifecycle.terminal_err().unwrap_or_else(|| {
                 AppendSessionError::Aborted(AbortedError::new_with_context(
                     DROPPED_ABORT_MSG,
@@ -171,21 +189,25 @@ impl Future for RecordSubmitTicket {
             this.done = true;
             return Poll::Ready(map_record_outcome(res, this.offset));
         }
-        let mut waiters = this.outcome.waiters.lock().unwrap();
-        if let Some(list) = waiters.as_mut() {
-            match this.waker_slot {
-                Some(idx) => match &mut list[idx] {
-                    Some(existing) => existing.clone_from(cx.waker()),
-                    slot @ None => *slot = Some(cx.waker().clone()),
-                },
-                None => {
-                    this.waker_slot = Some(list.len());
-                    list.push(Some(cx.waker().clone()));
+        let mut replaced_waker = None;
+        {
+            let mut waiters = this.outcome.waiters.lock().unwrap();
+            if let Some(list) = waiters.as_mut() {
+                match this.waker_slot {
+                    Some(idx) => match &mut list[idx] {
+                        Some(existing) if existing.will_wake(cx.waker()) => {}
+                        slot => replaced_waker = slot.replace(cx.waker().clone()),
+                    },
+                    None => {
+                        this.waker_slot = Some(list.len());
+                        list.push(Some(cx.waker().clone()));
+                    }
                 }
+                drop(waiters);
+                drop(replaced_waker);
+                return Poll::Pending;
             }
-            return Poll::Pending;
         }
-        drop(waiters);
         let res = this
             .outcome
             .result
@@ -201,11 +223,16 @@ impl Drop for RecordSubmitTicket {
         if let Some(idx) = self.waker_slot
             && !self.done
             && self.outcome.result.get().is_none()
-            && let Ok(mut guard) = self.outcome.waiters.lock()
-            && let Some(list) = guard.as_mut()
-            && let Some(slot) = list.get_mut(idx)
         {
-            *slot = None;
+            // Release the `waiters` lock BEFORE dropping the removed waker so a custom waker
+            // whose destructor drops another ticket from the same batch cannot deadlock.
+            let dropped_waker = self
+                .outcome
+                .waiters
+                .lock()
+                .ok()
+                .and_then(|mut guard| guard.as_mut()?.get_mut(idx)?.take());
+            drop(dropped_waker);
         }
     }
 }
@@ -403,8 +430,9 @@ struct ReadyBatch {
     records: Vec<AppendRecord>,
     match_seq_num: Option<u64>,
     max_acceptance_id: u64,
-    outcome_writer: BatchOutcomeWriter,
+    /// Declared before `outcome_writer` so implicit drop releases bytes before settling tickets.
     permit: AppendPermit,
+    outcome_writer: BatchOutcomeWriter,
 }
 
 struct PartialBatch {
@@ -466,8 +494,11 @@ impl PartialBatch {
             self.batch_match_seq = match_seq_num;
             let now = Instant::now();
             self.started_at = Some(now);
-            let (writer, outcome) =
-                BatchOutcomeWriter::new(shared.lifecycle.clone(), shared.context.clone());
+            let (writer, outcome) = BatchOutcomeWriter::new(
+                shared.lifecycle.clone(),
+                shared.unacked_records.clone(),
+                shared.context.clone(),
+            );
             self.outcome = Some((writer, outcome));
             Some(now)
         } else {
@@ -482,13 +513,13 @@ impl PartialBatch {
             Some(existing) => existing.merge(permit),
             None => self.permit = Some(permit),
         }
-        let outcome = self
+        let (writer, outcome) = self
             .outcome
-            .as_ref()
-            .expect("non-empty PartialBatch has outcome")
-            .1
-            .clone();
-        (outcome, offset, started_now)
+            .as_mut()
+            .expect("non-empty PartialBatch has outcome");
+        writer.record_count += 1;
+        shared.unacked_records.fetch_add(1, Ordering::Release);
+        (outcome.clone(), offset, started_now)
     }
 
     fn take(&mut self, batch_id: u64) -> Option<ReadyBatch> {
@@ -552,7 +583,7 @@ struct ProducerShared {
     match_seq_exhausted: AtomicBool,
     has_partial: AtomicBool,
     next_batch_id: AtomicU64,
-    unacked_records: AtomicUsize,
+    unacked_records: Arc<AtomicUsize>,
     acked_through_id: AtomicU64,
     lifecycle: Arc<SessionLifecycle>,
     session_lifecycle: Arc<SessionLifecycle>,
@@ -602,7 +633,6 @@ impl ProducerShared {
     }
 
     fn fail_unsent_batch(&self, batch: ReadyBatch, err: &AppendSessionError) {
-        let count = batch.records.len();
         let ReadyBatch {
             records,
             outcome_writer,
@@ -611,7 +641,6 @@ impl ProducerShared {
         } = batch;
         drop(records);
         drop(permit);
-        self.unacked_records.fetch_sub(count, Ordering::Release);
         outcome_writer.resolve(Err(err.clone()));
     }
 
@@ -659,7 +688,6 @@ impl ProducerShared {
             append_permit,
             self,
         );
-        self.unacked_records.fetch_add(1, Ordering::Release);
         gate.last_accepted_id = acceptance_id;
 
         if gate.partial.is_full() {
@@ -773,7 +801,7 @@ impl Producer {
             match_seq_exhausted,
             has_partial: AtomicBool::new(false),
             next_batch_id: AtomicU64::new(0),
-            unacked_records: AtomicUsize::new(0),
+            unacked_records: Arc::new(AtomicUsize::new(0)),
             acked_through_id: AtomicU64::new(0),
             lifecycle,
             session_lifecycle,
@@ -1106,9 +1134,9 @@ impl RecordSubmitPermit {
 }
 
 struct UnsubmittedBatch {
-    record_count: usize,
-    outcome_writer: BatchOutcomeWriter,
+    /// Declared before `outcome_writer` so implicit drop releases bytes before settling tickets.
     _permit: AppendPermit,
+    outcome_writer: BatchOutcomeWriter,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1119,10 +1147,6 @@ enum CutReason {
 }
 
 struct ProducerTask {
-    /// Stored on the task struct (constructed before `tokio::spawn`) and declared first so that
-    /// even if the task is dropped before its first poll on a single-threaded runtime, `lifecycle`
-    /// finishes and any buffered partial batch fails before `cmd_rx` / `pending_batch_acks` drop.
-    _finish_guard: ProducerFinishOnDrop,
     shared: Arc<ProducerShared>,
     session: AppendSessionCore,
     fencing_token: Option<FencingToken>,
@@ -1134,6 +1158,41 @@ struct ProducerTask {
     pending_flushes: VecDeque<PendingFlush>,
 }
 
+impl Drop for ProducerTask {
+    fn drop(&mut self) {
+        if self.shared.lifecycle.is_closed() {
+            return;
+        }
+        let aborted = AppendSessionError::Aborted(AbortedError::new_with_context(
+            DROPPED_ABORT_MSG,
+            self.shared.context.clone(),
+        ));
+        let (queued_cmds, partial_batch, err) = {
+            let mut gate = self
+                .shared
+                .gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.shared.gate.clear_poison();
+            let err = self.shared.lifecycle.terminal_err().unwrap_or(aborted);
+            self.shared.lifecycle.set_terminal_err(err.clone());
+            let queued = drain_queued_commands(&mut self.cmd_rx);
+            let partial = gate.take_partial(&self.shared.has_partial, &self.shared.next_batch_id);
+            (queued, partial, err)
+        };
+
+        self.session.abort_dropped();
+        for mut pending in self.pending_batch_acks.drain(..) {
+            drop(pending.permit.take());
+            if let Some(writer) = pending.outcome_writer.take() {
+                writer.resolve(Err(err.clone()));
+            }
+        }
+        self.shared
+            .settle_aborted_drop(&mut self.pending_flushes, queued_cmds, partial_batch, err);
+    }
+}
+
 impl ProducerTask {
     fn new(
         shared: Arc<ProducerShared>,
@@ -1141,11 +1200,7 @@ impl ProducerTask {
         config: ProducerConfig,
         cmd_rx: mpsc::UnboundedReceiver<Command>,
     ) -> Self {
-        let _finish_guard = ProducerFinishOnDrop {
-            shared: shared.clone(),
-        };
         Self {
-            _finish_guard,
             shared,
             session,
             fencing_token: config.fencing_token,
@@ -1169,7 +1224,6 @@ impl ProducerTask {
             permit,
             ..
         } = batch;
-        let record_count = records.len();
         let res =
             self.session
                 .submit_parts(&records, match_seq_num, self.fencing_token.as_deref(), None);
@@ -1179,16 +1233,14 @@ impl ProducerTask {
                 self.pending_batch_acks.push_back(PendingBatchAck {
                     ticket,
                     batch_max_id: max_acceptance_id,
-                    record_count,
-                    outcome_writer: Some(outcome_writer),
                     permit: Some(permit),
+                    outcome_writer: Some(outcome_writer),
                 });
                 Ok(())
             }
             Err(_) => Err(UnsubmittedBatch {
-                record_count,
-                outcome_writer,
                 _permit: permit,
+                outcome_writer,
             }),
         }
     }
@@ -1256,7 +1308,6 @@ impl ProducerTask {
         &mut self,
         batch_ack: Result<AppendAck, AppendSessionError>,
         batch_max_id: u64,
-        record_count: usize,
         outcome_writer: BatchOutcomeWriter,
         batch_permit: AppendPermit,
     ) {
@@ -1265,9 +1316,6 @@ impl ProducerTask {
         // checking `unacked_bytes()` / `unacked_records()` / `acked_records()` immediately after
         // `ticket.await` or `flush().await` observe settled counts without racing.
         drop(batch_permit);
-        self.shared
-            .unacked_records
-            .fetch_sub(record_count, Ordering::Release);
         if ok {
             self.shared
                 .acked_through_id
@@ -1287,13 +1335,7 @@ impl ProducerTask {
                 .take()
                 .expect("outcome_writer should not be None");
             let permit = pending.permit.take().expect("permit should not be None");
-            self.settle_batch_ack(
-                batch_ack,
-                pending.batch_max_id,
-                pending.record_count,
-                outcome_writer,
-                permit,
-            );
+            self.settle_batch_ack(batch_ack, pending.batch_max_id, outcome_writer, permit);
         }
     }
 
@@ -1316,15 +1358,11 @@ impl ProducerTask {
         ));
 
         if let Some(UnsubmittedBatch {
-            record_count,
-            outcome_writer,
             _permit,
+            outcome_writer,
         }) = unsubmitted
         {
             drop(_permit);
-            self.shared
-                .unacked_records
-                .fetch_sub(record_count, Ordering::Release);
             outcome_writer.resolve(Err(unsent_err.clone()));
         }
 
@@ -1429,7 +1467,6 @@ impl ProducerTask {
                         self.settle_batch_ack(
                             batch_ack,
                             pending.batch_max_id,
-                            pending.record_count,
                             outcome_writer,
                             batch_permit,
                         );
@@ -1439,7 +1476,6 @@ impl ProducerTask {
                     self.settle_batch_ack(
                         batch_ack,
                         pending.batch_max_id,
-                        pending.record_count,
                         outcome_writer,
                         batch_permit,
                     );
@@ -1700,9 +1736,9 @@ struct PendingFlush {
 struct PendingBatchAck {
     ticket: BatchSubmitTicket,
     batch_max_id: u64,
-    record_count: usize,
-    outcome_writer: Option<BatchOutcomeWriter>,
+    /// Declared before `outcome_writer` so implicit drop releases bytes before settling tickets.
     permit: Option<AppendPermit>,
+    outcome_writer: Option<BatchOutcomeWriter>,
 }
 
 fn drain_queued_commands(cmd_rx: &mut mpsc::UnboundedReceiver<Command>) -> Vec<Command> {
@@ -1714,32 +1750,49 @@ fn drain_queued_commands(cmd_rx: &mut mpsc::UnboundedReceiver<Command>) -> Vec<C
     queued
 }
 
-struct ProducerFinishOnDrop {
-    shared: Arc<ProducerShared>,
-}
+impl ProducerShared {
+    /// Settle queued commands, pending flushes, and any buffered partial batch on abnormal task
+    /// drop BEFORE marking `lifecycle` closed so `close()` waiters never observe unsettled tickets
+    /// or non-zero unacked counters.
+    fn settle_aborted_drop(
+        &self,
+        pending_flushes: &mut VecDeque<PendingFlush>,
+        queued_cmds: Vec<Command>,
+        partial_batch: Option<ReadyBatch>,
+        err: AppendSessionError,
+    ) {
+        let acked = self.acked_through_id.load(Ordering::Acquire);
+        for flush in pending_flushes.drain(..) {
+            let outcome = if acked >= flush.target_id {
+                Ok(())
+            } else {
+                Err(err.clone())
+            };
+            let _ = flush.done_tx.send(outcome);
+        }
 
-impl Drop for ProducerFinishOnDrop {
-    fn drop(&mut self) {
-        let aborted = AppendSessionError::Aborted(AbortedError::new_with_context(
-            DROPPED_ABORT_MSG,
-            self.shared.context.clone(),
-        ));
-        if !self.shared.lifecycle.is_closed() {
-            self.shared.lifecycle.finish(Err(aborted.clone()));
+        for cmd in queued_cmds {
+            match cmd {
+                Command::Batch(batch) => {
+                    self.fail_unsent_batch(batch, &err);
+                }
+                Command::Flush { target_id, done_tx } => {
+                    let outcome = if acked >= target_id {
+                        Ok(())
+                    } else {
+                        Err(err.clone())
+                    };
+                    let _ = done_tx.send(outcome);
+                }
+                Command::PartialStarted { .. } | Command::Close => {}
+            }
         }
-        let partial = {
-            let mut gate = self
-                .shared
-                .gate
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            gate.take_partial(&self.shared.has_partial, &self.shared.next_batch_id)
-        };
-        self.shared.gate.clear_poison();
-        if let Some(batch) = partial {
-            let err = self.shared.lifecycle.terminal_err().unwrap_or(aborted);
-            self.shared.fail_unsent_batch(batch, &err);
+
+        if let Some(batch) = partial_batch {
+            self.fail_unsent_batch(batch, &err);
         }
+
+        self.lifecycle.finish(Err(err));
     }
 }
 
@@ -1775,8 +1828,10 @@ mod tests {
     #[test]
     fn batch_outcome_writer_drop_before_resolve_aborts_tickets() {
         let lifecycle = Arc::new(SessionLifecycle::new());
+        let unacked = Arc::new(AtomicUsize::new(1));
         let ctx = ErrorContext::default();
-        let (writer, outcome) = BatchOutcomeWriter::new(lifecycle, ctx);
+        let (mut writer, outcome) = BatchOutcomeWriter::new(lifecycle, unacked.clone(), ctx);
+        writer.record_count = 1;
         let mut ticket = RecordSubmitTicket::new(outcome, 0);
 
         let counter = Arc::new(CountingWake(AtomicUsize::new(0)));
@@ -1786,6 +1841,7 @@ mod tests {
         assert!(ticket.try_ack().is_none());
 
         drop(writer);
+        assert_eq!(unacked.load(Ordering::Acquire), 0);
         assert_eq!(counter.0.load(Ordering::SeqCst), 1);
 
         let res = match Pin::new(&mut ticket).poll(&mut cx) {
@@ -1800,8 +1856,10 @@ mod tests {
     #[test]
     fn batch_outcome_ticket_reuses_waker_slot_on_repoll() {
         let lifecycle = Arc::new(SessionLifecycle::new());
+        let unacked = Arc::new(AtomicUsize::new(3));
         let ctx = ErrorContext::default();
-        let (writer, outcome) = BatchOutcomeWriter::new(lifecycle, ctx);
+        let (mut writer, outcome) = BatchOutcomeWriter::new(lifecycle, unacked.clone(), ctx);
+        writer.record_count = 3;
         let mut ticket = RecordSubmitTicket::new(outcome.clone(), 2);
 
         let c1 = Arc::new(CountingWake(AtomicUsize::new(0)));
@@ -1836,6 +1894,7 @@ mod tests {
             },
         };
         writer.resolve(Ok(ack.clone()));
+        assert_eq!(unacked.load(Ordering::Acquire), 0);
         assert_eq!(c1.0.load(Ordering::SeqCst), 0);
         assert_eq!(c2.0.load(Ordering::SeqCst), 1);
 
@@ -1845,8 +1904,8 @@ mod tests {
     }
 
     #[test]
-    fn producer_finish_on_drop_fails_partial_batch_without_stranding_tickets() {
-        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+    fn producer_settle_aborted_drop_fails_queued_and_partial_batches_before_closing() {
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
         let permits = AppendPermits::new(None, 1024);
         let lifecycle = Arc::new(SessionLifecycle::new());
         let session_lifecycle = Arc::new(SessionLifecycle::new());
@@ -1872,7 +1931,7 @@ mod tests {
             match_seq_exhausted: AtomicBool::new(false),
             has_partial: AtomicBool::new(false),
             next_batch_id: AtomicU64::new(0),
-            unacked_records: AtomicUsize::new(0),
+            unacked_records: Arc::new(AtomicUsize::new(0)),
             acked_through_id: AtomicU64::new(0),
             lifecycle,
             session_lifecycle,
@@ -1888,10 +1947,21 @@ mod tests {
         assert_eq!(shared.unacked_records.load(Ordering::Acquire), 1);
         assert_eq!(shared.permits.in_flight_bytes(), bytes);
 
-        drop(ProducerFinishOnDrop {
-            shared: shared.clone(),
-        });
+        let aborted = AppendSessionError::Aborted(AbortedError::new_with_context(
+            DROPPED_ABORT_MSG,
+            shared.context.clone(),
+        ));
+        let (queued, partial) = {
+            let mut gate = shared.gate.lock().unwrap();
+            shared.lifecycle.set_terminal_err(aborted.clone());
+            let queued = drain_queued_commands(&mut cmd_rx);
+            let partial = gate.take_partial(&shared.has_partial, &shared.next_batch_id);
+            (queued, partial)
+        };
+        let mut pending_flushes = VecDeque::new();
+        shared.settle_aborted_drop(&mut pending_flushes, queued, partial, aborted);
 
+        assert!(shared.lifecycle.is_closed());
         assert_eq!(shared.unacked_records.load(Ordering::Acquire), 0);
         assert_eq!(shared.permits.in_flight_bytes(), 0);
         assert!(!shared.has_partial.load(Ordering::Acquire));
@@ -1905,8 +1975,10 @@ mod tests {
     #[test]
     fn dropped_ticket_clears_waker_slot_without_shifting_siblings() {
         let lifecycle = Arc::new(SessionLifecycle::new());
+        let unacked = Arc::new(AtomicUsize::new(2));
         let ctx = ErrorContext::default();
-        let (writer, outcome) = BatchOutcomeWriter::new(lifecycle, ctx);
+        let (mut writer, outcome) = BatchOutcomeWriter::new(lifecycle, unacked, ctx);
+        writer.record_count = 2;
         let mut t0 = RecordSubmitTicket::new(outcome.clone(), 0);
         let mut t1 = RecordSubmitTicket::new(outcome.clone(), 1);
 
@@ -1952,5 +2024,87 @@ mod tests {
         assert_eq!(c0.0.load(Ordering::SeqCst), 0);
         assert_eq!(c1.0.load(Ordering::SeqCst), 1);
         assert_eq!(t1.try_ack().unwrap().unwrap().seq_num, 6);
+    }
+
+    #[test]
+    fn reentrant_waker_drop_of_sibling_ticket_does_not_deadlock() {
+        struct SiblingOwnerWake {
+            dropped: Arc<AtomicUsize>,
+            sibling: StdMutex<Option<RecordSubmitTicket>>,
+        }
+        impl Wake for SiblingOwnerWake {
+            fn wake(self: Arc<Self>) {
+                self.dropped.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        impl Drop for SiblingOwnerWake {
+            fn drop(&mut self) {
+                drop(self.sibling.lock().unwrap().take());
+                self.dropped.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let lifecycle = Arc::new(SessionLifecycle::new());
+        let unacked = Arc::new(AtomicUsize::new(3));
+        let ctx = ErrorContext::default();
+        let (mut writer, outcome) = BatchOutcomeWriter::new(lifecycle, unacked, ctx);
+        writer.record_count = 3;
+
+        let mut t0 = RecordSubmitTicket::new(outcome.clone(), 0);
+        let mut t1 = RecordSubmitTicket::new(outcome.clone(), 1);
+        let mut t2 = RecordSubmitTicket::new(outcome.clone(), 2);
+
+        let dummy_wake = Arc::new(CountingWake(AtomicUsize::new(0)));
+        let dummy_waker = Waker::from(dummy_wake.clone());
+        assert!(
+            Pin::new(&mut t1)
+                .poll(&mut Context::from_waker(&dummy_waker))
+                .is_pending()
+        );
+        assert!(
+            Pin::new(&mut t2)
+                .poll(&mut Context::from_waker(&dummy_waker))
+                .is_pending()
+        );
+
+        let dropped = Arc::new(AtomicUsize::new(0));
+        // 1. Replacing t0's waker during `poll()` drops the previous waker (which drops sibling t1)
+        //    outside the `waiters` mutex without deadlocking.
+        {
+            let owner = Arc::new(SiblingOwnerWake {
+                dropped: dropped.clone(),
+                sibling: StdMutex::new(Some(t1)),
+            });
+            let w0 = Waker::from(owner);
+            assert!(
+                Pin::new(&mut t0)
+                    .poll(&mut Context::from_waker(&w0))
+                    .is_pending()
+            );
+        }
+        assert!(
+            Pin::new(&mut t0)
+                .poll(&mut Context::from_waker(&dummy_waker))
+                .is_pending()
+        );
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+
+        // 2. Dropping t0 clears its slot and drops the stored waker (which drops sibling t2)
+        //    outside the `waiters` mutex without deadlocking.
+        {
+            let owner = Arc::new(SiblingOwnerWake {
+                dropped: dropped.clone(),
+                sibling: StdMutex::new(Some(t2)),
+            });
+            let w0 = Waker::from(owner);
+            assert!(
+                Pin::new(&mut t0)
+                    .poll(&mut Context::from_waker(&w0))
+                    .is_pending()
+            );
+        }
+        drop(t0);
+        assert_eq!(dropped.load(Ordering::SeqCst), 2);
+        drop(writer);
     }
 }

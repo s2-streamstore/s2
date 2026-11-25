@@ -1356,3 +1356,39 @@ async fn regression_read_session_stops_on_exhausted_count_and_rejects_u64_max_se
         "expected ProtocolError on u64::MAX seq_num, got {err:?}"
     );
 }
+
+#[test]
+fn read_session_runtime_shutdown_before_first_poll_settles_caught_up() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (_client, _sess, caught_up) = rt.block_on(async {
+        let client = s2_sdk::S2::new(s2_sdk::types::S2Config::new("test-token").with_endpoints(
+            s2_sdk::types::S2Endpoints::for_endpoint("http://127.0.0.1:1").unwrap(),
+        ))
+        .unwrap();
+        let stream = client
+            .basin("test-basin".parse().unwrap())
+            .stream("test-stream".parse().unwrap());
+        let sess = stream
+            .read_session(ReadInput::new(), ReadSessionConfig::default())
+            .unwrap();
+        let caught_up = sess.caught_up();
+        (client, sess, caught_up)
+    });
+    // Drop runtime before `ReadDriver` is ever polled while `_client` and `_sess` stay alive.
+    drop(rt);
+
+    let rt2 = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt2.block_on(async {
+        let err = tokio::time::timeout(Duration::from_secs(1), caught_up)
+            .await
+            .expect("caught_up() must settle promptly after driver runtime shuts down")
+            .unwrap_err();
+        assert!(matches!(err, ReadSessionError::Aborted(_)), "{err:?}");
+    });
+}

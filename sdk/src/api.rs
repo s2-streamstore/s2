@@ -247,8 +247,9 @@ impl BaseClient {
         apply_standard_default_headers(&mut default_headers, config);
         // Reserve headroom for per-request headers (`s2-basin`, `content-type`, `accept`,
         // `content-encoding`, `s2-attempt`, `s2-encryption-key`) so cloned maps avoid cap 8 -> 16
-        // hash-table rehashes.
-        default_headers.reserve(6);
+        // hash-table rehashes. Use `try_reserve` so caller maps near `HeaderMap`'s capacity limit
+        // never panic during fallible client construction.
+        let _ = default_headers.try_reserve(6);
         Ok((default_headers, provider))
     }
 
