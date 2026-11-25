@@ -5,7 +5,7 @@ use std::{
 };
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use flate2::{Compression, bufread::MultiGzDecoder, write::GzEncoder};
+use flate2::{Compression, bufread::GzDecoder, write::GzEncoder};
 use futures_core::Stream;
 use strum::FromRepr;
 
@@ -59,8 +59,8 @@ const FLAG_COMPRESSION_MASK: u8 = 0b0110_0000;
 const FLAG_COMPRESSION_SHIFT: u8 = 5;
 const FLAG_RECONNECT_ADVISED: u8 = 0b0001_0000;
 
-fn maybe_shrink_vec(buf: &mut Vec<u8>, min_slack: usize) {
-    if buf.capacity() > buf.len().saturating_mul(2) && buf.capacity() - buf.len() > min_slack {
+fn shrink_if_excess_slack(buf: &mut Vec<u8>, max_slack: usize) {
+    if buf.capacity().saturating_sub(buf.len()) > max_slack {
         buf.shrink_to_fit();
     }
 }
@@ -77,7 +77,8 @@ fn read_to_end_limited(mut reader: impl Read, initial_capacity: usize) -> std::i
             "decompressed payload exceeds limit",
         ));
     }
-    maybe_shrink_vec(&mut buf, 16 * 1024);
+    let max_slack = (buf.len() / 8).max(4096);
+    shrink_if_excess_slack(&mut buf, max_slack);
     Ok(Bytes::from(buf))
 }
 
@@ -139,9 +140,13 @@ pub fn encode_regular_frame_with(
     if compression == CompressionAlgorithm::None || encoded_len < COMPRESSION_THRESHOLD_BYTES {
         let mut buf = BytesMut::with_capacity(header_size + encoded_len);
         buf.put_slice(&[0, 0, 0, regular_flag(CompressionAlgorithm::None, false)]);
-        let mut payload_buf = buf.split_off(header_size);
-        encode_payload(&mut payload_buf);
-        let payload_len = payload_buf.len();
+        encode_payload(&mut buf);
+        let Some(payload_len) = buf.len().checked_sub(header_size) else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "encoder closure truncated frame header",
+            ));
+        };
         debug_assert_eq!(payload_len, encoded_len);
         if payload_len > MAX_DECOMPRESSED_PAYLOAD_BYTES {
             return Err(std::io::Error::new(
@@ -150,7 +155,6 @@ pub fn encode_regular_frame_with(
             ));
         }
         write_length_prefix(&mut buf, FLAG_TOTAL_SIZE + payload_len);
-        buf.unsplit(payload_buf);
         return Ok(buf.freeze());
     }
 
@@ -189,7 +193,8 @@ pub fn encode_regular_frame_with(
     write_length_prefix(&mut out, FLAG_TOTAL_SIZE + payload_len);
     // Trim excess pre-allocated slack when compression ratio is high so inflight frames
     // don't pin an uncompressed-sized allocation while awaiting acknowledgement.
-    maybe_shrink_vec(&mut out, 4096);
+    let max_slack = out.len().max(4096);
+    shrink_if_excess_slack(&mut out, max_slack);
     Ok(Bytes::from(out))
 }
 
@@ -283,7 +288,8 @@ impl CompressedData {
             }
             CompressionAlgorithm::None => unreachable!("handled above"),
         };
-        maybe_shrink_vec(&mut buf, 4096);
+        let max_slack = buf.len().max(4096);
+        shrink_if_excess_slack(&mut buf, max_slack);
         let payload = Bytes::from(buf);
         if payload.len() > MAX_FRAME_PAYLOAD_BYTES {
             return Err(std::io::Error::new(
@@ -316,7 +322,7 @@ impl CompressedData {
                 Ok(self.payload)
             }
             CompressionAlgorithm::Gzip => {
-                let mut decoder = MultiGzDecoder::new(&self.payload[..]);
+                let mut decoder = GzDecoder::new(&self.payload[..]);
                 read_to_end_limited(&mut decoder, initial_capacity)
             }
             CompressionAlgorithm::Zstd => {
@@ -329,7 +335,20 @@ impl CompressedData {
         }
     }
 
+    /// Decode the protobuf payload, copying `Bytes` fields into independent allocations so
+    /// untrusted inputs cannot retain oversized frame buffers via skipped unknown fields.
     pub fn try_into_proto<P: prost::Message + Default>(self) -> std::io::Result<P> {
+        let payload = self.decompressed()?;
+        P::decode(payload.as_ref())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
+
+    /// Decode the protobuf payload zero-copy by slicing `Bytes` fields directly from the frame
+    /// buffer.
+    ///
+    /// Intended for trusted response frames (such as SDK read streams) where avoiding per-field
+    /// copies is desirable and callers understand decoded `Bytes` slices share the frame buffer.
+    pub fn try_into_proto_zero_copy<P: prost::Message + Default>(self) -> std::io::Result<P> {
         let payload = self.decompressed()?;
         P::decode(payload).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
     }
@@ -1130,9 +1149,29 @@ mod test {
                 let SessionMessage::Regular(data) = decoded else {
                     panic!("expected regular frame");
                 };
-                assert_eq!(data.try_into_proto::<TestProto>().unwrap(), proto);
+                assert_eq!(data.clone().try_into_proto::<TestProto>().unwrap(), proto);
+                assert_eq!(data.try_into_proto_zero_copy::<TestProto>().unwrap(), proto);
             }
         }
+    }
+
+    #[test]
+    fn shrink_if_excess_slack_reduces_only_when_above_threshold() {
+        let mut oversized = Vec::with_capacity(64 * 1024);
+        oversized.extend_from_slice(&[0xAB; 512]);
+        assert!(oversized.capacity() >= 64 * 1024);
+        shrink_if_excess_slack(&mut oversized, 4096);
+        assert!(
+            oversized.capacity() < 4096,
+            "expected capacity to shrink, got {}",
+            oversized.capacity()
+        );
+
+        let mut within_budget = Vec::with_capacity(4096);
+        within_budget.extend_from_slice(&[0xCD; 2048]);
+        let before = within_budget.capacity();
+        shrink_if_excess_slack(&mut within_budget, 4096);
+        assert_eq!(within_budget.capacity(), before);
     }
 
     #[test]
@@ -1143,48 +1182,5 @@ mod test {
             assert!(compressed.payload.len() < 4096);
             assert_eq!(compressed.try_into_proto::<TestProto>().unwrap(), proto);
         }
-    }
-
-    #[test]
-    fn gzip_s2s_decodes_multi_member_payload_and_enforces_total_limit() {
-        let gzip_chunk = |data: &[u8]| {
-            let mut enc = GzEncoder::new(Vec::new(), Compression::default());
-            enc.write_all(data).unwrap();
-            enc.finish().unwrap()
-        };
-        let gzip_frame = |payload: &[u8]| {
-            let mut raw = Vec::with_capacity(4 + payload.len());
-            let body_len = 1 + payload.len();
-            raw.extend_from_slice(&(body_len as u32).to_be_bytes()[1..]);
-            raw.push((CompressionAlgorithm::Gzip as u8) << 5);
-            raw.extend_from_slice(payload);
-            Bytes::from(raw)
-        };
-        let decode_regular = |raw: Bytes| -> CompressedData {
-            let mut buf = BytesMut::from(raw.as_ref());
-            match FrameDecoder.decode(&mut buf).unwrap().unwrap() {
-                SessionMessage::Regular(data) => data,
-                SessionMessage::Terminal(_) => panic!("expected regular frame"),
-            }
-        };
-
-        let mut multi = gzip_chunk(b"first-");
-        multi.extend_from_slice(&gzip_chunk(b"second"));
-        assert_eq!(
-            decode_regular(gzip_frame(&multi))
-                .decompressed()
-                .unwrap()
-                .as_ref(),
-            b"first-second"
-        );
-
-        let half_over = vec![0x55u8; MAX_DECOMPRESSED_PAYLOAD_BYTES / 2 + 1024];
-        let mut oversized_multi = gzip_chunk(&half_over);
-        oversized_multi.extend_from_slice(&gzip_chunk(&half_over));
-        assert!(
-            decode_regular(gzip_frame(&oversized_multi))
-                .decompressed()
-                .is_err()
-        );
     }
 }

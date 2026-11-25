@@ -839,102 +839,14 @@ impl BasinClient {
             return Err(error);
         }
 
-        let (mut bytes_stream, retire_handle) = response.into_stream();
-        let stream_retire = retire_handle.clone();
-        let auth_client = self.base.clone();
-
-        let mut buffer = BytesMut::new();
-        let mut decoder = FrameDecoder;
-
-        let stream = Box::pin(try_stream! {
-            while let Some(chunk) = bytes_stream.next().await {
-                let mut chunk = chunk.map_err(|e| E::from_http(e, ctx.clone()))?;
-                if chunk.is_empty() {
-                    continue;
-                }
-
-                // When a partial frame straddles chunks, copy only the exact bytes needed to
-                // finish that single frame so trailing frames in `chunk` still decode zero-copy.
-                if !buffer.is_empty() {
-                    if buffer.len() < 3 {
-                        let header_needed = (3 - buffer.len()).min(chunk.len());
-                        buffer.extend_from_slice(&chunk.split_to(header_needed));
-                        if buffer.len() < 3 {
-                            continue;
-                        }
-                    }
-                    let total_size = match FrameDecoder::peek_total_frame_len(&buffer) {
-                        Ok(Some(total_size)) => total_size,
-                        Ok(None) => unreachable!("buffer has at least 3 bytes"),
-                        Err(err) => Err(E::from(ProtocolError::new_with_context(
-                            format!("s2s frame decode: {err}"),
-                            ctx.clone(),
-                        )))?,
-                    };
-                    let needed = total_size.saturating_sub(buffer.len());
-                    if chunk.len() < needed {
-                        buffer.reserve(needed);
-                        buffer.extend_from_slice(&chunk);
-                        continue;
-                    }
-                    if needed > 0 {
-                        buffer.extend_from_slice(&chunk.split_to(needed));
-                    }
-                    match decoder.decode(&mut buffer) {
-                        Ok(Some(msg)) => {
-                            yield decode_s2s_message::<T, E>(
-                                msg,
-                                &stream_retire,
-                                &auth_client,
-                                access_token.as_deref(),
-                                &ctx,
-                            )?;
-                        }
-                        Ok(None) => unreachable!("buffer holds complete frame"),
-                        Err(err) => Err(E::from(ProtocolError::new_with_context(
-                            format!("s2s frame decode: {err}"),
-                            ctx.clone(),
-                        )))?,
-                    }
-                    debug_assert!(buffer.is_empty());
-                }
-
-                loop {
-                    match FrameDecoder::decode_bytes(&mut chunk) {
-                        Ok(Some(msg)) => {
-                            yield decode_s2s_message::<T, E>(
-                                msg,
-                                &stream_retire,
-                                &auth_client,
-                                access_token.as_deref(),
-                                &ctx,
-                            )?;
-                        }
-                        Ok(None) => break,
-                        Err(err) => Err(E::from(ProtocolError::new_with_context(
-                            format!("s2s frame decode: {err}"),
-                            ctx.clone(),
-                        )))?,
-                    }
-                }
-                if !chunk.is_empty() {
-                    if let Ok(Some(total_size)) = FrameDecoder::peek_total_frame_len(&chunk) {
-                        buffer.reserve(total_size);
-                    }
-                    buffer.extend_from_slice(&chunk);
-                }
-            }
-            if !buffer.is_empty() {
-                Err(E::from(ConnectionLostError::new_with_context(
-                    format!(
-                        "truncated s2s frame at end of stream ({} bytes remaining)",
-                        buffer.len()
-                    ),
-                    false,
-                    ctx.clone(),
-                )))?;
-            }
-        });
+        let (bytes_stream, retire_handle) = response.into_stream();
+        let stream = decode_s2s_stream(
+            bytes_stream,
+            Some(retire_handle.clone()),
+            self.base.clone(),
+            access_token,
+            ctx,
+        );
         Ok(Streaming {
             stream,
             retire_handle,
@@ -979,9 +891,112 @@ impl BasinClient {
     }
 }
 
+fn decode_s2s_stream<T, E, S>(
+    bytes_stream: S,
+    stream_retire: Option<client::RetireHandle>,
+    auth_client: BaseClient,
+    access_token: Option<String>,
+    ctx: ErrorContext,
+) -> Pin<Box<dyn Send + Stream<Item = Result<S2sFrame<T>, E>>>>
+where
+    T: Message + Default + 'static,
+    E: TransportError + Send + 'static,
+    S: Stream<Item = Result<bytes::Bytes, client::HttpError>> + Send + 'static,
+{
+    Box::pin(try_stream! {
+        let mut bytes_stream = std::pin::pin!(bytes_stream);
+        let mut buffer = BytesMut::new();
+        let mut decoder = FrameDecoder;
+
+        while let Some(chunk) = bytes_stream.next().await {
+            let mut chunk = chunk.map_err(|e| E::from_http(e, ctx.clone()))?;
+            if chunk.is_empty() {
+                continue;
+            }
+
+            // When a partial frame straddles chunks, copy only the exact bytes needed to
+            // finish that single frame so trailing frames in `chunk` still decode zero-copy.
+            if !buffer.is_empty() {
+                if buffer.len() < 3 {
+                    let header_needed = (3 - buffer.len()).min(chunk.len());
+                    buffer.extend_from_slice(&chunk.split_to(header_needed));
+                    if buffer.len() < 3 {
+                        continue;
+                    }
+                }
+                let total_size = match FrameDecoder::peek_total_frame_len(&buffer) {
+                    Ok(Some(total_size)) => total_size,
+                    Ok(None) => unreachable!("buffer has at least 3 bytes"),
+                    Err(err) => Err(E::from(ProtocolError::new_with_context(
+                        format!("s2s frame decode: {err}"),
+                        ctx.clone(),
+                    )))?,
+                };
+                let needed = total_size.saturating_sub(buffer.len());
+                if chunk.len() < needed {
+                    buffer.extend_from_slice(&chunk);
+                    continue;
+                }
+                if needed > 0 {
+                    buffer.extend_from_slice(&chunk.split_to(needed));
+                }
+                match decoder.decode(&mut buffer) {
+                    Ok(Some(msg)) => {
+                        yield decode_s2s_message::<T, E>(
+                            msg,
+                            stream_retire.as_ref(),
+                            &auth_client,
+                            access_token.as_deref(),
+                            &ctx,
+                        )?;
+                    }
+                    Ok(None) => unreachable!("buffer holds complete frame"),
+                    Err(err) => Err(E::from(ProtocolError::new_with_context(
+                        format!("s2s frame decode: {err}"),
+                        ctx.clone(),
+                    )))?,
+                }
+                debug_assert!(buffer.is_empty());
+            }
+
+            loop {
+                match FrameDecoder::decode_bytes(&mut chunk) {
+                    Ok(Some(msg)) => {
+                        yield decode_s2s_message::<T, E>(
+                            msg,
+                            stream_retire.as_ref(),
+                            &auth_client,
+                            access_token.as_deref(),
+                            &ctx,
+                        )?;
+                    }
+                    Ok(None) => break,
+                    Err(err) => Err(E::from(ProtocolError::new_with_context(
+                        format!("s2s frame decode: {err}"),
+                        ctx.clone(),
+                    )))?,
+                }
+            }
+            if !chunk.is_empty() {
+                buffer.extend_from_slice(&chunk);
+            }
+        }
+        if !buffer.is_empty() {
+            Err(E::from(ConnectionLostError::new_with_context(
+                format!(
+                    "truncated s2s frame at end of stream ({} bytes remaining)",
+                    buffer.len()
+                ),
+                false,
+                ctx.clone(),
+            )))?;
+        }
+    })
+}
+
 fn decode_s2s_message<T, E>(
     msg: SessionMessage,
-    stream_retire: &client::RetireHandle,
+    stream_retire: Option<&client::RetireHandle>,
     auth_client: &BaseClient,
     access_token: Option<&str>,
     ctx: &ErrorContext,
@@ -993,10 +1008,10 @@ where
     match msg {
         SessionMessage::Regular(msg) => {
             let reconnect_advised = msg.reconnect_advised();
-            if reconnect_advised {
-                stream_retire.retire();
+            if reconnect_advised && let Some(retire) = stream_retire {
+                retire.retire();
             }
-            let decoded = msg.try_into_proto().map_err(|e| {
+            let decoded = msg.try_into_proto_zero_copy().map_err(|e| {
                 E::from(ProtocolError::new_with_context(
                     format!("protobuf decode: {e}"),
                     ctx.clone(),
@@ -1009,8 +1024,10 @@ where
         }
         SessionMessage::Terminal(msg) => {
             let error = E::from_terminal_message(msg, ctx.clone());
-            if error.should_retire_connection() {
-                stream_retire.retire();
+            if error.should_retire_connection()
+                && let Some(retire) = stream_retire
+            {
+                retire.retire();
             }
             auth_client.invalidate_access_token_if_rejected(&error, access_token);
             Err(error)
@@ -1618,5 +1635,112 @@ mod tests {
         let valid = authorization_header("secret-token").unwrap();
         assert_eq!(valid, "Bearer secret-token");
         assert!(valid.is_sensitive());
+    }
+
+    #[tokio::test]
+    async fn decode_s2s_stream_handles_prefix_straddle_and_handoff_to_zero_copy() {
+        use bytes::Bytes;
+        use s2_api::v1::stream::{
+            proto::{ReadBatch, SequencedRecord, StreamPosition},
+            s2s::{CompressionAlgorithm, encode_regular_frame},
+        };
+
+        let make_batch = |seq: u64, body: &[u8]| ReadBatch {
+            records: vec![SequencedRecord {
+                seq_num: seq,
+                timestamp: seq + 10,
+                headers: vec![],
+                body: Bytes::copy_from_slice(body),
+            }],
+            tail: Some(StreamPosition {
+                seq_num: seq + 1,
+                timestamp: seq + 10,
+            }),
+        };
+
+        let b0 = make_batch(0, b"first-frame");
+        let b1 = make_batch(1, b"second-frame-direct");
+        let b2 = make_batch(2, b"third-frame-straddled");
+        let f0 = encode_regular_frame(CompressionAlgorithm::None, &b0).unwrap();
+        let f1 = encode_regular_frame(CompressionAlgorithm::None, &b1).unwrap();
+        let f2 = encode_regular_frame(CompressionAlgorithm::None, &b2).unwrap();
+
+        let mut wire = Vec::new();
+        wire.extend_from_slice(&f0);
+        wire.extend_from_slice(&f1);
+        wire.extend_from_slice(&f2);
+
+        let config = S2Config::new("test-token").with_endpoints(
+            crate::types::S2Endpoints::for_endpoint("http://localhost:8080").unwrap(),
+        );
+        let auth_client = BaseClient::init(&config).unwrap();
+        let ctx = OpScope::stream("read_session", "b", "s", true).context(1);
+
+        // 1. Split 3-byte prefix of f0 across chunks (1 byte, then 1 byte, empty chunk, then rest
+        //    of f0 + complete f1 + 2-byte prefix of f2 in a single chunk, then rest of f2).
+        let mut combined = Vec::new();
+        combined.extend_from_slice(&f0[2..]);
+        combined.extend_from_slice(&f1);
+        combined.extend_from_slice(&f2[..2]);
+        let chunks = vec![
+            Ok(Bytes::copy_from_slice(&f0[..1])),
+            Ok(Bytes::copy_from_slice(&f0[1..2])),
+            Ok(Bytes::new()),
+            Ok(Bytes::from(combined)),
+            Ok(Bytes::copy_from_slice(&f2[2..])),
+        ];
+        let mut stream = decode_s2s_stream::<ReadBatch, crate::error::ReadSessionError, _>(
+            futures_util::stream::iter(chunks),
+            None,
+            auth_client.clone(),
+            None,
+            ctx.clone(),
+        );
+        let mut decoded = Vec::new();
+        while let Some(item) = stream.next().await {
+            decoded.push(item.unwrap().msg);
+        }
+        assert_eq!(decoded, vec![b0.clone(), b1.clone(), b2.clone()]);
+
+        // 2. Exhaustively verify every single 2-way split offset across the 3-frame wire buffer.
+        for split in 0..=wire.len() {
+            let chunks = vec![
+                Ok(Bytes::copy_from_slice(&wire[..split])),
+                Ok(Bytes::copy_from_slice(&wire[split..])),
+            ];
+            let mut stream = decode_s2s_stream::<ReadBatch, crate::error::ReadSessionError, _>(
+                futures_util::stream::iter(chunks),
+                None,
+                auth_client.clone(),
+                None,
+                ctx.clone(),
+            );
+            let mut decoded = Vec::new();
+            while let Some(item) = stream.next().await {
+                decoded.push(item.unwrap().msg);
+            }
+            assert_eq!(
+                decoded,
+                vec![b0.clone(), b1.clone(), b2.clone()],
+                "split={split}"
+            );
+        }
+
+        // 3. Truncated trailing bytes must report ConnectionLost with the exact remaining count.
+        let truncated = vec![Ok(Bytes::copy_from_slice(&wire[..wire.len() - 3]))];
+        let mut stream = decode_s2s_stream::<ReadBatch, crate::error::ReadSessionError, _>(
+            futures_util::stream::iter(truncated),
+            None,
+            auth_client,
+            None,
+            ctx,
+        );
+        assert_eq!(stream.next().await.unwrap().unwrap().msg, b0);
+        assert_eq!(stream.next().await.unwrap().unwrap().msg, b1);
+        let err = stream.next().await.unwrap().err().unwrap();
+        assert!(
+            matches!(err, crate::error::ReadSessionError::ConnectionLost(ref c) if c.message.contains(&format!("{} bytes remaining", f2.len() - 3))),
+            "unexpected error: {err:?}"
+        );
     }
 }
