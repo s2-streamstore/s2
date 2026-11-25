@@ -230,10 +230,14 @@ impl BaseClient {
         default_headers.remove(&BASIN_HEADER);
         let provider = match &config.access_token {
             AccessToken::Static(access_token) => {
-                default_headers.insert(
-                    AUTHORIZATION,
-                    authorization_header(access_token.expose_secret())?,
-                );
+                default_headers
+                    .try_insert(
+                        AUTHORIZATION,
+                        authorization_header(access_token.expose_secret())?,
+                    )
+                    .map_err(|_| {
+                        ValidationError("default_headers exceeds maximum HeaderMap capacity".into())
+                    })?;
                 PreparedTokenProvider {
                     #[cfg(feature = "_hidden")]
                     provider: None,
@@ -244,7 +248,7 @@ impl BaseClient {
                 provider: Some(provider.clone()),
             },
         };
-        apply_standard_default_headers(&mut default_headers, config);
+        apply_standard_default_headers(&mut default_headers, config)?;
         // Reserve headroom for per-request headers (`s2-basin`, `content-type`, `accept`,
         // `content-encoding`, `s2-attempt`, `s2-encryption-key`) so cloned maps avoid cap 8 -> 16
         // hash-table rehashes. Use `try_reserve` so caller maps near `HeaderMap`'s capacity limit
@@ -465,23 +469,34 @@ struct PreparedTokenProvider {
     provider: Option<Arc<dyn crate::types::AccessTokenProvider>>,
 }
 
-fn apply_standard_default_headers(default_headers: &mut HeaderMap, config: &S2Config) {
-    default_headers.insert(http::header::USER_AGENT, config.user_agent.clone());
+fn apply_standard_default_headers(
+    default_headers: &mut HeaderMap,
+    config: &S2Config,
+) -> Result<(), ValidationError> {
+    let cap_err = |_| ValidationError("default_headers exceeds maximum HeaderMap capacity".into());
+    default_headers
+        .try_insert(http::header::USER_AGENT, config.user_agent.clone())
+        .map_err(cap_err)?;
     match config.compression {
         Compression::Gzip => {
-            default_headers.insert(
-                http::header::ACCEPT_ENCODING,
-                HeaderValue::from_static("gzip"),
-            );
+            default_headers
+                .try_insert(
+                    http::header::ACCEPT_ENCODING,
+                    HeaderValue::from_static("gzip"),
+                )
+                .map_err(cap_err)?;
         }
         Compression::Zstd => {
-            default_headers.insert(
-                http::header::ACCEPT_ENCODING,
-                HeaderValue::from_static("zstd"),
-            );
+            default_headers
+                .try_insert(
+                    http::header::ACCEPT_ENCODING,
+                    HeaderValue::from_static("zstd"),
+                )
+                .map_err(cap_err)?;
         }
         Compression::None => {}
     }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy)]

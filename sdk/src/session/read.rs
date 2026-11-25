@@ -262,6 +262,35 @@ enum PendingClose {
     Error(ReadSessionError),
 }
 
+/// Deferred oneshot wake for a pending [`CaughtUp`] waiter, always fired AFTER releasing
+/// `ReadStateShared::inner` so custom wakers reading session state cannot deadlock on re-entry.
+#[must_use]
+struct CatchUpWake(Option<(oneshot::Sender<CaughtUpResult>, CaughtUpResult)>);
+
+impl CatchUpWake {
+    const NONE: Self = Self(None);
+
+    fn or(self, other: Self) -> Self {
+        match (self.0, other.0) {
+            (Some(first), None) => Self(Some(first)),
+            (None, second) => Self(second),
+            (Some(first), Some(_)) => {
+                debug_assert!(
+                    false,
+                    "at most one pending caught_up waiter per lock acquisition"
+                );
+                Self(Some(first))
+            }
+        }
+    }
+
+    fn fire(self) {
+        if let Some((tx, res)) = self.0 {
+            let _ = tx.send(res);
+        }
+    }
+}
+
 struct ReadStateShared {
     inner: StdMutex<ReadStateInner>,
     /// Atomic mirror of `inner.closed.is_some()` for lock-free `take_closed_or_abort()`.
@@ -324,9 +353,9 @@ impl ReadStateShared {
         self.closed.store(true, Ordering::Release);
     }
 
-    fn recompute_caught_up(&self, inner: &mut ReadStateInner) {
+    fn recompute_caught_up(&self, inner: &mut ReadStateInner) -> CatchUpWake {
         if inner.phase == RequestPhase::Ended {
-            return;
+            return CatchUpWake::NONE;
         }
         let caught_up_tail = match inner.phase {
             RequestPhase::Open {
@@ -355,42 +384,54 @@ impl ReadStateShared {
                         waiter: Some((tx, _)),
                     } = prev
                     {
-                        let _ = tx.send(Ok(tail));
+                        return CatchUpWake(Some((tx, Ok(tail))));
                     }
                 }
+                CatchUpWake::NONE
             }
             None => {
                 if inner.catch_up.is_caught_up() {
                     inner.catch_up = CatchUpSlot::pending();
                 }
                 self.caught_up.store(false, Ordering::Release);
+                CatchUpWake::NONE
             }
         }
     }
 
-    fn apply_heartbeat_tail(&self, inner: &mut ReadStateInner, tail: StreamPosition) {
+    fn apply_heartbeat_tail(
+        &self,
+        inner: &mut ReadStateInner,
+        tail: StreamPosition,
+    ) -> CatchUpWake {
         if inner.phase == RequestPhase::Ended {
-            return;
+            return CatchUpWake::NONE;
         }
         inner.update_observed_tail(tail);
         let next = self
             .load_next_seq()
             .map_or(tail.seq_num, |prev| prev.max(tail.seq_num));
         self.store_next_seq(next);
-        self.recompute_caught_up(inner);
+        self.recompute_caught_up(inner)
     }
 
-    fn apply_clean_close(&self, inner: &mut ReadStateInner, final_tail: Option<StreamPosition>) {
+    fn apply_clean_close(
+        &self,
+        inner: &mut ReadStateInner,
+        final_tail: Option<StreamPosition>,
+    ) -> CatchUpWake {
+        let mut wake = CatchUpWake::NONE;
         if let Some(tail) = final_tail {
-            self.apply_heartbeat_tail(inner, tail);
+            wake = wake.or(self.apply_heartbeat_tail(inner, tail));
         }
         self.set_closed(inner, TerminalClose::Clean);
         if !inner.catch_up.is_caught_up() {
-            self.on_ended(inner, None);
+            wake = wake.or(self.on_ended(inner, None));
         }
+        wake
     }
 
-    fn maybe_apply_pending_close(&self, inner: &mut ReadStateInner) {
+    fn maybe_apply_pending_close(&self, inner: &mut ReadStateInner) -> CatchUpWake {
         if !inner.has_pending_deliveries()
             && inner.closed.is_none()
             && let Some(pending) = inner.pending_close.take()
@@ -399,15 +440,17 @@ impl ReadStateShared {
                 PendingClose::Clean { final_tail } => self.apply_clean_close(inner, final_tail),
                 PendingClose::Error(err) => {
                     self.set_closed(inner, TerminalClose::Error(err.clone()));
-                    self.on_ended(inner, Some(err));
+                    self.on_ended(inner, Some(err))
                 }
             }
+        } else {
+            CatchUpWake::NONE
         }
     }
 
-    fn on_ended(&self, inner: &mut ReadStateInner, error: Option<ReadSessionError>) {
+    fn on_ended(&self, inner: &mut ReadStateInner, error: Option<ReadSessionError>) -> CatchUpWake {
         if inner.phase == RequestPhase::Ended {
-            return;
+            return CatchUpWake::NONE;
         }
         self.set_phase(inner, RequestPhase::Ended);
         self.caught_up.store(false, Ordering::Release);
@@ -428,20 +471,26 @@ impl ReadStateShared {
             waiter: Some((tx, _)),
         } = prev
         {
-            let _ = tx.send(Err(terminal_err));
+            CatchUpWake(Some((tx, Err(terminal_err))))
+        } else {
+            CatchUpWake::NONE
         }
     }
 
-    fn on_aborted_locked(&self, inner: &mut ReadStateInner, err: AbortedError) -> bool {
+    fn on_aborted_locked(
+        &self,
+        inner: &mut ReadStateInner,
+        err: AbortedError,
+    ) -> (bool, CatchUpWake) {
         if inner.closed.is_some() || inner.phase == RequestPhase::Ended {
-            return false;
+            return (false, CatchUpWake::NONE);
         }
         inner.pending_heartbeats = 0;
         inner.pending_close = None;
         let err = ReadSessionError::Aborted(err);
         self.set_closed(inner, TerminalClose::Error(err.clone()));
-        self.on_ended(inner, Some(err));
-        true
+        let wake = self.on_ended(inner, Some(err));
+        (true, wake)
     }
 }
 
@@ -574,13 +623,19 @@ impl ReadSessionState {
     /// session's failure, or [`SessionClosedError`] if the session closes cleanly before catching
     /// up.
     pub fn caught_up(&self) -> CaughtUp {
-        let mut inner = self.shared.inner.lock().unwrap();
-        if self.shutdown.is_cancelled() && inner.closed.is_none() {
-            let err = AbortedError::new_with_context("client closed", inner.context.clone());
-            self.shared.on_aborted_locked(&mut inner, err);
-        }
+        let (future, wake) = {
+            let mut inner = self.shared.inner.lock().unwrap();
+            let wake = if self.shutdown.is_cancelled() && inner.closed.is_none() {
+                let err = AbortedError::new_with_context("client closed", inner.context.clone());
+                self.shared.on_aborted_locked(&mut inner, err).1
+            } else {
+                CatchUpWake::NONE
+            };
+            (inner.catch_up.future(), wake)
+        };
+        wake.fire();
         CaughtUp {
-            inner: inner.catch_up.future(),
+            inner: future,
             done: false,
         }
     }
@@ -595,101 +650,132 @@ impl ReadSessionState {
         tail: Option<StreamPosition>,
         record_count: usize,
     ) -> bool {
-        let mut inner = self.shared.inner.lock().unwrap();
-        if inner.phase == RequestPhase::Ended || inner.closed.is_some() {
-            return true;
-        }
-        inner.buffered_records = inner.buffered_records.saturating_add(record_count);
-        self.shared
-            .set_phase(&mut inner, RequestPhase::Open { latest_tail: tail });
-        if let Some(tail) = tail {
-            inner.update_observed_tail(tail);
-        }
-        if self.shared.load_next_seq().is_none()
-            && let Some(seq) = first_record_seq.or_else(|| tail.map(|t| t.seq_num))
-        {
-            self.shared.store_next_seq(seq);
-        }
-        self.shared.recompute_caught_up(&mut inner);
-        // Returns true if this was a heartbeat and `next_seq_num` is already at `tail.seq_num`,
-        // meaning there are no earlier undelivered records waiting to advance past.
-        let heartbeat_already_at_tail = first_record_seq.is_none()
-            && tail.is_some_and(|t| self.shared.load_next_seq() == Some(t.seq_num));
-        if first_record_seq.is_none() && tail.is_some() && !heartbeat_already_at_tail {
-            inner.pending_heartbeats = inner.pending_heartbeats.saturating_add(1);
-        }
+        let (heartbeat_already_at_tail, wake) = {
+            let mut inner = self.shared.inner.lock().unwrap();
+            if inner.phase == RequestPhase::Ended || inner.closed.is_some() {
+                return true;
+            }
+            inner.buffered_records = inner.buffered_records.saturating_add(record_count);
+            self.shared
+                .set_phase(&mut inner, RequestPhase::Open { latest_tail: tail });
+            if let Some(tail) = tail {
+                inner.update_observed_tail(tail);
+            }
+            if self.shared.load_next_seq().is_none()
+                && let Some(seq) = first_record_seq.or_else(|| tail.map(|t| t.seq_num))
+            {
+                self.shared.store_next_seq(seq);
+            }
+            let wake = self.shared.recompute_caught_up(&mut inner);
+            // Returns true if this was a heartbeat and `next_seq_num` is already at `tail.seq_num`,
+            // meaning there are no earlier undelivered records waiting to advance past.
+            let heartbeat_already_at_tail = first_record_seq.is_none()
+                && tail.is_some_and(|t| self.shared.load_next_seq() == Some(t.seq_num));
+            if first_record_seq.is_none() && tail.is_some() && !heartbeat_already_at_tail {
+                inner.pending_heartbeats = inner.pending_heartbeats.saturating_add(1);
+            }
+            (heartbeat_already_at_tail, wake)
+        };
+        wake.fire();
         heartbeat_already_at_tail
     }
 
     fn on_disconnected(&self) {
-        let mut inner = self.shared.inner.lock().unwrap();
-        if inner.phase == RequestPhase::Ended || inner.closed.is_some() {
-            return;
-        }
-        self.shared.set_phase(&mut inner, RequestPhase::Connecting);
-        self.shared.recompute_caught_up(&mut inner);
+        let wake = {
+            let mut inner = self.shared.inner.lock().unwrap();
+            if inner.phase == RequestPhase::Ended || inner.closed.is_some() {
+                return;
+            }
+            self.shared.set_phase(&mut inner, RequestPhase::Connecting);
+            self.shared.recompute_caught_up(&mut inner)
+        };
+        wake.fire();
     }
 
     fn on_clean_stop(&self, tail: Option<StreamPosition>) -> bool {
-        let mut inner = self.shared.inner.lock().unwrap();
-        if inner.closed.is_some() || inner.phase == RequestPhase::Ended {
-            return true;
-        }
-        let latest_tail = tail.or(match inner.phase {
-            RequestPhase::Open { latest_tail } => latest_tail,
-            RequestPhase::Connecting | RequestPhase::Ended => None,
-        });
-        self.shared
-            .set_phase(&mut inner, RequestPhase::Open { latest_tail });
-        if let Some(tail) = tail {
-            inner.update_observed_tail(tail);
-        }
-        if !inner.has_pending_deliveries() {
-            self.shared.apply_clean_close(&mut inner, tail);
-            true
-        } else {
-            inner.pending_close = Some(PendingClose::Clean { final_tail: tail });
-            self.shared.recompute_caught_up(&mut inner);
-            false
-        }
+        let (closed, wake) = {
+            let mut inner = self.shared.inner.lock().unwrap();
+            if inner.closed.is_some() || inner.phase == RequestPhase::Ended {
+                return true;
+            }
+            let latest_tail = tail.or(match inner.phase {
+                RequestPhase::Open { latest_tail } => latest_tail,
+                RequestPhase::Connecting | RequestPhase::Ended => None,
+            });
+            self.shared
+                .set_phase(&mut inner, RequestPhase::Open { latest_tail });
+            if let Some(tail) = tail {
+                inner.update_observed_tail(tail);
+            }
+            if !inner.has_pending_deliveries() {
+                let wake = self.shared.apply_clean_close(&mut inner, tail);
+                (true, wake)
+            } else {
+                inner.pending_close = Some(PendingClose::Clean { final_tail: tail });
+                let wake = self.shared.recompute_caught_up(&mut inner);
+                (false, wake)
+            }
+        };
+        wake.fire();
+        closed
     }
 
     fn on_terminal_error(&self, err: ReadSessionError) -> bool {
-        let mut inner = self.shared.inner.lock().unwrap();
-        if inner.closed.is_some() || inner.phase == RequestPhase::Ended {
-            return true;
-        }
-        if !inner.has_pending_deliveries() {
-            self.shared
-                .set_closed(&mut inner, TerminalClose::Error(err.clone()));
-            self.shared.on_ended(&mut inner, Some(err));
-            true
-        } else {
-            inner.pending_close = Some(PendingClose::Error(err));
-            false
-        }
+        let (closed, wake) = {
+            let mut inner = self.shared.inner.lock().unwrap();
+            if inner.closed.is_some() || inner.phase == RequestPhase::Ended {
+                return true;
+            }
+            if !inner.has_pending_deliveries() {
+                self.shared
+                    .set_closed(&mut inner, TerminalClose::Error(err.clone()));
+                let wake = self.shared.on_ended(&mut inner, Some(err));
+                (true, wake)
+            } else {
+                inner.pending_close = Some(PendingClose::Error(err));
+                (false, CatchUpWake::NONE)
+            }
+        };
+        wake.fire();
+        closed
     }
 
     fn on_records_delivered(&self, last_seq_num: u64, count: usize) {
-        let mut inner = self.shared.inner.lock().unwrap();
-        self.shared.store_next_seq(last_seq_num.saturating_add(1));
-        inner.buffered_records = inner.buffered_records.saturating_sub(count);
-        if inner.phase != RequestPhase::Ended {
-            self.shared.recompute_caught_up(&mut inner);
-        }
-        self.shared.maybe_apply_pending_close(&mut inner);
+        let wake = {
+            let mut inner = self.shared.inner.lock().unwrap();
+            self.shared.store_next_seq(last_seq_num.saturating_add(1));
+            inner.buffered_records = inner.buffered_records.saturating_sub(count);
+            let mut wake = CatchUpWake::NONE;
+            if inner.phase != RequestPhase::Ended {
+                wake = wake.or(self.shared.recompute_caught_up(&mut inner));
+            }
+            wake.or(self.shared.maybe_apply_pending_close(&mut inner))
+        };
+        wake.fire();
     }
 
     fn on_heartbeat_delivered(&self, tail: StreamPosition) {
-        let mut inner = self.shared.inner.lock().unwrap();
-        inner.pending_heartbeats = inner.pending_heartbeats.saturating_sub(1);
-        self.shared.apply_heartbeat_tail(&mut inner, tail);
-        self.shared.maybe_apply_pending_close(&mut inner);
+        let wake = {
+            let mut inner = self.shared.inner.lock().unwrap();
+            inner.pending_heartbeats = inner.pending_heartbeats.saturating_sub(1);
+            let wake = self.shared.apply_heartbeat_tail(&mut inner, tail);
+            wake.or(self.shared.maybe_apply_pending_close(&mut inner))
+        };
+        wake.fire();
     }
 
     fn on_aborted(&self, err: AbortedError) -> bool {
-        let mut inner = self.shared.inner.lock().unwrap();
-        self.shared.on_aborted_locked(&mut inner, err)
+        let (aborted, wake) = {
+            let mut inner = self
+                .shared
+                .inner
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.shared.inner.clear_poison();
+            self.shared.on_aborted_locked(&mut inner, err)
+        };
+        wake.fire();
+        aborted
     }
 }
 
@@ -769,18 +855,22 @@ impl ReadSessionCore {
     fn finalize_closed(&mut self, closed: TerminalClose) -> Option<ReadSessionError> {
         self.exhausted = true;
         self.rx.close();
-        let mut inner = self.state.shared.inner.lock().unwrap();
-        match closed {
-            TerminalClose::Clean => {
-                self.terminated = true;
-                self.state.shared.on_ended(&mut inner, None);
-                None
+        let (res, wake) = {
+            let mut inner = self.state.shared.inner.lock().unwrap();
+            match closed {
+                TerminalClose::Clean => {
+                    self.terminated = true;
+                    let wake = self.state.shared.on_ended(&mut inner, None);
+                    (None, wake)
+                }
+                TerminalClose::Error(err) => {
+                    let wake = self.state.shared.on_ended(&mut inner, Some(err.clone()));
+                    (Some(err), wake)
+                }
             }
-            TerminalClose::Error(err) => {
-                self.state.shared.on_ended(&mut inner, Some(err.clone()));
-                Some(err)
-            }
-        }
+        };
+        wake.fire();
+        res
     }
 
     /// If the session has already closed (`R9`) or client shutdown (`C12`/`R9d`) is active,
@@ -789,14 +879,17 @@ impl ReadSessionCore {
         if !self.state.is_closed_fast() && !self.shutdown.is_cancelled() {
             return None;
         }
-        let closed = {
+        let (closed, wake) = {
             let mut inner = self.state.shared.inner.lock().unwrap();
-            if inner.closed.is_none() && self.shutdown.is_cancelled() {
+            let wake = if inner.closed.is_none() && self.shutdown.is_cancelled() {
                 let err = AbortedError::new_with_context("client closed", self.context.clone());
-                self.state.shared.on_aborted_locked(&mut inner, err);
-            }
-            inner.closed.clone()
+                self.state.shared.on_aborted_locked(&mut inner, err).1
+            } else {
+                CatchUpWake::NONE
+            };
+            (inner.closed.clone(), wake)
         };
+        wake.fire();
         closed.map(|c| self.finalize_closed(c))
     }
 
@@ -823,23 +916,27 @@ impl ReadSessionCore {
                     self.state.on_heartbeat_delivered(tail);
                 }
                 Poll::Ready(Some(DriverEvent::CleanEnd)) => {
-                    let closed = {
+                    let (closed, wake) = {
                         let mut inner = self.state.shared.inner.lock().unwrap();
-                        if inner.closed.is_none() {
+                        let wake = if inner.closed.is_none() {
                             if self.shutdown.is_cancelled() {
                                 let err = AbortedError::new_with_context(
                                     "client closed",
                                     self.context.clone(),
                                 );
-                                self.state.shared.on_aborted_locked(&mut inner, err);
+                                self.state.shared.on_aborted_locked(&mut inner, err).1
                             } else {
                                 self.state
                                     .shared
                                     .set_closed(&mut inner, TerminalClose::Clean);
+                                CatchUpWake::NONE
                             }
-                        }
-                        inner.closed.clone().expect("closed set above")
+                        } else {
+                            CatchUpWake::NONE
+                        };
+                        (inner.closed.clone().expect("closed set above"), wake)
                     };
+                    wake.fire();
                     return Poll::Ready(self.finalize_closed(closed).map(Err));
                 }
                 Poll::Ready(None) => {
@@ -850,13 +947,14 @@ impl ReadSessionCore {
                         "read session task ended unexpectedly",
                         self.context.clone(),
                     ));
-                    {
+                    let wake = {
                         let mut inner = self.state.shared.inner.lock().unwrap();
                         self.state
                             .shared
                             .set_closed(&mut inner, TerminalClose::Error(err.clone()));
-                        self.state.shared.on_ended(&mut inner, Some(err.clone()));
-                    }
+                        self.state.shared.on_ended(&mut inner, Some(err.clone()))
+                    };
+                    wake.fire();
                     self.exhausted = true;
                     self.rx.close();
                     return Poll::Ready(Some(Err(err)));
@@ -880,22 +978,31 @@ impl ReadSessionCore {
 
 impl Drop for ReadSessionCore {
     fn drop(&mut self) {
-        let mut inner = self.state.shared.inner.lock().unwrap();
-        if inner.closed.is_none() {
-            inner.pending_heartbeats = 0;
-            inner.pending_close = None;
-            if self.shutdown.is_cancelled() {
-                let err = AbortedError::new_with_context("client closed", self.context.clone());
-                self.state.shared.on_aborted_locked(&mut inner, err);
+        let wake = {
+            let mut inner = self
+                .state
+                .shared
+                .inner
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.state.shared.inner.clear_poison();
+            if inner.closed.is_none() {
+                inner.pending_heartbeats = 0;
+                inner.pending_close = None;
+                if self.shutdown.is_cancelled() {
+                    let err = AbortedError::new_with_context("client closed", self.context.clone());
+                    self.state.shared.on_aborted_locked(&mut inner, err).1
+                } else {
+                    self.state
+                        .shared
+                        .set_closed(&mut inner, TerminalClose::Clean);
+                    self.state.shared.on_ended(&mut inner, None)
+                }
             } else {
-                self.state
-                    .shared
-                    .set_closed(&mut inner, TerminalClose::Clean);
-                self.state.shared.on_ended(&mut inner, None);
+                self.state.shared.on_ended(&mut inner, None)
             }
-        } else {
-            self.state.shared.on_ended(&mut inner, None);
-        }
+        };
+        wake.fire();
     }
 }
 

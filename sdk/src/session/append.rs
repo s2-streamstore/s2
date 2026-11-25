@@ -535,6 +535,7 @@ impl AppendSessionCore {
                 prev_ack_end: None,
                 unacked_batches: unacked_batches.clone(),
             },
+            active_attempt: None,
         };
         tokio::spawn(task.run().instrument(span));
 
@@ -1525,6 +1526,9 @@ struct AppendSessionTask {
     abort: SessionAbort,
     context: ErrorContext,
     state: SessionState,
+    /// Tracks `(sync, acked_in_attempt)` while an attempt is active so abnormal drop/unwind can
+    /// freeze `sync` and classify the sent prefix vs unsent tail accurately (`A6a`, `A8c`).
+    active_attempt: Option<(Arc<AttemptSync>, usize)>,
 }
 
 impl Drop for AppendSessionTask {
@@ -1532,7 +1536,11 @@ impl Drop for AppendSessionTask {
         if self.lifecycle.is_closed() {
             return;
         }
-        let reason = if self.abort.is_cancelled() {
+        if let Some((sync, acked_in_attempt)) = self.active_attempt.take() {
+            finish_attempt_gate(&sync, acked_in_attempt, &mut self.state);
+        }
+        let explicit_abort = self.abort.is_cancelled();
+        let reason = if explicit_abort {
             self.abort.reason()
         } else {
             self.abort.dropped_msg()
@@ -1541,26 +1549,55 @@ impl Drop for AppendSessionTask {
             reason,
             self.context.clone(),
         ));
-        let (queued, err) = {
+        let (queued, has_pending_work, existing_err) = {
             let _gate = self
                 .gate
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             self.gate.clear_poison();
-            let err = self.lifecycle.terminal_err().unwrap_or(aborted);
-            self.lifecycle.set_terminal_err(err.clone());
-            (self.state.drain_queued_commands(), err)
+            let queued = self.state.drain_queued_commands();
+            let has_pending_work = !self.state.inflight_appends.is_empty()
+                || queued
+                    .iter()
+                    .any(|cmd| matches!(cmd, Command::Submit { .. }));
+            let existing_err = self.lifecycle.terminal_err();
+            if let Some(err) = existing_err.as_ref() {
+                self.lifecycle.set_terminal_err(err.clone());
+            } else if has_pending_work || !explicit_abort {
+                self.lifecycle.set_terminal_err(aborted.clone());
+            } else {
+                self.lifecycle.mark_closing();
+            }
+            (queued, has_pending_work, existing_err)
         };
+
+        if !has_pending_work && explicit_abort && existing_err.is_none() {
+            // A8c: explicitly aborting an idle append session loses nothing, so the close is clean.
+            self.lifecycle.finish(Ok(()));
+            return;
+        }
+
+        let err = existing_err.unwrap_or(aborted);
+        let unsent = AppendSessionError::SessionClosed(SessionClosedError::new_with_context(
+            Some(err.clone()),
+            self.context.clone(),
+        ));
+
         for append in self.state.inflight_appends.drain(..) {
+            let outcome = if append.sent_ever {
+                err.clone()
+            } else {
+                unsent.clone()
+            };
             drop(append._permit);
             self.state.unacked_batches.fetch_sub(1, Ordering::Release);
-            let _ = append.ack_tx.send(Err(err.clone()));
+            let _ = append.ack_tx.send(Err(outcome));
         }
         for cmd in queued {
             if let Command::Submit { ack_tx, permit, .. } = cmd {
                 drop(permit);
                 self.state.unacked_batches.fetch_sub(1, Ordering::Release);
-                let _ = ack_tx.send(Err(err.clone()));
+                let _ = ack_tx.send(Err(unsent.clone()));
             }
         }
         self.lifecycle.finish(Err(err));
@@ -1913,23 +1950,49 @@ impl AppendSessionTask {
         advised_reconnects: &mut AdvisedReconnects,
         attempt: u32,
     ) -> AttemptResult {
-        struct StopAttemptOnDrop(Option<Arc<AttemptSync>>);
-        impl StopAttemptOnDrop {
+        /// Owns the body channel sender alongside its `AttemptSync` so any abnormal drop/unwind
+        /// calls `sync.stop()` STRICTLY BEFORE dropping `tx` (preventing `AttemptBodyStream` from
+        /// observing a closed channel while the gate is still open).
+        struct AttemptSender {
+            tx: Option<mpsc::Sender<Bytes>>,
+            sync: Option<Arc<AttemptSync>>,
+        }
+        impl AttemptSender {
+            fn new(tx: mpsc::Sender<Bytes>, sync: Arc<AttemptSync>) -> Self {
+                Self {
+                    tx: Some(tx),
+                    sync: Some(sync),
+                }
+            }
+            fn as_ref(&self) -> Option<&mpsc::Sender<Bytes>> {
+                self.tx.as_ref()
+            }
+            fn is_some(&self) -> bool {
+                self.tx.is_some()
+            }
+            fn is_none(&self) -> bool {
+                self.tx.is_none()
+            }
+            fn close_clean(&mut self) {
+                self.tx = None;
+            }
             fn disarm(&mut self) {
-                self.0 = None;
+                self.sync = None;
             }
         }
-        impl Drop for StopAttemptOnDrop {
+        impl Drop for AttemptSender {
             fn drop(&mut self) {
-                if let Some(sync) = self.0.take() {
+                if let Some(sync) = self.sync.take() {
                     sync.stop();
                 }
+                self.tx = None;
             }
         }
 
         let sync = AttemptSync::new();
-        let mut stop_guard = StopAttemptOnDrop(Some(sync.clone()));
-        let (input_tx, input_rx) = mpsc::channel::<Bytes>(16);
+        self.active_attempt = Some((sync.clone(), 0));
+        let (tx, input_rx) = mpsc::channel::<Bytes>(16);
+        let mut input_tx = AttemptSender::new(tx, sync.clone());
         let body_stream = AttemptBodyStream::new(input_rx, sync.clone());
 
         let abort = self.abort.clone();
@@ -1943,12 +2006,14 @@ impl AppendSessionTask {
             biased;
             _ = abort_fut.as_mut() => {
                 sync.stop();
+                self.active_attempt = None;
                 return AttemptResult::Aborted(self.abort.reason());
             }
             res = connect_fut => match res {
                 Ok(s) => s,
                 Err(err) => {
                     sync.stop();
+                    self.active_attempt = None;
                     if let Some(reason) = self.check_abort() {
                         return AttemptResult::Aborted(reason);
                     }
@@ -1962,7 +2027,6 @@ impl AppendSessionTask {
         };
 
         let ack_timeout = self.client.base().request_timeout();
-        let mut input_tx = Some(input_tx);
         let mut send_cursor: usize = 0;
         let mut acked_in_attempt: usize = 0;
         let mut draining_for_reconnect = false;
@@ -1974,8 +2038,9 @@ impl AppendSessionTask {
 
         loop {
             if self.state.is_close_complete() {
-                stop_guard.disarm();
-                drop(input_tx);
+                self.active_attempt = None;
+                input_tx.disarm();
+                input_tx.close_clean();
                 drop(acks);
                 return AttemptResult::Closed;
             }
@@ -1983,6 +2048,7 @@ impl AppendSessionTask {
             // Check abort BEFORE handing any unsent frames to `AttemptBodyStream` so an
             // already-aborted session cannot start transmitting an unsent batch (`A8c`).
             if let Some(reason) = self.check_abort() {
+                self.active_attempt = None;
                 abort_attempt(
                     &mut acks,
                     &mut self.state,
@@ -2000,6 +2066,7 @@ impl AppendSessionTask {
                 let mut closed = false;
                 while send_cursor < self.state.inflight_appends.len() {
                     if let Some(reason) = self.check_abort() {
+                        self.active_attempt = None;
                         abort_attempt(
                             &mut acks,
                             &mut self.state,
@@ -2021,7 +2088,7 @@ impl AppendSessionTask {
                     }
                 }
                 if closed {
-                    input_tx = None;
+                    input_tx.close_clean();
                 }
             }
 
@@ -2029,7 +2096,8 @@ impl AppendSessionTask {
                 && !draining_for_reconnect
                 && self.state.inflight_appends.is_empty()
             {
-                stop_guard.disarm();
+                self.active_attempt = None;
+                input_tx.disarm();
                 drop(acks);
                 return AttemptResult::IdleEnded;
             }
@@ -2052,6 +2120,7 @@ impl AppendSessionTask {
             let timer_active = ack_timer_armed && !self.state.inflight_appends.is_empty();
 
             let mut drop_input_tx = false;
+            let mut reconnect_advised_done = false;
 
             tokio::select! {
                 biased;
@@ -2074,6 +2143,9 @@ impl AppendSessionTask {
                             ) {
                                 Ok(()) => {
                                     acked_in_attempt += 1;
+                                    if let Some((_, tracked_acked)) = self.active_attempt.as_mut() {
+                                        *tracked_acked = acked_in_attempt;
+                                    }
                                     send_cursor = send_cursor.saturating_sub(1);
                                     if acked_in_attempt.is_multiple_of(64) {
                                         sync.prune_finished(acked_in_attempt);
@@ -2097,12 +2169,11 @@ impl AppendSessionTask {
                                         && !self.abort.is_cancelled()
                                         && sync.batches_started() <= acked_in_attempt
                                     {
-                                        stop_guard.disarm();
-                                        drop(acks);
-                                        return AttemptResult::ReconnectAdvised;
+                                        reconnect_advised_done = true;
                                     }
                                 }
                                 Err(err) => {
+                                    self.active_attempt = None;
                                     let unacked_sent = finish_attempt_gate(
                                         &sync,
                                         acked_in_attempt,
@@ -2117,6 +2188,7 @@ impl AppendSessionTask {
                             }
                         }
                         Some(Err(err)) => {
+                            self.active_attempt = None;
                             let unacked_sent =
                                 finish_attempt_gate(&sync, acked_in_attempt, &mut self.state);
 
@@ -2141,6 +2213,7 @@ impl AppendSessionTask {
                             };
                         }
                         None => {
+                            self.active_attempt = None;
                             let unacked_sent =
                                 finish_attempt_gate(&sync, acked_in_attempt, &mut self.state);
 
@@ -2187,6 +2260,7 @@ impl AppendSessionTask {
                 }
 
                 _ = abort_fut.as_mut() => {
+                    self.active_attempt = None;
                     abort_attempt(
                         &mut acks,
                         &mut self.state,
@@ -2230,6 +2304,7 @@ impl AppendSessionTask {
                     }
 
                     acks.retire_connection();
+                    self.active_attempt = None;
                     let unacked_sent =
                         finish_attempt_gate(&sync, acked_in_attempt, &mut self.state);
                     if self.state.inflight_appends.is_empty() {
@@ -2307,6 +2382,7 @@ impl AppendSessionTask {
                                 break;
                             }
                             None => {
+                                self.active_attempt = None;
                                 abort_attempt(
                                     &mut acks,
                                     &mut self.state,
@@ -2330,8 +2406,15 @@ impl AppendSessionTask {
                 }
             }
 
+            if reconnect_advised_done {
+                self.active_attempt = None;
+                input_tx.disarm();
+                input_tx.close_clean();
+                drop(acks);
+                return AttemptResult::ReconnectAdvised;
+            }
             if drop_input_tx {
-                input_tx = None;
+                input_tx.close_clean();
             }
         }
     }

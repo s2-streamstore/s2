@@ -1392,3 +1392,65 @@ fn read_session_runtime_shutdown_before_first_poll_settles_caught_up() {
         assert!(matches!(err, ReadSessionError::Aborted(_)), "{err:?}");
     });
 }
+
+#[test]
+fn caught_up_waker_reading_state_on_wake_does_not_deadlock() {
+    use std::{
+        future::Future,
+        pin::Pin,
+        sync::atomic::{AtomicBool, Ordering},
+        task::{Context, Wake, Waker},
+    };
+
+    struct ReadingStateWake {
+        state: s2_sdk::read_session::ReadSessionState,
+        woken: AtomicBool,
+    }
+    impl Wake for ReadingStateWake {
+        fn wake(self: Arc<Self>) {
+            let _ = self.state.last_observed_tail();
+            self.woken.store(true, Ordering::SeqCst);
+        }
+    }
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (_client, _sess, wake_probe, mut caught_up) = rt.block_on(async {
+        let client = s2_sdk::S2::new(s2_sdk::types::S2Config::new("test-token").with_endpoints(
+            s2_sdk::types::S2Endpoints::for_endpoint("http://127.0.0.1:1").unwrap(),
+        ))
+        .unwrap();
+        let stream = client
+            .basin("test-basin".parse().unwrap())
+            .stream("test-stream".parse().unwrap());
+        let sess = stream
+            .read_session(ReadInput::new(), ReadSessionConfig::default())
+            .unwrap();
+        let state = sess.state();
+        let mut caught_up = sess.caught_up();
+        let wake_probe = Arc::new(ReadingStateWake {
+            state,
+            woken: AtomicBool::new(false),
+        });
+        let waker = Waker::from(wake_probe.clone());
+        assert!(
+            Pin::new(&mut caught_up)
+                .poll(&mut Context::from_waker(&waker))
+                .is_pending()
+        );
+        (client, sess, wake_probe, caught_up)
+    });
+    // Dropping runtime triggers `ReadDriver::drop` -> `on_aborted`, which must wake `caught_up`
+    // AFTER releasing `ReadStateShared::inner` so `wake_probe`'s `last_observed_tail()` cannot
+    // deadlock.
+    drop(rt);
+    assert!(wake_probe.woken.load(Ordering::SeqCst));
+    let waker = Waker::noop();
+    let res = match Pin::new(&mut caught_up).poll(&mut Context::from_waker(waker)) {
+        std::task::Poll::Ready(r) => r,
+        std::task::Poll::Pending => panic!("caught_up must be ready after driver drop"),
+    };
+    assert!(matches!(res, Err(ReadSessionError::Aborted(_))));
+}

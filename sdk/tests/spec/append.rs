@@ -2577,9 +2577,14 @@ fn producer_runtime_shutdown_before_first_poll_resolves_partial_and_full_batches
             .unwrap_or_else(|| panic!("{label} batch ticket must resolve on shutdown"))
             .unwrap_err();
         assert!(
-            matches!(err, AppendSessionError::Aborted(_)),
-            "{label}: {err:?}"
+            matches!(
+                err,
+                AppendSessionError::SessionClosed(ref sc)
+                    if matches!(sc.failure(), Some(AppendSessionError::Aborted(_)))
+            ),
+            "{label}: unsent batch must get SessionClosedError wrapping Aborted, got {err:?}"
         );
+        assert!(err.has_no_side_effects(), "{label}: {err:?}");
         assert_eq!(producer.unacked_records(), 0, "{label}: unacked_records");
         assert_eq!(producer.unacked_bytes(), 0, "{label}: unacked_bytes");
     }
@@ -2631,7 +2636,15 @@ fn append_session_runtime_shutdown_before_first_poll_settles_close_and_tickets()
         .try_ack()
         .expect("queued append ticket must resolve on shutdown")
         .unwrap_err();
-    assert!(matches!(err, AppendSessionError::Aborted(_)), "{err:?}");
+    assert!(
+        matches!(
+            err,
+            AppendSessionError::SessionClosed(ref sc)
+                if matches!(sc.failure(), Some(AppendSessionError::Aborted(_)))
+        ),
+        "unsent queued append must get SessionClosedError wrapping Aborted, got {err:?}"
+    );
+    assert!(err.has_no_side_effects(), "{err:?}");
     assert_eq!(busy_session.unacked_batches(), 0);
     assert_eq!(busy_session.unacked_bytes(), 0);
 
@@ -2650,5 +2663,102 @@ fn append_session_runtime_shutdown_before_first_poll_settles_close_and_tickets()
             .expect("busy session close must not hang after shutdown before first poll")
             .unwrap_err();
         assert!(matches!(err, AppendSessionError::Aborted(_)), "{err:?}");
+    });
+}
+
+#[test]
+fn explicit_abort_before_first_poll_then_runtime_shutdown_preserves_a6a_and_a8c() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (idle_sess, busy_sess, mut sess_ticket, idle_prod, busy_prod, mut prod_ticket) = rt
+        .block_on(async {
+            let client =
+                s2_sdk::S2::new(s2_sdk::types::S2Config::new("test-token").with_endpoints(
+                    s2_sdk::types::S2Endpoints::for_endpoint("http://127.0.0.1:1").unwrap(),
+                ))
+                .unwrap();
+            let stream = client
+                .basin("test-basin".parse().unwrap())
+                .stream("test-stream".parse().unwrap());
+
+            let idle_sess = stream.append_session(AppendSessionConfig::new()).unwrap();
+            idle_sess.abort();
+
+            let busy_sess = stream.append_session(AppendSessionConfig::new()).unwrap();
+            let sess_ticket = busy_sess.submit(sample_append_input()).await.unwrap();
+            busy_sess.abort();
+
+            let idle_prod = stream.producer(ProducerConfig::new()).unwrap();
+            idle_prod.abort();
+
+            let busy_prod = stream
+                .producer(ProducerConfig::new().with_linger(Duration::from_secs(60)))
+                .unwrap();
+            let prod_ticket = busy_prod
+                .submit(AppendRecord::new("unsent-at-abort").unwrap())
+                .await
+                .unwrap();
+            busy_prod.abort();
+
+            (
+                idle_sess,
+                busy_sess,
+                sess_ticket,
+                idle_prod,
+                busy_prod,
+                prod_ticket,
+            )
+        });
+    drop(rt);
+
+    // A6a: unsent work at abort receives definite `SessionClosedError { failure: Some(Aborted) }`.
+    let sess_err = sess_ticket.try_ack().expect("resolved").unwrap_err();
+    assert!(
+        matches!(
+            sess_err,
+            AppendSessionError::SessionClosed(ref sc)
+                if matches!(sc.failure(), Some(AppendSessionError::Aborted(_)))
+        ),
+        "{sess_err:?}"
+    );
+    assert!(sess_err.has_no_side_effects());
+
+    let prod_err = prod_ticket.try_ack().expect("resolved").unwrap_err();
+    assert!(
+        matches!(
+            prod_err,
+            AppendSessionError::SessionClosed(ref sc)
+                if matches!(sc.failure(), Some(AppendSessionError::Aborted(_)))
+        ),
+        "{prod_err:?}"
+    );
+    assert!(prod_err.has_no_side_effects());
+    assert_eq!(busy_prod.unacked_records(), 0);
+    assert_eq!(busy_prod.unacked_bytes(), 0);
+
+    // A8c: explicitly aborting an idle session or producer closes cleanly with `Ok(())`.
+    let rt2 = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt2.block_on(async {
+        idle_sess
+            .close()
+            .await
+            .expect("explicitly aborted idle append session closes cleanly");
+        idle_prod
+            .close()
+            .await
+            .expect("explicitly aborted idle producer closes cleanly");
+        assert!(matches!(
+            busy_sess.close().await.unwrap_err(),
+            AppendSessionError::Aborted(_)
+        ));
+        assert!(matches!(
+            busy_prod.close().await.unwrap_err(),
+            AppendSessionError::Aborted(_)
+        ));
     });
 }

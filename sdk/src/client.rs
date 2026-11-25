@@ -5,8 +5,8 @@ use std::{
     io::{Read as _, Write as _},
     pin::{Pin, pin},
     sync::{
-        Arc, Mutex as StdMutex, RwLock as StdRwLock, Weak,
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        Arc, RwLock as StdRwLock, Weak,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     task::{Context, Poll},
     time::Duration,
@@ -38,7 +38,6 @@ use tokio::{
     time::{Instant, Sleep, timeout},
 };
 pub(crate) use tokio_util::sync::CancellationToken;
-use tokio_util::task::AbortOnDropHandle;
 use tower_service::Service;
 
 use crate::{
@@ -1117,7 +1116,6 @@ fn uri_with_path_and_query(uri: &Uri, path_and_query: PathAndQuery) -> Result<Ur
     Ok(Uri::from_parts(parts)?)
 }
 
-const UNARY_ZSTD_WINDOW_LOG_MAX: u32 = 24;
 const UNARY_ZSTD_ONE_SHOT_MAX_BYTES: usize = 4 * 1024 * 1024;
 
 thread_local! {
@@ -1151,14 +1149,11 @@ fn compress_zstd_unary(data: &[u8]) -> std::io::Result<Vec<u8>> {
     Ok(out)
 }
 
-fn create_bounded_dctx() -> std::io::Result<zstd::zstd_safe::DCtx<'static>> {
-    let mut dctx = zstd::zstd_safe::DCtx::try_create()
-        .ok_or_else(|| std::io::Error::other("zstd could not allocate a decompression context"))?;
-    dctx.set_parameter(zstd::zstd_safe::DParameter::WindowLogMax(
-        UNARY_ZSTD_WINDOW_LOG_MAX,
-    ))
-    .map_err(|code| std::io::Error::other(zstd::zstd_safe::get_error_name(code)))?;
-    Ok(dctx)
+fn create_unary_dctx() -> std::io::Result<zstd::zstd_safe::DCtx<'static>> {
+    // Use libzstd's default window limit (matching `zstd::stream::read::Decoder::new`) while
+    // `read_bounded` / `exact_size` enforce `max_bytes` on decompressed output.
+    zstd::zstd_safe::DCtx::try_create()
+        .ok_or_else(|| std::io::Error::other("zstd could not allocate a decompression context"))
 }
 
 fn compress_body(
@@ -1299,7 +1294,7 @@ fn decompress_zstd(bytes: Bytes, max_bytes: usize) -> Result<Bytes, HttpError> {
         };
         let dctx = match slot.as_mut() {
             Some(d) => d,
-            None => match create_bounded_dctx() {
+            None => match create_unary_dctx() {
                 Ok(d) => slot.insert(d),
                 Err(err) => {
                     return Some(Err(HttpError::ResponseCompression(err.to_string())));
@@ -1319,7 +1314,7 @@ fn decompress_zstd(bytes: Bytes, max_bytes: usize) -> Result<Bytes, HttpError> {
     }
 
     let mut dctx =
-        create_bounded_dctx().map_err(|e| HttpError::ResponseCompression(e.to_string()))?;
+        create_unary_dctx().map_err(|e| HttpError::ResponseCompression(e.to_string()))?;
     decompress_zstd_with_dctx(
         &mut dctx,
         bytes.as_ref(),
@@ -1387,15 +1382,15 @@ const PERMIT_IDLE_BIT: u64 = 1 << 63;
 struct PermitState {
     epoch: Instant,
     packed: AtomicU64,
-    reaper_notify: Arc<Notify>,
+    idle_notify: Notify,
 }
 
 impl PermitState {
-    fn new(reaper_notify: Arc<Notify>) -> Self {
+    fn new() -> Self {
         Self {
             epoch: Instant::now(),
             packed: AtomicU64::new(1),
-            reaper_notify,
+            idle_notify: Notify::new(),
         }
     }
 
@@ -1480,7 +1475,7 @@ impl Drop for RequestPermit {
                     Ordering::Acquire,
                 ) {
                     Ok(_) => {
-                        self.state.reaper_notify.notify_one();
+                        self.state.idle_notify.notify_one();
                         return;
                     }
                     Err(actual) => cur = actual,
@@ -1521,9 +1516,8 @@ impl PooledConnection {
         id: ConnectionId,
         max_concurrent_requests: usize,
         rx: watch::Receiver<DialOutcome>,
-        reaper_notify: Arc<Notify>,
     ) -> (Self, RequestPermit) {
-        let state = Arc::new(PermitState::new(reaper_notify));
+        let state = Arc::new(PermitState::new());
         let permit = RequestPermit {
             state: state.clone(),
         };
@@ -1595,7 +1589,7 @@ struct HostPool<C> {
     state: StdRwLock<HostPoolState>,
     connector: C,
     shutdown: CancellationToken,
-    reaper_notify: Arc<Notify>,
+    hosts: Weak<StdRwLock<PoolHosts<C>>>,
 }
 
 impl<C> RetireTarget for HostPool<C>
@@ -1620,6 +1614,61 @@ impl<C> HostPool<C> {
         state.connections.retain(|conn| conn.id != id);
         state.connections.len() < before
     }
+
+    fn remove_and_is_empty(&self, id: ConnectionId) -> bool {
+        let mut state = self.state.write().unwrap();
+        state.connections.retain(|conn| conn.id != id);
+        state.connections.is_empty()
+    }
+
+    /// Evict connection `id` if it is no longer live or has been idle for at least `idle_timeout`,
+    /// returning `(evicted, pool_is_now_empty)` (`C13c`).
+    fn evict_if_idle(
+        &self,
+        id: ConnectionId,
+        now: Instant,
+        idle_timeout: Duration,
+    ) -> (bool, bool) {
+        let mut state = self.state.write().unwrap();
+        let Some(pos) = state.connections.iter().position(|c| c.id == id) else {
+            return (true, state.connections.is_empty());
+        };
+        let expired = !state.connections[pos].is_live()
+            || state.connections[pos]
+                .idle_deadline(idle_timeout)
+                .is_some_and(|deadline| deadline <= now);
+        if !expired {
+            return (false, false);
+        }
+        state.connections.swap_remove(pos);
+        (true, state.connections.is_empty())
+    }
+
+    /// Atomically detach and remove this host pool from `Pool::hosts` if it has no connections.
+    fn prune_if_empty(self: &Arc<Self>) {
+        if let Some(hosts) = self.hosts.upgrade() {
+            let mut hosts = hosts.write().unwrap();
+            if let Some(entry) = hosts.map.get(&self.origin)
+                && Arc::ptr_eq(entry, self)
+                && self.detach_if_empty()
+            {
+                hosts.map.remove(&self.origin);
+            }
+        }
+    }
+
+    /// Atomically detach this host pool if it currently has no pooled connections.
+    fn detach_if_empty(&self) -> bool {
+        let Ok(mut state) = self.state.try_write() else {
+            return false;
+        };
+        if state.connections.is_empty() {
+            state.detached = true;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 impl<C> HostPool<C>
@@ -1633,7 +1682,7 @@ where
         connection_timeout: Duration,
         http2: Http2Config,
         shutdown: CancellationToken,
-        reaper_notify: Arc<Notify>,
+        hosts: Weak<StdRwLock<PoolHosts<C>>>,
     ) -> Self {
         Self {
             origin,
@@ -1646,7 +1695,7 @@ where
             }),
             connector,
             shutdown,
-            reaper_notify,
+            hosts,
         }
     }
 
@@ -1707,17 +1756,14 @@ where
 
         let id = ConnectionId::next();
         let (tx, rx) = watch::channel(DialOutcome::Pending);
-        let (pooled, permit) = PooledConnection::new_connecting(
-            id,
-            self.max_concurrent_requests(),
-            rx.clone(),
-            self.reaper_notify.clone(),
-        );
+        let (pooled, permit) =
+            PooledConnection::new_connecting(id, self.max_concurrent_requests(), rx.clone());
         let peer_max_streams = pooled.peer_max_streams.clone();
+        let permit_state = pooled.state.clone();
         state.connections.push(pooled);
         drop(state);
 
-        self.spawn_connection(id, tx, peer_max_streams);
+        self.spawn_connection(id, tx, peer_max_streams, permit_state);
 
         Some(Checkout::Connecting { id, rx, permit })
     }
@@ -1727,8 +1773,29 @@ where
         id: ConnectionId,
         tx: watch::Sender<DialOutcome>,
         peer_max_streams: Arc<AtomicUsize>,
+        permit_state: Arc<PermitState>,
     ) {
+        struct RemoveOnDrop<C: Connect> {
+            pool: Weak<HostPool<C>>,
+            id: ConnectionId,
+        }
+        impl<C: Connect> Drop for RemoveOnDrop<C> {
+            fn drop(&mut self) {
+                if let Some(pool) = self.pool.upgrade()
+                    && pool.remove_and_is_empty(self.id)
+                {
+                    pool.prune_if_empty();
+                }
+            }
+        }
+
         let weak_pool = Arc::downgrade(self);
+        // Construct before `tokio::spawn` so even an unpolled drop (or panic when polled outside
+        // a Tokio runtime) removes the connection entry and prunes an empty host pool.
+        let remove_guard = RemoveOnDrop {
+            pool: weak_pool.clone(),
+            id,
+        };
         let connector = self.connector.clone();
         let origin = self.origin.clone();
         let origin_uri = self.origin_uri.clone();
@@ -1737,21 +1804,7 @@ where
         let shutdown = self.shutdown.clone();
 
         tokio::spawn(async move {
-            struct RemoveOnDrop<C: Connect> {
-                pool: Weak<HostPool<C>>,
-                id: ConnectionId,
-            }
-            impl<C: Connect> Drop for RemoveOnDrop<C> {
-                fn drop(&mut self) {
-                    if let Some(pool) = self.pool.upgrade() {
-                        pool.remove(self.id);
-                    }
-                }
-            }
-            let _remove_guard = RemoveOnDrop {
-                pool: weak_pool.clone(),
-                id,
-            };
+            let _remove_guard = remove_guard;
 
             let (sender, conn) = match dial_http2(
                 connector,
@@ -1790,31 +1843,90 @@ where
             // or connection retirement.
             drop(tx);
 
-            // Drive the HTTP/2 connection until all handles close, an error occurs, or
-            // client shutdown fires (`C12`, dropping `conn` and its socket immediately).
+            // Drive the HTTP/2 connection AND its per-connection idle timer on the connection's
+            // own Tokio runtime until all handles close, an error occurs, idle timeout evicts it
+            // (`C13c`), or client shutdown fires (`C12`, dropping `conn` and its socket).
             // Refresh the peer's advertised `SETTINGS_MAX_CONCURRENT_STREAMS` after each poll so
             // checkout spills over to a new connection when the peer advertises a lower cap
             // (`C13a`).
             let mut conn = pin!(conn);
-            tokio::select! {
-                biased;
-                _ = shutdown.cancelled() => {}
-                res = std::future::poll_fn(|cx| {
-                    let poll = conn.as_mut().poll(cx);
-                    let current = conn.current_max_send_streams();
-                    if current != last_peer_max_streams {
-                        last_peer_max_streams = current;
-                        peer_max_streams.store(current, Ordering::Relaxed);
+            let mut idle_sleep = pin!(tokio::time::sleep(IDLE_TIMEOUT));
+            let mut idle_armed = false;
+            let mut evicted_idle = false;
+            let mut idle_notified = pin!(permit_state.idle_notify.notified());
+
+            loop {
+                if !evicted_idle
+                    && !idle_armed
+                    && let Some(deadline) = permit_state.idle_deadline(IDLE_TIMEOUT)
+                {
+                    idle_sleep.as_mut().reset(deadline);
+                    idle_armed = true;
+                }
+
+                tokio::select! {
+                    biased;
+                    _ = shutdown.cancelled() => break,
+                    res = std::future::poll_fn(|cx| {
+                        let poll = conn.as_mut().poll(cx);
+                        let current = conn.current_max_send_streams();
+                        if current != last_peer_max_streams {
+                            last_peer_max_streams = current;
+                            peer_max_streams.store(current, Ordering::Relaxed);
+                        }
+                        poll
+                    }) => {
+                        if let Err(err) = res {
+                            tracing::debug!(
+                                origin = %origin,
+                                connection = id.0,
+                                err = %format_error_chain(&err),
+                                "HTTP/2 connection closed"
+                            );
+                        }
+                        break;
                     }
-                    poll
-                }) => {
-                    if let Err(err) = res {
-                        tracing::debug!(
-                            origin = %origin,
-                            connection = id.0,
-                            err = %format_error_chain(&err),
-                            "HTTP/2 connection closed"
-                        );
+                    _ = idle_sleep.as_mut(), if idle_armed && !evicted_idle => {
+                        idle_armed = false;
+                        let now = Instant::now();
+                        match permit_state.idle_deadline(IDLE_TIMEOUT) {
+                            Some(deadline) if deadline > now => {
+                                idle_sleep.as_mut().reset(deadline);
+                                idle_armed = true;
+                            }
+                            Some(_) => {
+                                if let Some(pool) = weak_pool.upgrade() {
+                                    let (evicted, is_empty) =
+                                        pool.evict_if_idle(id, now, IDLE_TIMEOUT);
+                                    if evicted {
+                                        evicted_idle = true;
+                                        tracing::debug!(
+                                            origin = %origin,
+                                            connection = id.0,
+                                            "reaped idle HTTP/2 connection"
+                                        );
+                                        if is_empty {
+                                            pool.prune_if_empty();
+                                        }
+                                    } else if let Some(deadline) =
+                                        permit_state.idle_deadline(IDLE_TIMEOUT)
+                                    {
+                                        idle_sleep.as_mut().reset(deadline);
+                                        idle_armed = true;
+                                    }
+                                } else {
+                                    evicted_idle = true;
+                                }
+                            }
+                            None => {}
+                        }
+                    }
+                    _ = idle_notified.as_mut(), if !idle_armed && !evicted_idle => {
+                        idle_notified.set(permit_state.idle_notify.notified());
+                        if let Some(deadline) = permit_state.idle_deadline(IDLE_TIMEOUT) {
+                            idle_sleep.as_mut().reset(deadline);
+                            idle_armed = true;
+                        }
                     }
                 }
             }
@@ -1832,77 +1944,6 @@ where
         let mut state = self.state.write().unwrap();
         state.connections.clear();
         state.detached = true;
-    }
-
-    /// Reap connections idle for at least `idle_timeout` and return `(next_deadline, is_empty)`
-    /// (`C13c`). Avoids acquiring the write lock when nothing needs eviction.
-    fn reap_idle(&self, now: Instant, idle_timeout: Duration) -> (Option<Instant>, bool) {
-        {
-            let state = self.state.read().unwrap();
-            let mut needs_eviction = false;
-            let mut next_deadline: Option<Instant> = None;
-            for conn in &state.connections {
-                if !conn.is_live() {
-                    needs_eviction = true;
-                    break;
-                }
-                if let Some(deadline) = conn.idle_deadline(idle_timeout) {
-                    if deadline <= now {
-                        needs_eviction = true;
-                        break;
-                    }
-                    next_deadline = Some(match next_deadline {
-                        Some(earliest) => earliest.min(deadline),
-                        None => deadline,
-                    });
-                }
-            }
-            if !needs_eviction {
-                return (next_deadline, state.connections.is_empty());
-            }
-        }
-
-        let mut state = self.state.write().unwrap();
-        let before = state.connections.len();
-        let mut next_deadline: Option<Instant> = None;
-        state.connections.retain(|conn| {
-            if !conn.is_live() {
-                return false;
-            }
-            if let Some(deadline) = conn.idle_deadline(idle_timeout) {
-                if deadline <= now {
-                    return false;
-                }
-                next_deadline = Some(match next_deadline {
-                    Some(earliest) => earliest.min(deadline),
-                    None => deadline,
-                });
-            }
-            true
-        });
-        let reaped = before - state.connections.len();
-        if reaped > 0 {
-            tracing::debug!(
-                origin = %self.origin,
-                reaped,
-                remaining = state.connections.len(),
-                "reaped idle HTTP/2 connections"
-            );
-        }
-        (next_deadline, state.connections.is_empty())
-    }
-
-    /// Atomically detach this host pool if it currently has no pooled connections.
-    fn detach_if_empty(&self) -> bool {
-        let Ok(mut state) = self.state.try_write() else {
-            return false;
-        };
-        if state.connections.is_empty() {
-            state.detached = true;
-            true
-        } else {
-            false
-        }
     }
 }
 
@@ -2050,9 +2091,6 @@ pub(crate) struct Pool<C> {
     hosts: Arc<StdRwLock<PoolHosts<C>>>,
     connector: C,
     shutdown: CancellationToken,
-    reaper_notify: Arc<Notify>,
-    reaper_alive: Arc<AtomicBool>,
-    reaper: StdMutex<Option<AbortOnDropHandle<()>>>,
 }
 
 impl<C> Drop for Pool<C> {
@@ -2084,65 +2122,7 @@ where
             hosts,
             connector,
             shutdown,
-            reaper_notify: Arc::new(Notify::new()),
-            reaper_alive: Arc::new(AtomicBool::new(false)),
-            reaper: StdMutex::new(None),
         }
-    }
-
-    fn ensure_reaper_started(&self) {
-        if self.shutdown.is_cancelled() || self.reaper_alive.load(Ordering::Acquire) {
-            return;
-        }
-        let mut slot = self.reaper.lock().unwrap();
-        if self.shutdown.is_cancelled() || self.reaper_alive.load(Ordering::Acquire) {
-            return;
-        }
-        struct ReaperAliveGuard(Arc<AtomicBool>);
-        impl Drop for ReaperAliveGuard {
-            fn drop(&mut self) {
-                self.0.store(false, Ordering::Release);
-            }
-        }
-        drop(slot.take());
-        self.reaper_alive.store(true, Ordering::Release);
-        let alive_guard = ReaperAliveGuard(self.reaper_alive.clone());
-        let hosts = self.hosts.clone();
-        let shutdown = self.shutdown.clone();
-        let notify = self.reaper_notify.clone();
-        *slot = Some(AbortOnDropHandle::new(tokio::spawn(async move {
-            let _alive_guard = alive_guard;
-            let mut shutdown_fut = pin!(shutdown.cancelled());
-            loop {
-                let next_deadline = reap_idle_connections(&hosts, Instant::now(), IDLE_TIMEOUT);
-                match next_deadline {
-                    Some(deadline) => {
-                        // `IDLE_TIMEOUT` is uniform across all connections, so no newly-idle
-                        // connection can expire earlier than `deadline`; sleep until then
-                        // rather than waking on every request completion.
-                        tokio::select! {
-                            biased;
-                            _ = &mut shutdown_fut => break,
-                            _ = tokio::time::sleep_until(deadline) => {}
-                        }
-                    }
-                    None => {
-                        tokio::select! {
-                            biased;
-                            _ = &mut shutdown_fut => break,
-                            _ = notify.notified() => {}
-                        }
-                        // Wait one full `IDLE_TIMEOUT` before scanning so rapid sequential
-                        // requests do not trigger a reaper wakeup storm on every completion.
-                        tokio::select! {
-                            biased;
-                            _ = &mut shutdown_fut => break,
-                            _ = tokio::time::sleep(IDLE_TIMEOUT) => {}
-                        }
-                    }
-                }
-            }
-        })));
     }
 
     fn get_or_create_host_pool(
@@ -2163,6 +2143,7 @@ where
         if hosts.closed {
             return Err(HttpError::Closed);
         }
+        let weak_hosts = Arc::downgrade(&self.hosts);
         Ok(hosts
             .map
             .entry(origin.to_owned())
@@ -2177,7 +2158,7 @@ where
                     self.connection_timeout,
                     self.http2,
                     self.shutdown.clone(),
-                    self.reaper_notify.clone(),
+                    weak_hosts,
                 ))
             })
             .clone())
@@ -2277,7 +2258,6 @@ where
         if self.shutdown.is_cancelled() {
             return Err(HttpError::Closed);
         }
-        self.ensure_reaper_started();
         let request_timeout = request.timeout;
         tokio::select! {
             biased;
@@ -2313,40 +2293,6 @@ where
             pool.clear_and_detach();
         }
     }
-}
-
-fn reap_idle_connections<C: Connect>(
-    hosts: &StdRwLock<PoolHosts<C>>,
-    now: Instant,
-    idle_timeout: Duration,
-) -> Option<Instant> {
-    let pools: Vec<Arc<HostPool<C>>> = {
-        let hosts = hosts.read().unwrap();
-        hosts.map.values().cloned().collect()
-    };
-
-    let mut next_deadline: Option<Instant> = None;
-    let mut any_empty = false;
-    for pool in &pools {
-        let (deadline, is_empty) = pool.reap_idle(now, idle_timeout);
-        any_empty |= is_empty;
-        if let Some(deadline) = deadline {
-            next_deadline = Some(match next_deadline {
-                Some(earliest) => earliest.min(deadline),
-                None => deadline,
-            });
-        }
-    }
-
-    if any_empty {
-        hosts
-            .write()
-            .unwrap()
-            .map
-            .retain(|_, pool| !pool.detach_if_empty());
-    }
-
-    next_deadline
 }
 
 async fn send_http_request(
@@ -3309,8 +3255,7 @@ mod tests {
     #[test]
     fn connecting_entry_is_not_live_after_dial_sender_dropped() {
         let (tx, rx) = watch::channel(DialOutcome::Pending);
-        let (pooled, _permit) =
-            PooledConnection::new_connecting(ConnectionId::next(), 10, rx, Arc::new(Notify::new()));
+        let (pooled, _permit) = PooledConnection::new_connecting(ConnectionId::next(), 10, rx);
         assert!(pooled.is_live());
         drop(tx);
         assert!(!pooled.is_live());
@@ -3362,7 +3307,7 @@ mod tests {
 
     #[test]
     fn permit_state_active_idle_transitions_and_reaper_check() {
-        let state = Arc::new(PermitState::new(Arc::new(Notify::new())));
+        let state = Arc::new(PermitState::new());
         let p1 = RequestPermit {
             state: state.clone(),
         };
@@ -3449,6 +3394,19 @@ mod tests {
                 .as_ref(),
             &(0u8..24).collect::<Vec<_>>()[..]
         );
+
+        // Streaming zstd frame with window_log=25 (32 MiB window) and unknown content size
+        // must still be accepted by the unary decoder while enforcing `max_bytes`.
+        let mut enc25 = zstd::stream::write::Encoder::new(Vec::new(), 1).unwrap();
+        enc25.window_log(25).unwrap();
+        enc25.write_all(b"window-log-25-ok").unwrap();
+        enc25.flush().unwrap();
+        let win25 = enc25.finish().unwrap();
+        assert_eq!(exact_zstd_decompressed_size(&win25), None);
+        assert_eq!(
+            decompress_zstd(Bytes::from(win25), 1024).unwrap().as_ref(),
+            b"window-log-25-ok"
+        );
     }
 
     #[tokio::test]
@@ -3470,7 +3428,7 @@ mod tests {
     }
 
     #[test]
-    fn pool_reaper_restarts_after_previous_runtime_shuts_down() {
+    fn pool_reaps_idle_connections_across_overlapping_runtimes() {
         let connector = DuplexH2Connector::new();
         let pool = test_pool_with(connector.clone(), Http2Config::new());
 
@@ -3478,43 +3436,85 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
-        rt_a.block_on(async {
-            let req = RequestBuilder::get("http://localhost:8080/a".parse().unwrap())
-                .build()
-                .unwrap();
-            let resp = pool.execute_unary(req).await.unwrap();
-            assert_eq!(resp.status(), StatusCode::OK);
-        });
-        assert!(pool.reaper_alive.load(Ordering::Acquire));
-        drop(rt_a);
-        assert!(
-            !pool.reaper_alive.load(Ordering::Acquire),
-            "reaper_alive must clear when runtime A drops"
-        );
-
         let rt_b = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .start_paused(true)
             .build()
             .unwrap();
-        rt_b.block_on(async {
-            let req = RequestBuilder::get("http://localhost:8080/b".parse().unwrap())
+
+        // Runtime A dials origin A; while A is still alive, runtime B dials origin B.
+        rt_a.block_on(async {
+            let req = RequestBuilder::get("http://origin-a:8080/a".parse().unwrap())
                 .build()
                 .unwrap();
             let resp = pool.execute_unary(req).await.unwrap();
             assert_eq!(resp.status(), StatusCode::OK);
-            assert!(pool.reaper_alive.load(Ordering::Acquire));
-            assert_eq!(host_connection_count(&pool, TEST_ORIGIN), 1);
+        });
+        rt_b.block_on(async {
+            let req = RequestBuilder::get("http://origin-b:8080/b".parse().unwrap())
+                .build()
+                .unwrap();
+            let resp = pool.execute_unary(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+        });
+        assert_eq!(host_connection_count(&pool, "http://origin-a:8080"), 1);
+        assert_eq!(host_connection_count(&pool, "http://origin-b:8080"), 1);
 
-            tokio::time::advance(IDLE_TIMEOUT * 3).await;
+        // Shut down runtime A while runtime B remains alive and quiet (no further requests).
+        drop(rt_a);
+        assert_eq!(host_connection_count(&pool, "http://origin-a:8080"), 0);
+        assert_eq!(host_connection_count(&pool, "http://origin-b:8080"), 1);
+
+        rt_b.block_on(async {
+            tokio::time::advance(IDLE_TIMEOUT + Duration::from_secs(1)).await;
             for _ in 0..10 {
                 tokio::task::yield_now().await;
             }
             assert_eq!(
-                host_connection_count(&pool, TEST_ORIGIN),
+                host_connection_count(&pool, "http://origin-b:8080"),
                 0,
-                "restarted reaper on runtime B must evict idle connections"
+                "idle connection on runtime B must still be reaped after runtime A exits"
             );
+            assert!(
+                !pool
+                    .hosts
+                    .read()
+                    .unwrap()
+                    .map
+                    .contains_key("http://origin-b:8080")
+            );
+            pool.close();
+        });
+    }
+
+    #[test]
+    fn pool_poll_outside_tokio_runtime_does_not_brick_subsequent_requests() {
+        let connector = DuplexH2Connector::new();
+        let pool = test_pool_with(connector, Http2Config::new());
+
+        // Polling outside any Tokio runtime panics in `tokio::spawn` but must NOT poison any pool
+        // lock or leave behind a wedged entry.
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let req = RequestBuilder::get("http://localhost:8080/bare".parse().unwrap())
+                .build()
+                .unwrap();
+            let mut fut = Box::pin(pool.execute_unary(req));
+            let waker = std::task::Waker::noop();
+            let mut cx = Context::from_waker(waker);
+            let _ = fut.as_mut().poll(&mut cx);
+        }));
+        assert!(panicked.is_err());
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let req = RequestBuilder::get("http://localhost:8080/ok".parse().unwrap())
+                .build()
+                .unwrap();
+            let resp = pool.execute_unary(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
             pool.close();
         });
     }
