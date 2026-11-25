@@ -5,7 +5,7 @@ use std::{
     pin::{Pin, pin},
     str::FromStr,
     sync::{
-        Arc, Mutex as StdMutex,
+        Arc, Mutex as StdMutex, OnceLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     task::{Context, Poll},
@@ -13,14 +13,11 @@ use std::{
 };
 
 use futures_core::{FusedFuture, FusedStream, Stream};
-use futures_util::{
-    StreamExt,
-    future::{FutureExt, Shared},
-};
+use futures_util::StreamExt;
 use http::StatusCode;
 use s2_api::v1::stream::{ReadEnd, ReadStart, proto};
 use tokio::{
-    sync::{mpsc, oneshot},
+    sync::mpsc,
     time::{Instant, Sleep},
 };
 use tokio_util::task::AbortOnDropHandle;
@@ -35,7 +32,7 @@ use crate::{
     },
     reconnect::AdvisedReconnects,
     retry::RetryBackoff,
-    session::StreamHeaders,
+    session::{StreamHeaders, WaiterSlab},
     types::{BasinName, ReadBatch, ReadInput, SequencedRecord, StreamName, StreamPosition},
 };
 
@@ -131,29 +128,162 @@ const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(20);
 
 type CaughtUpResult = Result<StreamPosition, ReadSessionError>;
 
-#[derive(Clone)]
+/// Shared one-shot outcome for sibling [`CaughtUp`] futures.
+///
+/// Detaches its waiter list before invoking user wakers (isolating panicking wakers) and performs
+/// all `Waker::clone` / `Waker::drop` operations strictly outside its mutex so re-entrant wakers
+/// that drop or poll sibling [`CaughtUp`] futures cannot deadlock.
+struct CaughtUpOutcome {
+    result: OnceLock<CaughtUpResult>,
+    waiters: StdMutex<Option<WaiterSlab>>,
+}
+
+impl CaughtUpOutcome {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            result: OnceLock::new(),
+            waiters: StdMutex::new(Some(WaiterSlab::new())),
+        })
+    }
+
+    fn resolve(&self, result: CaughtUpResult) {
+        let _ = self.result.set(result);
+        let waiters = self
+            .waiters
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let Some(waiters) = waiters {
+            for waker in waiters.into_wakers() {
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    waker.wake();
+                }));
+            }
+        }
+    }
+}
+
 enum CaughtUpFuture {
-    Pending(Shared<oneshot::Receiver<CaughtUpResult>>),
+    Pending {
+        outcome: Arc<CaughtUpOutcome>,
+        waker_slot: Option<usize>,
+    },
     Ready(CaughtUpResult),
+}
+
+impl Clone for CaughtUpFuture {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Pending { outcome, .. } => {
+                if let Some(result) = outcome.result.get() {
+                    Self::Ready(result.clone())
+                } else {
+                    Self::Pending {
+                        outcome: outcome.clone(),
+                        waker_slot: None,
+                    }
+                }
+            }
+            Self::Ready(result) => Self::Ready(result.clone()),
+        }
+    }
+}
+
+impl Drop for CaughtUpFuture {
+    fn drop(&mut self) {
+        if let Self::Pending {
+            outcome,
+            waker_slot: Some(idx),
+        } = self
+            && outcome.result.get().is_none()
+        {
+            // Release the `waiters` lock BEFORE dropping the removed waker so a custom waker
+            // destructor dropping a sibling `CaughtUp` future cannot deadlock.
+            let dropped_waker = outcome
+                .waiters
+                .lock()
+                .ok()
+                .and_then(|mut guard| guard.as_mut()?.remove(*idx));
+            drop(dropped_waker);
+        }
+    }
 }
 
 impl Future for CaughtUpFuture {
     type Output = CaughtUpResult;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match &mut *self {
-            Self::Pending(rx) => match Pin::new(rx).poll(cx) {
-                Poll::Ready(Ok(result)) => {
-                    *self = Self::Ready(result.clone());
-                    Poll::Ready(result)
+        let ready = match &mut *self {
+            Self::Ready(result) => return Poll::Ready(result.clone()),
+            Self::Pending {
+                outcome,
+                waker_slot,
+            } => {
+                if let Some(result) = outcome.result.get() {
+                    result.clone()
+                } else {
+                    // Fast path when re-polling an already-registered slot: avoid cloning if
+                    // `will_wake` holds. Any `Waker::clone` or displaced-waker drop happens
+                    // strictly outside `outcome.waiters`.
+                    if let Some(idx) = *waker_slot {
+                        let waiters = outcome
+                            .waiters
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        match waiters.as_ref() {
+                            Some(slab) if slab.will_wake(idx, cx.waker()) => {
+                                return Poll::Pending;
+                            }
+                            Some(_) => {}
+                            None => {
+                                drop(waiters);
+                                let result = outcome
+                                    .result
+                                    .get()
+                                    .expect("result stored before waiters closed")
+                                    .clone();
+                                *self = Self::Ready(result.clone());
+                                return Poll::Ready(result);
+                            }
+                        }
+                    }
+
+                    let mut leftover = Some(cx.waker().clone());
+                    {
+                        let mut waiters = outcome
+                            .waiters
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        if let Some(slab) = waiters.as_mut() {
+                            match *waker_slot {
+                                Some(idx) => {
+                                    leftover = slab.replace_if_changed(
+                                        idx,
+                                        leftover.take().expect("candidate waker"),
+                                    );
+                                }
+                                None => {
+                                    *waker_slot = Some(
+                                        slab.insert(leftover.take().expect("candidate waker")),
+                                    );
+                                }
+                            }
+                            drop(waiters);
+                            drop(leftover);
+                            return Poll::Pending;
+                        }
+                    }
+                    drop(leftover);
+                    outcome
+                        .result
+                        .get()
+                        .expect("result stored before waiters closed")
+                        .clone()
                 }
-                Poll::Ready(Err(_)) => {
-                    unreachable!("ReadSessionCore::drop resolves every pending CaughtUp")
-                }
-                Poll::Pending => Poll::Pending,
-            },
-            Self::Ready(result) => Poll::Ready(result.clone()),
-        }
+            }
+        };
+        *self = Self::Ready(ready.clone());
+        Poll::Ready(ready)
     }
 }
 
@@ -218,7 +348,7 @@ enum RequestPhase {
 
 enum CatchUpSlot {
     Pending {
-        waiter: Option<(oneshot::Sender<CaughtUpResult>, CaughtUpFuture)>,
+        outcome: Option<Arc<CaughtUpOutcome>>,
     },
     CaughtUp {
         tail: StreamPosition,
@@ -229,7 +359,7 @@ enum CatchUpSlot {
 
 impl CatchUpSlot {
     fn pending() -> Self {
-        Self::Pending { waiter: None }
+        Self::Pending { outcome: None }
     }
 
     fn is_caught_up(&self) -> bool {
@@ -238,12 +368,12 @@ impl CatchUpSlot {
 
     fn future(&mut self) -> CaughtUpFuture {
         match self {
-            Self::Pending { waiter } => {
-                let (_, future) = waiter.get_or_insert_with(|| {
-                    let (tx, rx) = oneshot::channel();
-                    (tx, CaughtUpFuture::Pending(rx.shared()))
-                });
-                future.clone()
+            Self::Pending { outcome } => {
+                let outcome = outcome.get_or_insert_with(CaughtUpOutcome::new);
+                CaughtUpFuture::Pending {
+                    outcome: outcome.clone(),
+                    waker_slot: None,
+                }
             }
             Self::CaughtUp { future, .. } => future.clone(),
             Self::Ended(err) => CaughtUpFuture::Ready(Err(err.clone())),
@@ -262,10 +392,11 @@ enum PendingClose {
     Error(ReadSessionError),
 }
 
-/// Deferred oneshot wake for a pending [`CaughtUp`] waiter, always fired AFTER releasing
-/// `ReadStateShared::inner` so custom wakers reading session state cannot deadlock on re-entry.
+/// Deferred wake for a pending [`CaughtUpOutcome`], always fired AFTER releasing
+/// `ReadStateShared::inner` so custom wakers reading session state or dropping sibling
+/// [`CaughtUp`] futures cannot deadlock on re-entry.
 #[must_use]
-struct CatchUpWake(Option<(oneshot::Sender<CaughtUpResult>, CaughtUpResult)>);
+struct CatchUpWake(Option<(Arc<CaughtUpOutcome>, CaughtUpResult)>);
 
 impl CatchUpWake {
     const NONE: Self = Self(None);
@@ -285,8 +416,8 @@ impl CatchUpWake {
     }
 
     fn fire(self) {
-        if let Some((tx, res)) = self.0 {
-            let _ = tx.send(res);
+        if let Some((outcome, res)) = self.0 {
+            outcome.resolve(res);
         }
     }
 }
@@ -381,10 +512,10 @@ impl ReadStateShared {
                         },
                     );
                     if let CatchUpSlot::Pending {
-                        waiter: Some((tx, _)),
+                        outcome: Some(outcome),
                     } = prev
                     {
-                        return CatchUpWake(Some((tx, Ok(tail))));
+                        return CatchUpWake(Some((outcome, Ok(tail))));
                     }
                 }
                 CatchUpWake::NONE
@@ -468,10 +599,10 @@ impl ReadStateShared {
             CatchUpSlot::Ended(terminal_err.clone()),
         );
         if let CatchUpSlot::Pending {
-            waiter: Some((tx, _)),
+            outcome: Some(outcome),
         } = prev
         {
-            CatchUpWake(Some((tx, Err(terminal_err))))
+            CatchUpWake(Some((outcome, Err(terminal_err))))
         } else {
             CatchUpWake::NONE
         }
@@ -2399,5 +2530,93 @@ mod tests {
         assert!(session.next().await.is_none());
         assert_eq!(state.next_seq_num(), Some(5));
         assert_eq!(cu.await.unwrap(), position(5));
+    }
+
+    #[tokio::test]
+    async fn caught_up_reentrant_waker_dropping_sibling_and_panic_do_not_deadlock() {
+        use std::{
+            sync::atomic::AtomicUsize,
+            task::{Context, Wake, Waker},
+        };
+
+        fn assert_send_sync_unpin<T: Send + Sync + Unpin>() {}
+        assert_send_sync_unpin::<CaughtUp>();
+
+        struct DropSiblingWake {
+            sibling: StdMutex<Option<CaughtUp>>,
+            woken: AtomicUsize,
+        }
+        impl Wake for DropSiblingWake {
+            fn wake(self: Arc<Self>) {
+                drop(self.sibling.lock().unwrap().take());
+                self.woken.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        struct PanicWake;
+        impl Wake for PanicWake {
+            fn wake(self: Arc<Self>) {
+                panic!("simulated caught_up waker panic");
+            }
+        }
+        struct CountingWake(AtomicUsize);
+        impl Wake for CountingWake {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let (session, _tx, _state, _shutdown) = test_session_parts(Some(0));
+        let mut cu1 = session.caught_up();
+        let mut cu2 = session.caught_up();
+        let mut cu3 = session.caught_up();
+        let mut cu4 = session.caught_up();
+
+        let dummy = Waker::from(Arc::new(CountingWake(AtomicUsize::new(0))));
+        assert!(
+            Pin::new(&mut cu2)
+                .poll(&mut Context::from_waker(&dummy))
+                .is_pending()
+        );
+
+        let drop_hook = Arc::new(DropSiblingWake {
+            sibling: StdMutex::new(Some(cu2)),
+            woken: AtomicUsize::new(0),
+        });
+        let w1 = Waker::from(drop_hook.clone());
+        assert!(
+            Pin::new(&mut cu1)
+                .poll(&mut Context::from_waker(&w1))
+                .is_pending()
+        );
+
+        let w3 = Waker::from(Arc::new(PanicWake));
+        assert!(
+            Pin::new(&mut cu3)
+                .poll(&mut Context::from_waker(&w3))
+                .is_pending()
+        );
+
+        let c4 = Arc::new(CountingWake(AtomicUsize::new(0)));
+        let w4 = Waker::from(c4.clone());
+        assert!(
+            Pin::new(&mut cu4)
+                .poll(&mut Context::from_waker(&w4))
+                .is_pending()
+        );
+
+        // Dropping the session resolves CaughtUpOutcome: w1 drops sibling cu2 re-entrantly,
+        // w3 panics, and w4 must still be woken without deadlocking or unwinding.
+        drop(session);
+
+        assert_eq!(drop_hook.woken.load(Ordering::SeqCst), 1);
+        assert_eq!(c4.0.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            cu1.await,
+            Err(ReadSessionError::SessionClosed(e)) if e.failure().is_none()
+        ));
+        assert!(matches!(
+            cu4.await,
+            Err(ReadSessionError::SessionClosed(e)) if e.failure().is_none()
+        ));
     }
 }

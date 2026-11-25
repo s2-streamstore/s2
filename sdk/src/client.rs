@@ -347,7 +347,9 @@ impl Request {
         let (body, content_encoding) = compress_body(self.body, compression)?;
         let mut headers = self.headers;
         if let Some(encoding) = content_encoding {
-            headers.insert(CONTENT_ENCODING, encoding);
+            headers
+                .try_insert(CONTENT_ENCODING, encoding)
+                .map_err(|e| HttpError::RequestBuild(e.to_string()))?;
         }
         Ok(Self {
             body,
@@ -449,8 +451,11 @@ impl RequestBuilder {
 
         match serde_json::to_vec(json) {
             Ok(data) => {
-                self.headers.insert(CONTENT_TYPE, APPLICATION_JSON);
-                self.body = Some(Body::from(data));
+                if let Err(e) = self.headers.try_insert(CONTENT_TYPE, APPLICATION_JSON) {
+                    self.error = Some(HttpError::RequestBuild(e.to_string()));
+                } else {
+                    self.body = Some(Body::from(data));
+                }
             }
             Err(e) => self.error = Some(HttpError::RequestBuild(e.to_string())),
         }
@@ -474,7 +479,9 @@ impl RequestBuilder {
         }
         match (key.try_into(), value.try_into()) {
             (Ok(name), Ok(value)) => {
-                self.headers.insert(name, value);
+                if let Err(e) = self.headers.try_insert(name, value) {
+                    self.error = Some(HttpError::RequestBuild(e.to_string()));
+                }
             }
             (Err(e), _) => self.error = Some(HttpError::RequestBuild(e.into().to_string())),
             (_, Err(e)) => self.error = Some(HttpError::RequestBuild(e.into().to_string())),
@@ -483,11 +490,23 @@ impl RequestBuilder {
     }
 
     pub(crate) fn headers(mut self, headers: &HeaderMap) -> Self {
+        if self.error.is_some() {
+            return self;
+        }
         if self.headers.is_empty() {
             self.headers = headers.clone();
         } else {
-            // An owned HeaderMap replaces each key's existing values while preserving duplicates.
-            self.headers.extend(headers.clone());
+            // Preserve replacement semantics for existing keys while remaining fallible near
+            // `HeaderMap`'s capacity limit.
+            for key in headers.keys() {
+                self.headers.remove(key);
+            }
+            for (key, value) in headers {
+                if let Err(e) = self.headers.try_append(key.clone(), value.clone()) {
+                    self.error = Some(HttpError::RequestBuild(e.to_string()));
+                    break;
+                }
+            }
         }
         self
     }
@@ -1376,10 +1395,16 @@ fn decompress_body(
 }
 
 /// Bit 63 clear: active request count in bits `0..63`.
-/// Bit 63 set: connection is idle; bits `0..63` hold nanoseconds since `epoch`.
+/// Bit 63 set: connection is idle; bits `0..63` hold nanoseconds since `epoch` on `owner_handle`'s
+/// Tokio clock.
 const PERMIT_IDLE_BIT: u64 = 1 << 63;
 
 struct PermitState {
+    /// Owning Tokio runtime handle (captured when the connection is spawned). Entering this
+    /// handle before calling `epoch.elapsed()` in `RequestPermit::drop` ensures idle timestamps
+    /// are always measured on the connection owner's clock even when a permit is dropped on
+    /// another runtime with an independently paused clock.
+    owner_handle: Option<tokio::runtime::Handle>,
     epoch: Instant,
     packed: AtomicU64,
     idle_notify: Notify,
@@ -1387,7 +1412,9 @@ struct PermitState {
 
 impl PermitState {
     fn new() -> Self {
+        let owner_handle = tokio::runtime::Handle::try_current().ok();
         Self {
+            owner_handle,
             epoch: Instant::now(),
             packed: AtomicU64::new(1),
             idle_notify: Notify::new(),
@@ -1461,12 +1488,18 @@ impl Drop for RequestPermit {
                     Err(actual) => cur = actual,
                 }
             } else {
-                let elapsed_nanos = self
-                    .state
-                    .epoch
-                    .elapsed()
-                    .as_nanos()
-                    .min((PERMIT_IDLE_BIT - 1) as u128) as u64;
+                let elapsed_nanos = {
+                    let _enter = self
+                        .state
+                        .owner_handle
+                        .as_ref()
+                        .map(tokio::runtime::Handle::enter);
+                    self.state
+                        .epoch
+                        .elapsed()
+                        .as_nanos()
+                        .min((PERMIT_IDLE_BIT - 1) as u128) as u64
+                };
                 let next = PERMIT_IDLE_BIT | elapsed_nanos;
                 match self.state.packed.compare_exchange_weak(
                     cur,
@@ -3515,6 +3548,67 @@ mod tests {
                 .unwrap();
             let resp = pool.execute_unary(req).await.unwrap();
             assert_eq!(resp.status(), StatusCode::OK);
+            pool.close();
+        });
+    }
+
+    #[test]
+    fn pool_idle_reaping_uses_owner_clock_when_permit_dropped_on_advanced_runtime() {
+        let connector = DuplexH2Connector::new();
+        let pool = test_pool_with(connector.clone(), Http2Config::new());
+
+        let rt_a = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .unwrap();
+        let rt_b = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .unwrap();
+
+        // Dial and hold a streaming response (holding the connection's sole RequestPermit) on
+        // paused runtime A.
+        let resp = rt_a.block_on(async {
+            let req = RequestBuilder::get("http://origin-clock:8080/stream".parse().unwrap())
+                .build()
+                .unwrap();
+            pool.init_streaming(req).await.unwrap()
+        });
+        assert_eq!(host_connection_count(&pool, "http://origin-clock:8080"), 1);
+
+        // Advance paused runtime B by one full day, then drop the response/permit on runtime B.
+        rt_b.block_on(async {
+            tokio::time::advance(Duration::from_secs(86_400)).await;
+            drop(resp);
+        });
+
+        // Advancing runtime A by IDLE_TIMEOUT + 1s (even without yielding beforehand) must still
+        // reap the connection promptly on A's clock.
+        let resp2 = rt_a.block_on(async {
+            tokio::time::advance(IDLE_TIMEOUT + Duration::from_secs(1)).await;
+            for _ in 0..10 {
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(
+                host_connection_count(&pool, "http://origin-clock:8080"),
+                0,
+                "idle connection must be reaped using owner runtime A's clock"
+            );
+            assert_eq!(connector.active_connections.load(Ordering::SeqCst), 0);
+
+            // Also verify dropping the owning runtime while a permit is still held on another
+            // runtime neither blocks shutdown nor panics when the permit later drops.
+            let req2 = RequestBuilder::get("http://origin-clock:8080/stream2".parse().unwrap())
+                .build()
+                .unwrap();
+            pool.init_streaming(req2).await.unwrap()
+        });
+        drop(rt_a);
+        assert_eq!(host_connection_count(&pool, "http://origin-clock:8080"), 0);
+        rt_b.block_on(async {
+            drop(resp2);
             pool.close();
         });
     }

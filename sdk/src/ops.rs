@@ -986,9 +986,9 @@ impl S2Stream {
             .header(ACCEPT, APPLICATION_PROTOBUF)
             .body(body)
             .build()
-            .map(|mut req| {
-                headers.apply(&mut req);
-                req
+            .and_then(|mut req| {
+                headers.apply(&mut req)?;
+                Ok(req)
             });
         let (ack, attempts): (api::stream::proto::AppendAck, u32) = self
             .client
@@ -1022,9 +1022,9 @@ impl S2Stream {
                     .saturating_add(Duration::from_secs(wait.into())),
             );
         }
-        let req = builder.build().map(|mut req| {
-            headers.apply(&mut req);
-            req
+        let req = builder.build().and_then(|mut req| {
+            headers.apply(&mut req)?;
+            Ok(req)
         });
         let (batch, _): (api::stream::proto::ReadBatch, u32) = self
             .client

@@ -249,11 +249,20 @@ impl BaseClient {
             },
         };
         apply_standard_default_headers(&mut default_headers, config)?;
-        // Reserve headroom for per-request headers (`s2-basin`, `content-type`, `accept`,
-        // `content-encoding`, `s2-attempt`, `s2-encryption-key`) so cloned maps avoid cap 8 -> 16
-        // hash-table rehashes. Use `try_reserve` so caller maps near `HeaderMap`'s capacity limit
-        // never panic during fallible client construction.
-        let _ = default_headers.try_reserve(6);
+        // Maximum distinct SDK-managed headers that can be added per request (`authorization` for
+        // dynamic token providers, `s2-basin`, `s2-attempt`, `content-type`, `accept`,
+        // `content-encoding`, `s2-request-token`, `s2-encryption-key`, `s2-stream-config`).
+        // Pre-reserving avoids cap 8 -> 16 rehashes on cloned maps and rejects near-full caller
+        // maps up front instead of failing on the first request.
+        const MAX_SDK_PER_REQUEST_HEADERS: usize = 9;
+        default_headers
+            .try_reserve(MAX_SDK_PER_REQUEST_HEADERS)
+            .map_err(|_| {
+                ValidationError(
+                    "default_headers leaves insufficient HeaderMap capacity for SDK request headers"
+                        .into(),
+                )
+            })?;
         Ok((default_headers, provider))
     }
 
@@ -436,9 +445,19 @@ impl BaseClient {
                 .access_token()
                 .await
                 .map_err(E::from_access_token_provider)?;
-            let header = authorization_header(&access_token)
-                .map_err(|e| _make_context().format_validation(e))?;
-            _request.headers_mut().insert(AUTHORIZATION, header);
+            let header = match authorization_header(&access_token) {
+                Ok(header) => header,
+                Err(e) => return Err(_make_context().format_validation(e).into()),
+            };
+            _request
+                .headers_mut()
+                .try_insert(AUTHORIZATION, header)
+                .map_err(|e| {
+                    E::from_http(
+                        client::HttpError::RequestBuild(e.to_string()),
+                        _make_context(),
+                    )
+                })?;
             return Ok(Some(access_token));
         }
         Ok(None)
@@ -585,7 +604,13 @@ impl<'a> UnaryCall<'a> {
                         .expect("body should not be a stream")
                 };
                 r.headers_mut()
-                    .insert(S2_ATTEMPT, attempt_header_value(attempts));
+                    .try_insert(S2_ATTEMPT, attempt_header_value(attempts))
+                    .map_err(|e| {
+                        E::from_http(
+                            client::HttpError::RequestBuild(e.to_string()),
+                            self.scope.context(attempts),
+                        )
+                    })?;
                 if let Some(ref gate) = send_gate {
                     r = r.with_gated_body(gate.clone());
                 }
@@ -850,12 +875,14 @@ impl BasinClient {
         OpScope::stream(op, self.name.as_ref(), stream.as_ref(), read_only)
     }
 
-    fn apply_basin_header(&self, request: &mut client::Request) {
+    fn apply_basin_header(&self, request: &mut client::Request) -> Result<(), client::HttpError> {
         if let Some(ref header) = self.basin_header {
             request
                 .headers_mut()
-                .insert(BASIN_HEADER.clone(), header.clone());
+                .try_insert(BASIN_HEADER.clone(), header.clone())
+                .map_err(|e| client::HttpError::RequestBuild(e.to_string()))?;
         }
+        Ok(())
     }
 
     pub(crate) fn unary<'a>(
@@ -863,9 +890,9 @@ impl BasinClient {
         request: Result<client::Request, client::HttpError>,
         scope: OpScope<'a>,
     ) -> UnaryCall<'a> {
-        let request = request.map(|mut req| {
-            self.apply_basin_header(&mut req);
-            req
+        let request = request.and_then(|mut req| {
+            self.apply_basin_header(&mut req)?;
+            Ok(req)
         });
         self.base.unary(request, scope)
     }
@@ -886,8 +913,11 @@ impl BasinClient {
             .header(S2_ATTEMPT, attempt_header_value(attempt))
             .build()
             .map_err(|e| E::from_http(e, ctx.clone()))?;
-        self.apply_basin_header(&mut request);
-        headers.apply(&mut request);
+        self.apply_basin_header(&mut request)
+            .map_err(|e| E::from_http(e, ctx.clone()))?;
+        headers
+            .apply(&mut request)
+            .map_err(|e| E::from_http(e, ctx.clone()))?;
 
         let (response, access_token) = self
             .base
@@ -1685,5 +1715,41 @@ mod tests {
         let valid = authorization_header("secret-token").unwrap();
         assert_eq!(valid, "Bearer secret-token");
         assert!(valid.is_sensitive());
+    }
+
+    #[test]
+    fn near_full_default_headers_rejected_at_init_and_per_request_inserts_are_fallible() {
+        // Fill a HeaderMap to 2 entries short of HeaderMap's max capacity (24,576 entries) so
+        // Authorization + User-Agent succeed but per-request headers (`s2-attempt`, etc.) would
+        // otherwise panic on the first request.
+        let mut near_full = HeaderMap::new();
+        for i in 0..24_574usize {
+            let name = http::HeaderName::from_bytes(format!("x-hdr-{i}").as_bytes()).unwrap();
+            near_full.insert(name, HeaderValue::from_static("v"));
+        }
+        let mut cfg = S2Config::new("test-token").with_endpoints(
+            crate::types::S2Endpoints::for_endpoint("http://localhost:8080").unwrap(),
+        );
+        cfg.default_headers = near_full.clone();
+        let err = BaseClient::prepare(&cfg)
+            .err()
+            .expect("near-full default_headers must fail upfront validation");
+        assert!(
+            err.to_string().contains("HeaderMap capacity"),
+            "unexpected validation error: {err}"
+        );
+
+        // Defense in depth: per-request RequestBuilder header inserts return HttpError rather
+        // than panicking even on a completely full HeaderMap.
+        let mut full = near_full;
+        for i in 24_574..24_576usize {
+            let name = http::HeaderName::from_bytes(format!("x-hdr-{i}").as_bytes()).unwrap();
+            full.insert(name, HeaderValue::from_static("v"));
+        }
+        let built = client::RequestBuilder::post("http://localhost:8080/v1/test".parse().unwrap())
+            .headers(&full)
+            .header(S2_ATTEMPT, HeaderValue::from_static("1"))
+            .build();
+        assert!(matches!(built, Err(client::HttpError::RequestBuild(_))));
     }
 }

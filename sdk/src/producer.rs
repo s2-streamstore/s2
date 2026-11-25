@@ -30,8 +30,9 @@ use crate::{
     },
     error::{AbortedError, AppendSessionError, ErrorContext, SessionClosedError, ValidationError},
     session::{
-        AppendPermit, AppendPermits, AppendSessionCore, BatchSubmitTicket, SessionAbort,
-        SessionLifecycle, StreamHeaders, validate_max_unacked_bytes, validate_reserve_bytes,
+        AppendPermit, AppendPermits, AppendSessionCore, BatchSubmitTicket, LifecycleWake,
+        SessionAbort, SessionLifecycle, StreamHeaders, send_oneshot_isolated,
+        validate_max_unacked_bytes, validate_reserve_bytes,
     },
     types::{
         AppendAck, AppendRecord, BasinName, FencingToken, ONE_MIB, RECORD_BATCH_MAX, StreamConfig,
@@ -685,76 +686,99 @@ impl ProducerShared {
         record: AppendRecord,
         metered: usize,
     ) -> Result<RecordSubmitTicket, AppendSessionError> {
-        let mut gate = self.gate.lock().unwrap();
-        gate.match_seq
-            .check_available()
-            .map_err(|e| self.context.format_validation(e))?;
-        let has_unacked_work =
-            gate.last_accepted_id > self.acked_through_id.load(Ordering::Acquire);
-        if self.is_closing_or_closed() || self.abort.is_cancelled() || self.cmd_tx.is_closed() {
-            return Err(self.session_closed_err(has_unacked_work));
-        }
+        let mut unsent_to_fail: Option<(ReadyBatch, AppendSessionError)> = None;
+        let result = {
+            let mut gate = self.gate.lock().unwrap();
+            if let Err(e) = gate.match_seq.check_available() {
+                drop(gate);
+                drop(append_permit);
+                return Err(self.context.format_validation(e).into());
+            }
+            let has_unacked_work =
+                gate.last_accepted_id > self.acked_through_id.load(Ordering::Acquire);
+            if self.is_closing_or_closed() || self.abort.is_cancelled() || self.cmd_tx.is_closed() {
+                drop(gate);
+                drop(append_permit);
+                return Err(self.session_closed_err(has_unacked_work));
+            }
 
-        let match_seq_num = gate
-            .match_seq
-            .claim_next()
-            .map_err(|e| self.context.format_validation(e))?;
-        if gate.match_seq.is_exhausted() {
-            self.match_seq_exhausted.store(true, Ordering::Release);
-        }
+            let match_seq_num = match gate.match_seq.claim_next() {
+                Ok(n) => n,
+                Err(e) => {
+                    drop(gate);
+                    drop(append_permit);
+                    return Err(self.context.format_validation(e).into());
+                }
+            };
+            if gate.match_seq.is_exhausted() {
+                self.match_seq_exhausted.store(true, Ordering::Release);
+            }
 
-        if !gate.partial.is_empty()
-            && gate.partial.would_overflow(metered)
-            && let Some(overflow_batch) = gate.take_partial(&self.has_partial, &self.next_batch_id)
-            && let Err(mpsc::error::SendError(Command::Batch(unsent))) =
-                self.cmd_tx.send(Command::Batch(overflow_batch))
-        {
-            let err = self.session_closed_err(true);
+            if !gate.partial.is_empty()
+                && gate.partial.would_overflow(metered)
+                && let Some(overflow_batch) =
+                    gate.take_partial(&self.has_partial, &self.next_batch_id)
+                && let Err(mpsc::error::SendError(Command::Batch(unsent))) =
+                    self.cmd_tx.send(Command::Batch(overflow_batch))
+            {
+                let err = self.session_closed_err(true);
+                unsent_to_fail = Some((unsent, err.clone()));
+                Err(err)
+            } else {
+                let acceptance_id = gate.last_accepted_id + 1;
+                let (outcome, offset, started_at) = gate.partial.push(
+                    record,
+                    metered,
+                    acceptance_id,
+                    match_seq_num,
+                    append_permit,
+                    self,
+                );
+                gate.last_accepted_id = acceptance_id;
+
+                if gate.partial.is_full() {
+                    let ready_batch = gate
+                        .take_partial(&self.has_partial, &self.next_batch_id)
+                        .expect("full partial batch must be non-empty");
+                    if let Err(mpsc::error::SendError(Command::Batch(unsent))) =
+                        self.cmd_tx.send(Command::Batch(ready_batch))
+                    {
+                        let err = self.session_closed_err(true);
+                        unsent_to_fail = Some((unsent, err.clone()));
+                        Err(err)
+                    } else {
+                        Ok(RecordSubmitTicket::new(outcome, offset))
+                    }
+                } else if let Some(started_at) = started_at {
+                    self.has_partial.store(true, Ordering::Release);
+                    let batch_id = gate.next_batch_id;
+                    if self
+                        .cmd_tx
+                        .send(Command::PartialStarted {
+                            batch_id,
+                            started_at,
+                        })
+                        .is_err()
+                        && let Some(unsent) =
+                            gate.take_partial(&self.has_partial, &self.next_batch_id)
+                    {
+                        let err = self.session_closed_err(true);
+                        unsent_to_fail = Some((unsent, err.clone()));
+                        Err(err)
+                    } else {
+                        Ok(RecordSubmitTicket::new(outcome, offset))
+                    }
+                } else {
+                    Ok(RecordSubmitTicket::new(outcome, offset))
+                }
+            }
+        };
+        // Fail any detached batch strictly AFTER releasing `self.gate` so permit release and
+        // ticket waking cannot re-enter `self.gate` and deadlock.
+        if let Some((unsent, err)) = unsent_to_fail {
             self.fail_unsent_batch(unsent, &err);
-            return Err(err);
         }
-
-        let acceptance_id = gate.last_accepted_id + 1;
-        let (outcome, offset, started_at) = gate.partial.push(
-            record,
-            metered,
-            acceptance_id,
-            match_seq_num,
-            append_permit,
-            self,
-        );
-        gate.last_accepted_id = acceptance_id;
-
-        if gate.partial.is_full() {
-            let ready_batch = gate
-                .take_partial(&self.has_partial, &self.next_batch_id)
-                .expect("full partial batch must be non-empty");
-            if let Err(mpsc::error::SendError(Command::Batch(unsent))) =
-                self.cmd_tx.send(Command::Batch(ready_batch))
-            {
-                let err = self.session_closed_err(true);
-                self.fail_unsent_batch(unsent, &err);
-                return Err(err);
-            }
-        } else if let Some(started_at) = started_at {
-            self.has_partial.store(true, Ordering::Release);
-            let batch_id = gate.next_batch_id;
-            if self
-                .cmd_tx
-                .send(Command::PartialStarted {
-                    batch_id,
-                    started_at,
-                })
-                .is_err()
-                && let Some(unsent) = gate.take_partial(&self.has_partial, &self.next_batch_id)
-            {
-                let err = self.session_closed_err(true);
-                self.fail_unsent_batch(unsent, &err);
-                return Err(err);
-            }
-        }
-
-        Ok(RecordSubmitTicket::new(outcome, offset))
+        result
     }
 }
 
@@ -988,6 +1012,7 @@ impl Producer {
     /// Dropping a `flush()` future cancels only the wait; the flush request remains submitted and
     /// accepted records continue draining in the background.
     pub async fn flush(&self) -> Result<(), AppendSessionError> {
+        let mut unsent_to_fail: Option<(ReadyBatch, AppendSessionError)> = None;
         let flush_state = {
             // Hold gate across reading `last_accepted_id`, cutting any partial batch, and
             // enqueueing `Command::Flush` so the flush boundary linearizes strictly between
@@ -1001,30 +1026,31 @@ impl Producer {
 
             if self.shared.lifecycle.is_closed() || self.shared.cmd_tx.is_closed() {
                 Err(target_id)
+            } else if let Some(batch) =
+                gate.take_partial(&self.shared.has_partial, &self.shared.next_batch_id)
+                && let Err(mpsc::error::SendError(Command::Batch(unsent))) =
+                    self.shared.cmd_tx.send(Command::Batch(batch))
+            {
+                let err = self.shared.session_closed_err(true);
+                unsent_to_fail = Some((unsent, err));
+                Err(target_id)
             } else {
-                if let Some(batch) =
-                    gate.take_partial(&self.shared.has_partial, &self.shared.next_batch_id)
-                    && let Err(mpsc::error::SendError(Command::Batch(unsent))) =
-                        self.shared.cmd_tx.send(Command::Batch(batch))
+                let (done_tx, done_rx) = oneshot::channel();
+                if self
+                    .shared
+                    .cmd_tx
+                    .send(Command::Flush { target_id, done_tx })
+                    .is_err()
                 {
-                    let err = self.shared.session_closed_err(true);
-                    self.shared.fail_unsent_batch(unsent, &err);
                     Err(target_id)
                 } else {
-                    let (done_tx, done_rx) = oneshot::channel();
-                    if self
-                        .shared
-                        .cmd_tx
-                        .send(Command::Flush { target_id, done_tx })
-                        .is_err()
-                    {
-                        Err(target_id)
-                    } else {
-                        Ok((target_id, done_rx))
-                    }
+                    Ok((target_id, done_rx))
                 }
             }
         };
+        if let Some((unsent, err)) = unsent_to_fail {
+            self.shared.fail_unsent_batch(unsent, &err);
+        }
 
         let (target_id, done_rx) = match flush_state {
             Ok(pair) => pair,
@@ -1070,19 +1096,30 @@ impl Producer {
     /// Dropping a `close()` future cancels only the wait; the producer continues closing in the
     /// background. Dropping the [`Producer`] itself aborts it and its owned append session.
     pub async fn close(&self) -> Result<(), AppendSessionError> {
-        {
+        let mut unsent_to_fail: Option<(ReadyBatch, AppendSessionError)> = None;
+        let wake = {
             let mut gate = self.shared.gate.lock().unwrap();
-            if !self.shared.abort.is_cancelled() && self.shared.lifecycle.mark_closing() {
-                if let Some(batch) =
-                    gate.take_partial(&self.shared.has_partial, &self.shared.next_batch_id)
-                    && let Err(mpsc::error::SendError(Command::Batch(unsent))) =
-                        self.shared.cmd_tx.send(Command::Batch(batch))
-                {
-                    let err = self.shared.session_closed_err(true);
-                    self.shared.fail_unsent_batch(unsent, &err);
+            if !self.shared.abort.is_cancelled() {
+                let (marked, wake) = self.shared.lifecycle.mark_closing();
+                if marked {
+                    if let Some(batch) =
+                        gate.take_partial(&self.shared.has_partial, &self.shared.next_batch_id)
+                        && let Err(mpsc::error::SendError(Command::Batch(unsent))) =
+                            self.shared.cmd_tx.send(Command::Batch(batch))
+                    {
+                        let err = self.shared.session_closed_err(true);
+                        unsent_to_fail = Some((unsent, err));
+                    }
+                    let _ = self.shared.cmd_tx.send(Command::Close);
                 }
-                let _ = self.shared.cmd_tx.send(Command::Close);
+                wake
+            } else {
+                LifecycleWake::NONE
             }
+        };
+        wake.fire();
+        if let Some((unsent, err)) = unsent_to_fail {
+            self.shared.fail_unsent_batch(unsent, &err);
         }
         self.shared.lifecycle.wait_closed().await
     }
@@ -1191,6 +1228,12 @@ struct ProducerTask {
     received_batches: u64,
     pending_batch_acks: VecDeque<PendingBatchAck>,
     pending_flushes: VecDeque<PendingFlush>,
+    /// Unsubmitted batches detached during `terminate()` or `abort()` and kept on `self` across
+    /// `.await` points so abnormal cancellation still settles them via `settle_remaining` with
+    /// `SessionClosed(Some(failure))` (`A6a`, `A8c`).
+    detached_unsubmitted: Option<UnsubmittedBatch>,
+    detached_queued: Vec<Command>,
+    detached_partial: Option<ReadyBatch>,
 }
 
 impl Drop for ProducerTask {
@@ -1208,74 +1251,133 @@ impl Drop for ProducerTask {
             reason,
             self.shared.context.clone(),
         ));
-        let (queued_cmds, partial_batch, has_unsubmitted, existing_err) = {
+        let unsubmitted = self.detached_unsubmitted.take();
+        let (queued_cmds, partial_batch, has_unsubmitted, existing_err, wake) = {
             let mut gate = self
                 .shared
                 .gate
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             self.shared.gate.clear_poison();
-            let queued = drain_queued_commands(&mut self.cmd_rx);
-            let partial = gate.take_partial(&self.shared.has_partial, &self.shared.next_batch_id);
-            let has_unsubmitted =
-                partial.is_some() || queued.iter().any(|cmd| matches!(cmd, Command::Batch(_)));
+            let mut queued = std::mem::take(&mut self.detached_queued);
+            queued.extend(drain_queued_commands(&mut self.cmd_rx));
+            let mut partial = self.detached_partial.take();
+            if let Some(extra_partial) =
+                gate.take_partial(&self.shared.has_partial, &self.shared.next_batch_id)
+            {
+                if partial.is_none() {
+                    partial = Some(extra_partial);
+                } else {
+                    queued.push(Command::Batch(extra_partial));
+                }
+            }
+            let has_unsubmitted = unsubmitted.is_some()
+                || partial.is_some()
+                || queued.iter().any(|cmd| matches!(cmd, Command::Batch(_)));
             let existing_err = self
                 .shared
                 .lifecycle
                 .terminal_err()
                 .or_else(|| self.session.terminal_err());
-            if let Some(err) = existing_err.as_ref() {
-                self.shared.lifecycle.set_terminal_err(err.clone());
+            let wake = if let Some(err) = existing_err.as_ref() {
+                self.shared.lifecycle.set_terminal_err(err.clone())
             } else if has_unsubmitted || !explicit_abort {
-                self.shared.lifecycle.set_terminal_err(aborted.clone());
+                self.shared.lifecycle.set_terminal_err(aborted.clone())
             } else if self.pending_batch_acks.is_empty() {
-                self.shared.lifecycle.mark_closing();
-            }
-            (queued, partial, has_unsubmitted, existing_err)
+                self.shared.lifecycle.mark_closing().1
+            } else {
+                LifecycleWake::NONE
+            };
+            (queued, partial, has_unsubmitted, existing_err, wake)
         };
+        wake.fire();
 
         // Drain any durable outcomes already delivered by the owned append session strictly in
         // FIFO submission order before aborting or falling back (`A6d`, `A7`).
-        let mut first_session_err: Option<AppendSessionError> = None;
-        let mut had_unresolved_pending = false;
+        #[derive(Default)]
+        struct DropErrors {
+            saw_batch_err: bool,
+            first_non_closed: Option<AppendSessionError>,
+            first_closed_cause: Option<AppendSessionError>,
+        }
+        impl DropErrors {
+            fn record(&mut self, err: &AppendSessionError) {
+                self.saw_batch_err = true;
+                match err {
+                    AppendSessionError::SessionClosed(closed) => {
+                        if self.first_closed_cause.is_none()
+                            && let Some(cause) = closed.failure()
+                        {
+                            self.first_closed_cause = Some(cause.clone());
+                        }
+                    }
+                    other => {
+                        if self.first_non_closed.is_none() {
+                            self.first_non_closed = Some(other.clone());
+                        }
+                    }
+                }
+            }
+        }
+        let mut errors = DropErrors::default();
+
         while let Some(front) = self.pending_batch_acks.front_mut() {
             let Some(batch_ack) = front.ticket.try_ack() else {
                 break;
             };
             let mut pending = self.pending_batch_acks.pop_front().expect("checked front");
-            if let Err(err) = &batch_ack
-                && first_session_err.is_none()
-            {
-                first_session_err = Some(err.clone());
+            if let Err(err) = &batch_ack {
+                errors.record(err);
             }
             let permit = pending.permit.take().expect("permit should not be None");
             let writer = pending
                 .outcome_writer
                 .take()
                 .expect("outcome_writer should not be None");
-            self.settle_batch_ack(batch_ack, pending.batch_max_id, writer, permit);
+            self.settle_batch_ack(
+                batch_ack,
+                pending.batch_max_id,
+                writer,
+                permit,
+                !errors.saw_batch_err,
+            );
         }
 
+        // Stop the owned append session and synchronously freeze its wire-send watermark so any
+        // unresolved batch with `submit_seq >= sent_watermark` is provably unsent (`A6a`, `A8c`),
+        // regardless of whether `ProducerTask` or `AppendSessionTask` drops first on shutdown.
         self.session.abort_dropped();
+        let sent_watermark = self.session.freeze_sent_watermark();
 
-        let fallback_err = first_session_err
-            .clone()
+        let session_fallback_err = self
+            .session
+            .terminal_err()
             .or_else(|| existing_err.clone())
-            .or_else(|| self.session.terminal_err())
+            .or_else(|| errors.first_non_closed.clone())
+            .or_else(|| errors.first_closed_cause.clone())
             .unwrap_or_else(|| aborted.clone());
+        let unsent_fallback_err =
+            AppendSessionError::SessionClosed(SessionClosedError::new_with_context(
+                Some(session_fallback_err.clone()),
+                self.shared.context.clone(),
+            ));
+
+        let mut had_unresolved_pending = false;
         while let Some(mut pending) = self.pending_batch_acks.pop_front() {
             let batch_ack = match pending.ticket.try_ack() {
                 Some(res) => {
-                    if let Err(err) = &res
-                        && first_session_err.is_none()
-                    {
-                        first_session_err = Some(err.clone());
+                    if let Err(err) = &res {
+                        errors.record(err);
                     }
                     res
                 }
                 None => {
                     had_unresolved_pending = true;
-                    Err(fallback_err.clone())
+                    if pending.ticket.submit_seq() < sent_watermark {
+                        Err(session_fallback_err.clone())
+                    } else {
+                        Err(unsent_fallback_err.clone())
+                    }
                 }
             };
             let permit = pending.permit.take().expect("permit should not be None");
@@ -1283,15 +1385,35 @@ impl Drop for ProducerTask {
                 .outcome_writer
                 .take()
                 .expect("outcome_writer should not be None");
-            self.settle_batch_ack(batch_ack, pending.batch_max_id, writer, permit);
+            // Once any earlier batch fell back or failed, do not advance `acked_through_id` or
+            // resolve covered flushes even if a later batch concurrently received `Ok` (`A7`,
+            // `A10c`), while still forwarding the session's reported outcome to its tickets
+            // (`A6d`).
+            let publish_progress = !had_unresolved_pending && !errors.saw_batch_err;
+            self.settle_batch_ack(
+                batch_ack,
+                pending.batch_max_id,
+                writer,
+                permit,
+                publish_progress,
+            );
         }
 
-        let final_result = if let Some(err) = first_session_err
+        // Producer `close()` and `flush()` report the owned session's terminal failure (`A9`),
+        // never promoting a per-batch `SessionClosedError` above it.
+        let final_result = if let Some(err) = self
+            .session
+            .terminal_err()
             .or(existing_err)
-            .or_else(|| self.session.terminal_err())
+            .or(errors.first_non_closed)
+            .or(errors.first_closed_cause)
         {
             Err(err)
-        } else if has_unsubmitted || had_unresolved_pending || !explicit_abort {
+        } else if has_unsubmitted
+            || had_unresolved_pending
+            || errors.saw_batch_err
+            || !explicit_abort
+        {
             Err(aborted)
         } else {
             // A8c: explicitly aborting an idle producer (with all prior batches durably acked)
@@ -1299,7 +1421,7 @@ impl Drop for ProducerTask {
             Ok(())
         };
 
-        self.settle_remaining(None, queued_cmds, partial_batch, final_result);
+        self.settle_remaining(unsubmitted, queued_cmds, partial_batch, final_result);
     }
 }
 
@@ -1320,6 +1442,9 @@ impl ProducerTask {
             received_batches: 0,
             pending_batch_acks: VecDeque::new(),
             pending_flushes: VecDeque::new(),
+            detached_unsubmitted: None,
+            detached_queued: Vec::new(),
+            detached_partial: None,
         }
     }
 
@@ -1399,19 +1524,24 @@ impl ProducerTask {
     }
 
     fn publish_closing_from_session(&self, has_unsubmitted: bool) {
-        let _gate = self.shared.gate.lock().unwrap();
-        if let Some(err) = self.session.terminal_err() {
-            self.shared.lifecycle.set_terminal_err(err);
-        } else if has_unsubmitted && self.shared.abort.is_cancelled() {
-            self.shared
-                .lifecycle
-                .set_terminal_err(AppendSessionError::Aborted(AbortedError::new_with_context(
-                    self.shared.abort.reason(),
-                    self.shared.context.clone(),
-                )));
-        } else if !self.shared.abort.is_cancelled() {
-            self.shared.lifecycle.mark_closing();
-        }
+        let wake = {
+            let _gate = self.shared.gate.lock().unwrap();
+            if let Some(err) = self.session.terminal_err() {
+                self.shared.lifecycle.set_terminal_err(err)
+            } else if has_unsubmitted && self.shared.abort.is_cancelled() {
+                self.shared
+                    .lifecycle
+                    .set_terminal_err(AppendSessionError::Aborted(AbortedError::new_with_context(
+                        self.shared.abort.reason(),
+                        self.shared.context.clone(),
+                    )))
+            } else if !self.shared.abort.is_cancelled() {
+                self.shared.lifecycle.mark_closing().1
+            } else {
+                LifecycleWake::NONE
+            }
+        };
+        wake.fire();
     }
 
     fn settle_batch_ack(
@@ -1420,6 +1550,7 @@ impl ProducerTask {
         batch_max_id: u64,
         mut outcome_writer: BatchOutcomeWriter,
         batch_permit: AppendPermit,
+        publish_progress: bool,
     ) {
         let ok = batch_ack.is_ok();
         // Release permit and decrement `unacked_records` BEFORE publishing `acked_through_id` or
@@ -1428,13 +1559,13 @@ impl ProducerTask {
         // counts without racing (`A10`).
         drop(batch_permit);
         outcome_writer.release_unacked();
-        if ok {
+        if ok && publish_progress {
             self.shared
                 .acked_through_id
                 .store(batch_max_id, Ordering::Release);
         }
         outcome_writer.resolve(batch_ack);
-        if ok {
+        if ok && publish_progress {
             resolve_satisfied_flushes(&mut self.pending_flushes, batch_max_id);
         }
     }
@@ -1453,7 +1584,13 @@ impl ProducerTask {
                 .take()
                 .expect("outcome_writer should not be None");
             let permit = pending.permit.take().expect("permit should not be None");
-            self.settle_batch_ack(batch_ack, pending.batch_max_id, outcome_writer, permit);
+            self.settle_batch_ack(
+                batch_ack,
+                pending.batch_max_id,
+                outcome_writer,
+                permit,
+                true,
+            );
         }
     }
 
@@ -1464,11 +1601,12 @@ impl ProducerTask {
         partial_batch: Option<ReadyBatch>,
         final_result: Result<(), AppendSessionError>,
     ) {
-        if let Err(err) = &final_result {
-            self.shared.lifecycle.set_terminal_err(err.clone());
+        let wake = if let Err(err) = &final_result {
+            self.shared.lifecycle.set_terminal_err(err.clone())
         } else {
-            self.shared.lifecycle.mark_closing();
-        }
+            self.shared.lifecycle.mark_closing().1
+        };
+        wake.fire();
 
         let unsent_err = AppendSessionError::SessionClosed(SessionClosedError::new_with_context(
             final_result.as_ref().err().cloned(),
@@ -1491,7 +1629,7 @@ impl ProducerTask {
             } else {
                 final_result.clone()
             };
-            let _ = flush.done_tx.send(outcome);
+            send_oneshot_isolated(flush.done_tx, outcome);
         }
 
         for cmd in queued_cmds {
@@ -1505,7 +1643,7 @@ impl ProducerTask {
                     } else {
                         final_result.clone()
                     };
-                    let _ = done_tx.send(outcome);
+                    send_oneshot_isolated(done_tx, outcome);
                 }
                 Command::PartialStarted { .. } | Command::Close => {}
             }
@@ -1587,6 +1725,7 @@ impl ProducerTask {
                             pending.batch_max_id,
                             outcome_writer,
                             batch_permit,
+                            true,
                         );
                         self.terminate(None).await;
                         return;
@@ -1596,6 +1735,7 @@ impl ProducerTask {
                         pending.batch_max_id,
                         outcome_writer,
                         batch_permit,
+                        true,
                     );
                     if self.should_flush_for_backpressure() {
                         debug!("flushing partial batch early for backpressure waiter");
@@ -1644,7 +1784,7 @@ impl ProducerTask {
                             }
                             Some(Command::Flush { target_id, done_tx }) => {
                                 if self.shared.acked_through_id.load(Ordering::Acquire) >= target_id {
-                                    let _ = done_tx.send(Ok(()));
+                                    send_oneshot_isolated(done_tx, Ok(()));
                                 } else {
                                     self.pending_flushes.push_back(PendingFlush { target_id, done_tx });
                                 }
@@ -1723,13 +1863,14 @@ impl ProducerTask {
 
     async fn finish_clean(mut self) {
         let session_close_res = self.session.close().await;
-        let (queued_cmds, partial_batch) = {
+        let (queued_cmds, partial_batch, wake) = {
             let mut gate = self.shared.gate.lock().unwrap();
-            self.shared.lifecycle.mark_closing();
+            let (_, wake) = self.shared.lifecycle.mark_closing();
             let queued = drain_queued_commands(&mut self.cmd_rx);
             let partial = gate.take_partial(&self.shared.has_partial, &self.shared.next_batch_id);
-            (queued, partial)
+            (queued, partial, wake)
         };
+        wake.fire();
         debug!(ok = session_close_res.is_ok(), "producer closed");
         self.settle_remaining(None, queued_cmds, partial_batch, session_close_res);
     }
@@ -1738,45 +1879,61 @@ impl ProducerTask {
     /// (`A6d`, `A9`), then fail any records still being batched or queued with
     /// `SessionClosedError` (`A6a`).
     async fn terminate(mut self, unsubmitted: Option<UnsubmittedBatch>) {
-        self.publish_closing_from_session(unsubmitted.is_some());
+        // Keep any unsubmitted batch on `self` across `.await` points so abnormal cancellation
+        // still settles it with `SessionClosed(Some(failure))` in `ProducerTask::drop`.
+        self.detached_unsubmitted = unsubmitted;
+        self.publish_closing_from_session(self.detached_unsubmitted.is_some());
 
         // Drain every remaining batch already submitted to the owned session so every record
         // receives the exact outcome reported by AppendSession strictly in submission order (A6d).
         self.drain_pending_batch_acks().await;
 
-        // Obtain the owned session's exact failure (A9). If the owned session had nothing in
-        // flight when an abort closed it cleanly, this producer still had unsubmitted work, so the
-        // failure is `AbortedError` (`A8c`, `E6`).
-        let session_failure = match self.session.close().await {
-            Err(err) => err,
-            Ok(()) => {
-                debug_assert!(
-                    self.shared.abort.is_cancelled(),
-                    "owned session closed cleanly without abort while terminating producer"
-                );
-                AppendSessionError::Aborted(AbortedError::new_with_context(
-                    self.shared.abort.reason(),
-                    self.shared.context.clone(),
-                ))
-            }
-        };
+        let session_res = self.session.close().await;
 
-        debug!(err = %session_failure, "terminating producer on session failure");
-        let (queued_cmds, partial_batch) = {
+        let (queued_cmds, partial_batch, has_unsubmitted, wake) = {
             let mut gate = self.shared.gate.lock().unwrap();
-            self.shared
-                .lifecycle
-                .set_terminal_err(session_failure.clone());
             let queued = drain_queued_commands(&mut self.cmd_rx);
             let partial = gate.take_partial(&self.shared.has_partial, &self.shared.next_batch_id);
-            (queued, partial)
+            let has_unsubmitted = self.detached_unsubmitted.is_some()
+                || partial.is_some()
+                || queued.iter().any(|cmd| matches!(cmd, Command::Batch(_)));
+            let wake = match &session_res {
+                Err(err) => self.shared.lifecycle.set_terminal_err(err.clone()),
+                Ok(()) if has_unsubmitted => {
+                    self.shared
+                        .lifecycle
+                        .set_terminal_err(AppendSessionError::Aborted(
+                            AbortedError::new_with_context(
+                                self.shared.abort.reason(),
+                                self.shared.context.clone(),
+                            ),
+                        ))
+                }
+                Ok(()) => self.shared.lifecycle.mark_closing().1,
+            };
+            (queued, partial, has_unsubmitted, wake)
         };
-        self.settle_remaining(
-            unsubmitted,
-            queued_cmds,
-            partial_batch,
-            Err(session_failure),
-        );
+        wake.fire();
+
+        // Obtain the owned session's exact failure (A9). If the owned session closed cleanly on
+        // abort (`A8c`), preserve `Ok(())` when this producer also has no unsubmitted work, and
+        // fail with `AbortedError` (`E6`) only if unsubmitted work was lost.
+        let final_result = match session_res {
+            Err(err) => Err(err),
+            Ok(()) if has_unsubmitted => {
+                Err(AppendSessionError::Aborted(AbortedError::new_with_context(
+                    self.shared.abort.reason(),
+                    self.shared.context.clone(),
+                )))
+            }
+            Ok(()) => Ok(()),
+        };
+        match &final_result {
+            Err(err) => debug!(err = %err, "terminating producer on session failure"),
+            Ok(()) => debug!("terminating idle producer cleanly after session close"),
+        }
+        let unsubmitted = self.detached_unsubmitted.take();
+        self.settle_remaining(unsubmitted, queued_cmds, partial_batch, final_result);
     }
 
     async fn abort(mut self, reason: &'static str) {
@@ -1784,12 +1941,23 @@ impl ProducerTask {
             reason,
             self.shared.context.clone(),
         ));
-        let (queued_cmds, partial_batch) = {
+        let wake = {
             let mut gate = self.shared.gate.lock().unwrap();
             let queued = drain_queued_commands(&mut self.cmd_rx);
             let partial = gate.take_partial(&self.shared.has_partial, &self.shared.next_batch_id);
             let has_unsubmitted =
                 partial.is_some() || queued.iter().any(|cmd| matches!(cmd, Command::Batch(_)));
+            // Retain detached batches on `self` across `.await` points so abnormal cancellation
+            // during drain/close still settles them via `settle_remaining` with
+            // `SessionClosed(Some(failure))` (`A6a`, `A8c`).
+            self.detached_queued.extend(queued);
+            if let Some(batch) = partial {
+                if self.detached_partial.is_none() {
+                    self.detached_partial = Some(batch);
+                } else {
+                    self.detached_queued.push(Command::Batch(batch));
+                }
+            }
             if has_unsubmitted {
                 // Publish failure before marking closing so waiting reserve()/submit() calls
                 // observe `SessionClosedError { failure: Some(..) }` (`E6`).
@@ -1797,17 +1965,22 @@ impl ProducerTask {
                     self.session
                         .terminal_err()
                         .unwrap_or_else(|| aborted.clone()),
-                );
+                )
             } else if self.pending_batch_acks.is_empty() {
-                self.shared.lifecycle.mark_closing();
+                self.shared.lifecycle.mark_closing().1
+            } else {
+                LifecycleWake::NONE
             }
-            (queued, partial)
         };
+        wake.fire();
 
         debug!(
             reason,
             pending_batches = self.pending_batch_acks.len(),
-            partial_records = partial_batch.as_ref().map_or(0, |b| b.records.len()),
+            partial_records = self
+                .detached_partial
+                .as_ref()
+                .map_or(0, |b| b.records.len()),
             "aborting producer"
         );
 
@@ -1818,6 +1991,8 @@ impl ProducerTask {
         self.drain_pending_batch_acks().await;
         let session_res = self.session.close().await;
 
+        let queued_cmds = std::mem::take(&mut self.detached_queued);
+        let partial_batch = self.detached_partial.take();
         let has_queued_batches = queued_cmds
             .iter()
             .any(|cmd| matches!(cmd, Command::Batch(_)));
@@ -1872,7 +2047,7 @@ fn resolve_satisfied_flushes(pending_flushes: &mut VecDeque<PendingFlush>, acked
     while let Some(front) = pending_flushes.front() {
         if front.target_id <= acked_through_id {
             let flush = pending_flushes.pop_front().expect("checked front");
-            let _ = flush.done_tx.send(Ok(()));
+            send_oneshot_isolated(flush.done_tx, Ok(()));
         } else {
             break;
         }
@@ -2227,5 +2402,293 @@ mod tests {
         drop(t0);
         assert_eq!(dropped.load(Ordering::SeqCst), 2);
         drop(writer);
+    }
+
+    fn test_producer_task_parts() -> (
+        ProducerTask,
+        Arc<ProducerShared>,
+        mpsc::UnboundedSender<Command>,
+    ) {
+        use crate::{
+            api::{BaseClient, BasinClient},
+            session::SessionAbort,
+            types::{S2Config, S2Endpoints},
+        };
+
+        let endpoints = S2Endpoints::for_endpoint("http://localhost:8080").unwrap();
+        let cfg = S2Config::new("test-token").with_endpoints(endpoints.clone());
+        let base = BaseClient::init(&cfg).unwrap();
+        let basin: BasinName = "test-basin".parse().unwrap();
+        let stream: StreamName = "test-stream".parse().unwrap();
+        let client = BasinClient::init(basin.clone(), &endpoints, base);
+        let context = ErrorContext::stream("producer", basin.as_ref(), stream.as_ref(), false);
+        let abort = SessionAbort::new(
+            client.shutdown_token(),
+            EXPLICIT_ABORT_MSG,
+            DROPPED_ABORT_MSG,
+        );
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let config = ProducerConfig::new();
+        let permits = AppendPermits::new(None, config.max_unacked_bytes);
+        let gate = StdMutex::new(ProducerGate {
+            match_seq: MatchSeqState::from_option(None),
+            last_accepted_id: 0,
+            next_batch_id: 0,
+            partial: PartialBatch::new(config.max_batch_records, config.max_batch_bytes),
+        });
+        let lifecycle = Arc::new(SessionLifecycle::new());
+        let session = AppendSessionCore::new_with_abort(
+            client,
+            stream.clone(),
+            StreamHeaders::default(),
+            "producer",
+            abort.child(),
+        );
+        let session_lifecycle = session.lifecycle().clone();
+        let shared = Arc::new(ProducerShared {
+            basin,
+            stream,
+            gate,
+            recycled_records: StdMutex::new(Vec::new()),
+            cmd_tx: cmd_tx.clone(),
+            permits,
+            max_batch_bytes: config.max_batch_bytes,
+            fencing_token_len: 0,
+            match_seq_exhausted: AtomicBool::new(false),
+            has_partial: AtomicBool::new(false),
+            next_batch_id: AtomicU64::new(0),
+            unacked_records: Arc::new(AtomicUsize::new(0)),
+            acked_through_id: AtomicU64::new(0),
+            lifecycle,
+            session_lifecycle,
+            abort,
+            flush_partial_notify: Notify::new(),
+            context,
+        });
+        let task = ProducerTask::new(shared.clone(), session, config, cmd_rx);
+        (task, shared, cmd_tx)
+    }
+
+    #[tokio::test]
+    async fn producer_task_drop_does_not_publish_later_ok_after_earlier_fallback() {
+        let (mut task, shared, _cmd_tx) = test_producer_task_parts();
+
+        // Batch 0: unresolved oneshot (will fall back on ProducerTask::drop).
+        let (tx0, rx0) = oneshot::channel();
+        let _keep_tx0_open = tx0;
+        let p0 = shared.permits.try_acquire(16).unwrap();
+        let (mut w0, o0) = BatchOutcomeWriter::new(
+            shared.lifecycle.clone(),
+            shared.unacked_records.clone(),
+            shared.context.clone(),
+        );
+        w0.record_count = 1;
+        shared.unacked_records.fetch_add(1, Ordering::Release);
+        let mut rt0 = RecordSubmitTicket::new(o0, 0);
+
+        // Batch 1: already-delivered Ok(ack) on its oneshot.
+        let (tx1, rx1) = oneshot::channel();
+        let ack1 = AppendAck {
+            start: StreamPosition {
+                seq_num: 1,
+                timestamp: 10,
+            },
+            end: StreamPosition {
+                seq_num: 2,
+                timestamp: 10,
+            },
+            tail: StreamPosition {
+                seq_num: 2,
+                timestamp: 10,
+            },
+        };
+        tx1.send(Ok(ack1.clone())).unwrap();
+        let p1 = shared.permits.try_acquire(16).unwrap();
+        let (mut w1, o1) = BatchOutcomeWriter::new(
+            shared.lifecycle.clone(),
+            shared.unacked_records.clone(),
+            shared.context.clone(),
+        );
+        w1.record_count = 1;
+        shared.unacked_records.fetch_add(1, Ordering::Release);
+        let mut rt1 = RecordSubmitTicket::new(o1, 0);
+
+        task.pending_batch_acks.push_back(PendingBatchAck {
+            ticket: BatchSubmitTicket::for_test(
+                rx0,
+                0,
+                shared.session_lifecycle.clone(),
+                shared.context.clone(),
+            ),
+            batch_max_id: 1,
+            permit: Some(p0),
+            outcome_writer: Some(w0),
+        });
+        task.pending_batch_acks.push_back(PendingBatchAck {
+            ticket: BatchSubmitTicket::for_test(
+                rx1,
+                1,
+                shared.session_lifecycle.clone(),
+                shared.context.clone(),
+            ),
+            batch_max_id: 2,
+            permit: Some(p1),
+            outcome_writer: Some(w1),
+        });
+
+        let (f0_tx, f0_rx) = oneshot::channel();
+        let (f1_tx, f1_rx) = oneshot::channel();
+        task.pending_flushes.push_back(PendingFlush {
+            target_id: 1,
+            done_tx: f0_tx,
+        });
+        task.pending_flushes.push_back(PendingFlush {
+            target_id: 2,
+            done_tx: f1_tx,
+        });
+
+        drop(task);
+
+        // Batch 0 failed, so acked_through_id must remain 0 and both flushes covering batch 0 must
+        // fail, while batch 1's ticket still receives the session's durable Ok(ack1).
+        assert_eq!(shared.acked_through_id.load(Ordering::Acquire), 0);
+        assert_eq!(shared.unacked_records.load(Ordering::Acquire), 0);
+        assert!(rt0.try_ack().unwrap().is_err());
+        assert_eq!(rt1.try_ack().unwrap().unwrap().batch, ack1);
+        assert!(f0_rx.await.unwrap().is_err());
+        assert!(f1_rx.await.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn producer_abort_and_terminate_cancellation_preserve_unsent_classification() {
+        // 1. Cancellation mid-`abort()` while draining an in-flight batch must settle detached
+        //    partial and queued batches with `SessionClosed(Some(Aborted))`.
+        let (mut task, shared, cmd_tx) = test_producer_task_parts();
+        let (tx_inflight, rx_inflight) = oneshot::channel();
+        let _hold = tx_inflight;
+        let p_in = shared.permits.try_acquire(16).unwrap();
+        let (mut w_in, o_in) = BatchOutcomeWriter::new(
+            shared.lifecycle.clone(),
+            shared.unacked_records.clone(),
+            shared.context.clone(),
+        );
+        w_in.record_count = 1;
+        shared.unacked_records.fetch_add(1, Ordering::Release);
+        let _t_in = RecordSubmitTicket::new(o_in, 0);
+        task.pending_batch_acks.push_back(PendingBatchAck {
+            ticket: BatchSubmitTicket::for_test(
+                rx_inflight,
+                0,
+                shared.session_lifecycle.clone(),
+                shared.context.clone(),
+            ),
+            batch_max_id: 1,
+            permit: Some(p_in),
+            outcome_writer: Some(w_in),
+        });
+
+        let p_part = shared.permits.try_acquire(16).unwrap();
+        let t_part = shared
+            .submit_with_permit(p_part, AppendRecord::new("lingering").unwrap(), 16)
+            .unwrap();
+        shared.abort.cancel_explicit();
+
+        let mut abort_fut = Box::pin(task.abort(EXPLICIT_ABORT_MSG));
+        let noop = Waker::from(Arc::new(CountingWake(AtomicUsize::new(0))));
+        assert!(
+            abort_fut
+                .as_mut()
+                .poll(&mut Context::from_waker(&noop))
+                .is_pending()
+        );
+        drop(abort_fut);
+        drop(cmd_tx);
+
+        let err_part = t_part.await.unwrap_err();
+        assert!(
+            matches!(
+                err_part,
+                AppendSessionError::SessionClosed(ref sc)
+                    if matches!(sc.failure(), Some(AppendSessionError::Aborted(_)))
+            ),
+            "detached partial batch must stay SessionClosed(Some(Aborted)), got: {err_part:?}"
+        );
+        assert!(err_part.has_no_side_effects());
+        assert_eq!(shared.unacked_records.load(Ordering::Acquire), 0);
+
+        // 2. Cancellation mid-`terminate(Some(unsubmitted))` preserves `SessionClosed` too.
+        let (mut task2, shared2, _cmd_tx2) = test_producer_task_parts();
+        let (tx_in2, rx_in2) = oneshot::channel();
+        let _hold2 = tx_in2;
+        let p_in2 = shared2.permits.try_acquire(16).unwrap();
+        let (mut w_in2, o_in2) = BatchOutcomeWriter::new(
+            shared2.lifecycle.clone(),
+            shared2.unacked_records.clone(),
+            shared2.context.clone(),
+        );
+        w_in2.record_count = 1;
+        shared2.unacked_records.fetch_add(1, Ordering::Release);
+        let _t_in2 = RecordSubmitTicket::new(o_in2, 0);
+        task2.pending_batch_acks.push_back(PendingBatchAck {
+            ticket: BatchSubmitTicket::for_test(
+                rx_in2,
+                0,
+                shared2.session_lifecycle.clone(),
+                shared2.context.clone(),
+            ),
+            batch_max_id: 1,
+            permit: Some(p_in2),
+            outcome_writer: Some(w_in2),
+        });
+
+        let p_unsub = shared2.permits.try_acquire(16).unwrap();
+        let (mut w_unsub, o_unsub) = BatchOutcomeWriter::new(
+            shared2.lifecycle.clone(),
+            shared2.unacked_records.clone(),
+            shared2.context.clone(),
+        );
+        w_unsub.record_count = 1;
+        shared2.unacked_records.fetch_add(1, Ordering::Release);
+        let t_unsub = RecordSubmitTicket::new(o_unsub, 0);
+
+        let mut term_fut = Box::pin(task2.terminate(Some(UnsubmittedBatch {
+            _permit: p_unsub,
+            outcome_writer: w_unsub,
+        })));
+        assert!(
+            term_fut
+                .as_mut()
+                .poll(&mut Context::from_waker(&noop))
+                .is_pending()
+        );
+        drop(term_fut);
+
+        let err_unsub = t_unsub.await.unwrap_err();
+        assert!(
+            matches!(
+                err_unsub,
+                AppendSessionError::SessionClosed(ref sc)
+                    if matches!(sc.failure(), Some(AppendSessionError::Aborted(_)))
+            ),
+            "detached unsubmitted batch must stay SessionClosed(Some(Aborted)), got: {err_unsub:?}"
+        );
+        assert!(err_unsub.has_no_side_effects());
+        assert_eq!(shared2.unacked_records.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
+    async fn producer_terminate_preserves_clean_close_when_idle_aborted() {
+        let (task, shared, _cmd_tx) = test_producer_task_parts();
+        shared.abort.cancel_explicit();
+        // Wait until the idle owned append session has closed cleanly with Ok(()), simulating
+        // `session_closing_fut` winning `select!` over `abort_fut`.
+        shared.session_lifecycle.wait_closed().await.unwrap();
+
+        task.terminate(None).await;
+        shared
+            .lifecycle
+            .wait_closed()
+            .await
+            .expect("explicitly aborting an idle producer via terminate(None) must close cleanly");
     }
 }

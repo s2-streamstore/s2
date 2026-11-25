@@ -7,7 +7,7 @@ use std::{
         Arc, Mutex as StdMutex,
         atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering},
     },
-    task::{Context, Poll},
+    task::{Context, Poll, Waker},
     time::Duration,
 };
 
@@ -16,7 +16,7 @@ use futures_core::{FusedFuture, Stream};
 use futures_util::{FutureExt, StreamExt};
 use s2_api::v1::stream::{proto, s2s};
 use tokio::{
-    sync::{Notify, mpsc, oneshot, watch},
+    sync::{Notify, mpsc, oneshot},
     time::Instant,
 };
 use tracing::{Instrument, debug, debug_span};
@@ -32,12 +32,19 @@ use crate::{
     reconnect::AdvisedReconnects,
     retry::RetryBackoff,
     send_gate::attempt_ended_io_error,
-    session::StreamHeaders,
+    session::{StreamHeaders, WaiterSlab},
     types::{
         AppendAck, AppendInput, AppendRecord, AppendRetryPolicy, BasinName, ONE_MIB, StreamConfig,
         StreamName, StreamPosition, append_input_parts_encoded_len, encode_append_input_parts,
     },
 };
+
+/// Deliver a oneshot value while isolating any panic raised by the receiver's custom [`Waker`].
+pub(crate) fn send_oneshot_isolated<T>(tx: oneshot::Sender<T>, value: T) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let _ = tx.send(value);
+    }));
+}
 
 /// Chunk size used when streaming encoded S2S frames into HTTP/2 DATA frames so wire-send
 /// progress tracks HTTP/2 flow control (`T7c`, `T10`).
@@ -143,7 +150,10 @@ impl<T: Clone + Unpin> FusedFuture for SubmitTicket<T> {
 ///
 /// Once resolved, re-polling returns the same outcome without panicking, and
 /// [`try_ack`](Self::try_ack) returns `None`.
-pub struct BatchSubmitTicket(SubmitTicket<AppendAck>);
+pub struct BatchSubmitTicket {
+    ticket: SubmitTicket<AppendAck>,
+    submit_seq: u64,
+}
 
 impl BatchSubmitTicket {
     /// Poll the ticket without blocking, returning `Some` once the batch outcome is ready.
@@ -151,7 +161,24 @@ impl BatchSubmitTicket {
     /// Returns `None` if the batch is still in flight or if the outcome was already consumed.
     #[must_use]
     pub fn try_ack(&mut self) -> Option<Result<AppendAck, AppendSessionError>> {
-        self.0.try_ack()
+        self.ticket.try_ack()
+    }
+
+    pub(crate) fn submit_seq(&self) -> u64 {
+        self.submit_seq
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        rx: oneshot::Receiver<Result<AppendAck, AppendSessionError>>,
+        submit_seq: u64,
+        lifecycle: Arc<SessionLifecycle>,
+        context: ErrorContext,
+    ) -> Self {
+        Self {
+            ticket: SubmitTicket::new(rx, lifecycle, context, "dropped"),
+            submit_seq,
+        }
     }
 }
 
@@ -165,13 +192,13 @@ impl Future for BatchSubmitTicket {
     type Output = Result<AppendAck, AppendSessionError>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        Pin::new(&mut self.0).poll(cx)
+        Pin::new(&mut self.ticket).poll(cx)
     }
 }
 
 impl FusedFuture for BatchSubmitTicket {
     fn is_terminated(&self) -> bool {
-        self.0.is_terminated()
+        self.ticket.is_terminated()
     }
 }
 
@@ -280,6 +307,42 @@ const PHASE_CLOSING_ERR: u8 = 2;
 const PHASE_CLOSED_CLEAN: u8 = 3;
 const PHASE_CLOSED_ERR: u8 = 4;
 
+struct LifecycleInner {
+    state: LifecycleState,
+    closing_waiters: WaiterSlab,
+    closed_waiters: WaiterSlab,
+}
+
+/// Deferred waker notifications detached from [`SessionLifecycle`] while holding an outer
+/// acceptance gate, always fired strictly AFTER dropping the gate so custom wakers that poll
+/// `close()` / `submit()` / `flush()` cannot deadlock on re-entry.
+#[must_use]
+pub(crate) struct LifecycleWake {
+    wakers: Vec<Option<Waker>>,
+}
+
+impl LifecycleWake {
+    pub(crate) const NONE: Self = Self { wakers: Vec::new() };
+
+    pub(crate) fn fire(mut self) {
+        self.wake_all();
+    }
+
+    fn wake_all(&mut self) {
+        for waker in self.wakers.drain(..).flatten() {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                waker.wake();
+            }));
+        }
+    }
+}
+
+impl Drop for LifecycleWake {
+    fn drop(&mut self) {
+        self.wake_all();
+    }
+}
+
 /// Shared lifecycle coordination for [`AppendSession`] and [`Producer`](crate::producer::Producer).
 ///
 /// Guarantees:
@@ -287,16 +350,20 @@ const PHASE_CLOSED_ERR: u8 = 4;
 ///   waking any `reserve()`/`submit()` waiting on capacity (`A4c`).
 /// - Repeated or concurrent `close(&self)` calls return the exact same `Result` (`A8a`).
 /// - Dropping a `close(&self)` future cancels only that wait (`T8`).
+/// - Wakers are always cloned, dropped, and invoked strictly outside internal and gate mutexes.
 pub(crate) struct SessionLifecycle {
-    state: watch::Sender<LifecycleState>,
+    inner: StdMutex<LifecycleInner>,
     phase: AtomicU8,
 }
 
 impl SessionLifecycle {
     pub(crate) fn new() -> Self {
-        let (state, _) = watch::channel(LifecycleState::Open);
         Self {
-            state,
+            inner: StdMutex::new(LifecycleInner {
+                state: LifecycleState::Open,
+                closing_waiters: WaiterSlab::new(),
+                closed_waiters: WaiterSlab::new(),
+            }),
             phase: AtomicU8::new(PHASE_OPEN),
         }
     }
@@ -316,36 +383,50 @@ impl SessionLifecycle {
         )
     }
 
-    /// Transition `Open -> Closing { failure: None }`. Returns `true` if this call performed the
-    /// transition.
-    pub(crate) fn mark_closing(&self) -> bool {
-        self.state.send_if_modified(|s| {
-            if matches!(s, LifecycleState::Open) {
-                *s = LifecycleState::Closing { failure: None };
-                self.phase.store(PHASE_CLOSING_CLEAN, Ordering::Release);
-                true
-            } else {
-                false
-            }
-        })
+    /// Transition `Open -> Closing { failure: None }`. Returns `(performed, wake)`; the caller
+    /// MUST fire `wake` after releasing any acceptance gate lock.
+    pub(crate) fn mark_closing(&self) -> (bool, LifecycleWake) {
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if matches!(inner.state, LifecycleState::Open) {
+            inner.state = LifecycleState::Closing { failure: None };
+            self.phase.store(PHASE_CLOSING_CLEAN, Ordering::Release);
+            let wakers = inner.closing_waiters.take_all();
+            (true, LifecycleWake { wakers })
+        } else {
+            (false, LifecycleWake::NONE)
+        }
     }
 
-    pub(crate) fn set_terminal_err(&self, err: AppendSessionError) {
-        self.state.send_if_modified(|s| match s {
+    /// Transition `Open | Closing -> Closing { failure: Some(err) }`. The caller MUST fire the
+    /// returned [`LifecycleWake`] after releasing any acceptance gate lock.
+    pub(crate) fn set_terminal_err(&self, err: AppendSessionError) -> LifecycleWake {
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match inner.state {
             LifecycleState::Open | LifecycleState::Closing { .. } => {
-                *s = LifecycleState::Closing { failure: Some(err) };
+                inner.state = LifecycleState::Closing { failure: Some(err) };
                 self.phase.store(PHASE_CLOSING_ERR, Ordering::Release);
-                true
+                let wakers = inner.closing_waiters.take_all();
+                LifecycleWake { wakers }
             }
-            LifecycleState::Closed(_) => false,
-        });
+            LifecycleState::Closed(_) => LifecycleWake::NONE,
+        }
     }
 
     pub(crate) fn terminal_err(&self) -> Option<AppendSessionError> {
         if !self.has_terminal_err() {
             return None;
         }
-        match &*self.state.borrow() {
+        let inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match &inner.state {
             LifecycleState::Open => None,
             LifecycleState::Closing { failure } => failure.clone(),
             LifecycleState::Closed(res) => res.as_ref().err().cloned(),
@@ -359,40 +440,214 @@ impl SessionLifecycle {
         ))
     }
 
+    /// Transition to `Closed(result)` and wake all `wait_closing_or_closed` and `wait_closed`
+    /// waiters strictly outside internal locks. Never call while holding an acceptance gate lock.
     pub(crate) fn finish(&self, result: Result<(), AppendSessionError>) {
-        self.state.send_if_modified(|s| {
-            if matches!(s, LifecycleState::Closed(_)) {
-                false
+        let wake = {
+            let mut inner = self
+                .inner
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if matches!(inner.state, LifecycleState::Closed(_)) {
+                LifecycleWake::NONE
             } else {
                 let phase = if result.is_ok() {
                     PHASE_CLOSED_CLEAN
                 } else {
                     PHASE_CLOSED_ERR
                 };
-                *s = LifecycleState::Closed(result);
+                inner.state = LifecycleState::Closed(result);
                 self.phase.store(phase, Ordering::Release);
-                true
+                let mut wakers = inner.closing_waiters.take_all();
+                let closed = inner.closed_waiters.take_all();
+                if wakers.is_empty() {
+                    wakers = closed;
+                } else {
+                    wakers.extend(closed);
+                }
+                LifecycleWake { wakers }
             }
-        });
+        };
+        wake.fire();
     }
 
-    pub(crate) async fn wait_closing_or_closed(&self) {
-        if self.is_closing_or_closed() {
-            return;
+    pub(crate) fn wait_closing_or_closed(&self) -> WaitClosing<'_> {
+        WaitClosing {
+            lifecycle: self,
+            waker_slot: None,
         }
-        let mut rx = self.state.subscribe();
-        let _ = rx.wait_for(|s| !matches!(s, LifecycleState::Open)).await;
     }
 
-    pub(crate) async fn wait_closed(&self) -> Result<(), AppendSessionError> {
-        let mut rx = self.state.subscribe();
-        let guard = rx
-            .wait_for(|s| matches!(s, LifecycleState::Closed(_)))
-            .await
-            .expect("watch sender owned by self");
-        match &*guard {
-            LifecycleState::Closed(res) => res.clone(),
-            _ => unreachable!("wait_for guarantees Closed"),
+    pub(crate) fn wait_closed(&self) -> WaitClosed<'_> {
+        WaitClosed {
+            lifecycle: self,
+            waker_slot: None,
+        }
+    }
+}
+
+pub(crate) struct WaitClosing<'a> {
+    lifecycle: &'a SessionLifecycle,
+    waker_slot: Option<usize>,
+}
+
+impl Future for WaitClosing<'_> {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.as_mut().get_mut();
+        if this.lifecycle.is_closing_or_closed() {
+            return Poll::Ready(());
+        }
+        if let Some(idx) = this.waker_slot {
+            let inner = this
+                .lifecycle
+                .inner
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if !matches!(inner.state, LifecycleState::Open) {
+                return Poll::Ready(());
+            }
+            if inner.closing_waiters.will_wake(idx, cx.waker()) {
+                return Poll::Pending;
+            }
+        }
+
+        let mut leftover = Some(cx.waker().clone());
+        let ready = {
+            let mut inner = this
+                .lifecycle
+                .inner
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if !matches!(inner.state, LifecycleState::Open) {
+                true
+            } else {
+                match this.waker_slot {
+                    Some(idx) => {
+                        leftover = inner
+                            .closing_waiters
+                            .replace_if_changed(idx, leftover.take().expect("candidate waker"));
+                    }
+                    None => {
+                        this.waker_slot = Some(
+                            inner
+                                .closing_waiters
+                                .insert(leftover.take().expect("candidate waker")),
+                        );
+                    }
+                }
+                false
+            }
+        };
+        drop(leftover);
+        if ready {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    }
+}
+
+impl Drop for WaitClosing<'_> {
+    fn drop(&mut self) {
+        if let Some(idx) = self.waker_slot
+            && !self.lifecycle.is_closing_or_closed()
+        {
+            let dropped = self
+                .lifecycle
+                .inner
+                .lock()
+                .ok()
+                .filter(|inner| matches!(inner.state, LifecycleState::Open))
+                .and_then(|mut inner| inner.closing_waiters.remove(idx));
+            drop(dropped);
+        }
+    }
+}
+
+pub(crate) struct WaitClosed<'a> {
+    lifecycle: &'a SessionLifecycle,
+    waker_slot: Option<usize>,
+}
+
+impl Future for WaitClosed<'_> {
+    type Output = Result<(), AppendSessionError>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.as_mut().get_mut();
+        if this.lifecycle.is_closed() {
+            let inner = this
+                .lifecycle
+                .inner
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let LifecycleState::Closed(res) = &inner.state {
+                return Poll::Ready(res.clone());
+            }
+        }
+        if let Some(idx) = this.waker_slot {
+            let inner = this
+                .lifecycle
+                .inner
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let LifecycleState::Closed(res) = &inner.state {
+                return Poll::Ready(res.clone());
+            }
+            if inner.closed_waiters.will_wake(idx, cx.waker()) {
+                return Poll::Pending;
+            }
+        }
+
+        let mut leftover = Some(cx.waker().clone());
+        let ready = {
+            let mut inner = this
+                .lifecycle
+                .inner
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let LifecycleState::Closed(res) = &inner.state {
+                Some(res.clone())
+            } else {
+                match this.waker_slot {
+                    Some(idx) => {
+                        leftover = inner
+                            .closed_waiters
+                            .replace_if_changed(idx, leftover.take().expect("candidate waker"));
+                    }
+                    None => {
+                        this.waker_slot = Some(
+                            inner
+                                .closed_waiters
+                                .insert(leftover.take().expect("candidate waker")),
+                        );
+                    }
+                }
+                None
+            }
+        };
+        drop(leftover);
+        match ready {
+            Some(res) => Poll::Ready(res),
+            None => Poll::Pending,
+        }
+    }
+}
+
+impl Drop for WaitClosed<'_> {
+    fn drop(&mut self) {
+        if let Some(idx) = self.waker_slot
+            && !self.lifecycle.is_closed()
+        {
+            let dropped = self
+                .lifecycle
+                .inner
+                .lock()
+                .ok()
+                .filter(|inner| !matches!(inner.state, LifecycleState::Closed(_)))
+                .and_then(|mut inner| inner.closed_waiters.remove(idx));
+            drop(dropped);
         }
     }
 }
@@ -475,11 +730,15 @@ pub(crate) struct AppendSessionCore {
     basin: BasinName,
     stream: StreamName,
     compression: s2s::CompressionAlgorithm,
-    /// Serializes command acceptance and `close()` initiation so every `submit()` returning `Ok`
-    /// is ordered strictly before `Command::Close` in the unbounded channel (`A4c`, `A8a`).
-    gate: Arc<StdMutex<()>>,
+    /// Serializes command acceptance, monotonic submission sequencing, and `close()` initiation
+    /// so every `submit()` returning `Ok` is ordered strictly before `Command::Close` in the
+    /// unbounded channel (`A4c`, `A8a`).
+    gate: Arc<StdMutex<u64>>,
     cmd_tx: mpsc::UnboundedSender<Command>,
     lifecycle: Arc<SessionLifecycle>,
+    /// Tracks monotonic wire-send progress so `ProducerTask::drop` can synchronously freeze and
+    /// classify unsent batches even when it drops before `AppendSessionTask`.
+    sent_tracker: Arc<SentTracker>,
     /// Cancelled on client close, parent abort, or session drop/abort.
     abort: SessionAbort,
     unacked_batches: Arc<AtomicUsize>,
@@ -511,8 +770,9 @@ impl AppendSessionCore {
         abort: SessionAbort,
     ) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
-        let gate = Arc::new(StdMutex::new(()));
+        let gate = Arc::new(StdMutex::new(0u64));
         let lifecycle = Arc::new(SessionLifecycle::new());
+        let sent_tracker = SentTracker::new();
         let unacked_batches = Arc::new(AtomicUsize::new(0));
         let basin = client.name.clone();
         let compression = client.base().compression().into_api();
@@ -526,6 +786,7 @@ impl AppendSessionCore {
             op,
             gate: gate.clone(),
             lifecycle: lifecycle.clone(),
+            sent_tracker: sent_tracker.clone(),
             abort: abort.clone(),
             context: context.clone(),
             state: SessionState {
@@ -546,6 +807,7 @@ impl AppendSessionCore {
             gate,
             cmd_tx,
             lifecycle,
+            sent_tracker,
             abort,
             unacked_batches,
             context,
@@ -558,6 +820,13 @@ impl AppendSessionCore {
 
     pub(crate) fn terminal_err(&self) -> Option<AppendSessionError> {
         self.lifecycle.terminal_err()
+    }
+
+    /// Synchronously stop any active attempt, prevent future attempts from starting, and return
+    /// the monotonic `sent_watermark` (`submit_seq < watermark` => started on wire;
+    /// `submit_seq >= watermark` => provably never started on wire).
+    pub(crate) fn freeze_sent_watermark(&self) -> u64 {
+        self.sent_tracker.freeze_sent_watermark()
     }
 
     fn session_closed_err_on_submit(&self) -> AppendSessionError {
@@ -616,41 +885,64 @@ impl AppendSessionCore {
         })?;
 
         let (ack_tx, ack_rx) = oneshot::channel();
-        {
-            let _gate = self.gate.lock().unwrap();
+        // Ensure any returned `permit` drops strictly AFTER releasing `self.gate` so waking a
+        // blocked `reserve()` waiter cannot re-enter `self.gate` and deadlock.
+        let mut rejected_permit: Option<AppendPermit> = None;
+        let submit_seq = {
+            let mut next_seq = self.gate.lock().unwrap();
             if self.lifecycle.is_closing_or_closed() || self.abort.is_cancelled() {
+                drop(next_seq);
+                drop(permit);
                 return Err(self.session_closed_err_on_submit());
             }
+            let seq = *next_seq;
             self.unacked_batches.fetch_add(1, Ordering::Release);
-            if self
-                .cmd_tx
-                .send(Command::Submit {
-                    frame,
-                    record_count,
-                    ack_tx,
-                    permit,
-                })
-                .is_err()
-            {
-                self.unacked_batches.fetch_sub(1, Ordering::Release);
-                return Err(self.session_closed_err_on_submit());
+            match self.cmd_tx.send(Command::Submit {
+                seq,
+                frame,
+                record_count,
+                ack_tx,
+                permit,
+            }) {
+                Ok(()) => {
+                    *next_seq += 1;
+                    Ok(seq)
+                }
+                Err(mpsc::error::SendError(Command::Submit { permit, .. })) => {
+                    self.unacked_batches.fetch_sub(1, Ordering::Release);
+                    rejected_permit = permit;
+                    Err(self.session_closed_err_on_submit())
+                }
+                Err(_) => unreachable!("sent Command::Submit"),
             }
-        }
-        Ok(BatchSubmitTicket(SubmitTicket::new(
-            ack_rx,
-            self.lifecycle.clone(),
-            self.context.clone(),
-            self.abort.dropped_msg(),
-        )))
+        };
+        drop(rejected_permit);
+        let submit_seq = submit_seq?;
+        Ok(BatchSubmitTicket {
+            ticket: SubmitTicket::new(
+                ack_rx,
+                self.lifecycle.clone(),
+                self.context.clone(),
+                self.abort.dropped_msg(),
+            ),
+            submit_seq,
+        })
     }
 
     pub(crate) async fn close(&self) -> Result<(), AppendSessionError> {
-        {
+        let wake = {
             let _gate = self.gate.lock().unwrap();
-            if !self.abort.is_cancelled() && self.lifecycle.mark_closing() {
-                let _ = self.cmd_tx.send(Command::Close);
+            if !self.abort.is_cancelled() {
+                let (marked, wake) = self.lifecycle.mark_closing();
+                if marked {
+                    let _ = self.cmd_tx.send(Command::Close);
+                }
+                wake
+            } else {
+                LifecycleWake::NONE
             }
-        }
+        };
+        wake.fire();
         self.lifecycle.wait_closed().await
     }
 
@@ -945,6 +1237,31 @@ struct PermitWaiter {
     granted: oneshot::Sender<()>,
 }
 
+/// Zero-allocation container for the 0- and 1-waiter common cases when detaching granted permit
+/// waiters from `PermitsState` before invoking their wakers outside the mutex.
+enum GrantedWaiters {
+    Empty,
+    One(PermitWaiter),
+    Many(Vec<PermitWaiter>),
+}
+
+impl GrantedWaiters {
+    fn is_empty(&self) -> bool {
+        matches!(self, Self::Empty)
+    }
+
+    fn push(&mut self, waiter: PermitWaiter) {
+        match std::mem::replace(self, Self::Empty) {
+            Self::Empty => *self = Self::One(waiter),
+            Self::One(first) => *self = Self::Many(vec![first, waiter]),
+            Self::Many(mut list) => {
+                list.push(waiter);
+                *self = Self::Many(list);
+            }
+        }
+    }
+}
+
 struct PermitsState {
     available_batches: Option<usize>,
     total_bytes: usize,
@@ -965,38 +1282,82 @@ impl PermitsState {
         self.available_bytes -= bytes;
     }
 
-    fn release(&mut self, bytes: usize, has_waiters: &AtomicBool) {
+    fn release_units(&mut self, bytes: usize, batches: usize) {
         if let Some(c) = self.available_batches.as_mut() {
-            *c += 1;
+            *c += batches;
         }
         self.available_bytes += bytes;
-        self.grant_next(has_waiters);
     }
 
-    fn grant_next(&mut self, has_waiters: &AtomicBool) {
+    /// Debit capacity and detach all satisfiable FIFO waiters without invoking any waker under
+    /// the mutex. Callers MUST deliver the returned grants via [`PermitsInner::deliver_grants`]
+    /// strictly after dropping the mutex guard.
+    fn take_ready_grants(&mut self, has_waiters: &AtomicBool) -> GrantedWaiters {
+        let mut grants = GrantedWaiters::Empty;
         while let Some(front) = self.waiters.front() {
             if !self.can_satisfy(front.bytes) {
                 break;
             }
             let waiter = self.waiters.pop_front().expect("checked front");
             self.take(waiter.bytes);
-            if waiter.granted.send(()).is_err() {
-                // Waiter was dropped concurrently; immediately refund and continue FIFO granting.
-                if let Some(c) = self.available_batches.as_mut() {
-                    *c += 1;
-                }
-                self.available_bytes += waiter.bytes;
-            }
+            grants.push(waiter);
         }
         if self.waiters.is_empty() {
             has_waiters.store(false, Ordering::Release);
         }
+        grants
     }
 }
 
 struct PermitsInner {
     state: StdMutex<PermitsState>,
     has_waiters: AtomicBool,
+}
+
+impl PermitsInner {
+    /// Deliver detached grants strictly outside `self.state`. Any grant whose receiver was closed
+    /// concurrently is refunded under re-acquired `self.state`, preserving FIFO ordering and
+    /// isolating panicking user wakers.
+    fn deliver_grants(&self, mut grants: GrantedWaiters) {
+        while !grants.is_empty() {
+            let mut refund_bytes = 0usize;
+            let mut refund_batches = 0usize;
+            let mut send_one = |waiter: PermitWaiter| {
+                let bytes = waiter.bytes;
+                let tx = waiter.granted;
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || tx.send(()))) {
+                    Ok(Ok(())) => {}
+                    Ok(Err(())) => {
+                        refund_bytes += bytes;
+                        refund_batches += 1;
+                    }
+                    Err(_) => {
+                        // In `tokio::sync::oneshot`, `()` is stored before waking the receiver.
+                        // Do not refund here: either the receiver will poll `Ok(())`, or
+                        // `AcquireGuard::drop` will observe `try_recv().is_ok()` and refund.
+                    }
+                }
+            };
+            match grants {
+                GrantedWaiters::Empty => break,
+                GrantedWaiters::One(waiter) => send_one(waiter),
+                GrantedWaiters::Many(list) => {
+                    for waiter in list {
+                        send_one(waiter);
+                    }
+                }
+            }
+            if refund_batches == 0 {
+                break;
+            }
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.release_units(refund_bytes, refund_batches);
+            grants = state.take_ready_grants(&self.has_waiters);
+        }
+    }
 }
 
 pub(crate) struct AppendPermit {
@@ -1019,9 +1380,16 @@ impl AppendPermit {
         if new_bytes < self.bytes {
             let excess = self.bytes - new_bytes;
             self.bytes = new_bytes;
-            let mut state = self.inner.state.lock().unwrap();
-            state.available_bytes += excess;
-            state.grant_next(&self.inner.has_waiters);
+            let grants = {
+                let mut state = self
+                    .inner
+                    .state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                state.available_bytes += excess;
+                state.take_ready_grants(&self.inner.has_waiters)
+            };
+            self.inner.deliver_grants(grants);
         }
     }
 
@@ -1042,8 +1410,16 @@ impl Drop for AppendPermit {
         if self.bytes == 0 && !self.has_batch_slot {
             return;
         }
-        let mut state = self.inner.state.lock().unwrap();
-        state.release(self.bytes, &self.inner.has_waiters);
+        let grants = {
+            let mut state = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.release_units(self.bytes, usize::from(self.has_batch_slot));
+            state.take_ready_grants(&self.inner.has_waiters)
+        };
+        self.inner.deliver_grants(grants);
     }
 }
 
@@ -1069,7 +1445,11 @@ impl AppendPermits {
     }
 
     pub(crate) fn in_flight_bytes(&self) -> usize {
-        let state = self.inner.state.lock().unwrap();
+        let state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.total_bytes - state.available_bytes
     }
 
@@ -1078,7 +1458,11 @@ impl AppendPermits {
     }
 
     pub(crate) fn try_acquire(&self, bytes: usize) -> Option<AppendPermit> {
-        let mut state = self.inner.state.lock().unwrap();
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if state.waiters.is_empty() && state.can_satisfy(bytes) {
             let has_batch_slot = state.available_batches.is_some();
             state.take(bytes);
@@ -1116,14 +1500,31 @@ impl AppendPermits {
                 if self.acquired {
                     return;
                 }
-                let mut state = self.inner.state.lock().unwrap();
-                if let Some(pos) = state.waiters.iter().position(|w| w.id == self.id) {
-                    state.waiters.remove(pos);
-                    state.grant_next(&self.inner.has_waiters);
-                } else if self.rx.try_recv().is_ok() {
-                    // Grant raced with cancellation; refund immediately.
-                    state.release(self.bytes, &self.inner.has_waiters);
-                }
+                // Close `rx` BEFORE inspecting `try_recv()` so any concurrent `deliver_grants`
+                // send either landed before `close()` (making `try_recv()` return `Ok(())` so we
+                // refund here) or lands after `close()` (returning `Err(())` so `deliver_grants`
+                // refunds there). Exactly one side refunds, with zero leak or double-refund.
+                self.rx.close();
+                let (removed_waiter, grants) = {
+                    let mut state = self
+                        .inner
+                        .state
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    if let Some(pos) = state.waiters.iter().position(|w| w.id == self.id) {
+                        let removed = state.waiters.remove(pos);
+                        let grants = state.take_ready_grants(&self.inner.has_waiters);
+                        (removed, grants)
+                    } else if self.rx.try_recv().is_ok() {
+                        state.release_units(self.bytes, 1);
+                        let grants = state.take_ready_grants(&self.inner.has_waiters);
+                        (None, grants)
+                    } else {
+                        (None, GrantedWaiters::Empty)
+                    }
+                };
+                drop(removed_waiter);
+                self.inner.deliver_grants(grants);
             }
         }
 
@@ -1194,6 +1595,7 @@ impl SessionState {
 
     fn push_submit(
         &mut self,
+        seq: u64,
         frame: Bytes,
         record_count: u64,
         ack_tx: oneshot::Sender<Result<AppendAck, AppendSessionError>>,
@@ -1201,6 +1603,7 @@ impl SessionState {
     ) {
         debug_assert!(!self.closing, "gate orders all Submits before Close");
         self.inflight_appends.push_back(InflightAppend {
+            seq,
             frame,
             record_count,
             ack_tx,
@@ -1221,6 +1624,7 @@ impl SessionState {
 }
 
 struct InflightAppend {
+    seq: u64,
     /// Pre-encoded and compressed S2S frame; cloning on resend is O(1).
     frame: Bytes,
     record_count: u64,
@@ -1232,12 +1636,85 @@ struct InflightAppend {
 
 enum Command {
     Submit {
+        seq: u64,
         frame: Bytes,
         record_count: u64,
         ack_tx: oneshot::Sender<Result<AppendAck, AppendSessionError>>,
         permit: Option<AppendPermit>,
     },
     Close,
+}
+
+struct ActiveAttemptTracker {
+    sync: Arc<AttemptSync>,
+    base_seq: u64,
+}
+
+struct SentTrackerState {
+    frozen: bool,
+    active: Option<ActiveAttemptTracker>,
+}
+
+/// Synchronizes the monotonic `sent_watermark` (`max(seq + 1)` across all started batches)
+/// between `AppendSessionTask` and `ProducerTask::drop` (`A6a`, `A8c`).
+struct SentTracker {
+    sent_watermark: AtomicU64,
+    state: StdMutex<SentTrackerState>,
+}
+
+impl SentTracker {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            sent_watermark: AtomicU64::new(0),
+            state: StdMutex::new(SentTrackerState {
+                frozen: false,
+                active: None,
+            }),
+        })
+    }
+
+    fn install_active(&self, sync: Arc<AttemptSync>, base_seq: u64) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.frozen {
+            sync.stop();
+            return false;
+        }
+        state.active = Some(ActiveAttemptTracker { sync, base_seq });
+        true
+    }
+
+    fn clear_active(&self, sync: &AttemptSync, base_seq: u64, stop_gate: bool) -> usize {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let batches_started = if stop_gate {
+            sync.stop()
+        } else {
+            sync.batches_started()
+        };
+        let end_seq = base_seq.saturating_add(batches_started as u64);
+        self.sent_watermark.fetch_max(end_seq, Ordering::AcqRel);
+        state.active = None;
+        batches_started
+    }
+
+    fn freeze_sent_watermark(&self) -> u64 {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.frozen = true;
+        if let Some(active) = state.active.as_ref() {
+            let batches_started = active.sync.stop();
+            let end_seq = active.base_seq.saturating_add(batches_started as u64);
+            self.sent_watermark.fetch_max(end_seq, Ordering::AcqRel);
+        }
+        self.sent_watermark.load(Ordering::Acquire)
+    }
 }
 
 const GATE_STOPPED: u64 = 1 << 63;
@@ -1521,14 +1998,16 @@ struct AppendSessionTask {
     stream: StreamName,
     headers: StreamHeaders,
     op: &'static str,
-    gate: Arc<StdMutex<()>>,
+    gate: Arc<StdMutex<u64>>,
     lifecycle: Arc<SessionLifecycle>,
+    sent_tracker: Arc<SentTracker>,
     abort: SessionAbort,
     context: ErrorContext,
     state: SessionState,
-    /// Tracks `(sync, acked_in_attempt)` while an attempt is active so abnormal drop/unwind can
-    /// freeze `sync` and classify the sent prefix vs unsent tail accurately (`A6a`, `A8c`).
-    active_attempt: Option<(Arc<AttemptSync>, usize)>,
+    /// Tracks `(sync, base_seq, acked_in_attempt)` while an attempt is active so abnormal
+    /// drop/unwind can freeze `sync` and classify the sent prefix vs unsent tail accurately
+    /// (`A6a`, `A8c`).
+    active_attempt: Option<(Arc<AttemptSync>, u64, usize)>,
 }
 
 impl Drop for AppendSessionTask {
@@ -1536,8 +2015,14 @@ impl Drop for AppendSessionTask {
         if self.lifecycle.is_closed() {
             return;
         }
-        if let Some((sync, acked_in_attempt)) = self.active_attempt.take() {
-            finish_attempt_gate(&sync, acked_in_attempt, &mut self.state);
+        if let Some((sync, base_seq, acked_in_attempt)) = self.active_attempt.take() {
+            finish_attempt_gate(
+                &self.sent_tracker,
+                &sync,
+                base_seq,
+                acked_in_attempt,
+                &mut self.state,
+            );
         }
         let explicit_abort = self.abort.is_cancelled();
         let reason = if explicit_abort {
@@ -1549,7 +2034,7 @@ impl Drop for AppendSessionTask {
             reason,
             self.context.clone(),
         ));
-        let (queued, has_pending_work, existing_err) = {
+        let (queued, has_pending_work, existing_err, wake) = {
             let _gate = self
                 .gate
                 .lock()
@@ -1561,15 +2046,16 @@ impl Drop for AppendSessionTask {
                     .iter()
                     .any(|cmd| matches!(cmd, Command::Submit { .. }));
             let existing_err = self.lifecycle.terminal_err();
-            if let Some(err) = existing_err.as_ref() {
-                self.lifecycle.set_terminal_err(err.clone());
+            let wake = if let Some(err) = existing_err.as_ref() {
+                self.lifecycle.set_terminal_err(err.clone())
             } else if has_pending_work || !explicit_abort {
-                self.lifecycle.set_terminal_err(aborted.clone());
+                self.lifecycle.set_terminal_err(aborted.clone())
             } else {
-                self.lifecycle.mark_closing();
-            }
-            (queued, has_pending_work, existing_err)
+                self.lifecycle.mark_closing().1
+            };
+            (queued, has_pending_work, existing_err, wake)
         };
+        wake.fire();
 
         if !has_pending_work && explicit_abort && existing_err.is_none() {
             // A8c: explicitly aborting an idle append session loses nothing, so the close is clean.
@@ -1591,13 +2077,13 @@ impl Drop for AppendSessionTask {
             };
             drop(append._permit);
             self.state.unacked_batches.fetch_sub(1, Ordering::Release);
-            let _ = append.ack_tx.send(Err(outcome));
+            send_oneshot_isolated(append.ack_tx, Err(outcome));
         }
         for cmd in queued {
             if let Command::Submit { ack_tx, permit, .. } = cmd {
                 drop(permit);
                 self.state.unacked_batches.fetch_sub(1, Ordering::Release);
-                let _ = ack_tx.send(Err(unsent.clone()));
+                send_oneshot_isolated(ack_tx, Err(unsent.clone()));
             }
         }
         self.lifecycle.finish(Err(err));
@@ -1751,12 +2237,13 @@ impl AppendSessionTask {
             _ = self.abort.cancelled() => IdleWait::Aborted(self.abort.reason()),
             cmd = self.state.cmd_rx.recv() => match cmd {
                 Some(Command::Submit {
+                    seq,
                     frame,
                     record_count,
                     ack_tx,
                     permit,
                 }) => {
-                    self.state.push_submit(frame, record_count, ack_tx, permit);
+                    self.state.push_submit(seq, frame, record_count, ack_tx, permit);
                     IdleWait::WorkReady
                 }
                 Some(Command::Close) => {
@@ -1778,11 +2265,12 @@ impl AppendSessionTask {
 
     fn finish_clean(&mut self) {
         debug!("append session closed cleanly");
-        let queued = {
+        let (queued, wake) = {
             let _gate = self.gate.lock().unwrap();
-            self.lifecycle.mark_closing();
-            self.state.drain_queued_commands()
+            let (_, wake) = self.lifecycle.mark_closing();
+            (self.state.drain_queued_commands(), wake)
         };
+        wake.fire();
         let closed_err = AppendSessionError::SessionClosed(SessionClosedError::new_with_context(
             None,
             self.context.clone(),
@@ -1791,7 +2279,7 @@ impl AppendSessionTask {
             if let Command::Submit { ack_tx, permit, .. } = cmd {
                 drop(permit);
                 self.state.unacked_batches.fetch_sub(1, Ordering::Release);
-                let _ = ack_tx.send(Err(closed_err.clone()));
+                send_oneshot_isolated(ack_tx, Err(closed_err.clone()));
             }
         }
         debug_assert_eq!(self.state.unacked_batches.load(Ordering::Acquire), 0);
@@ -1803,7 +2291,7 @@ impl AppendSessionTask {
             reason,
             self.context.clone(),
         ));
-        let (queued, has_pending_work) = {
+        let (queued, has_pending_work, wake) = {
             // Hold gate across checking pending work AND publishing terminal_err / closing so
             // concurrent reserve()/submit() callers never observe
             // `SessionClosedError { failure: None }` on an aborted session with pending work.
@@ -1813,13 +2301,14 @@ impl AppendSessionTask {
                 || queued
                     .iter()
                     .any(|cmd| matches!(cmd, Command::Submit { .. }));
-            if has_pending_work {
-                self.lifecycle.set_terminal_err(aborted.clone());
+            let wake = if has_pending_work {
+                self.lifecycle.set_terminal_err(aborted.clone())
             } else {
-                self.lifecycle.mark_closing();
-            }
-            (queued, has_pending_work)
+                self.lifecycle.mark_closing().1
+            };
+            (queued, has_pending_work, wake)
         };
+        wake.fire();
 
         debug!(
             reason,
@@ -1854,14 +2343,14 @@ impl AppendSessionTask {
             };
             drop(_permit);
             self.state.unacked_batches.fetch_sub(1, Ordering::Release);
-            let _ = ack_tx.send(Err(outcome));
+            send_oneshot_isolated(ack_tx, Err(outcome));
         }
 
         for cmd in queued {
             if let Command::Submit { ack_tx, permit, .. } = cmd {
                 drop(permit);
                 self.state.unacked_batches.fetch_sub(1, Ordering::Release);
-                let _ = ack_tx.send(Err(unsent.clone()));
+                send_oneshot_isolated(ack_tx, Err(unsent.clone()));
             }
         }
 
@@ -1906,11 +2395,12 @@ impl AppendSessionTask {
         // definite and any batch's outcome was wrapped.
         let session_failure = final_err.clone().with_prior_uncertainty(any_batch_wrapped);
 
-        let queued = {
+        let (queued, wake) = {
             let _gate = self.gate.lock().unwrap();
-            self.lifecycle.set_terminal_err(session_failure.clone());
-            self.state.drain_queued_commands()
+            let wake = self.lifecycle.set_terminal_err(session_failure.clone());
+            (self.state.drain_queued_commands(), wake)
         };
+        wake.fire();
         let closed_err = AppendSessionError::SessionClosed(SessionClosedError::new_with_context(
             Some(session_failure.clone()),
             self.context.clone(),
@@ -1930,14 +2420,14 @@ impl AppendSessionTask {
             } = append;
             drop(_permit);
             self.state.unacked_batches.fetch_sub(1, Ordering::Release);
-            let _ = ack_tx.send(Err(base.with_prior_uncertainty(prior_uncertainty)));
+            send_oneshot_isolated(ack_tx, Err(base.with_prior_uncertainty(prior_uncertainty)));
         }
 
         for cmd in queued {
             if let Command::Submit { ack_tx, permit, .. } = cmd {
                 drop(permit);
                 self.state.unacked_batches.fetch_sub(1, Ordering::Release);
-                let _ = ack_tx.send(Err(closed_err.clone()));
+                send_oneshot_isolated(ack_tx, Err(closed_err.clone()));
             }
         }
 
@@ -1989,8 +2479,17 @@ impl AppendSessionTask {
             }
         }
 
+        let base_seq = self
+            .state
+            .inflight_appends
+            .front()
+            .expect("run_attempt requires inflight work")
+            .seq;
         let sync = AttemptSync::new();
-        self.active_attempt = Some((sync.clone(), 0));
+        if !self.sent_tracker.install_active(sync.clone(), base_seq) {
+            return AttemptResult::Aborted(self.abort.reason());
+        }
+        self.active_attempt = Some((sync.clone(), base_seq, 0));
         let (tx, input_rx) = mpsc::channel::<Bytes>(16);
         let mut input_tx = AttemptSender::new(tx, sync.clone());
         let body_stream = AttemptBodyStream::new(input_rx, sync.clone());
@@ -2005,15 +2504,15 @@ impl AppendSessionTask {
         let mut acks = tokio::select! {
             biased;
             _ = abort_fut.as_mut() => {
-                sync.stop();
                 self.active_attempt = None;
+                self.sent_tracker.clear_active(&sync, base_seq, true);
                 return AttemptResult::Aborted(self.abort.reason());
             }
             res = connect_fut => match res {
                 Ok(s) => s,
                 Err(err) => {
-                    sync.stop();
                     self.active_attempt = None;
+                    self.sent_tracker.clear_active(&sync, base_seq, true);
                     if let Some(reason) = self.check_abort() {
                         return AttemptResult::Aborted(reason);
                     }
@@ -2041,6 +2540,7 @@ impl AppendSessionTask {
                 self.active_attempt = None;
                 input_tx.disarm();
                 input_tx.close_clean();
+                self.sent_tracker.clear_active(&sync, base_seq, false);
                 drop(acks);
                 return AttemptResult::Closed;
             }
@@ -2050,9 +2550,11 @@ impl AppendSessionTask {
             if let Some(reason) = self.check_abort() {
                 self.active_attempt = None;
                 abort_attempt(
+                    &self.sent_tracker,
                     &mut acks,
                     &mut self.state,
                     &sync,
+                    base_seq,
                     &mut acked_in_attempt,
                     &mut send_cursor,
                     &self.context,
@@ -2068,9 +2570,11 @@ impl AppendSessionTask {
                     if let Some(reason) = self.check_abort() {
                         self.active_attempt = None;
                         abort_attempt(
+                            &self.sent_tracker,
                             &mut acks,
                             &mut self.state,
                             &sync,
+                            base_seq,
                             &mut acked_in_attempt,
                             &mut send_cursor,
                             &self.context,
@@ -2098,6 +2602,7 @@ impl AppendSessionTask {
             {
                 self.active_attempt = None;
                 input_tx.disarm();
+                self.sent_tracker.clear_active(&sync, base_seq, false);
                 drop(acks);
                 return AttemptResult::IdleEnded;
             }
@@ -2143,7 +2648,7 @@ impl AppendSessionTask {
                             ) {
                                 Ok(()) => {
                                     acked_in_attempt += 1;
-                                    if let Some((_, tracked_acked)) = self.active_attempt.as_mut() {
+                                    if let Some((_, _, tracked_acked)) = self.active_attempt.as_mut() {
                                         *tracked_acked = acked_in_attempt;
                                     }
                                     send_cursor = send_cursor.saturating_sub(1);
@@ -2175,7 +2680,9 @@ impl AppendSessionTask {
                                 Err(err) => {
                                     self.active_attempt = None;
                                     let unacked_sent = finish_attempt_gate(
+                                        &self.sent_tracker,
                                         &sync,
+                                        base_seq,
                                         acked_in_attempt,
                                         &mut self.state,
                                     );
@@ -2189,8 +2696,13 @@ impl AppendSessionTask {
                         }
                         Some(Err(err)) => {
                             self.active_attempt = None;
-                            let unacked_sent =
-                                finish_attempt_gate(&sync, acked_in_attempt, &mut self.state);
+                            let unacked_sent = finish_attempt_gate(
+                                &self.sent_tracker,
+                                &sync,
+                                base_seq,
+                                acked_in_attempt,
+                                &mut self.state,
+                            );
 
                             if let Some(reason) = self.check_abort() {
                                 return AttemptResult::Aborted(reason);
@@ -2214,8 +2726,13 @@ impl AppendSessionTask {
                         }
                         None => {
                             self.active_attempt = None;
-                            let unacked_sent =
-                                finish_attempt_gate(&sync, acked_in_attempt, &mut self.state);
+                            let unacked_sent = finish_attempt_gate(
+                                &self.sent_tracker,
+                                &sync,
+                                base_seq,
+                                acked_in_attempt,
+                                &mut self.state,
+                            );
 
                             if let Some(reason) = self.check_abort() {
                                 return AttemptResult::Aborted(reason);
@@ -2262,9 +2779,11 @@ impl AppendSessionTask {
                 _ = abort_fut.as_mut() => {
                     self.active_attempt = None;
                     abort_attempt(
+                        &self.sent_tracker,
                         &mut acks,
                         &mut self.state,
                         &sync,
+                        base_seq,
                         &mut acked_in_attempt,
                         &mut send_cursor,
                         &self.context,
@@ -2305,8 +2824,13 @@ impl AppendSessionTask {
 
                     acks.retire_connection();
                     self.active_attempt = None;
-                    let unacked_sent =
-                        finish_attempt_gate(&sync, acked_in_attempt, &mut self.state);
+                    let unacked_sent = finish_attempt_gate(
+                        &self.sent_tracker,
+                        &sync,
+                        base_seq,
+                        acked_in_attempt,
+                        &mut self.state,
+                    );
                     if self.state.inflight_appends.is_empty() {
                         return AttemptResult::IdleEnded;
                     }
@@ -2362,13 +2886,14 @@ impl AppendSessionTask {
                     for remaining in (0..32).rev() {
                         match first {
                             Some(Command::Submit {
+                                seq,
                                 frame,
                                 record_count,
                                 ack_tx,
                                 permit,
                             }) => {
                                 let was_empty = self.state.inflight_appends.is_empty();
-                                self.state.push_submit(frame, record_count, ack_tx, permit);
+                                self.state.push_submit(seq, frame, record_count, ack_tx, permit);
                                 if was_empty {
                                     let now = Instant::now();
                                     became_oldest_at = Some(now);
@@ -2384,9 +2909,11 @@ impl AppendSessionTask {
                             None => {
                                 self.active_attempt = None;
                                 abort_attempt(
+                                    &self.sent_tracker,
                                     &mut acks,
                                     &mut self.state,
                                     &sync,
+                                    base_seq,
                                     &mut acked_in_attempt,
                                     &mut send_cursor,
                                     &self.context,
@@ -2410,6 +2937,7 @@ impl AppendSessionTask {
                 self.active_attempt = None;
                 input_tx.disarm();
                 input_tx.close_clean();
+                self.sent_tracker.clear_active(&sync, base_seq, false);
                 drop(acks);
                 return AttemptResult::ReconnectAdvised;
             }
@@ -2421,11 +2949,13 @@ impl AppendSessionTask {
 }
 
 fn finish_attempt_gate(
+    sent_tracker: &SentTracker,
     sync: &AttemptSync,
+    base_seq: u64,
     acked_in_attempt: usize,
     state: &mut SessionState,
 ) -> usize {
-    let batches_started = sync.stop();
+    let batches_started = sent_tracker.clear_active(sync, base_seq, true);
     let unacked_sent = batches_started
         .saturating_sub(acked_in_attempt)
         .min(state.inflight_appends.len());
@@ -2438,15 +2968,18 @@ fn finish_attempt_gate(
 /// Stop the attempt gate immediately so `AttemptBodyStream` cannot start any unsent batch queued
 /// in the body channel, then drain any already-buffered acks against the frozen started count and
 /// classify the remaining unacked batches (`A8c`, `T10`).
+#[allow(clippy::too_many_arguments)]
 fn abort_attempt(
+    sent_tracker: &SentTracker,
     acks: &mut Streaming<proto::AppendAck, AppendSessionError>,
     state: &mut SessionState,
     sync: &AttemptSync,
+    base_seq: u64,
     acked_in_attempt: &mut usize,
     send_cursor: &mut usize,
     context: &ErrorContext,
 ) {
-    let batches_started = sync.stop();
+    let batches_started = sent_tracker.clear_active(sync, base_seq, true);
     // Use `coop::unconstrained` so Tokio cooperative preemption cannot spuriously return
     // `Pending` and drop an already-buffered ack during abort (`T10`).
     while let Some(Some(Ok(frame))) = tokio::task::coop::unconstrained(acks.next()).now_or_never() {
@@ -2517,7 +3050,7 @@ fn process_proto_ack(
     state.unacked_batches.fetch_sub(1, Ordering::Release);
     state.prev_ack_end = Some(ack.end);
 
-    let _ = ack_tx.send(Ok(ack));
+    send_oneshot_isolated(ack_tx, Ok(ack));
 
     Ok(())
 }
@@ -2677,6 +3210,7 @@ mod tests {
         let mut state = SessionState {
             cmd_rx,
             inflight_appends: VecDeque::from([InflightAppend {
+                seq: 0,
                 frame: Bytes::new(),
                 record_count: 1,
                 ack_tx,
@@ -2793,5 +3327,266 @@ mod tests {
         assert!(sync.is_stopped());
         assert_eq!(sync.try_start_batch(), GateState::Stopped);
         assert_eq!(sync.batches_started(), 100);
+    }
+
+    #[test]
+    fn append_permits_reentrant_waker_and_panic_and_canceled_grant_refund() {
+        use std::task::{Context, Wake, Waker};
+
+        use super::AppendPermits;
+
+        struct ReentrantWake {
+            permits: AppendPermits,
+            observed_in_flight: AtomicUsize,
+        }
+        impl Wake for ReentrantWake {
+            fn wake(self: Arc<Self>) {
+                let bytes = self.permits.in_flight_bytes();
+                self.observed_in_flight.store(bytes, Ordering::SeqCst);
+            }
+        }
+
+        struct PanicWake;
+        impl Wake for PanicWake {
+            fn wake(self: Arc<Self>) {
+                panic!("simulated permit waker panic");
+            }
+        }
+
+        struct CountingWake(AtomicUsize);
+        impl Wake for CountingWake {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let permits = AppendPermits::new(Some(2), 100);
+        let p1 = permits.try_acquire(100).unwrap();
+
+        // Waiter 1 (re-entrant waker reading `in_flight_bytes()`), Waiter 2 (panics on wake),
+        // Waiter 3 (normal counting waker).
+        let mut f1 = Box::pin(permits.acquire(40));
+        let mut f2 = Box::pin(permits.acquire(30));
+        let mut f3 = Box::pin(permits.acquire(30));
+
+        let reentrant = Arc::new(ReentrantWake {
+            permits: permits.clone(),
+            observed_in_flight: AtomicUsize::new(usize::MAX),
+        });
+        let w1 = Waker::from(reentrant.clone());
+        assert!(f1.as_mut().poll(&mut Context::from_waker(&w1)).is_pending());
+
+        let w2 = Waker::from(Arc::new(PanicWake));
+        assert!(f2.as_mut().poll(&mut Context::from_waker(&w2)).is_pending());
+
+        let c3 = Arc::new(CountingWake(AtomicUsize::new(0)));
+        let w3 = Waker::from(c3.clone());
+        assert!(f3.as_mut().poll(&mut Context::from_waker(&w3)).is_pending());
+
+        // Dropping p1 releases 100 bytes + 1 batch slot -> grants f1 (40 bytes) & f2 (30 bytes),
+        // leaving 0 batch slots for f3. Neither the re-entrant lock read nor f2's panic may
+        // deadlock or skip waking f1 / keeping accounting consistent.
+        drop(p1);
+        assert_eq!(reentrant.observed_in_flight.load(Ordering::SeqCst), 70);
+
+        // Dropping f2 without polling refunds its already-delivered grant (30 bytes + 1 batch slot)
+        // and immediately grants f3.
+        drop(f2);
+        assert_eq!(c3.0.load(Ordering::SeqCst), 1);
+
+        let g1 = match f1.as_mut().poll(&mut Context::from_waker(&w1)) {
+            std::task::Poll::Ready(p) => p,
+            std::task::Poll::Pending => panic!("f1 must be granted"),
+        };
+        let g3 = match f3.as_mut().poll(&mut Context::from_waker(&w3)) {
+            std::task::Poll::Ready(p) => p,
+            std::task::Poll::Pending => panic!("f3 must be granted after f2 refund"),
+        };
+        assert_eq!(permits.in_flight_bytes(), 70);
+        drop(g1);
+        drop(g3);
+        assert_eq!(permits.in_flight_bytes(), 0);
+        assert!(permits.try_acquire(100).is_some());
+    }
+
+    #[test]
+    fn lifecycle_close_waker_reentering_gate_does_not_deadlock() {
+        use std::{
+            sync::Mutex as StdMutex,
+            task::{Context, Wake, Waker},
+        };
+
+        use super::SessionLifecycle;
+
+        struct ReenterGateWake {
+            gate: Arc<StdMutex<u64>>,
+            lifecycle: Arc<SessionLifecycle>,
+            woken: AtomicUsize,
+        }
+        impl Wake for ReenterGateWake {
+            fn wake(self: Arc<Self>) {
+                // Re-acquiring the acceptance gate inside the closing waker must not deadlock.
+                let _g = self.gate.lock().unwrap();
+                let (marked, wake) = self.lifecycle.mark_closing();
+                assert!(!marked);
+                wake.fire();
+                self.woken.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let gate = Arc::new(StdMutex::new(0u64));
+        let lifecycle = Arc::new(SessionLifecycle::new());
+        let mut wait = Box::pin(lifecycle.wait_closing_or_closed());
+        let hook = Arc::new(ReenterGateWake {
+            gate: gate.clone(),
+            lifecycle: lifecycle.clone(),
+            woken: AtomicUsize::new(0),
+        });
+        let waker = Waker::from(hook.clone());
+        assert!(
+            wait.as_mut()
+                .poll(&mut Context::from_waker(&waker))
+                .is_pending()
+        );
+
+        let wake = {
+            let _g = gate.lock().unwrap();
+            let (marked, wake) = lifecycle.mark_closing();
+            assert!(marked);
+            wake
+        };
+        wake.fire();
+        assert_eq!(hook.woken.load(Ordering::SeqCst), 1);
+        assert!(
+            wait.as_mut()
+                .poll(&mut Context::from_waker(&waker))
+                .is_ready()
+        );
+    }
+
+    #[test]
+    fn append_session_task_drop_isolates_panicking_ticket_waker() {
+        use std::{
+            collections::VecDeque,
+            pin::Pin,
+            sync::Mutex as StdMutex,
+            task::{Context, Wake, Waker},
+        };
+
+        use super::{
+            AppendSessionTask, BatchSubmitTicket, Command, SentTracker, SessionAbort,
+            SessionLifecycle, SessionState, SubmitTicket,
+        };
+        use crate::{
+            api::{BaseClient, BasinClient},
+            client::CancellationToken,
+            types::{BasinName, S2Config, S2Endpoints, StreamName},
+        };
+
+        struct PanicWake;
+        impl Wake for PanicWake {
+            fn wake(self: Arc<Self>) {
+                panic!("simulated ticket waker panic");
+            }
+        }
+        struct CountingWake(AtomicUsize);
+        impl Wake for CountingWake {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let endpoints = S2Endpoints::for_endpoint("http://localhost:8080").unwrap();
+        let cfg = S2Config::new("test-token").with_endpoints(endpoints.clone());
+        let base = BaseClient::init(&cfg).unwrap();
+        let basin: BasinName = "test-basin".parse().unwrap();
+        let stream: StreamName = "test-stream".parse().unwrap();
+        let client = BasinClient::init(basin, &endpoints, base);
+        let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+        let lifecycle = Arc::new(SessionLifecycle::new());
+        let unacked_batches = Arc::new(AtomicUsize::new(2));
+        let context = ErrorContext::default();
+
+        let (tx0, rx0) = tokio::sync::oneshot::channel();
+        let (tx1, rx1) = tokio::sync::oneshot::channel();
+        cmd_tx
+            .send(Command::Submit {
+                seq: 0,
+                frame: Bytes::new(),
+                record_count: 1,
+                ack_tx: tx0,
+                permit: None,
+            })
+            .unwrap();
+        cmd_tx
+            .send(Command::Submit {
+                seq: 1,
+                frame: Bytes::new(),
+                record_count: 1,
+                ack_tx: tx1,
+                permit: None,
+            })
+            .unwrap();
+
+        let mut t0 = BatchSubmitTicket {
+            ticket: SubmitTicket::new(rx0, lifecycle.clone(), context.clone(), "dropped"),
+            submit_seq: 0,
+        };
+        let mut t1 = BatchSubmitTicket {
+            ticket: SubmitTicket::new(rx1, lifecycle.clone(), context.clone(), "dropped"),
+            submit_seq: 1,
+        };
+
+        let w0 = Waker::from(Arc::new(PanicWake));
+        assert!(
+            Pin::new(&mut t0)
+                .poll(&mut Context::from_waker(&w0))
+                .is_pending()
+        );
+        let c1 = Arc::new(CountingWake(AtomicUsize::new(0)));
+        let w1 = Waker::from(c1.clone());
+        assert!(
+            Pin::new(&mut t1)
+                .poll(&mut Context::from_waker(&w1))
+                .is_pending()
+        );
+
+        let task = AppendSessionTask {
+            client,
+            stream,
+            headers: super::StreamHeaders::default(),
+            op: "append_session",
+            gate: Arc::new(StdMutex::new(2)),
+            lifecycle: lifecycle.clone(),
+            sent_tracker: SentTracker::new(),
+            abort: SessionAbort::new(CancellationToken::new(), "aborted", "dropped"),
+            context,
+            state: SessionState {
+                cmd_rx,
+                inflight_appends: VecDeque::new(),
+                closing: false,
+                prev_ack_end: None,
+                unacked_batches: unacked_batches.clone(),
+            },
+            active_attempt: None,
+        };
+        drop(task);
+
+        assert_eq!(unacked_batches.load(Ordering::Acquire), 0);
+        assert!(lifecycle.is_closed());
+        assert!(matches!(
+            lifecycle.terminal_err(),
+            Some(AppendSessionError::Aborted(_))
+        ));
+        assert_eq!(c1.0.load(Ordering::SeqCst), 1);
+        let err1 = t1.try_ack().expect("t1 settled").unwrap_err();
+        assert!(
+            matches!(
+                err1,
+                AppendSessionError::SessionClosed(ref sc)
+                    if matches!(sc.failure(), Some(AppendSessionError::Aborted(_)))
+            ),
+            "{err1:?}"
+        );
     }
 }

@@ -2762,3 +2762,223 @@ fn explicit_abort_before_first_poll_then_runtime_shutdown_preserves_a6a_and_a8c(
         ));
     });
 }
+
+#[test]
+fn producer_stalled_handshake_runtime_shutdown_classifies_unsent_and_close_in_both_drop_orders() {
+    // Hold a raw TCP socket open without completing the HTTP/2 handshake so the producer's
+    // accepted batch is submitted to the owned AppendSessionCore but provably never sent on the
+    // wire. Varying the number of preceding tasks exercises both Tokio task drop orders
+    // (AppendSessionTask-first and ProducerTask-first).
+    let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = std_listener.local_addr().unwrap();
+    std_listener.set_nonblocking(true).unwrap();
+
+    for pad_tasks in 0..32usize {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let std_listener_clone = std_listener.try_clone().unwrap();
+
+        let (producer, mut ticket, flush_handle) = rt.block_on(async move {
+            let listener = tokio::net::TcpListener::from_std(std_listener_clone).unwrap();
+            let _accept_task = tokio::spawn(async move {
+                let mut held = Vec::new();
+                while let Ok((sock, _)) = listener.accept().await {
+                    held.push(sock);
+                }
+            });
+
+            // Vary Tokio's task list ordering between ProducerTask and AppendSessionTask.
+            let mut pad = Vec::with_capacity(pad_tasks);
+            for _ in 0..pad_tasks {
+                pad.push(tokio::spawn(std::future::pending::<()>()));
+            }
+
+            let endpoint = format!("http://{addr}");
+            let client = s2_sdk::S2::new(
+                s2_sdk::types::S2Config::new("test-token")
+                    .with_endpoints(s2_sdk::types::S2Endpoints::for_endpoint(&endpoint).unwrap())
+                    .with_connection_timeout(Duration::from_secs(30))
+                    .unwrap()
+                    .with_request_timeout(Duration::from_secs(30))
+                    .unwrap(),
+            )
+            .unwrap();
+            let stream = client
+                .basin("test-basin".parse().unwrap())
+                .stream("test-stream".parse().unwrap());
+            let producer = stream
+                .producer(ProducerConfig::new().with_linger(Duration::ZERO))
+                .unwrap();
+
+            let ticket = producer
+                .submit(AppendRecord::new("stalled-handshake").unwrap())
+                .await
+                .unwrap();
+            // Let ProducerTask submit the batch to AppendSessionCore and begin dialing.
+            for _ in 0..10 {
+                tokio::task::yield_now().await;
+            }
+            let flush_fut = Box::pin(async {
+                // Keep a reference to check flush() after shutdown via a fresh runtime below.
+            });
+            drop(flush_fut);
+            (producer, ticket, pad)
+        });
+        drop(flush_handle);
+        drop(rt);
+
+        // Record ticket MUST report definite `SessionClosedError { failure: Some(Aborted) }`.
+        let ticket_err = ticket
+            .try_ack()
+            .expect("ticket must be settled after runtime drop")
+            .unwrap_err();
+        assert!(
+            matches!(
+                ticket_err,
+                AppendSessionError::SessionClosed(ref sc)
+                    if matches!(sc.failure(), Some(AppendSessionError::Aborted(_)))
+            ),
+            "pad={pad_tasks}: expected SessionClosed(Some(Aborted)) on ticket, got {ticket_err:?}"
+        );
+        assert!(ticket_err.has_no_side_effects(), "pad={pad_tasks}");
+        assert_eq!(producer.unacked_records(), 0, "pad={pad_tasks}");
+        assert_eq!(producer.unacked_bytes(), 0, "pad={pad_tasks}");
+
+        // Producer `close()` and `flush()` MUST return `AbortedError`, never `SessionClosedError`.
+        let rt2 = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt2.block_on(async {
+            let close_err = producer.close().await.unwrap_err();
+            assert!(
+                matches!(close_err, AppendSessionError::Aborted(_)),
+                "pad={pad_tasks}: expected Aborted from close(), got {close_err:?}"
+            );
+            let flush_err = producer.flush().await.unwrap_err();
+            assert!(
+                matches!(flush_err, AppendSessionError::Aborted(_)),
+                "pad={pad_tasks}: expected Aborted from flush(), got {flush_err:?}"
+            );
+        });
+    }
+}
+
+#[tokio::test]
+async fn close_waking_reentrant_reserve_waker_does_not_deadlock_session_or_producer() {
+    use std::{
+        future::Future,
+        sync::Arc,
+        task::{Context, Wake, Waker},
+    };
+
+    // 1. AppendSession: blocked reserve()'s waker synchronously polls a second close().
+    {
+        let server =
+            MockH2Server::start(|_conn_id, _req, _respond| std::future::pending::<()>()).await;
+        let client = server.client(RetryConfig::new());
+        let stream = client
+            .basin("test-basin".parse().unwrap())
+            .stream("test-stream".parse().unwrap());
+        let session = Arc::new(
+            stream
+                .append_session(
+                    AppendSessionConfig::new()
+                        .with_max_unacked_batches(1)
+                        .unwrap(),
+                )
+                .unwrap(),
+        );
+        let permit = session.reserve(1024).await.unwrap();
+
+        struct ReenterSessionClose {
+            session: Arc<AppendSession>,
+            woken: std::sync::atomic::AtomicUsize,
+        }
+        impl Wake for ReenterSessionClose {
+            fn wake(self: Arc<Self>) {
+                let mut f = Box::pin(self.session.close());
+                let noop = Waker::noop();
+                let _ = f.as_mut().poll(&mut Context::from_waker(noop));
+                self.woken.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        let hook = Arc::new(ReenterSessionClose {
+            session: session.clone(),
+            woken: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let waker = Waker::from(hook.clone());
+        let mut blocked_reserve = Box::pin(session.reserve(1024));
+        assert!(
+            blocked_reserve
+                .as_mut()
+                .poll(&mut Context::from_waker(&waker))
+                .is_pending()
+        );
+
+        session.close().await.unwrap();
+        assert!(hook.woken.load(std::sync::atomic::Ordering::SeqCst) >= 1);
+        assert!(matches!(
+            blocked_reserve.await,
+            Err(AppendSessionError::SessionClosed(_))
+        ));
+        drop(permit);
+    }
+
+    // 2. Producer: blocked reserve()'s waker synchronously polls a second close().
+    {
+        let server =
+            MockH2Server::start(|_conn_id, _req, _respond| std::future::pending::<()>()).await;
+        let client = server.client(RetryConfig::new());
+        let stream = client
+            .basin("test-basin".parse().unwrap())
+            .stream("test-stream".parse().unwrap());
+        let producer = Arc::new(
+            stream
+                .producer(
+                    ProducerConfig::new()
+                        .with_max_unacked_bytes(1024 * 1024)
+                        .unwrap(),
+                )
+                .unwrap(),
+        );
+        let permit = producer.reserve(1024 * 1024).await.unwrap();
+
+        struct ReenterProducerClose {
+            producer: Arc<s2_sdk::producer::Producer>,
+            woken: std::sync::atomic::AtomicUsize,
+        }
+        impl Wake for ReenterProducerClose {
+            fn wake(self: Arc<Self>) {
+                let mut f = Box::pin(self.producer.close());
+                let noop = Waker::noop();
+                let _ = f.as_mut().poll(&mut Context::from_waker(noop));
+                self.woken.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        let hook = Arc::new(ReenterProducerClose {
+            producer: producer.clone(),
+            woken: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let waker = Waker::from(hook.clone());
+        let mut blocked_reserve = Box::pin(producer.reserve(1024));
+        assert!(
+            blocked_reserve
+                .as_mut()
+                .poll(&mut Context::from_waker(&waker))
+                .is_pending()
+        );
+
+        producer.close().await.unwrap();
+        assert!(hook.woken.load(std::sync::atomic::Ordering::SeqCst) >= 1);
+        assert!(matches!(
+            blocked_reserve.await,
+            Err(AppendSessionError::SessionClosed(_))
+        ));
+        drop(permit);
+    }
+}
