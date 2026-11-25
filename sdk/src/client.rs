@@ -44,7 +44,7 @@ use crate::{
 };
 
 const APPLICATION_JSON: HeaderValue = HeaderValue::from_static("application/json");
-const DEFAULT_MAX_CONCURRENT_REQUESTS_PER_CONNECTION: usize = 50;
+pub(crate) const DEFAULT_MAX_CONCURRENT_REQUESTS_PER_CONNECTION: usize = 50;
 // 50 concurrent streams × 4 MiB = 200 MiB < 256 MiB, so paused read sessions on a shared
 // connection cannot exhaust the connection-level flow-control window and stall sibling appends
 // or unary calls.
@@ -1585,13 +1585,9 @@ fn effective_max_concurrent_requests(http2_config: Http2Config) -> usize {
     let configured = http2_config
         .max_concurrent_requests
         .unwrap_or(DEFAULT_MAX_CONCURRENT_REQUESTS_PER_CONNECTION);
-    if http2_config.connection_receive_window.is_none() {
-        let (stream_window, conn_window) = effective_receive_windows(http2_config);
-        let window_fit = (conn_window / stream_window).max(1) as usize;
-        configured.min(window_fit)
-    } else {
-        configured
-    }
+    let (stream_window, conn_window) = effective_receive_windows(http2_config);
+    let window_fit = (conn_window / stream_window).max(1) as usize;
+    configured.min(window_fit)
 }
 
 async fn dial_http2<C: Connect>(
@@ -2808,12 +2804,19 @@ mod tests {
         );
         assert_eq!(effective_max_concurrent_requests(cfg), 31);
 
-        // Explicit connection_receive_window override is always honored verbatim.
+        // Explicit connection_receive_window meeting C13d is honored verbatim, while
+        // defense-in-depth clamping still bounds concurrency if constructed without validate().
         let cfg = Http2Config::new()
-            .with_max_concurrent_requests(100)
+            .with_max_concurrent_requests(16)
             .with_connection_receive_window(64 * MIB);
         assert_eq!(effective_receive_windows(cfg), (4 * MIB, 64 * MIB));
-        assert_eq!(effective_max_concurrent_requests(cfg), 100);
+        assert_eq!(effective_max_concurrent_requests(cfg), 16);
+
+        let undersized = Http2Config::new()
+            .with_max_concurrent_requests(100)
+            .with_connection_receive_window(64 * MIB);
+        assert_eq!(effective_receive_windows(undersized), (4 * MIB, 64 * MIB));
+        assert_eq!(effective_max_concurrent_requests(undersized), 16);
     }
 
     // spec: r1 C13a

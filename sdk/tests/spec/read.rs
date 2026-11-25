@@ -854,11 +854,15 @@ async fn spec_t7d_read_session_heartbeat_timeout_and_backpressure_pause() {
                 s2s.send_raw(frame1.slice(mid1..mid2), false);
                 frag2_sent.notify_one();
                 send_frag3.notified().await;
-                s2s.send_raw(frame1.slice(mid2..), false);
-                // Start a second frame then go permanently silent mid-frame.
+                // Coalesce the end of frame 1 with the leading 4 bytes of frame 2 into one chunk
+                // so frame 2's partial prefix is guaranteed already read into the client before
+                // the silence-timeout wait begins (no loopback delivery race).
                 let frame2 =
                     encode_s2s_regular_frame(&proto_read_batch_records(&[2], Some(3)), false);
-                s2s.send_raw(frame2.slice(..4), false);
+                let mut tail_plus_head = Vec::with_capacity(frame1.len() - mid2 + 4);
+                tail_plus_head.extend_from_slice(&frame1[mid2..]);
+                tail_plus_head.extend_from_slice(&frame2[..4]);
+                s2s.send_raw(bytes::Bytes::from(tail_plus_head), false);
                 std::future::pending::<()>().await;
             }
         }
@@ -1914,4 +1918,88 @@ async fn regression_read_session_stops_on_exhausted_count_and_rejects_u64_max_se
         rendered.contains("after 2 attempts"),
         "E7: ProtocolError after retry must report attempt count, got: {rendered}"
     );
+}
+
+// spec: r1 C13d, R6b
+#[tokio::test]
+async fn spec_c13d_parked_reader_with_explicit_windows_does_not_stall_sibling_calls() {
+    let flood_started = Arc::new(tokio::sync::Notify::new());
+    let server = MockH2Server::start({
+        let flood_started = flood_started.clone();
+        move |_conn_id, req, respond| {
+            let flood_started = flood_started.clone();
+            async move {
+                if req.uri().path().ends_with("/records/tail") {
+                    send_tail_json(respond, 200, 42, 1000);
+                    return;
+                }
+                let Some(mut s2s) = S2sResponder::open(respond) else {
+                    return;
+                };
+                // Send record 0 so the reader consumes one record and parks, then push > 64 KiB of
+                // follow-up frames to saturate the reader's 64 KiB stream receive window.
+                s2s.send_regular(&proto_read_batch_records(&[0], Some(1)), false, false);
+                flood_started.notify_one();
+                use prost::Message as _;
+                use s2_api::v1::stream::proto::{
+                    ReadBatch as ProtoReadBatch, SequencedRecord as ProtoSequencedRecord,
+                    StreamPosition as ProtoStreamPosition,
+                };
+                let payload = bytes::Bytes::from(vec![b'x'; 16 * 1024]);
+                for seq in 1u64..12 {
+                    let batch = ProtoReadBatch {
+                        records: vec![ProtoSequencedRecord {
+                            seq_num: seq,
+                            timestamp: 1000,
+                            headers: Vec::new(),
+                            body: payload.clone(),
+                        }],
+                        tail: Some(ProtoStreamPosition {
+                            seq_num: seq + 1,
+                            timestamp: 1000,
+                        }),
+                    }
+                    .encode_to_vec();
+                    s2s.send_regular(&batch, false, false);
+                }
+                std::future::pending::<()>().await;
+            }
+        }
+    })
+    .await;
+
+    let stream = server.stream_with(|cfg| {
+        cfg.with_retry(no_retry_config())
+            .with_request_timeout(Duration::from_secs(2))
+            .with_http2(
+                s2_sdk::types::Http2Config::new()
+                    .with_max_concurrent_requests(2)
+                    .with_stream_receive_window(64 * 1024)
+                    .with_connection_receive_window(128 * 1024),
+            )
+    });
+
+    let mut parked_reader = stream
+        .read_session(
+            ReadInput::new().with_start(ReadStart::SeqNum(0)),
+            ReadSessionConfig::default(),
+        )
+        .unwrap();
+    assert_eq!(parked_reader.next().await.unwrap().unwrap().seq_num, 0);
+    flood_started.notified().await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Sibling unary check_tail sharing the same connection must complete promptly without
+    // stalling behind the parked reader's saturated 64 KiB stream window (`C13d`).
+    let tail = tokio::time::timeout(Duration::from_secs(2), stream.check_tail())
+        .await
+        .expect("C13d: sibling check_tail must not stall behind parked reader")
+        .unwrap();
+    assert_eq!(tail.seq_num, 42);
+    assert_eq!(
+        server.connection_count(),
+        1,
+        "explicit C13d-valid 2-stream window must share one connection without stalling"
+    );
+    drop(parked_reader);
 }

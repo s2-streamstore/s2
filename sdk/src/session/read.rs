@@ -962,7 +962,9 @@ impl PollTransport {
 struct ReadSessionCore {
     basin: BasinName,
     stream: StreamName,
-    client: BasinClient,
+    /// Released once the session can no longer open new requests so a retained finished session
+    /// does not keep the underlying client / HTTP/2 connection pool alive (`C12`).
+    client: Option<BasinClient>,
     headers: StreamHeaders,
     start: ReadStart,
     end: ReadEnd,
@@ -1024,7 +1026,7 @@ impl ReadSessionCore {
         Self {
             basin,
             stream: name,
-            client,
+            client: Some(client),
             headers,
             start,
             end,
@@ -1080,6 +1082,10 @@ impl ReadSessionCore {
             }
         };
         wakes.wake();
+        // Release `BasinClient` only *after* `inner.closed` and `RequestPhase::Ended` are
+        // committed, so dropping the last client handle (`C12`) cannot cancel `shutdown` while the
+        // session is still open.
+        self.client = None;
         out
     }
 
@@ -1121,7 +1127,10 @@ impl ReadSessionCore {
             next_seq_num = ?self.start.seq_num,
             "opening read session request"
         );
-        let client = self.client.clone();
+        let client = self
+            .client
+            .clone()
+            .expect("active read session holds BasinClient");
         let name = self.stream.clone();
         let headers = self.headers.clone();
         let start = self.start.clone();
@@ -1473,7 +1482,11 @@ impl ReadSessionCore {
                     // messages already buffered by HTTP/2 are read before timing out.
                     match Pin::new(&mut attempt.stream).poll_next(cx) {
                         Poll::Ready(Some(Ok(frame))) => {
-                            attempt.last_chunks_received = attempt.stream.chunks_received();
+                            let chunks_now = attempt.stream.chunks_received();
+                            if chunks_now != attempt.last_chunks_received {
+                                attempt.last_chunks_received = chunks_now;
+                                heartbeat.reset();
+                            }
                             let batch = ReadBatch::from_proto(frame.msg);
                             let reconnect_advised = frame.reconnect_advised;
                             match self.handle_decoded_batch(batch, reconnect_advised) {
@@ -2204,6 +2217,7 @@ mod tests {
 
         assert!(session.next().await.is_none());
         assert!(!session.is_caught_up());
+        assert!(session.core.client.is_none());
         assert_eq!(session.next_seq_num(), Some(2));
         assert_eq!(session.last_observed_tail(), Some(position(2)));
         assert_eq!(cu_while_caught.await.unwrap(), position(2));
@@ -2801,7 +2815,70 @@ mod tests {
             session.next().await,
             Some(Err(ReadSessionError::Protocol(_)))
         ));
+        assert!(session.core.client.is_none());
         assert_eq!(state.next_seq_num(), Some(12));
+    }
+
+    // spec: r1 T7d, T5a
+    #[tokio::test(start_paused = true)]
+    async fn empty_frame_with_chunk_progress_resets_heartbeat_timer_without_resetting_retry_budget()
+    {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let config = S2Config::new("test-token")
+            .with_endpoints(S2Endpoints::for_endpoint("http://127.0.0.1:1").unwrap())
+            .with_retry(RetryConfig::new().with_max_attempts(2));
+        let base = BaseClient::init(&config).unwrap();
+        let basin = BasinClient::init(
+            "test-basin".parse().unwrap(),
+            &config.endpoints,
+            base.clone(),
+        );
+        let mut session = ReadSession::open(
+            basin,
+            "test-stream".parse().unwrap(),
+            StreamHeaders::default(),
+            ReadInput::new().with_start(crate::types::ReadStart::SeqNum(0)),
+            ReadSessionConfig::default(),
+        );
+        // Simulate one failed attempt already consumed so retry budget is on attempt 2.
+        assert!(session.core.retry_backoff.next().is_some());
+        assert_eq!(session.core.retry_backoff.attempt_number(), 2);
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let chunks = Arc::new(AtomicU64::new(0));
+        let stream = Streaming::from_stream_with_chunks_for_test(
+            futures_util::stream::poll_fn(move |cx| rx.poll_recv(cx)),
+            chunks.clone(),
+        );
+        session.core.transport_mut().phase = DriverPhase::Active(ActiveAttempt {
+            stream,
+            made_progress: false,
+            fetched_record: false,
+            last_chunks_received: 0,
+        });
+
+        let mut next = Box::pin(session.next());
+        assert!(poll!(next.as_mut()).is_pending());
+
+        // Advance 15s, then deliver an empty frame whose transport chunk incremented `chunks`.
+        tokio::time::advance(Duration::from_secs(15)).await;
+        assert!(poll!(next.as_mut()).is_pending());
+        chunks.fetch_add(1, Ordering::Relaxed);
+        tx.send(Ok(S2sFrame {
+            msg: proto_batch(&[], None),
+            reconnect_advised: false,
+        }))
+        .unwrap();
+        assert!(poll!(next.as_mut()).is_pending());
+
+        // Advance another 15s (30s total, but only 15s since bytes arrived) -> must NOT time out!
+        tokio::time::advance(Duration::from_secs(15)).await;
+        assert!(poll!(next.as_mut()).is_pending());
+        drop(next);
+
+        // Retry budget was NOT reset by the empty frame (`T5a`).
+        assert_eq!(session.core.retry_backoff.attempt_number(), 2);
     }
 
     // spec: r1 R5

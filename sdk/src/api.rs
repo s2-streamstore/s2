@@ -96,10 +96,21 @@ impl<R, E> Streaming<R, E> {
     where
         S: Stream<Item = Result<S2sFrame<R>, E>> + Send + 'static,
     {
+        Self::from_stream_with_chunks_for_test(stream, Arc::new(AtomicU64::new(0)))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_stream_with_chunks_for_test<S>(
+        stream: S,
+        chunks_received: Arc<AtomicU64>,
+    ) -> Self
+    where
+        S: Stream<Item = Result<S2sFrame<R>, E>> + Send + 'static,
+    {
         Self {
             stream: Box::pin(stream),
             retire_handle: client::RetireHandle::noop(),
-            chunks_received: Arc::new(AtomicU64::new(0)),
+            chunks_received,
         }
     }
 }
