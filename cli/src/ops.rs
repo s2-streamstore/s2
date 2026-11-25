@@ -3,6 +3,7 @@ use std::time::Duration;
 use futures::{Stream, StreamExt, TryStreamExt, stream::FuturesOrdered};
 use s2_sdk::{
     self as sdk, S2, S2Stream,
+    error::{ErrorCode, StatusCode},
     producer::{ProducerConfig, RecordAck},
     read_session::{ReadBatchSession, ReadSessionConfig},
     types::{
@@ -400,6 +401,25 @@ pub async fn get_default_location(s2: &S2) -> Result<LocationInfo, CliError> {
     s2.get_default_location()
         .await
         .map_err(|e| CliError::op(OpKind::GetDefaultLocation, e))
+}
+
+/// Returns the default storage class for the account's default location, or `None` when location
+/// discovery is unavailable (for example against `s2-lite` or with a token lacking permission).
+pub async fn default_storage_class(s2: &S2) -> Result<Option<String>, CliError> {
+    match s2.get_default_location().await {
+        Ok(location) => Ok(location.default_storage_class),
+        Err(error)
+            if error.server_error().is_some_and(|error| {
+                matches!(
+                    error.known_code(),
+                    Some(ErrorCode::NotImplemented | ErrorCode::PermissionDenied)
+                ) || error.status == StatusCode::NOT_FOUND
+            }) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(CliError::op(OpKind::GetDefaultLocation, error)),
+    }
 }
 
 pub async fn set_default_location(
