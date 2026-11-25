@@ -2104,6 +2104,7 @@ where
                 self.0.store(false, Ordering::Release);
             }
         }
+        drop(slot.take());
         self.reaper_alive.store(true, Ordering::Release);
         let alive_guard = ReaperAliveGuard(self.reaper_alive.clone());
         let hosts = self.hosts.clone();

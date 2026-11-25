@@ -1163,8 +1163,13 @@ impl Drop for ProducerTask {
         if self.shared.lifecycle.is_closed() {
             return;
         }
+        let reason = if self.shared.abort.is_cancelled() {
+            self.shared.abort.reason()
+        } else {
+            DROPPED_ABORT_MSG
+        };
         let aborted = AppendSessionError::Aborted(AbortedError::new_with_context(
-            DROPPED_ABORT_MSG,
+            reason,
             self.shared.context.clone(),
         ));
         let (queued_cmds, partial_batch, err) = {

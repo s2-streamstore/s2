@@ -1532,8 +1532,13 @@ impl Drop for AppendSessionTask {
         if self.lifecycle.is_closed() {
             return;
         }
+        let reason = if self.abort.is_cancelled() {
+            self.abort.reason()
+        } else {
+            self.abort.dropped_msg()
+        };
         let aborted = AppendSessionError::Aborted(AbortedError::new_with_context(
-            self.abort.dropped_msg(),
+            reason,
             self.context.clone(),
         ));
         let (queued, err) = {
@@ -1908,7 +1913,22 @@ impl AppendSessionTask {
         advised_reconnects: &mut AdvisedReconnects,
         attempt: u32,
     ) -> AttemptResult {
+        struct StopAttemptOnDrop(Option<Arc<AttemptSync>>);
+        impl StopAttemptOnDrop {
+            fn disarm(&mut self) {
+                self.0 = None;
+            }
+        }
+        impl Drop for StopAttemptOnDrop {
+            fn drop(&mut self) {
+                if let Some(sync) = self.0.take() {
+                    sync.stop();
+                }
+            }
+        }
+
         let sync = AttemptSync::new();
+        let mut stop_guard = StopAttemptOnDrop(Some(sync.clone()));
         let (input_tx, input_rx) = mpsc::channel::<Bytes>(16);
         let body_stream = AttemptBodyStream::new(input_rx, sync.clone());
 
@@ -1954,6 +1974,7 @@ impl AppendSessionTask {
 
         loop {
             if self.state.is_close_complete() {
+                stop_guard.disarm();
                 drop(input_tx);
                 drop(acks);
                 return AttemptResult::Closed;
@@ -2008,6 +2029,7 @@ impl AppendSessionTask {
                 && !draining_for_reconnect
                 && self.state.inflight_appends.is_empty()
             {
+                stop_guard.disarm();
                 drop(acks);
                 return AttemptResult::IdleEnded;
             }
@@ -2072,8 +2094,10 @@ impl AppendSessionTask {
                                         drop_input_tx = true;
                                     }
                                     if draining_for_reconnect
+                                        && !self.abort.is_cancelled()
                                         && sync.batches_started() <= acked_in_attempt
                                     {
+                                        stop_guard.disarm();
                                         drop(acks);
                                         return AttemptResult::ReconnectAdvised;
                                     }
