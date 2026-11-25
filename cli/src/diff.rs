@@ -99,7 +99,7 @@ pub async fn run(s2: &s2_sdk::S2, args: DiffArgs) -> Result<DiffOutcome, CliErro
             )?;
             let default_sc =
                 if needs_default_storage_class_for_stream_diff(&basin_config, &stream_config) {
-                    ops::default_storage_class(s2).await?
+                    ops::basin_default_storage_class(s2, &basin).await?
                 } else {
                     None
                 };
@@ -112,7 +112,7 @@ pub async fn run(s2: &s2_sdk::S2, args: DiffArgs) -> Result<DiffOutcome, CliErro
             )?;
             let default_sc =
                 if needs_default_storage_class_for_stream_diff(&basin_config, &stream_config) {
-                    ops::default_storage_class(s2).await?
+                    ops::basin_default_storage_class(s2, &basin).await?
                 } else {
                     None
                 };

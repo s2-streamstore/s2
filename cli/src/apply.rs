@@ -1,6 +1,6 @@
 //! Declarative basin/stream configuration via a JSON spec file.
 
-use std::{path::Path, time::Duration};
+use std::{collections::HashMap, path::Path, time::Duration};
 
 use colored::Colorize;
 use s2_common::{
@@ -10,7 +10,7 @@ use s2_common::{
 };
 use s2_sdk::{
     error::{ErrorCode, RequestError},
-    types::{BasinConfig, StreamConfig},
+    types::{BasinConfig, LocationName, StreamConfig},
 };
 
 use crate::{
@@ -572,66 +572,98 @@ fn print_stream_create(basin: &str, stream: &str, spec: &Option<s2_resource_spec
 pub async fn dry_run(s2: &s2_sdk::S2, spec: s2_resource_spec::Resources) -> miette::Result<()> {
     validate(&spec)?;
 
-    let needs_location_default = spec.basins.iter().any(|basin| {
-        basin
-            .config
-            .as_ref()
-            .and_then(|config| config.default_stream_config.as_ref())
-            .and_then(|config| config.storage_class.as_ref())
-            .is_none()
-    });
-    let default_storage_class = if needs_location_default {
-        ops::default_storage_class(s2)
-            .await
-            .map_err(|error| miette::miette!("failed to get default storage class: {error}"))?
-    } else {
-        None
-    };
+    let mut location_defaults: Option<Option<HashMap<LocationName, Option<String>>>> = None;
 
     for basin_spec in spec.basins {
-        let desired_basin_config = basin_spec
+        let raw_desired_basin_config = basin_spec
             .config
             .clone()
             .map(basin_config_to_sdk)
             .unwrap_or_default();
-        let mut desired_basin_defaults = desired_basin_config
+        let mut desired_basin_defaults = raw_desired_basin_config
             .default_stream_config()
             .cloned()
             .unwrap_or_default();
         let basin_spec_omits_storage_class = desired_basin_defaults.storage_class().is_none();
-        if basin_spec_omits_storage_class && let Some(ref sc) = default_storage_class {
-            desired_basin_defaults = desired_basin_defaults.with_storage_class(sc.clone());
-        }
-        let desired_basin_config =
-            desired_basin_config.with_default_stream_config(desired_basin_defaults.clone());
 
-        let (basin_action, existing_basin_storage_class) =
-            match s2.get_basin_config(basin_spec.name.clone()).await {
-                Ok(existing) => {
-                    let existing_sc = existing
-                        .default_stream_config()
-                        .and_then(|c| c.storage_class())
-                        .map(str::to_owned);
-                    let existing_default_sc = basin_spec_omits_storage_class
-                        .then_some(default_storage_class.as_deref())
-                        .flatten();
-                    let diffs =
-                        diff_basin_config(&existing, &desired_basin_config, existing_default_sc);
-                    let action = ResourceAction::from_diff(
-                        diffs,
-                        desired_basin_defaults.storage_class().is_none(),
-                    );
-                    (action, existing_sc)
+        let (basin_action, existing_basin_storage_class, basin_default_storage_class) = match s2
+            .get_basin_config(basin_spec.name.clone())
+            .await
+        {
+            Ok(existing) => {
+                let basin_default_storage_class = if basin_spec_omits_storage_class {
+                    let location =
+                        ops::basin_location(s2, &basin_spec.name)
+                            .await
+                            .map_err(|error| {
+                                miette::miette!(
+                                    "failed to look up location for basin {:?}: {error}",
+                                    basin_spec.name.as_ref()
+                                )
+                            })?;
+                    match location {
+                        Some(location) => {
+                            let map = match &location_defaults {
+                                Some(map) => map.as_ref(),
+                                None => {
+                                    let fetched = ops::list_locations_optional(s2)
+                                            .await
+                                            .map_err(|error| {
+                                                miette::miette!(
+                                                    "failed to list locations for default storage class: {error}"
+                                                )
+                                            })?
+                                            .map(|locations| {
+                                                locations
+                                                    .into_iter()
+                                                    .map(|loc| {
+                                                        (loc.name, loc.default_storage_class)
+                                                    })
+                                                    .collect::<HashMap<_, _>>()
+                                            });
+                                    location_defaults = Some(fetched);
+                                    location_defaults.as_ref().and_then(Option::as_ref)
+                                }
+                            };
+                            map.and_then(|map| map.get(&location).cloned().flatten())
+                        }
+                        None => None,
+                    }
+                } else {
+                    None
+                };
+
+                if basin_spec_omits_storage_class && let Some(ref sc) = basin_default_storage_class
+                {
+                    desired_basin_defaults = desired_basin_defaults.with_storage_class(sc.clone());
                 }
-                Err(e) if is_not_found_error(&e) => (ResourceAction::Create, None),
-                Err(e) => {
-                    return Err(miette::miette!(
-                        "failed to check basin {:?}: {}",
-                        basin_spec.name.as_ref(),
-                        e
-                    ));
-                }
-            };
+                let desired_basin_config = raw_desired_basin_config
+                    .with_default_stream_config(desired_basin_defaults.clone());
+
+                let existing_sc = existing
+                    .default_stream_config()
+                    .and_then(|c| c.storage_class())
+                    .map(str::to_owned);
+                let existing_default_sc = basin_spec_omits_storage_class
+                    .then_some(basin_default_storage_class.as_deref())
+                    .flatten();
+                let diffs =
+                    diff_basin_config(&existing, &desired_basin_config, existing_default_sc);
+                let action = ResourceAction::from_diff(
+                    diffs,
+                    desired_basin_defaults.storage_class().is_none(),
+                );
+                (action, existing_sc, basin_default_storage_class)
+            }
+            Err(e) if is_not_found_error(&e) => (ResourceAction::Create, None, None),
+            Err(e) => {
+                return Err(miette::miette!(
+                    "failed to check basin {:?}: {}",
+                    basin_spec.name.as_ref(),
+                    e
+                ));
+            }
+        };
 
         match &basin_action {
             ResourceAction::Create => {
@@ -660,7 +692,7 @@ pub async fn dry_run(s2: &s2_sdk::S2, spec: s2_resource_spec::Resources) -> miet
                     let existing_fallback_sc =
                         existing_basin_storage_class.as_deref().or_else(|| {
                             desired_uses_location_default
-                                .then_some(default_storage_class.as_deref())
+                                .then_some(basin_default_storage_class.as_deref())
                                 .flatten()
                         });
                     let existing = resolve_existing_stream_config(existing, existing_fallback_sc);
