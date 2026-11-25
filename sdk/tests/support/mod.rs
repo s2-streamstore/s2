@@ -329,16 +329,6 @@ pub fn send_tail_json(respond: SendResponse<Bytes>, status: u16, seq_num: u64, t
     );
 }
 
-pub async fn wait_until(timeout: Duration, mut pred: impl FnMut() -> bool, msg: &str) {
-    tokio::time::timeout(timeout, async {
-        while !pred() {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("timed out waiting: {msg}"));
-}
-
 pub async fn advance_virtual_time(duration: Duration) {
     tokio::time::pause();
     tokio::time::advance(duration).await;

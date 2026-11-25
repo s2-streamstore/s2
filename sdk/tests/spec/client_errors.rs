@@ -2417,8 +2417,26 @@ async fn with_retry_overrides_pool_sharing_and_validation() {
             ReadSessionConfig::default(),
         )
         .unwrap();
-    live_rs.caught_up().await.unwrap();
+    let mut live_cu = live_rs.caught_up();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::select! {
+            res = &mut live_cu => res.unwrap(),
+            item = live_rs.next() => panic!("unexpected record/end before catchup: {item:?}"),
+        }
+    })
+    .await
+    .expect("read session must catch up while iterating");
+    assert!(live_rs.is_caught_up());
+    let live_state = live_rs.state();
     base_s2.close();
+    assert!(
+        !live_state.is_caught_up(),
+        "C12/R9d: is_caught_up must clear immediately on S2::close() even while parked"
+    );
+    assert!(matches!(
+        live_state.caught_up().await,
+        Err(ReadSessionError::Aborted(_))
+    ));
     let abort_err = live_rs.next().await.unwrap().unwrap_err();
     assert!(
         matches!(abort_err, ReadSessionError::Aborted(_)),

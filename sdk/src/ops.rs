@@ -1083,16 +1083,12 @@ impl S2Stream {
     /// [`SequencedRecord`](crate::types::SequencedRecord)s.
     ///
     /// Accepts a [`ReadInput`] or a [`ReadStart`](crate::types::ReadStart).
-    /// Initiates the first request immediately without waiting for a response; request errors
-    /// surface through iteration.
+    /// Reading is pull-driven: opening sends no request, and the first request initiates on the
+    /// first pull. Request errors surface through iteration.
     ///
     /// # Errors
     ///
     /// Returns [`ClientClosedError`] if [`S2::close`] has already been called.
-    ///
-    /// # Panics
-    ///
-    /// Panics if called outside the context of a Tokio runtime.
     pub fn read_session(
         &self,
         input: impl Into<ReadInput>,
@@ -1113,16 +1109,12 @@ impl S2Stream {
     /// Create a continuous read session yielding whole non-empty [`ReadBatch`]es.
     ///
     /// Accepts a [`ReadInput`] or a [`ReadStart`](crate::types::ReadStart).
-    /// Initiates the first request immediately without waiting for a response; request errors
-    /// surface through iteration.
+    /// Reading is pull-driven: opening sends no request, and the first request initiates on the
+    /// first pull. Request errors surface through iteration.
     ///
     /// # Errors
     ///
     /// Returns [`ClientClosedError`] if [`S2::close`] has already been called.
-    ///
-    /// # Panics
-    ///
-    /// Panics if called outside the context of a Tokio runtime.
     pub fn read_batch_session(
         &self,
         input: impl Into<ReadInput>,

@@ -9,7 +9,7 @@ use std::{
 
 use s2_sdk::{
     error::{ReadError, ReadSessionError},
-    read_session::{ReadSession, ReadSessionConfig, ReadSessionRetryPolicy},
+    read_session::{ReadSessionConfig, ReadSessionRetryPolicy},
     types::{EncryptionKey, ReadInput, ReadStart},
 };
 
@@ -110,13 +110,15 @@ async fn spec_r2_r3_r4_unary_read_stop_options_empty_batch_416_and_check_tail() 
 // spec: r1 R5, R6, R6a, R6b, R6c, R7, R7a, R7b, R7c, R8, R8a, R8b, R8c, R8d
 #[tokio::test]
 async fn spec_r5_r6_r7_r8_read_session_records_batches_readahead_state_and_caught_up() {
+    use futures_util::FutureExt as _;
+
     let fast_retry = fast_retry_config(3);
 
-    // 1. R5 + R6 + R6c + R7 + R7a + R7b + R7c + R8 + R8a-R8d: Walk the exact spec Example table
-    //    over loopback HTTP/2 with a concurrent observer task!
+    // 1. R5 + R6 + R6c + R7 + R7a + R7b + R7c + R8 + R8a-R8d: Walk the exact pull-driven spec
+    //    Example table over loopback HTTP/2 with a concurrent observer task!
     let opened_notify = Arc::new(tokio::sync::Notify::new());
     let send_step4_hb = Arc::new(tokio::sync::Notify::new());
-    let send_step5_rec5 = Arc::new(tokio::sync::Notify::new());
+    let send_step5_rec5_6 = Arc::new(tokio::sync::Notify::new());
     let break_conn = Arc::new(tokio::sync::Notify::new());
     let allow_reconnect_hb = Arc::new(tokio::sync::Notify::new());
     let attempt_num = Arc::new(AtomicUsize::new(0));
@@ -124,14 +126,14 @@ async fn spec_r5_r6_r7_r8_read_session_records_batches_readahead_state_and_caugh
     let server = MockH2Server::start({
         let opened_notify = opened_notify.clone();
         let send_step4_hb = send_step4_hb.clone();
-        let send_step5_rec5 = send_step5_rec5.clone();
+        let send_step5_rec5_6 = send_step5_rec5_6.clone();
         let break_conn = break_conn.clone();
         let allow_reconnect_hb = allow_reconnect_hb.clone();
         let attempt_num = attempt_num.clone();
         move |_conn_id, _req, respond| {
             let opened_notify = opened_notify.clone();
             let send_step4_hb = send_step4_hb.clone();
-            let send_step5_rec5 = send_step5_rec5.clone();
+            let send_step5_rec5_6 = send_step5_rec5_6.clone();
             let break_conn = break_conn.clone();
             let allow_reconnect_hb = allow_reconnect_hb.clone();
             let attempt_num = attempt_num.clone();
@@ -149,16 +151,16 @@ async fn spec_r5_r6_r7_r8_read_session_records_batches_readahead_state_and_caugh
                         false,
                     );
                     send_step4_hb.notified().await;
-                    // Distinct timestamp lets the test verify step 4's heartbeat was received.
+                    // Distinct timestamp lets the test verify step 4's heartbeat was decoded.
                     s2s.send_regular(&proto_heartbeat_at(5, 2000), false, false);
-                    send_step5_rec5.notified().await;
-                    s2s.send_regular(&proto_read_batch_records(&[5], Some(6)), false, false);
+                    send_step5_rec5_6.notified().await;
+                    s2s.send_regular(&proto_read_batch_records(&[5, 6], Some(7)), false, false);
                     break_conn.notified().await;
                     // Break active request with RST_STREAM
                     s2s.reset(h2::Reason::INTERNAL_ERROR);
                 } else {
                     allow_reconnect_hb.notified().await;
-                    s2s.send_regular(&proto_heartbeat(6), false, false);
+                    s2s.send_regular(&proto_heartbeat(7), false, false);
                     std::future::pending::<()>().await;
                 }
             }
@@ -174,19 +176,27 @@ async fn spec_r5_r6_r7_r8_read_session_records_batches_readahead_state_and_caugh
             ReadSessionConfig::default(),
         )
         .expect("R5: sync open succeeds");
-    // R5: request initiates immediately WITHOUT polling session.next()!
-    tokio::time::timeout(Duration::from_secs(2), opened_notify.notified())
-        .await
-        .expect("R5: read_session must initiate first request immediately on open");
+    // R5: opening sends NO request until iteration first pulls!
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    assert_eq!(
+        attempt_num.load(Ordering::SeqCst),
+        0,
+        "R5: opening a read session must not send a request before the first pull"
+    );
 
     // R6c: concurrent ReadSessionState handle observed from another task while iterating.
     let state = session.state();
     assert_eq!(state.next_seq_num(), Some(0));
+    assert_eq!(state.last_observed_tail(), None);
     assert!(!state.is_caught_up());
     let cu1 = state.caught_up();
 
-    // Deliver record 0 -> next_seq_num=1, last_observed_tail=5, is_caught_up=false
+    // First pull initiates the request (`R5`) and delivers record 0 -> next_seq_num=1,
+    // last_observed_tail=5, is_caught_up=false.
     let r0 = session.next().await.unwrap().unwrap();
+    tokio::time::timeout(Duration::from_secs(2), opened_notify.notified())
+        .await
+        .expect("R5: first pull must initiate request");
     assert_eq!(r0.seq_num, 0);
     assert_eq!(state.next_seq_num(), Some(1));
     assert_eq!(state.last_observed_tail().unwrap().seq_num, 5);
@@ -216,59 +226,94 @@ async fn spec_r5_r6_r7_r8_read_session_records_batches_readahead_state_and_caugh
     let pinned_cu = state.caught_up();
     assert_eq!(pinned_cu.clone().await.unwrap().seq_num, 5);
 
-    // Heartbeat tail=5 (ts=2000) -> observed and still caught up
+    // Step 4: heartbeat tail=5 (ts=2000) is NOT decoded while parked, and IS decoded while
+    // pulling at the tail (keeping is_caught_up=true).
     send_step4_hb.notify_one();
-    wait_until(
-        Duration::from_secs(2),
-        || {
-            state
-                .last_observed_tail()
-                .is_some_and(|t| t.seq_num == 5 && t.timestamp == 2000)
-        },
-        "driver should observe step 4 heartbeat",
-    )
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    assert_ne!(
+        state.last_observed_tail().map(|t| t.timestamp),
+        Some(2000),
+        "R6b: parked session must not decode heartbeats before pulling"
+    );
+    let hb_observed = tokio::time::timeout(Duration::from_secs(2), async {
+        let mut pull = Box::pin(session.next());
+        let mut tick = tokio::time::interval(Duration::from_millis(5));
+        loop {
+            tokio::select! {
+                _ = &mut pull => panic!("heartbeat must not yield a record"),
+                _ = tick.tick() => {
+                    if state
+                        .last_observed_tail()
+                        .is_some_and(|t| t.seq_num == 5 && t.timestamp == 2000)
+                    {
+                        break;
+                    }
+                }
+            }
+        }
+    })
     .await;
+    hb_observed.expect("pulling at tail must decode heartbeat");
     assert!(state.is_caught_up());
 
-    // Record 5 fetched with tail=6 BEFORE delivery -> next_seq_num=5, last_observed_tail=6,
-    // is_caught_up=false!
-    send_step5_rec5.notify_one();
-    wait_until(
-        Duration::from_secs(2),
-        || state.last_observed_tail().is_some_and(|t| t.seq_num == 6),
-        "driver should fetch record 5 and update last_observed_tail",
-    )
-    .await;
-    assert_eq!(state.next_seq_num(), Some(5));
-    assert!(!state.is_caught_up());
-    // R8a: already-resolved caught_up future never changes!
-    assert_eq!(pinned_cu.await.unwrap().seq_num, 5);
-
-    // Record 5 delivered -> next_seq_num=6, is_caught_up=true
+    // Steps 5–6: server sends records [5, 6] with tail=7 -> pull delivers record 5 ->
+    // next_seq_num=6, last_observed_tail=7, is_caught_up=false; pinned_cu stays 5 (R8a);
+    // then record 6 delivers -> next_seq_num=7, is_caught_up=true.
+    send_step5_rec5_6.notify_one();
     let r5 = session.next().await.unwrap().unwrap();
     assert_eq!(r5.seq_num, 5);
     assert_eq!(state.next_seq_num(), Some(6));
+    assert_eq!(state.last_observed_tail().unwrap().seq_num, 7);
+    assert!(!state.is_caught_up());
+    assert_eq!(pinned_cu.await.unwrap().seq_num, 5);
+
+    let r6 = session.next().await.unwrap().unwrap();
+    assert_eq!(r6.seq_num, 6);
+    assert_eq!(state.next_seq_num(), Some(7));
     assert!(state.is_caught_up());
 
-    // Active request breaks -> is_caught_up=false; caught_up() stays pending across retry (R8c)
+    // Steps 7–8: active request breaks -> observed while pulling (is_caught_up=false),
+    // caught_up() stays pending across retry (R8c), and resolves to 7 on reconnect heartbeat!
     break_conn.notify_one();
-    wait_until(
-        Duration::from_secs(2),
-        || !state.is_caught_up(),
-        "is_caught_up must clear on disconnect",
-    )
-    .await;
-    assert_eq!(state.next_seq_num(), Some(6));
-    assert_eq!(state.last_observed_tail().unwrap().seq_num, 6);
-    let cu_across_retry = state.caught_up();
+    // While parked, the session does NOT reconnect or mutate state (`R6b`, `R7`).
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    assert_eq!(
+        attempt_num.load(Ordering::SeqCst),
+        1,
+        "R6b: parked session must not reconnect on server reset until pulled"
+    );
+    assert!(state.is_caught_up());
 
-    // Reconnected; heartbeat with tail=6 -> is_caught_up=true and cu_across_retry resolves!
-    allow_reconnect_hb.notify_one();
-    let tail = tokio::time::timeout(Duration::from_secs(2), cu_across_retry)
-        .await
-        .expect("R8c: caught_up must resolve after reconnect")
-        .unwrap();
-    assert_eq!(tail.seq_num, 6);
+    // Drive iteration in the background while observing disconnect and R8c reconnect catchup.
+    let mut cu_across_retry = None;
+    let disconnect_and_reconnect = tokio::time::timeout(Duration::from_secs(3), async {
+        let mut pull = Box::pin(session.next());
+        let mut tick = tokio::time::interval(Duration::from_millis(5));
+        // Phase 1: wait for pull to observe disconnect and clear is_caught_up.
+        loop {
+            tokio::select! {
+                res = &mut pull => panic!("unexpected terminal result during retry: {res:?}"),
+                _ = tick.tick() => {
+                    if !state.is_caught_up() {
+                        assert_eq!(state.next_seq_num(), Some(7));
+                        assert_eq!(state.last_observed_tail().unwrap().seq_num, 7);
+                        cu_across_retry = Some(state.caught_up());
+                        allow_reconnect_hb.notify_one();
+                        break;
+                    }
+                }
+            }
+        }
+        // Phase 2: keep driving `pull` while awaiting `cu_across_retry` (`R8b`, `R8c`).
+        let mut cu = cu_across_retry.take().unwrap();
+        tokio::select! {
+            tail = &mut cu => tail.unwrap(),
+            res = &mut pull => panic!("unexpected record/error before reconnect heartbeat: {res:?}"),
+        }
+    })
+    .await
+    .expect("R8c: caught_up must resolve after reconnect while iterating");
+    assert_eq!(disconnect_and_reconnect.seq_num, 7);
     assert!(state.is_caught_up());
 
     // Dropping session rejects new caught_up with SessionClosedError (R8d)
@@ -306,21 +351,34 @@ async fn spec_r5_r6_r7_r8_read_session_records_batches_readahead_state_and_caugh
     assert!(batch_session.next().await.is_none());
     assert!(!batch_session.is_caught_up());
 
-    // 3. R6b: At most 1 batch decoded ahead of the batch currently being delivered!
-    let readahead_server = MockH2Server::start(|_conn_id, _req, respond| async move {
-        let Some(mut s2s) = S2sResponder::open(respond) else {
-            return;
-        };
-        for b_idx in 0u64..4 {
-            let s0 = b_idx * 2;
-            let s1 = s0 + 1;
-            s2s.send_regular(
-                &proto_read_batch_records(&[s0, s1], Some(s1 + 1)),
-                false,
-                false,
-            );
+    // 3. R6b: Zero decoded batches ahead + synchronous draining (`now_or_never`) of already-
+    //    buffered HTTP/2 frames!
+    let ra_reqs = Arc::new(AtomicUsize::new(0));
+    let all_sent = Arc::new(tokio::sync::Notify::new());
+    let readahead_server = MockH2Server::start({
+        let ra_reqs = ra_reqs.clone();
+        let all_sent = all_sent.clone();
+        move |_conn_id, _req, respond| {
+            let ra_reqs = ra_reqs.clone();
+            let all_sent = all_sent.clone();
+            async move {
+                ra_reqs.fetch_add(1, Ordering::SeqCst);
+                let Some(mut s2s) = S2sResponder::open(respond) else {
+                    return;
+                };
+                for b_idx in 0u64..4 {
+                    let s0 = b_idx * 2;
+                    let s1 = s0 + 1;
+                    s2s.send_regular(
+                        &proto_read_batch_records(&[s0, s1], Some(s1 + 1)),
+                        false,
+                        false,
+                    );
+                }
+                all_sent.notify_one();
+                std::future::pending::<()>().await;
+            }
         }
-        std::future::pending::<()>().await;
     })
     .await;
 
@@ -332,49 +390,90 @@ async fn spec_r5_r6_r7_r8_read_session_records_batches_readahead_state_and_caugh
         )
         .unwrap();
 
-    async fn wait_and_assert_tail(session: &ReadSession, expected: u64, msg: &str) {
-        wait_until(
-            Duration::from_secs(2),
-            || session.last_observed_tail().map(|t| t.seq_num) == Some(expected),
-            msg,
+    // Before pulling anything: 0 requests sent and 0 batches decoded.
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    assert_eq!(ra_reqs.load(Ordering::SeqCst), 0);
+    assert_eq!(ra_session.last_observed_tail(), None);
+
+    // Pull record 0 of B0 -> ONLY B0 (tail=2) is decoded; B1..B3 stay undecoded in HTTP/2!
+    assert_eq!(ra_session.next().await.unwrap().unwrap().seq_num, 0);
+    all_sent.notified().await;
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    assert_eq!(
+        ra_session.last_observed_tail().map(|t| t.seq_num),
+        Some(2),
+        "R6b: while delivering B0, session must decode 0 batches ahead"
+    );
+
+    // Finish B0 (record 1) -> STILL 0 batches decoded ahead (tail stays 2 until next pull)!
+    assert_eq!(ra_session.next().await.unwrap().unwrap().seq_num, 1);
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    assert_eq!(
+        ra_session.last_observed_tail().map(|t| t.seq_num),
+        Some(2),
+        "R6b: between batches, session must decode 0 batches ahead"
+    );
+
+    // Pull record 2 of B1 -> decodes B1 (tail=4), NOT B2 (tail=6)!
+    assert_eq!(ra_session.next().await.unwrap().unwrap().seq_num, 2);
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    assert_eq!(
+        ra_session.last_observed_tail().map(|t| t.seq_num),
+        Some(4),
+        "R6b: while delivering B1, session must decode 0 batches ahead"
+    );
+
+    // All remaining small batches (B1 tail, B2, B3) are already buffered in hyper's HTTP/2 receive
+    // buffer, so `now_or_never()` synchronously drains records 3..=7 without a single Pending!
+    let mut drained = Vec::new();
+    while let Some(item) = ra_session.next().now_or_never() {
+        drained.push(item.unwrap().unwrap().seq_num);
+    }
+    assert_eq!(
+        drained,
+        vec![3, 4, 5, 6, 7],
+        "R6b: pull-driven session must synchronously drain already-buffered HTTP/2 batches via now_or_never"
+    );
+    assert_eq!(ra_session.last_observed_tail().map(|t| t.seq_num), Some(8));
+    assert!(ra_session.is_caught_up());
+
+    // 4. R6a + R6b: ReadBatchSession also decodes 0 batches ahead and synchronously drains
+    //    already-buffered HTTP/2 batches via `now_or_never()`.
+    let mut ra_batch_session = readahead_server
+        .stream(no_retry_config())
+        .read_batch_session(
+            ReadInput::new().with_start(ReadStart::SeqNum(0)),
+            ReadSessionConfig::default(),
         )
-        .await;
-        // Settle briefly to verify the driver does not decode past the 1-batch-ahead cap.
-        tokio::time::sleep(Duration::from_millis(25)).await;
-        assert_eq!(
-            session.last_observed_tail().map(|t| t.seq_num),
-            Some(expected),
-            "{msg}"
+        .unwrap();
+    let b0 = ra_batch_session.next().await.unwrap().unwrap();
+    assert_eq!(
+        b0.records.iter().map(|r| r.seq_num).collect::<Vec<_>>(),
+        vec![0, 1]
+    );
+    all_sent.notified().await;
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    assert_eq!(
+        ra_batch_session.last_observed_tail().map(|t| t.seq_num),
+        Some(2),
+        "R6b: ReadBatchSession must hold 0 decoded batches ahead between pulls"
+    );
+    let mut drained_batches = Vec::new();
+    while let Some(item) = ra_batch_session.next().now_or_never() {
+        drained_batches.push(
+            item.unwrap()
+                .unwrap()
+                .records
+                .into_iter()
+                .map(|r| r.seq_num)
+                .collect::<Vec<_>>(),
         );
     }
-
-    // Before consuming anything, at most B0 (tail=2) is decoded into the 1-slot buffer.
-    wait_and_assert_tail(
-        &ra_session,
-        2,
-        "R6b: before consumer pulls B0, driver must decode at most 1 batch (B0)",
-    )
-    .await;
-
-    // Pull record 0 of B0 -> now B0 is being delivered, so driver may decode at most B1 (tail=4),
-    // NEVER B2 (tail=6) or B3 (tail=8)!
-    assert_eq!(ra_session.next().await.unwrap().unwrap().seq_num, 0);
-    wait_and_assert_tail(
-        &ra_session,
-        4,
-        "R6b: while delivering B0, driver must decode at most 1 batch ahead (B1)",
-    )
-    .await;
-
-    // Finish B0 (record 1) and pull record 2 of B1 -> driver decodes B2 (tail=6), NOT B3 (tail=8)!
-    assert_eq!(ra_session.next().await.unwrap().unwrap().seq_num, 1);
-    assert_eq!(ra_session.next().await.unwrap().unwrap().seq_num, 2);
-    wait_and_assert_tail(
-        &ra_session,
-        6,
-        "R6b: while delivering B1, driver must decode at most 1 batch ahead (B2)",
-    )
-    .await;
+    assert_eq!(
+        drained_batches,
+        vec![vec![2, 3], vec![4, 5], vec![6, 7]],
+        "R6b: ReadBatchSession must synchronously drain already-buffered HTTP/2 batches via now_or_never"
+    );
 }
 
 // spec: r1 R9, R9a, R9b, R9c, R9d, R10
@@ -482,14 +581,18 @@ async fn spec_r9_r10_read_session_closing_buffered_delivery_and_abort() {
         )
         .unwrap();
 
-    // Wait for stream open, then cancel a pending next() future -> session stays alive and
-    // delivers record 0 next!
-    tokio::time::timeout(Duration::from_secs(2), delayed_connected.notified())
-        .await
-        .expect("read session must connect");
+    // Start pulling so R5 opens the stream, wait until connected, then cancel the pending next()
+    // future (`T8`/`R9b`) -> session stays alive and delivers record 0 on the next pull!
     {
         let mut pending_next = Box::pin(sess.next());
-        assert!(futures_util::poll!(pending_next.as_mut()).is_pending());
+        tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::select! {
+                res = &mut pending_next => panic!("unexpected result before release: {res:?}"),
+                _ = delayed_connected.notified() => {}
+            }
+        })
+        .await
+        .expect("read session must connect on first pull");
         drop(pending_next);
     }
     delayed_release.notify_one();
@@ -522,14 +625,12 @@ async fn spec_t7d_read_session_heartbeat_timeout_and_backpressure_pause() {
                     return;
                 };
                 if idx == 1 {
-                    // Send two batches immediately so B0 is delivered and B1 (with tail=3) fills
-                    // the 1-slot read-ahead channel; then go silent!
-                    s2s.send_regular(&proto_read_batch_records(&[0, 1], None), false, false);
-                    s2s.send_regular(&proto_read_batch_records(&[2], Some(3)), false, false);
+                    // Send a batch [0, 1] and then go silent!
+                    s2s.send_regular(&proto_read_batch_records(&[0, 1], Some(2)), false, false);
                     std::future::pending::<()>().await;
                 } else {
-                    // On retry after heartbeat timeout, deliver record 3 and end cleanly.
-                    s2s.send_regular(&proto_read_batch_records(&[3], Some(4)), false, false);
+                    // On retry after heartbeat timeout, deliver record 2.
+                    s2s.send_regular(&proto_read_batch_records(&[2], Some(3)), false, false);
                     std::future::pending::<()>().await;
                 }
             }
@@ -545,45 +646,118 @@ async fn spec_t7d_read_session_heartbeat_timeout_and_backpressure_pause() {
         )
         .unwrap();
 
-    // Pull record 0 (record 1 stays in current_batch, record 2 fills the 1-slot channel).
+    // Pull record 0 (record 1 stays in current_batch).
     assert_eq!(session.next().await.unwrap().unwrap().seq_num, 0);
-    // Deterministically wait until the driver has decoded B1 into the bounded 1-slot channel and
-    // is parked on `tx.reserve()` before pausing the Tokio clock.
-    wait_until(
-        Duration::from_secs(2),
-        || session.last_observed_tail().map(|t| t.seq_num) == Some(3),
-        "driver must decode B1 into the bounded channel",
-    )
-    .await;
-    tokio::task::yield_now().await;
 
-    // Advance 60s (> 20s heartbeat timeout!) while caller has NOT consumed buffered records.
-    // T7d: backpressure time MUST NOT count toward the 20s heartbeat timeout!
+    // Advance 60s (> 20s heartbeat timeout!) while caller has NOT consumed record 1.
+    // T7d: time spent consuming current batch MUST NOT count toward the 20s heartbeat timeout!
     advance_virtual_time(Duration::from_secs(60)).await;
-    tokio::task::yield_now().await;
     assert_eq!(
         attempts.load(Ordering::SeqCst),
         1,
-        "T7d: heartbeat timer must not fire while caller has not consumed buffered records"
+        "T7d: heartbeat timer must not fire while consuming current batch"
     );
 
-    // Drain remaining buffered records 1 and 2 on the SAME attempt!
+    // Deliver record 1 (draining current_batch), then park 60s without iterating!
+    // T7d: time spent not iterating MUST NOT count toward the 20s heartbeat timeout!
     assert_eq!(session.next().await.unwrap().unwrap().seq_num, 1);
-    assert_eq!(session.next().await.unwrap().unwrap().seq_num, 2);
+    advance_virtual_time(Duration::from_secs(60)).await;
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        1,
+        "T7d: heartbeat timer must not fire while parked between pulls"
+    );
+
+    // Wait 6s inside next() and cancel (T8), then park 60s -> parked time must NOT count!
+    {
+        let mut next_rec = Box::pin(session.next());
+        assert!(futures_util::poll!(next_rec.as_mut()).is_pending());
+        advance_virtual_time(Duration::from_secs(6)).await;
+        assert!(futures_util::poll!(next_rec.as_mut()).is_pending());
+        drop(next_rec);
+    }
+    advance_virtual_time(Duration::from_secs(60)).await;
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        1,
+        "T7d: parked time after canceled wait must not count toward heartbeat timeout"
+    );
+
+    // Three more 5s canceled waits accumulate to >20s total waiting (6 + 5 + 5 + 5 = 21s) ->
+    // heartbeat timeout fires and retries onto attempt 2, delivering record 2!
+    for _ in 0..2 {
+        let mut next_rec = Box::pin(session.next());
+        assert!(futures_util::poll!(next_rec.as_mut()).is_pending());
+        advance_virtual_time(Duration::from_secs(5)).await;
+        assert!(futures_util::poll!(next_rec.as_mut()).is_pending());
+        drop(next_rec);
+    }
     assert_eq!(attempts.load(Ordering::SeqCst), 1);
 
-    // Now actively waiting for next server message -> after 20s silent, heartbeat timeout fires
-    // and retries onto attempt 2, which delivers record 3!
     let mut next_rec = Box::pin(session.next());
     assert!(futures_util::poll!(next_rec.as_mut()).is_pending());
-    advance_virtual_time(Duration::from_secs(21)).await;
-    let rec3 = tokio::time::timeout(Duration::from_secs(3), next_rec)
+    advance_virtual_time(Duration::from_secs(5)).await;
+    let rec2 = tokio::time::timeout(Duration::from_secs(3), next_rec)
         .await
-        .expect("heartbeat timeout must trigger retry")
+        .expect("heartbeat timeout must trigger retry after 20s of waiting")
         .unwrap()
         .unwrap();
-    assert_eq!(rec3.seq_num, 3);
+    assert_eq!(rec2.seq_num, 2);
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
+
+    // T7d: when pulling resumes after >20s (even via direct `Stream::poll_next` without
+    // `next()`'s drop guard), messages already buffered by HTTP/2 are read BEFORE timing out!
+    let buf_attempts = Arc::new(AtomicUsize::new(0));
+    let send_rec1 = Arc::new(tokio::sync::Notify::new());
+    let rec1_sent = Arc::new(tokio::sync::Notify::new());
+    let buf_server = MockH2Server::start({
+        let buf_attempts = buf_attempts.clone();
+        let send_rec1 = send_rec1.clone();
+        let rec1_sent = rec1_sent.clone();
+        move |_conn_id, _req, respond| {
+            let buf_attempts = buf_attempts.clone();
+            let send_rec1 = send_rec1.clone();
+            let rec1_sent = rec1_sent.clone();
+            async move {
+                buf_attempts.fetch_add(1, Ordering::SeqCst);
+                let Some(mut s2s) = S2sResponder::open(respond) else {
+                    return;
+                };
+                s2s.send_regular(&proto_read_batch_records(&[0], Some(1)), false, false);
+                send_rec1.notified().await;
+                s2s.send_regular(&proto_read_batch_records(&[1], Some(2)), false, false);
+                rec1_sent.notify_one();
+                std::future::pending::<()>().await;
+            }
+        }
+    })
+    .await;
+
+    let mut buf_sess = buf_server
+        .stream(no_retry_config())
+        .read_session(
+            ReadInput::new().with_start(ReadStart::SeqNum(0)),
+            ReadSessionConfig::default(),
+        )
+        .unwrap();
+    assert_eq!(buf_sess.next().await.unwrap().unwrap().seq_num, 0);
+
+    // Arm the heartbeat deadline via direct `StreamExt::next` (no PauseHeartbeatOnDrop).
+    {
+        use futures_util::StreamExt;
+        let mut pending = Box::pin(StreamExt::next(&mut buf_sess));
+        assert!(futures_util::poll!(pending.as_mut()).is_pending());
+        drop(pending);
+    }
+    // Deliver record 1 into hyper's HTTP/2 receive buffer, then advance virtual time past 20s!
+    send_rec1.notify_one();
+    rec1_sent.notified().await;
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    advance_virtual_time(Duration::from_secs(30)).await;
+
+    // Resuming must read the buffered record 1 on the SAME attempt rather than timing out!
+    assert_eq!(buf_sess.next().await.unwrap().unwrap().seq_num, 1);
+    assert_eq!(buf_attempts.load(Ordering::SeqCst), 1);
 }
 
 // spec: r1 R11, R11a, R11b, R11c, R11d, T5, T5b
@@ -635,7 +809,7 @@ async fn spec_r11_t5_t5b_read_session_resume_clamp_wait_416_and_unbounded() {
                     s2s.send_regular(&proto_heartbeat(10), false, false);
                     a1_hb1_sent.notify_one();
                     send_hb2.notified().await;
-                    s2s.send_regular(&proto_heartbeat(10), false, false);
+                    s2s.send_regular(&proto_heartbeat_at(10, 2000), false, false);
                     break_a1.notified().await;
                     s2s.reset(h2::Reason::INTERNAL_ERROR);
                 } else {
@@ -660,20 +834,43 @@ async fn spec_r11_t5_t5b_read_session_resume_clamp_wait_416_and_unbounded() {
         )
         .unwrap();
 
-    tokio::time::timeout(Duration::from_secs(3), a1_hb1_sent.notified())
-        .await
-        .expect("hb1 sent");
-    // Wait until the client driver has actually decoded hb1 and resolved next_seq_num to 10!
-    wait_until(
-        Duration::from_secs(3),
-        || session.next_seq_num() == Some(10),
-        "client must resolve start from hb1",
-    )
-    .await;
-    // Wait 3s, send 2nd heartbeat (must NOT reset clock), wait 2.1s more (5.1s total elapsed).
+    // Drive iteration while waiting for hb1 so the pull-driven session connects and resolves start!
+    let state = session.state();
+    let mut cu = state.caught_up();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        tokio::select! {
+            res = &mut cu => res.unwrap(),
+            item = session.next() => panic!("unexpected item before hb1: {item:?}"),
+        }
+    })
+    .await
+    .expect("client must resolve start from hb1");
+    assert_eq!(state.next_seq_num(), Some(10));
+    let _ = a1_hb1_sent;
+
+    // Wait 3s, send 2nd heartbeat (decoded while pulling; must NOT reset wait clock!), wait 2.1s
+    // more (5.1s total elapsed).
     advance_virtual_time(Duration::from_secs(3)).await;
     send_hb2.notify_one();
-    tokio::time::sleep(Duration::from_millis(30)).await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        let mut pull = Box::pin(session.next());
+        let mut tick = tokio::time::interval(Duration::from_millis(5));
+        loop {
+            tokio::select! {
+                item = &mut pull => panic!("unexpected item during hb2: {item:?}"),
+                _ = tick.tick() => {
+                    if state
+                        .last_observed_tail()
+                        .is_some_and(|t| t.seq_num == 10 && t.timestamp == 2000)
+                    {
+                        break;
+                    }
+                }
+            }
+        }
+    })
+    .await
+    .expect("client must decode hb2 while pulling");
     advance_virtual_time(Duration::from_millis(2_100)).await;
     break_a1.notify_one();
 
@@ -911,11 +1108,17 @@ async fn regression_read_session_r11c_reduced_wait_refreshes_after_record() {
         )
         .unwrap();
 
-    // Wait for Attempt 1's heartbeat (which initializes `idle_since` before resolving caught_up).
-    let caught = tokio::time::timeout(Duration::from_secs(2), sess.caught_up())
-        .await
-        .expect("heartbeat must resolve caught_up")
-        .unwrap();
+    // Drive iteration while awaiting Attempt 1's heartbeat (`R8b`), which initializes `idle_since`
+    // before resolving caught_up.
+    let mut cu = sess.caught_up();
+    let caught = tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::select! {
+            res = &mut cu => res.unwrap(),
+            item = sess.next() => panic!("unexpected item before heartbeat: {item:?}"),
+        }
+    })
+    .await
+    .expect("heartbeat must resolve caught_up while iterating");
     assert_eq!(caught.seq_num, 0);
 
     // Advance virtual clock past 1s so remaining_wait drops from 4s to 3s, then reset Attempt 1.
@@ -1141,9 +1344,8 @@ async fn spec_t5a_empty_frame_does_not_reset_budget_and_r9_close_boundary() {
         "T5a: empty non-heartbeat frame must not reset retry budget"
     );
 
-    // 2. R9c with zero buffered records: terminal error closes immediately (resolving caught_up()
-    //    before next() is polled), and a subsequent client.close() has no effect on either
-    //    caught_up() or next().
+    // 2. R9c with zero buffered records: iterating observes the terminal 404 and closes immediately
+    //    (failing caught_up() with 404); a subsequent client.close() has no effect.
     let err_server = MockH2Server::start(|_conn_id, _req, respond| async move {
         if let Some(mut s2s) = S2sResponder::open(respond) {
             s2s.send_terminal(
@@ -1163,9 +1365,19 @@ async fn spec_t5a_empty_frame_does_not_reset_budget_and_r9_close_boundary() {
             ReadSessionConfig::default(),
         )
         .unwrap();
-    let cu_err = tokio::time::timeout(Duration::from_secs(2), err_sess.caught_up())
+    let cu = err_sess.caught_up();
+    let next_err = err_sess
+        .next()
         .await
-        .expect("R9c: caught_up must fail immediately when no records are buffered")
+        .expect("must yield terminal 404 once")
+        .unwrap_err();
+    assert!(
+        matches!(next_err, ReadSessionError::Server(ref e) if e.status == 404),
+        "R9c: expected 404 on next(), got {next_err:?}"
+    );
+    let cu_err = tokio::time::timeout(Duration::from_secs(2), cu)
+        .await
+        .expect("R9c: caught_up must fail immediately once terminal error is observed")
         .unwrap_err();
     assert!(
         matches!(cu_err, ReadSessionError::Server(ref e) if e.status == 404),
@@ -1173,19 +1385,14 @@ async fn spec_t5a_empty_frame_does_not_reset_budget_and_r9_close_boundary() {
     );
     // Session already closed under R9c -> client.close() must have no effect.
     err_client.close();
-    let next_err = err_sess
-        .next()
-        .await
-        .expect("must still yield terminal 404 once")
-        .unwrap_err();
-    assert!(
-        matches!(next_err, ReadSessionError::Server(ref e) if e.status == 404),
-        "R9: post-close client.close() must not overwrite R9c failure, got {next_err:?}"
-    );
+    assert!(matches!(
+        err_sess.caught_up().await,
+        Err(ReadSessionError::Server(ref e)) if e.status == 404
+    ));
     assert!(err_sess.next().await.is_none());
 
-    // 3. R9a with zero buffered records: clean stop closes immediately (failing caught_up() with
-    //    SessionClosedError), and a subsequent client.close() has no effect.
+    // 3. R9a with zero buffered records: iterating observes clean EOF and closes immediately
+    //    (failing caught_up() with SessionClosedError); a subsequent client.close() has no effect.
     let eof_server = MockH2Server::start(|_conn_id, _req, respond| async move {
         if let Some(mut s2s) = S2sResponder::open(respond) {
             s2s.send_eof();
@@ -1204,9 +1411,11 @@ async fn spec_t5a_empty_frame_does_not_reset_budget_and_r9_close_boundary() {
             ReadSessionConfig::default(),
         )
         .unwrap();
-    let cu_eof = tokio::time::timeout(Duration::from_secs(2), eof_sess.caught_up())
+    let cu_eof_fut = eof_sess.caught_up();
+    assert!(eof_sess.next().await.is_none());
+    let cu_eof = tokio::time::timeout(Duration::from_secs(2), cu_eof_fut)
         .await
-        .expect("R9a: caught_up must fail immediately when clean stop has no buffered records")
+        .expect("R9a: caught_up must fail immediately when clean stop closes the session")
         .unwrap_err();
     assert!(
         matches!(cu_eof, ReadSessionError::SessionClosed(ref e) if e.failure().is_none()),
@@ -1218,38 +1427,44 @@ async fn spec_t5a_empty_frame_does_not_reset_budget_and_r9_close_boundary() {
         "R9: post-close client.close() must not turn clean R9a close into AbortedError"
     );
 
-    // 4. R9c with buffered records: abort while record 1 is still buffered wins over the queued 404
-    //    on BOTH caught_up() and next(); once all buffered records are delivered, R9c closes
-    //    immediately and a later client.close() is a no-op.
+    // 4. R9a/R9d with buffered records in the current batch (`count = 2`, batch `[0, 1]`, tail=5):
+    //    4a: abort (`client.close()`) while record 1 is still buffered in `current_batch` and the
+    //    session is parked IMMEDIATELY wakes `caught_up()` with AbortedError, drops record 1, and
+    //    fails `next()` with AbortedError! 4b: draining both buffered records locks in `R9a`
+    //    immediately (failing `caught_up()` with clean SessionClosedError); a subsequent
+    //    `client.close()` is a no-op and `next()` returns `None`.
     let buffered_server = MockH2Server::start(|_conn_id, _req, respond| async move {
         if let Some(mut s2s) = S2sResponder::open(respond) {
-            s2s.send_regular(&proto_read_batch_records(&[0, 1], Some(5)), false, false);
-            s2s.send_terminal(
-                404,
-                r#"{"code":"stream_not_found","message":"gone"}"#.as_bytes(),
-            );
+            s2s.send_regular(&proto_read_batch_records(&[0, 1], Some(5)), false, true);
         }
     })
     .await;
-    // 4a: abort while record 1 is still buffered -> both caught_up() and next() get AbortedError.
+    // 4a: abort while parked with record 1 still buffered -> both caught_up() and next() get
+    // Aborted.
     let c1 = buffered_server.client(no_retry_config());
     let (basin, stream) = test_basin_and_stream();
     let mut s1 = c1
         .basin(basin)
         .stream(stream)
         .read_session(
-            ReadInput::new().with_start(ReadStart::SeqNum(0)),
+            ReadInput::new()
+                .with_start(ReadStart::SeqNum(0))
+                .with_count(2),
             ReadSessionConfig::default(),
         )
         .unwrap();
     let cu1 = s1.caught_up();
     assert_eq!(s1.next().await.unwrap().unwrap().seq_num, 0);
-    // Give the driver time to observe the 404 behind the buffered batch.
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // Do NOT poll s1.next() — verify `c1.close()` still wakes parked `cu1` immediately
+    // (`R8d`/`R9d`)!
     c1.close();
+    let cu1_err = tokio::time::timeout(Duration::from_secs(1), cu1)
+        .await
+        .expect("R8d/R9d: client.close() must wake parked caught_up immediately")
+        .unwrap_err();
     assert!(
-        matches!(cu1.await, Err(ReadSessionError::Aborted(_))),
-        "R9d: abort while records remain buffered must fail caught_up with AbortedError"
+        matches!(cu1_err, ReadSessionError::Aborted(_)),
+        "R9d: abort while records remain buffered must fail caught_up with AbortedError, got {cu1_err:?}"
     );
     let next1 = s1
         .next()
@@ -1260,15 +1475,18 @@ async fn spec_t5a_empty_frame_does_not_reset_budget_and_r9_close_boundary() {
         matches!(next1, ReadSessionError::Aborted(_)),
         "R9d: abort while records remain buffered must fail next() with AbortedError, got {next1:?}"
     );
+    assert!(s1.next().await.is_none());
 
-    // 4b: drain both buffered records -> R9c closes immediately, later client.close() is a no-op.
+    // 4b: drain both buffered records -> R9a locks in immediately, later client.close() is a no-op.
     let c2 = buffered_server.client(no_retry_config());
     let (basin, stream) = test_basin_and_stream();
     let mut s2 = c2
         .basin(basin)
         .stream(stream)
         .read_session(
-            ReadInput::new().with_start(ReadStart::SeqNum(0)),
+            ReadInput::new()
+                .with_start(ReadStart::SeqNum(0))
+                .with_count(2),
             ReadSessionConfig::default(),
         )
         .unwrap();
@@ -1277,17 +1495,16 @@ async fn spec_t5a_empty_frame_does_not_reset_budget_and_r9_close_boundary() {
     assert_eq!(s2.next().await.unwrap().unwrap().seq_num, 1);
     let cu2_err = tokio::time::timeout(Duration::from_secs(2), cu2)
         .await
-        .expect("R9c: caught_up must fail as soon as buffered records finish draining")
+        .expect("R9a: caught_up must fail as soon as count-exhausted batch finishes draining")
         .unwrap_err();
     assert!(
-        matches!(cu2_err, ReadSessionError::Server(ref e) if e.status == 404),
-        "R9c: expected 404 on caught_up after drain, got {cu2_err:?}"
+        matches!(cu2_err, ReadSessionError::SessionClosed(ref e) if e.failure().is_none()),
+        "R9a: expected clean SessionClosedError on caught_up after drain, got {cu2_err:?}"
     );
     c2.close();
-    let next2 = s2.next().await.expect("must yield 404").unwrap_err();
     assert!(
-        matches!(next2, ReadSessionError::Server(ref e) if e.status == 404),
-        "R9: post-drain client.close() must not overwrite R9c 404, got {next2:?}"
+        s2.next().await.is_none(),
+        "R9: post-drain client.close() must not overwrite locked-in R9a clean stop"
     );
 }
 

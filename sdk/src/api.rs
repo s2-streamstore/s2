@@ -76,6 +76,17 @@ impl<R, E> Streaming<R, E> {
     pub(crate) fn retire_connection(&self) {
         self.retire_handle.retire();
     }
+
+    #[cfg(test)]
+    pub(crate) fn from_stream_for_test<S>(stream: S) -> Self
+    where
+        S: Stream<Item = Result<S2sFrame<R>, E>> + Send + 'static,
+    {
+        Self {
+            stream: Box::pin(stream),
+            retire_handle: client::RetireHandle::noop(),
+        }
+    }
 }
 
 impl<R, E> Stream for Streaming<R, E> {

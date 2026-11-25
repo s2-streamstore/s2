@@ -453,6 +453,18 @@ impl RetireHandle {
         Self { target, id }
     }
 
+    #[cfg(test)]
+    pub(crate) fn noop() -> Self {
+        struct NoopTarget;
+        impl RetireTarget for NoopTarget {
+            fn retire(&self, _id: ConnectionId) {}
+        }
+        Self {
+            target: Weak::<NoopTarget>::new(),
+            id: ConnectionId(0),
+        }
+    }
+
     pub(crate) fn retire(&self) {
         if let Some(target) = self.target.upgrade() {
             target.retire(self.id);
