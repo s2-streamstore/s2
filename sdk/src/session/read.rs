@@ -760,8 +760,6 @@ impl ReadSessionState {
 struct AttemptSnapshot {
     /// Whether the session had already resolved its start before *this* request was opened.
     was_resumed: bool,
-    /// Absolute `seq_num` sent on *this* request (compared against `416` wire tail per `R11d`).
-    sent_seq_num: Option<u64>,
     /// Whether *this* request was sent with no `wait` remaining (`R11d`).
     no_wait_remaining: bool,
 }
@@ -1104,7 +1102,6 @@ impl ReadSessionCore {
         })?;
         let snapshot = AttemptSnapshot {
             was_resumed: self.has_received_response,
-            sent_seq_num: self.start.seq_num,
             no_wait_remaining: has_no_wait_remaining(&self.end),
         };
         debug!(
@@ -1350,13 +1347,9 @@ impl ReadSessionCore {
         snapshot: AttemptSnapshot,
     ) -> DriverStep {
         // R11d: 416 on a resumed request with no remaining wait is a clean stop unless the
-        // reported tail regressed below the sequence number sent on that request (or already
-        // advanced past it on this attempt).
-        let effective_snapshot = AttemptSnapshot {
-            sent_seq_num: snapshot.sent_seq_num.max(self.start.seq_num),
-            ..snapshot
-        };
-        if let ResumedStop::CleanEnd(tail) = check_resumed_unwritten_stop(effective_snapshot, &err)
+        // reported tail regressed below `next_seq_num`.
+        if let ResumedStop::CleanEnd(tail) =
+            check_resumed_unwritten_stop(snapshot, self.start.seq_num, &err)
         {
             debug!(?tail, "read session reached tail on resumed stop condition");
             return DriverStep::Done(self.finish_clean_end_now(tail));
@@ -1459,7 +1452,7 @@ impl ReadSessionCore {
                             }
                             Err(err) => {
                                 if let ResumedStop::CleanEnd(tail) =
-                                    check_resumed_unwritten_stop(snapshot, &err)
+                                    check_resumed_unwritten_stop(snapshot, self.start.seq_num, &err)
                                 {
                                     debug!(
                                         ?tail,
@@ -1855,8 +1848,12 @@ enum ResumedStop {
 }
 
 /// Check whether an error is a clean `R11d` stop condition (resumed request with no remaining
-/// `wait` receiving `416` whose tail has not regressed below the `seq_num` sent on that request).
-fn check_resumed_unwritten_stop(snapshot: AttemptSnapshot, err: &ReadSessionError) -> ResumedStop {
+/// `wait` receiving `416` whose tail has not regressed below `next_seq_num`).
+fn check_resumed_unwritten_stop(
+    snapshot: AttemptSnapshot,
+    next_seq_num: Option<u64>,
+    err: &ReadSessionError,
+) -> ResumedStop {
     if !snapshot.was_resumed || !snapshot.no_wait_remaining {
         return ResumedStop::NotApplicable;
     }
@@ -1865,8 +1862,8 @@ fn check_resumed_unwritten_stop(snapshot: AttemptSnapshot, err: &ReadSessionErro
         ReadSessionError::Server(e) if e.status == StatusCode::RANGE_NOT_SATISFIABLE => None,
         _ => return ResumedStop::NotApplicable,
     };
-    if let (Some(tail_pos), Some(sent_seq)) = (tail, snapshot.sent_seq_num)
-        && tail_pos.seq_num < sent_seq
+    if let (Some(tail_pos), Some(next_seq)) = (tail, next_seq_num)
+        && tail_pos.seq_num < next_seq
     {
         return ResumedStop::NotApplicable;
     }
@@ -2102,7 +2099,6 @@ mod tests {
         );
         let snapshot = AttemptSnapshot {
             was_resumed: false,
-            sent_seq_num: core.start.seq_num,
             no_wait_remaining: has_no_wait_remaining(&core.end),
         };
         core.transport_mut().phase = DriverPhase::Active(ActiveAttempt {
@@ -2909,6 +2905,35 @@ mod tests {
         ));
         assert_eq!(state.next_seq_num(), Some(1));
         assert!(session.next().await.is_none());
+
+        // On a resumed attempt that delivers record 0 (advancing `next_seq_num` to 1) and then
+        // receives a terminal 416 with `tail.seq_num == 0 < next_seq_num`, `R11d` compares against
+        // `next_seq_num` and fails with `ReadUnwrittenError` rather than closing cleanly.
+        let (mut resumed, resumed_tx, resumed_state, _shutdown) = test_session_with_active_stream(
+            ReadInput::new(crate::types::ReadStart::SeqNum(0)).with_count(10),
+        );
+        if let DriverPhase::Active(attempt) = &mut resumed.core.transport_mut().phase {
+            attempt.snapshot.was_resumed = true;
+        }
+        resumed_tx
+            .send(Ok(S2sFrame {
+                msg: proto_batch(&[0], Some(1)),
+                reconnect_advised: false,
+            }))
+            .unwrap();
+        resumed_tx
+            .send(Err(ReadSessionError::ReadUnwritten(
+                crate::error::ReadUnwrittenError::new(position(0)),
+            )))
+            .unwrap();
+        assert_eq!(resumed.next().await.unwrap().unwrap().seq_num, 0);
+        assert!(matches!(
+            resumed.next().await,
+            Some(Err(ReadSessionError::ReadUnwritten(ref e))) if e.tail == position(0)
+        ));
+        assert_eq!(resumed_state.next_seq_num(), Some(1));
+        assert!(!resumed_state.is_caught_up());
+        assert!(resumed.next().await.is_none());
     }
 
     // spec: r1 C12, R9a, R9c
