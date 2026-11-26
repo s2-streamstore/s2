@@ -49,6 +49,7 @@ Flag byte layout:
 */
 
 const FLAG_TOTAL_SIZE: usize = 1;
+const REGULAR_HEADER_SIZE: usize = LENGTH_PREFIX_SIZE + FLAG_TOTAL_SIZE;
 // The frame length budget includes one flag byte, so payload bytes are capped at budget - flag.
 const MAX_FRAME_PAYLOAD_BYTES: usize = MAX_FRAME_BYTES - FLAG_TOTAL_SIZE;
 /// Maximum body bytes allowed in a terminal S2S frame (`MAX_FRAME_BYTES - 1 flag - 2 status`).
@@ -65,6 +66,16 @@ fn shrink_if_excess_slack(buf: &mut Vec<u8>, max_slack: usize) {
     }
 }
 
+fn validate_decompressed_len(len: usize) -> std::io::Result<()> {
+    if len > MAX_DECOMPRESSED_PAYLOAD_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "payload exceeds decompressed limit",
+        ));
+    }
+    Ok(())
+}
+
 fn zstd_encode_into(raw: &[u8], out: Vec<u8>) -> std::io::Result<Vec<u8>> {
     let mut encoder = zstd::stream::write::Encoder::new(out, 0)?;
     // Pledging the source length lets libzstd write the exact content size and clamp the frame's
@@ -73,6 +84,37 @@ fn zstd_encode_into(raw: &[u8], out: Vec<u8>) -> std::io::Result<Vec<u8>> {
     encoder.set_pledged_src_size(Some(raw.len() as u64))?;
     encoder.write_all(raw)?;
     encoder.finish()
+}
+
+/// Compress `raw` by appending to `out`, enforcing `MAX_FRAME_PAYLOAD_BYTES` on the newly appended
+/// compressed payload bytes and trimming excess pre-allocated slack.
+fn compress_into(
+    compression: CompressionAlgorithm,
+    raw: &[u8],
+    out: Vec<u8>,
+) -> std::io::Result<Vec<u8>> {
+    let prefix_len = out.len();
+    let mut out = match compression {
+        CompressionAlgorithm::Gzip => {
+            let mut encoder = GzEncoder::new(out, Compression::default());
+            encoder.write_all(raw)?;
+            encoder.finish()?
+        }
+        CompressionAlgorithm::Zstd => zstd_encode_into(raw, out)?,
+        CompressionAlgorithm::None => unreachable!("caller handles uncompressed payloads"),
+    };
+    let payload_len = out.len() - prefix_len;
+    if payload_len > MAX_FRAME_PAYLOAD_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "compressed payload exceeds frame limit",
+        ));
+    }
+    // Trim excess pre-allocated slack when compression ratio is high so inflight frames
+    // don't pin an uncompressed-sized allocation while awaiting acknowledgement.
+    let max_slack = (out.len() / 8).max(64);
+    shrink_if_excess_slack(&mut out, max_slack);
+    Ok(out)
 }
 
 fn read_to_end_limited(mut reader: impl Read, initial_capacity: usize) -> std::io::Result<Bytes> {
@@ -101,80 +143,57 @@ fn regular_flag(compression: CompressionAlgorithm, reconnect_advised: bool) -> u
 }
 
 fn write_length_prefix(dst: &mut [u8], frame_len: usize) {
+    debug_assert!(frame_len <= MAX_FRAME_BYTES);
     dst[0] = ((frame_len >> 16) & 0xFF) as u8;
     dst[1] = ((frame_len >> 8) & 0xFF) as u8;
     dst[2] = (frame_len & 0xFF) as u8;
 }
 
 /// Encode a protobuf message directly into a wire-ready S2S regular frame.
+///
+/// Output bytes, below-threshold uncompressed fallback (`< 1 KiB`), and error kinds/messages match
+/// [`SessionMessage::regular`] followed by [`SessionMessage::encode`].
 pub fn encode_regular_frame(
     compression: CompressionAlgorithm,
     proto: &impl prost::Message,
 ) -> std::io::Result<Bytes> {
     let encoded_len = proto.encoded_len();
-    if encoded_len > MAX_DECOMPRESSED_PAYLOAD_BYTES {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "payload exceeds decompressed limit",
-        ));
-    }
+    validate_decompressed_len(encoded_len)?;
 
-    let header_size = LENGTH_PREFIX_SIZE + FLAG_TOTAL_SIZE;
     if compression == CompressionAlgorithm::None || encoded_len < COMPRESSION_THRESHOLD_BYTES {
-        let mut buf = BytesMut::with_capacity(header_size + encoded_len);
-        buf.put_slice(&[0u8; 4]);
+        let mut buf = BytesMut::with_capacity(REGULAR_HEADER_SIZE + encoded_len);
+        buf.put_slice(&[0u8; REGULAR_HEADER_SIZE]);
+        // Use `encode_raw` to avoid a second `encoded_len()` walk (`encode` re-computes it).
         proto.encode_raw(&mut buf);
-        let Some(payload_len) = buf
-            .len()
-            .checked_sub(header_size)
-            .filter(|&len| len == encoded_len)
-        else {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
+        let payload_len = buf.len() - REGULAR_HEADER_SIZE;
+        if payload_len != encoded_len {
+            return Err(std::io::Error::other(
                 "protobuf encoder wrote unexpected payload length",
             ));
-        };
+        }
         write_length_prefix(&mut buf, FLAG_TOTAL_SIZE + payload_len);
-        buf[LENGTH_PREFIX_SIZE] = regular_flag(CompressionAlgorithm::None, false);
+        debug_assert_eq!(
+            buf[LENGTH_PREFIX_SIZE],
+            regular_flag(CompressionAlgorithm::None, false)
+        );
         return Ok(buf.freeze());
     }
 
     let mut raw = Vec::with_capacity(encoded_len);
+    // Use `encode_raw` to avoid a second `encoded_len()` walk (`encode` re-computes it).
     proto.encode_raw(&mut raw);
     if raw.len() != encoded_len {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
+        return Err(std::io::Error::other(
             "protobuf encoder wrote unexpected payload length",
         ));
     }
 
     let flag = regular_flag(compression, false);
-    let mut out = Vec::with_capacity(header_size + raw.len() + (raw.len() >> 8) + 64);
+    let mut out = Vec::with_capacity(REGULAR_HEADER_SIZE + raw.len() + (raw.len() >> 8) + 64);
     out.extend_from_slice(&[0, 0, 0, flag]);
-    match compression {
-        CompressionAlgorithm::Gzip => {
-            let mut encoder = GzEncoder::new(out, Compression::default());
-            encoder.write_all(&raw)?;
-            out = encoder.finish()?;
-        }
-        CompressionAlgorithm::Zstd => {
-            out = zstd_encode_into(&raw, out)?;
-        }
-        CompressionAlgorithm::None => unreachable!("handled above"),
-    }
-
-    let payload_len = out.len() - header_size;
-    if payload_len > MAX_FRAME_PAYLOAD_BYTES {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "compressed payload exceeds frame limit",
-        ));
-    }
+    let mut out = compress_into(compression, &raw, out)?;
+    let payload_len = out.len() - REGULAR_HEADER_SIZE;
     write_length_prefix(&mut out, FLAG_TOTAL_SIZE + payload_len);
-    // Trim excess pre-allocated slack when compression ratio is high so inflight frames
-    // don't pin an uncompressed-sized allocation while awaiting acknowledgement.
-    let max_slack = (out.len() / 8).max(64);
-    shrink_if_excess_slack(&mut out, max_slack);
     Ok(Bytes::from(out))
 }
 
@@ -242,12 +261,7 @@ impl CompressedData {
     }
 
     fn compress(compression: CompressionAlgorithm, data: Vec<u8>) -> std::io::Result<Self> {
-        if data.len() > MAX_DECOMPRESSED_PAYLOAD_BYTES {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "payload exceeds decompressed limit",
-            ));
-        }
+        validate_decompressed_len(data.len())?;
 
         if compression == CompressionAlgorithm::None || data.len() < COMPRESSION_THRESHOLD_BYTES {
             return Ok(Self {
@@ -256,31 +270,15 @@ impl CompressedData {
                 payload: data.into(),
             });
         }
-        let mut buf = Vec::with_capacity(data.len() + (data.len() >> 8) + 64);
-        match compression {
-            CompressionAlgorithm::Gzip => {
-                let mut encoder = GzEncoder::new(buf, Compression::default());
-                encoder.write_all(data.as_slice())?;
-                buf = encoder.finish()?;
-            }
-            CompressionAlgorithm::Zstd => {
-                buf = zstd_encode_into(data.as_slice(), buf)?;
-            }
-            CompressionAlgorithm::None => unreachable!("handled above"),
-        };
-        let max_slack = (buf.len() / 8).max(64);
-        shrink_if_excess_slack(&mut buf, max_slack);
-        let payload = Bytes::from(buf);
-        if payload.len() > MAX_FRAME_PAYLOAD_BYTES {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "compressed payload exceeds frame limit",
-            ));
-        }
+        let buf = compress_into(
+            compression,
+            data.as_slice(),
+            Vec::with_capacity(data.len() + (data.len() >> 8) + 64),
+        )?;
         Ok(Self {
             compression,
             reconnect_advised: false,
-            payload,
+            payload: Bytes::from(buf),
         })
     }
 
@@ -367,12 +365,7 @@ impl SessionMessage {
                 );
                 let mut buf = BytesMut::with_capacity(LENGTH_PREFIX_SIZE + encoded_size);
                 buf.put_uint(encoded_size as u64, 3);
-                let mut flag =
-                    ((msg.compression as u8) << FLAG_COMPRESSION_SHIFT) & FLAG_COMPRESSION_MASK;
-                if msg.reconnect_advised {
-                    flag |= FLAG_RECONNECT_ADVISED;
-                }
-                buf.put_u8(flag);
+                buf.put_u8(regular_flag(msg.compression, msg.reconnect_advised));
                 buf.extend_from_slice(&msg.payload);
                 buf.freeze()
             }
@@ -621,6 +614,7 @@ mod test {
             let proto = TestProto::new(payload.clone());
             let msg = SessionMessage::regular(algo, &proto).unwrap();
             let encoded = msg.encode();
+            prop_assert_eq!(encode_regular_frame(algo, &proto).unwrap(), encoded.clone());
             let decoded = decode_once(&encoded).unwrap();
 
             prop_assert!(matches!(decoded, SessionMessage::Regular(_)));
@@ -647,6 +641,7 @@ mod test {
             let proto = TestProto::new(payload);
             let msg = SessionMessage::regular(algo, &proto).unwrap();
             let encoded = msg.encode();
+            prop_assert_eq!(encode_regular_frame(algo, &proto).unwrap(), encoded.clone());
             let expected = decode_once(&encoded).unwrap();
 
             let chunks = chunk_bytes(&encoded, &chunk_pattern);
@@ -1066,44 +1061,103 @@ mod test {
     }
 
     #[test]
-    fn encode_regular_frame_matches_legacy_and_round_trips_all_algorithms() {
+    fn encode_regular_frame_matches_legacy_and_threshold_boundary() {
+        // TestProto wraps `bytes` field tag 1 (1 B tag + 2 B varint for lengths 128..=16383), so
+        // payload lengths 1020 and 1021 straddle the 1024-byte compression threshold at encoded
+        // lengths 1023 (uncompressed) and 1024 (compressed).
+        let below = TestProto::new(vec![0x5Au8; 1020]);
+        assert_eq!(below.encoded_len(), COMPRESSION_THRESHOLD_BYTES - 1);
+        let at_threshold = TestProto::new(vec![0x5Au8; 1021]);
+        assert_eq!(at_threshold.encoded_len(), COMPRESSION_THRESHOLD_BYTES);
+
         for algo in [
             CompressionAlgorithm::None,
             CompressionAlgorithm::Gzip,
             CompressionAlgorithm::Zstd,
         ] {
-            for size in [0usize, 16, COMPRESSION_THRESHOLD_BYTES - 1, 8192] {
-                let proto = TestProto::new(vec![0x5Au8; size]);
+            for proto in [
+                TestProto::new(vec![]),
+                TestProto::new(vec![0x5Au8; 16]),
+                below.clone(),
+                at_threshold.clone(),
+                TestProto::new(vec![0x5Au8; 8192]),
+            ] {
                 let fused = encode_regular_frame(algo, &proto).unwrap();
                 let legacy = SessionMessage::regular(algo, &proto).unwrap().encode();
                 assert_eq!(fused, legacy);
 
-                let decoded = decode_once(&fused).unwrap();
-                let SessionMessage::Regular(data) = decoded else {
+                let expected_compression = if algo == CompressionAlgorithm::None
+                    || proto.encoded_len() < COMPRESSION_THRESHOLD_BYTES
+                {
+                    CompressionAlgorithm::None
+                } else {
+                    algo
+                };
+                assert_eq!(
+                    (fused[LENGTH_PREFIX_SIZE] & FLAG_COMPRESSION_MASK) >> FLAG_COMPRESSION_SHIFT,
+                    expected_compression as u8
+                );
+
+                let SessionMessage::Regular(data) = decode_once(&fused).unwrap() else {
                     panic!("expected regular frame");
                 };
+                assert_eq!(data.compression, expected_compression);
                 assert_eq!(data.try_into_proto::<TestProto>().unwrap(), proto);
             }
         }
     }
 
     #[test]
-    fn shrink_if_excess_slack_reduces_only_when_above_threshold() {
-        let mut oversized = Vec::with_capacity(64 * 1024);
-        oversized.extend_from_slice(&[0xAB; 512]);
-        assert!(oversized.capacity() >= 64 * 1024);
-        shrink_if_excess_slack(&mut oversized, 4096);
-        assert!(
-            oversized.capacity() < 4096,
-            "expected capacity to shrink, got {}",
-            oversized.capacity()
-        );
+    fn encode_regular_frame_enforces_size_limits() {
+        // Exact MAX_DECOMPRESSED_PAYLOAD_BYTES encoded length (1 B tag + 4 B varint = 5 B
+        // overhead).
+        let exact_max = TestProto::new(vec![0u8; MAX_DECOMPRESSED_PAYLOAD_BYTES - 5]);
+        assert_eq!(exact_max.encoded_len(), MAX_DECOMPRESSED_PAYLOAD_BYTES);
+        let frame = encode_regular_frame(CompressionAlgorithm::None, &exact_max).unwrap();
+        assert_eq!(frame.len(), LENGTH_PREFIX_SIZE + MAX_FRAME_BYTES);
+        let SessionMessage::Regular(data) = decode_once(&frame).unwrap() else {
+            panic!("expected regular frame");
+        };
+        assert_eq!(data.try_into_proto::<TestProto>().unwrap(), exact_max);
 
-        let mut within_budget = Vec::with_capacity(4096);
-        within_budget.extend_from_slice(&[0xCD; 2048]);
-        let before = within_budget.capacity();
-        shrink_if_excess_slack(&mut within_budget, 4096);
-        assert_eq!(within_budget.capacity(), before);
+        // Over decompressed limit fails before compressing for all algorithms.
+        let over_max = TestProto::new(vec![0u8; MAX_DECOMPRESSED_PAYLOAD_BYTES - 4]);
+        assert_eq!(over_max.encoded_len(), MAX_DECOMPRESSED_PAYLOAD_BYTES + 1);
+        for algo in [
+            CompressionAlgorithm::None,
+            CompressionAlgorithm::Gzip,
+            CompressionAlgorithm::Zstd,
+        ] {
+            let err = encode_regular_frame(algo, &over_max).expect_err("should fail");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+            assert!(
+                err.to_string()
+                    .contains("payload exceeds decompressed limit")
+            );
+        }
+
+        // Incompressible payload at exact decompressed limit exceeds frame limit after compression.
+        let mut incompressible = vec![0u8; MAX_DECOMPRESSED_PAYLOAD_BYTES - 5];
+        let mut x = 0x1234_5678u32;
+        for byte in &mut incompressible {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            *byte = (x & 0xFF) as u8;
+        }
+        let incompressible_proto = TestProto::new(incompressible);
+        assert_eq!(
+            incompressible_proto.encoded_len(),
+            MAX_DECOMPRESSED_PAYLOAD_BYTES
+        );
+        for algo in [CompressionAlgorithm::Gzip, CompressionAlgorithm::Zstd] {
+            let err = encode_regular_frame(algo, &incompressible_proto).expect_err("should fail");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+            assert!(
+                err.to_string()
+                    .contains("compressed payload exceeds frame limit")
+            );
+        }
     }
 
     #[test]
@@ -1126,8 +1180,6 @@ mod test {
                     payload_cap <= payload_len + (payload_len / 8).max(64) + 64,
                     "CompressedData::for_proto({alg:?}, {size}): len={payload_len} retained cap={payload_cap}"
                 );
-                let roundtrip = CompressedData::for_proto(alg, &proto).unwrap();
-                assert_eq!(roundtrip.try_into_proto::<TestProto>().unwrap(), proto);
             }
         }
     }
@@ -1149,5 +1201,20 @@ mod test {
         let mut out = Vec::new();
         decoder.read_to_end(&mut out).unwrap();
         assert_eq!(TestProto::decode(out.as_slice()).unwrap(), proto);
+    }
+
+    #[test]
+    fn decompressed_decodes_legacy_zstd_frame_without_content_size() {
+        let proto = TestProto::new(vec![0x3Cu8; 4_096]);
+        let raw = proto.encode_to_vec();
+        let mut compressed = Vec::new();
+        zstd::stream::copy_encode(raw.as_slice(), &mut compressed, 0).unwrap();
+
+        let data = CompressedData {
+            compression: CompressionAlgorithm::Zstd,
+            reconnect_advised: false,
+            payload: Bytes::from(compressed),
+        };
+        assert_eq!(data.try_into_proto::<TestProto>().unwrap(), proto);
     }
 }
