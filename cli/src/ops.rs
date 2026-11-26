@@ -270,9 +270,7 @@ pub async fn issue_access_token(s2: &S2, args: IssueAccessTokenArgs) -> Result<S
         let dt = Timestamp::now()
             .checked_add(*expires_in)
             .map_err(|e| CliError::InvalidArgs(miette::miette!("Invalid expiration time: {e}")))?;
-        input = input
-            .with_expires_at(dt)
-            .map_err(|e| CliError::InvalidArgs(miette::miette!("Invalid expiration time: {e}")))?;
+        input = input.with_expires_at(dt);
     } else if let Some(expires_at) = args.expires_at {
         let dt: Timestamp = expires_at.parse().map_err(|e| {
             CliError::InvalidArgs(miette::miette!(
@@ -280,9 +278,7 @@ pub async fn issue_access_token(s2: &S2, args: IssueAccessTokenArgs) -> Result<S
                 e
             ))
         })?;
-        input = input
-            .with_expires_at(dt)
-            .map_err(|e| CliError::InvalidArgs(miette::miette!("Invalid expires_at: {e}")))?;
+        input = input.with_expires_at(dt);
     }
     if args.auto_prefix_streams {
         input = input.with_auto_prefix_streams(true);

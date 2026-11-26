@@ -221,7 +221,7 @@ async fn issue_list_and_revoke_access_token() -> Result<(), Box<dyn std::error::
                         "namespace".parse().expect("valid prefix"),
                     )),
             )
-            .with_expires_at(expires_at)?
+            .with_expires_at(expires_at)
             .with_auto_prefix_streams(true),
         )
         .await?;

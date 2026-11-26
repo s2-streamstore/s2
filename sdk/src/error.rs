@@ -1,11 +1,12 @@
 //! Errors returned by the SDK.
 //!
-//! Client construction and retry overrides (`S2::new`, `S2::from_env`, `with_retry`) return
-//! [`ValidationError`], and synchronous session openers (`append_session`, `producer`,
-//! `read_session`, `read_batch_session`) return [`ClientClosedError`]. Every other operation
-//! returns the narrowest error enum for its surface ([`RequestError`], [`ReadError`],
-//! [`AppendError`], [`AppendSessionError`], or [`ReadSessionError`]), and every operation error
-//! converts into the catch-all [`S2Error`].
+//! Client construction, retry overrides, standalone batchers, and validated value types
+//! (`S2::new`, `S2::from_env`, `with_retry`, `Batcher::new`, `TryBatcher::new`, `batch_iter`)
+//! return [`ValidationError`]. Every client, basin, stream, and session operation (including
+//! synchronous session/producer openers `append_session`, `producer`, `read_session`, and
+//! `read_batch_session`) returns the narrowest error enum for its surface ([`RequestError`],
+//! [`ReadError`], [`AppendError`], [`AppendSessionError`], or [`ReadSessionError`]), and every
+//! error converts into the catch-all [`S2Error`].
 //!
 //! [`S2Error`], the five operation error enums, and leaf error types whose classification varies
 //! per instance ([`ServerError`], [`ConnectionLostError`], [`TimeoutError`], [`ProtocolError`],

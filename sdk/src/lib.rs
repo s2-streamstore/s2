@@ -102,10 +102,9 @@ Choose the append surface that matches your workload:
 Every operation returns the narrowest flat error enum for its surface:
 
 * [`RequestError`](error::RequestError) — account, basin, stream-management, and metrics ops
-* [`ReadError`](error::ReadError) / [`ReadSessionError`](error::ReadSessionError) — `check_tail`, unary reads, and continuous read sessions
-* [`AppendError`](error::AppendError) / [`AppendSessionError`](error::AppendSessionError) — unary appends, append sessions, and producers
-* [`ClientClosedError`](error::ClientClosedError) — returned synchronously by session/producer openers when the client has been closed via [`S2::close`]
-* [`ValidationError`](error::ValidationError) — returned by client constructors, [`with_retry`](S2::with_retry), and validated type builders
+* [`ReadError`](error::ReadError) / [`ReadSessionError`](error::ReadSessionError) — `check_tail`, unary reads, and opening/iterating continuous read sessions
+* [`AppendError`](error::AppendError) / [`AppendSessionError`](error::AppendSessionError) — unary appends, and opening/using append sessions and producers
+* [`ValidationError`](error::ValidationError) — returned by client constructors, [`with_retry`](S2::with_retry), standalone batchers, and validated value types
 
 All of these convert into [`S2Error`]; [`S2Error`] and the five operation error enums expose
 [`is_retryable`](S2Error::is_retryable),

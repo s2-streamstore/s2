@@ -393,7 +393,6 @@ pub fn sdk_config(
 
     let mut sdk_config = S2Config::new(access_token)
         .with_user_agent(user_agent)
-        .expect("valid user agent")
         .with_request_timeout(Duration::from_secs(30))
         .with_compression(compression);
 

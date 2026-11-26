@@ -239,7 +239,7 @@ impl BaseClient {
     }
 
     fn prepare(config: &S2Config) -> Result<(HeaderMap, PreparedTokenProvider), ValidationError> {
-        config.validate()?;
+        let user_agent = config.validate_and_parse_user_agent()?;
         let mut default_headers = config.default_headers.clone();
         // `Authorization` and `s2-basin` are SDK-managed headers; never let caller-supplied
         // defaults leak onto account or Cloud basin requests (`C3`).
@@ -261,7 +261,7 @@ impl BaseClient {
                 provider: Some(provider.clone()),
             },
         };
-        apply_standard_default_headers(&mut default_headers, config);
+        apply_standard_default_headers(&mut default_headers, user_agent, config.compression);
         Ok((default_headers, provider))
     }
 
@@ -487,9 +487,13 @@ struct PreparedTokenProvider {
     provider: Option<Arc<dyn crate::types::AccessTokenProvider>>,
 }
 
-fn apply_standard_default_headers(default_headers: &mut HeaderMap, config: &S2Config) {
-    default_headers.insert(http::header::USER_AGENT, config.user_agent.clone());
-    match config.compression {
+fn apply_standard_default_headers(
+    default_headers: &mut HeaderMap,
+    user_agent: HeaderValue,
+    compression: Compression,
+) {
+    default_headers.insert(http::header::USER_AGENT, user_agent);
+    match compression {
         Compression::Gzip => {
             default_headers.insert(
                 http::header::ACCEPT_ENCODING,
@@ -1254,8 +1258,7 @@ mod tests {
         let config = S2Config::new("actual-token")
             .with_endpoints(crate::types::S2Endpoints::for_endpoint("http://example.test").unwrap())
             .with_compression(Compression::Gzip)
-            .with_default_headers(headers)
-            .unwrap();
+            .with_default_headers(headers);
         let executor = Arc::new(HeaderCapture::default());
         let retry = RetryConfig::new()
             .with_min_base_delay(Duration::ZERO)
@@ -1335,7 +1338,7 @@ mod tests {
             assert!(headers["x-origin-session"].is_sensitive());
             assert_eq!(headers[AUTHORIZATION], "Bearer actual-token");
             assert!(headers[AUTHORIZATION].is_sensitive());
-            assert_eq!(headers[http::header::USER_AGENT], config.user_agent);
+            assert_eq!(headers[http::header::USER_AGENT], &*config.user_agent);
             assert_eq!(headers[http::header::ACCEPT_ENCODING], "gzip");
             assert!(!headers.contains_key(http::header::CONTENT_ENCODING));
         }
@@ -1364,8 +1367,7 @@ mod tests {
             .with_default_headers(HeaderMap::from_iter([(
                 http::header::ACCEPT_ENCODING,
                 HeaderValue::from_static("gzip, zstd"),
-            )]))
-            .unwrap();
+            )]));
         let client = BaseClient::init_with_connector(&config, HttpConnector::new()).unwrap();
         let mut request = client
             .post("http://example.test/v1/basins".parse().unwrap())
@@ -1524,7 +1526,6 @@ mod tests {
                 AUTHORIZATION,
                 HeaderValue::from_static("Bearer wrong-token"),
             )]))
-            .unwrap()
             .with_access_token_provider(RotatingTokenProvider {
                 generation: AtomicUsize::new(1),
             });
