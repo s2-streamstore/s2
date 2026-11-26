@@ -730,24 +730,28 @@ async fn spec_c12_client_close_aborts_inflight_and_sessions_and_rejects_new_call
         stream.append(sample_append_input()).await,
         Err(AppendError::ClientClosed(_))
     ));
-    assert!(stream.append_session(AppendSessionConfig::new()).is_err());
-    assert!(stream.producer(ProducerConfig::new()).is_err());
-    assert!(
-        stream
-            .read_session(
-                ReadInput::new(ReadStart::TAIL),
-                ReadSessionConfig::default()
-            )
-            .is_err()
-    );
-    assert!(
-        stream
-            .read_batch_session(
-                ReadInput::new(ReadStart::TAIL),
-                ReadSessionConfig::default()
-            )
-            .is_err()
-    );
+    assert!(matches!(
+        stream.append_session(AppendSessionConfig::new()),
+        Err(AppendSessionError::ClientClosed(_))
+    ));
+    assert!(matches!(
+        stream.producer(ProducerConfig::new()),
+        Err(AppendSessionError::ClientClosed(_))
+    ));
+    assert!(matches!(
+        stream.read_session(
+            ReadInput::new(ReadStart::TAIL),
+            ReadSessionConfig::default()
+        ),
+        Err(ReadSessionError::ClientClosed(_))
+    ));
+    assert!(matches!(
+        stream.read_batch_session(
+            ReadInput::new(ReadStart::TAIL),
+            ReadSessionConfig::default()
+        ),
+        Err(ReadSessionError::ClientClosed(_))
+    ));
 
     // Dropping S2 without calling close() keeps sessions alive.
     let ack_server = MockH2Server::start(|_conn_id, req, respond| async move {
@@ -2003,7 +2007,6 @@ async fn producer_client_close_during_cut_or_reserve_wait_reports_aborted() {
         .producer(
             ProducerConfig::new()
                 .with_max_unacked_bytes(max_unacked)
-                .unwrap()
                 .with_linger(Duration::from_secs(60)),
         )
         .expect("open producer");

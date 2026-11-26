@@ -15,8 +15,8 @@ use crate::{
     },
     client,
     error::{
-        AppendError, ClientClosedError, ErrorCode, ErrorContext, OpScope, ReadError, RequestError,
-        ValidationError,
+        AppendError, AppendSessionError, ClientClosedError, ErrorCode, ErrorContext, OpScope,
+        ReadError, ReadSessionError, RequestError, ValidationError,
     },
     producer::{Producer, ProducerConfig},
     session::{
@@ -98,7 +98,7 @@ impl S2 {
     /// # Errors
     ///
     /// Returns [`ValidationError`] if the configuration (such as the access token, timeouts,
-    /// retry settings, HTTP/2 settings, or TLS setup) is invalid.
+    /// retry settings, HTTP/2 settings, headers, user agent, or TLS setup) is invalid.
     pub fn new(config: S2Config) -> Result<Self, ValidationError> {
         Self::init_with_op(config, "S2::new")
     }
@@ -402,13 +402,13 @@ impl S2 {
         &self,
         input: IssueAccessTokenInput,
     ) -> Result<String, RequestError> {
-        let req = input.into_api();
+        let scope = OpScope::account("issue_access_token", false);
+        let req = input
+            .try_into_api()
+            .map_err(|e| scope.context(1).format_validation(e))?;
         let response: api::access::IssueAccessTokenResponse = self
             .base
-            .unary(
-                self.post("/v1/access-tokens").json(&req).build(),
-                OpScope::account("issue_access_token", false),
-            )
+            .unary(self.post("/v1/access-tokens").json(&req).build(), scope)
             .definite_retries_only()
             .send_json()
             .await?;
@@ -1042,7 +1042,8 @@ impl S2Stream {
     ///
     /// # Errors
     ///
-    /// Returns [`ClientClosedError`] if [`S2::close`] has already been called.
+    /// Returns [`AppendSessionError::Validation`] if `config` is invalid, or
+    /// [`AppendSessionError::ClientClosed`] if [`S2::close`] has already been called.
     ///
     /// # Panics
     ///
@@ -1050,7 +1051,13 @@ impl S2Stream {
     pub fn append_session(
         &self,
         config: AppendSessionConfig,
-    ) -> Result<AppendSession, ClientClosedError> {
+    ) -> Result<AppendSession, AppendSessionError> {
+        let scope = self
+            .client
+            .stream_scope("append_session", &self.name, false);
+        config
+            .validate()
+            .map_err(|e| scope.context(1).format_validation(e))?;
         self.ensure_open("append_session", false)?;
         Ok(AppendSession::new(
             self.client.clone(),
@@ -1064,12 +1071,17 @@ impl S2Stream {
     ///
     /// # Errors
     ///
-    /// Returns [`ClientClosedError`] if [`S2::close`] has already been called.
+    /// Returns [`AppendSessionError::Validation`] if `config` is invalid, or
+    /// [`AppendSessionError::ClientClosed`] if [`S2::close`] has already been called.
     ///
     /// # Panics
     ///
     /// Panics if called outside the context of a Tokio runtime.
-    pub fn producer(&self, config: ProducerConfig) -> Result<Producer, ClientClosedError> {
+    pub fn producer(&self, config: ProducerConfig) -> Result<Producer, AppendSessionError> {
+        let scope = self.client.stream_scope("producer", &self.name, false);
+        config
+            .validate()
+            .map_err(|e| scope.context(1).format_validation(e))?;
         self.ensure_open("producer", false)?;
         Ok(Producer::new(
             self.client.clone(),
@@ -1088,12 +1100,12 @@ impl S2Stream {
     ///
     /// # Errors
     ///
-    /// Returns [`ClientClosedError`] if [`S2::close`] has already been called.
+    /// Returns [`ReadSessionError::ClientClosed`] if [`S2::close`] has already been called.
     pub fn read_session(
         &self,
         input: impl Into<ReadInput>,
         config: ReadSessionConfig,
-    ) -> Result<ReadSession, ClientClosedError> {
+    ) -> Result<ReadSession, ReadSessionError> {
         self.ensure_open("read_session", true)?;
         let input = input.into();
         let headers = self.headers(input.stream_config());
@@ -1114,12 +1126,12 @@ impl S2Stream {
     ///
     /// # Errors
     ///
-    /// Returns [`ClientClosedError`] if [`S2::close`] has already been called.
+    /// Returns [`ReadSessionError::ClientClosed`] if [`S2::close`] has already been called.
     pub fn read_batch_session(
         &self,
         input: impl Into<ReadInput>,
         config: ReadSessionConfig,
-    ) -> Result<ReadBatchSession, ClientClosedError> {
+    ) -> Result<ReadBatchSession, ReadSessionError> {
         self.ensure_open("read_batch_session", true)?;
         let input = input.into();
         let headers = self.headers(input.stream_config());

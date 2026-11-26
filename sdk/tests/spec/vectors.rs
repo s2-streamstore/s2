@@ -14,8 +14,11 @@ use s2_api::v1::{
 use s2_sdk::{
     S2,
     append_session::AppendSessionConfig,
-    batching::BatcherConfig,
-    error::{AppendError, ReadError, ReadSessionError, S2Error, ValidationError},
+    batching::{Batcher, BatcherConfig, TryBatchError, TryBatcher, batch_iter, try_batch_iter},
+    error::{
+        AppendError, AppendSessionError, ReadError, ReadSessionError, RequestError, S2Error,
+        ValidationError,
+    },
     producer::ProducerConfig,
     read_session::ReadSessionConfig,
     types::{
@@ -366,13 +369,16 @@ struct NumberCase {
 }
 
 // spec: r1 A2d, C2, D5
-#[test]
-fn spec_vectors_numbers() {
+#[tokio::test]
+async fn spec_vectors_numbers() {
     let file: NumbersFile = read_json("sdk/vectors/numbers.json");
     assert!(!file.cases.is_empty());
 
     let dummy_batch = AppendRecordBatch::try_from_iter([AppendRecord::new("").unwrap()]).unwrap();
     let http_endpoints = S2Endpoints::for_endpoint("http://localhost:8080").unwrap();
+    let (basin_name, stream_name) = test_basin_and_stream();
+    let client = S2::new(S2Config::new("token").with_endpoints(http_endpoints.clone())).unwrap();
+    let stream = client.basin(basin_name).stream(stream_name);
 
     for case in &file.cases {
         let label = format!(
@@ -458,35 +464,107 @@ fn spec_vectors_numbers() {
                 },
                 "session.max_unacked_bytes" => match raw.parse::<usize>() {
                     Ok(v) => {
-                        let sess = AppendSessionConfig::new().with_max_unacked_bytes(v);
-                        let prod = ProducerConfig::new().with_max_unacked_bytes(v);
+                        let sess = stream
+                            .append_session(AppendSessionConfig::new().with_max_unacked_bytes(v));
+                        let prod = stream.producer(ProducerConfig::new().with_max_unacked_bytes(v));
                         assert_eq!(sess.is_ok(), expect_valid, "{label}");
                         assert_eq!(prod.is_ok(), expect_valid, "{label}");
+                        if !expect_valid {
+                            assert!(
+                                matches!(sess, Err(AppendSessionError::Validation(_))),
+                                "{label}"
+                            );
+                            assert!(
+                                matches!(prod, Err(AppendSessionError::Validation(_))),
+                                "{label}"
+                            );
+                        }
                     }
                     Err(_) => assert!(!expect_valid, "{label}"),
                 },
                 "session.max_unacked_batches" => match raw.parse::<usize>() {
                     Ok(v) => {
-                        let res = AppendSessionConfig::new().with_max_unacked_batches(v);
+                        let res = stream
+                            .append_session(AppendSessionConfig::new().with_max_unacked_batches(v));
                         assert_eq!(res.is_ok(), expect_valid, "{label}");
+                        if !expect_valid {
+                            assert!(
+                                matches!(res, Err(AppendSessionError::Validation(_))),
+                                "{label}"
+                            );
+                        }
                     }
                     Err(_) => assert!(!expect_valid, "{label}"),
                 },
                 "batching.max_batch_records" => match raw.parse::<usize>() {
                     Ok(v) => {
-                        let batcher = BatcherConfig::new().with_max_batch_records(v);
-                        let prod = ProducerConfig::new().with_max_batch_records(v);
+                        let batcher_cfg = BatcherConfig::new().with_max_batch_records(v);
+                        let batcher = Batcher::new(
+                            futures_util::stream::empty::<AppendRecord>(),
+                            batcher_cfg.clone(),
+                        );
+                        let try_batcher = TryBatcher::new(
+                            futures_util::stream::empty::<Result<AppendRecord, ()>>(),
+                            batcher_cfg.clone(),
+                        );
+                        let iter_res =
+                            batch_iter(std::iter::empty::<AppendRecord>(), batcher_cfg.clone());
+                        let try_iter_res = try_batch_iter(
+                            std::iter::empty::<Result<AppendRecord, ()>>(),
+                            batcher_cfg,
+                        );
+                        let prod = stream.producer(ProducerConfig::new().with_max_batch_records(v));
                         assert_eq!(batcher.is_ok(), expect_valid, "{label}");
+                        assert_eq!(try_batcher.is_ok(), expect_valid, "{label}");
+                        assert_eq!(iter_res.is_ok(), expect_valid, "{label}");
+                        assert_eq!(try_iter_res.is_ok(), expect_valid, "{label}");
                         assert_eq!(prod.is_ok(), expect_valid, "{label}");
+                        if !expect_valid {
+                            assert!(
+                                matches!(try_iter_res, Err(TryBatchError::Validation(_))),
+                                "{label}"
+                            );
+                            assert!(
+                                matches!(prod, Err(AppendSessionError::Validation(_))),
+                                "{label}"
+                            );
+                        }
                     }
                     Err(_) => assert!(!expect_valid, "{label}"),
                 },
                 "batching.max_batch_bytes" => match raw.parse::<usize>() {
                     Ok(v) => {
-                        let batcher = BatcherConfig::new().with_max_batch_bytes(v);
-                        let prod = ProducerConfig::new().with_max_batch_bytes(v);
+                        let batcher_cfg = BatcherConfig::new().with_max_batch_bytes(v);
+                        let batcher = Batcher::new(
+                            futures_util::stream::empty::<AppendRecord>(),
+                            batcher_cfg.clone(),
+                        );
+                        let try_batcher = TryBatcher::new(
+                            futures_util::stream::empty::<Result<AppendRecord, ()>>(),
+                            batcher_cfg.clone(),
+                        );
+                        let iter_res =
+                            batch_iter(std::iter::empty::<AppendRecord>(), batcher_cfg.clone());
+                        let try_iter_res = try_batch_iter(
+                            std::iter::empty::<Result<AppendRecord, ()>>(),
+                            batcher_cfg,
+                        );
+                        let prod = stream.producer(ProducerConfig::new().with_max_batch_bytes(v));
                         assert_eq!(batcher.is_ok(), expect_valid, "{label}");
+                        assert_eq!(try_batcher.is_ok(), expect_valid, "{label}");
+                        assert_eq!(iter_res.is_ok(), expect_valid, "{label}");
+                        assert_eq!(try_iter_res.is_ok(), expect_valid, "{label}");
                         assert_eq!(prod.is_ok(), expect_valid, "{label}");
+                        if !expect_valid {
+                            assert!(
+                                matches!(try_iter_res, Err(TryBatchError::Validation(_))),
+                                "{label}"
+                            );
+                            assert!(
+                                matches!(prod, Err(AppendSessionError::Validation(_))),
+                                "{label}"
+                            );
+                        }
                     }
                     Err(_) => assert!(!expect_valid, "{label}"),
                 },
@@ -970,12 +1048,17 @@ struct DateCase {
 }
 
 // spec: r1 D4
-#[test]
-fn spec_d4_wall_clock_and_metrics_timestamps() {
+#[tokio::test]
+async fn spec_d4_wall_clock_and_metrics_timestamps() {
     let file: DatesFile = read_json("sdk/vectors/dates.json");
     assert!(!file.cases.is_empty());
 
     let scope = AccessTokenScope::from_op_group_perms(OperationGroupPermissions::read_write_all());
+    let server = MockH2Server::start(|_conn_id, _req, respond| async move {
+        send_json(respond, 200, r#"{"access_token":"tok-secret"}"#);
+    })
+    .await;
+    let s2 = server.client(no_retry_config());
 
     for case in &file.cases {
         let label = format!("[{}] {}", case.rule, case.name);
@@ -992,10 +1075,33 @@ fn spec_d4_wall_clock_and_metrics_timestamps() {
                 };
                 match ts {
                     Ok(ts) => {
-                        let res =
-                            IssueAccessTokenInput::new("tok-d4".parse().unwrap(), scope.clone())
-                                .with_expires_at(ts);
-                        assert_eq!(res.is_ok(), expect_valid, "{label}: ts={ts}");
+                        let before = server.request_count();
+                        let res = s2
+                            .issue_access_token(
+                                IssueAccessTokenInput::new(
+                                    "tok-d4".parse().unwrap(),
+                                    scope.clone(),
+                                )
+                                .with_expires_at(ts),
+                            )
+                            .await;
+                        if expect_valid {
+                            assert!(res.is_ok(), "{label}: ts={ts}, got {res:?}");
+                            assert_eq!(server.request_count(), before + 1, "{label}");
+                        } else {
+                            let err = res.expect_err(&format!("{label}: expected ValidationError"));
+                            assert!(
+                                matches!(err, RequestError::Validation(_)),
+                                "{label}: {err:?}"
+                            );
+                            assert!(err.has_no_side_effects(), "{label}");
+                            assert!(!err.is_retryable(), "{label}");
+                            assert_eq!(
+                                server.request_count(),
+                                before,
+                                "{label}: invalid expires_at must fail before sending request"
+                            );
+                        }
                     }
                     Err(_) => {
                         // jiff::Timestamp::MAX is 9999-12-30T22:00:00.999999999Z (253402207200),

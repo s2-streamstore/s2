@@ -76,7 +76,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .with_basins(BasinMatcher::all())
                 .with_streams(StreamMatcher::Prefix("users/1234/".parse()?)),
             )
-            .with_expires_at("2027-01-01T00:00:00Z".parse()?)?,
+            .with_expires_at("2027-01-01T00:00:00Z".parse()?),
         )
         .await?;
 

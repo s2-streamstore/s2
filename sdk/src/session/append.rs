@@ -75,13 +75,11 @@ impl Drop for FinishOnDrop {
     }
 }
 
-pub(crate) fn validate_max_unacked_bytes(
-    max_unacked_bytes: usize,
-) -> Result<usize, ValidationError> {
+pub(crate) fn validate_max_unacked_bytes(max_unacked_bytes: usize) -> Result<(), ValidationError> {
     if max_unacked_bytes < ONE_MIB {
         return Err(format!("max_unacked_bytes must be at least {ONE_MIB}").into());
     }
-    Ok(max_unacked_bytes)
+    Ok(())
 }
 
 pub(crate) struct SubmitTicket<T> {
@@ -252,37 +250,28 @@ impl AppendSessionConfig {
 
     /// Set the limit on total metered bytes of unacknowledged [`AppendInput`]s held in memory.
     ///
+    /// Must be at least `1 MiB`; smaller values fail with [`ValidationError`] in
+    /// [`S2Stream::append_session`](crate::S2Stream::append_session).
+    ///
     /// Defaults to `5 MiB`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ValidationError`] if `max_unacked_bytes` is less than `1 MiB`.
-    pub fn with_max_unacked_bytes(self, max_unacked_bytes: usize) -> Result<Self, ValidationError> {
-        let max_unacked_bytes = validate_max_unacked_bytes(max_unacked_bytes)?;
-        Ok(Self {
+    pub fn with_max_unacked_bytes(self, max_unacked_bytes: usize) -> Self {
+        Self {
             max_unacked_bytes,
             ..self
-        })
+        }
     }
 
     /// Set the limit on number of unacknowledged [`AppendInput`]s held in memory.
     ///
+    /// Must be at least `1`; passing `0` fails with [`ValidationError`] in
+    /// [`S2Stream::append_session`](crate::S2Stream::append_session).
+    ///
     /// Defaults to no limit.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ValidationError`] if `max_unacked_batches` is `0`.
-    pub fn with_max_unacked_batches(
-        self,
-        max_unacked_batches: usize,
-    ) -> Result<Self, ValidationError> {
-        if max_unacked_batches == 0 {
-            return Err("max_unacked_batches must be at least 1".into());
-        }
-        Ok(Self {
+    pub fn with_max_unacked_batches(self, max_unacked_batches: usize) -> Self {
+        Self {
             max_unacked_batches: Some(max_unacked_batches),
             ..self
-        })
+        }
     }
 
     /// Set the stream configuration to apply if the stream is created on append.
@@ -296,6 +285,16 @@ impl AppendSessionConfig {
             stream_config: Some(stream_config),
             ..self
         }
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), ValidationError> {
+        validate_max_unacked_bytes(self.max_unacked_bytes)?;
+        if let Some(max_unacked_batches) = self.max_unacked_batches
+            && max_unacked_batches == 0
+        {
+            return Err("max_unacked_batches must be at least 1".into());
+        }
+        Ok(())
     }
 }
 
@@ -693,6 +692,7 @@ impl AppendSession {
         headers: StreamHeaders,
         config: AppendSessionConfig,
     ) -> Self {
+        debug_assert!(config.validate().is_ok());
         let permits = AppendPermits::new(config.max_unacked_batches, config.max_unacked_bytes);
         let core = Arc::new(AppendSessionCore::new(
             client,

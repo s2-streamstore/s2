@@ -90,11 +90,7 @@ async fn spec_a2_validation_before_capacity_and_split_reserve_submit() {
     // 1. AppendSession: reserve() validates before waiting for capacity; permit.submit() rejects
     //    batches larger than reserved_bytes, releases reservation, and leaves session open.
     let session = stream
-        .append_session(
-            AppendSessionConfig::new()
-                .with_max_unacked_batches(1)
-                .unwrap(),
-        )
+        .append_session(AppendSessionConfig::new().with_max_unacked_batches(1))
         .unwrap();
 
     // Invalid reserve sizes fail immediately with ValidationError.
@@ -137,7 +133,6 @@ async fn spec_a2_validation_before_capacity_and_split_reserve_submit() {
         .producer(
             ProducerConfig::new()
                 .with_max_batch_bytes(64)
-                .unwrap()
                 .with_linger(Duration::from_secs(60)),
         )
         .unwrap();
@@ -166,6 +161,26 @@ async fn spec_a2_validation_before_capacity_and_split_reserve_submit() {
     release.notify_one();
     close_fut.await.unwrap();
     assert_eq!(t.await.unwrap().seq_num, 0);
+    // 3. Invalid session/producer configs fail at open time with E7-contextualized ValidationError.
+    let err = stream
+        .append_session(AppendSessionConfig::new().with_max_unacked_batches(0))
+        .expect_err("0 max_unacked_batches must fail");
+    assert!(matches!(err, AppendSessionError::Validation(_)), "{err:?}");
+    assert!(err.has_no_side_effects());
+    assert!(!err.is_retryable());
+    assert!(err.to_string().contains("append_session"), "{err}");
+    assert!(err.to_string().contains("test-basin"), "{err}");
+    assert!(err.to_string().contains("test-stream"), "{err}");
+
+    let err = stream
+        .producer(ProducerConfig::new().with_max_batch_records(0))
+        .expect_err("0 max_batch_records must fail");
+    assert!(matches!(err, AppendSessionError::Validation(_)), "{err:?}");
+    assert!(err.has_no_side_effects());
+    assert!(!err.is_retryable());
+    assert!(err.to_string().contains("producer"), "{err}");
+    assert!(err.to_string().contains("test-basin"), "{err}");
+    assert!(err.to_string().contains("test-stream"), "{err}");
 }
 
 // spec: r1 A3, A3a, A3b, T9
@@ -308,11 +323,7 @@ async fn spec_a4_fifo_capacity_cancel_and_closing_wakes_waiters() {
     //    MUST queue behind Waiter A!).
     let session = Arc::new(
         stream
-            .append_session(
-                AppendSessionConfig::new()
-                    .with_max_unacked_bytes(1024 * 1024)
-                    .unwrap(),
-            )
+            .append_session(AppendSessionConfig::new().with_max_unacked_bytes(1024 * 1024))
             .unwrap(),
     );
 
@@ -388,7 +399,7 @@ async fn spec_a4_fifo_capacity_cancel_and_closing_wakes_waiters() {
     .await;
     let producer = fail_server
         .stream(no_retry_config())
-        .producer(ProducerConfig::new().with_max_batch_records(1).unwrap())
+        .producer(ProducerConfig::new().with_max_batch_records(1))
         .unwrap();
     let t = producer
         .submit(AppendRecord::new("boom").unwrap())
@@ -510,9 +521,7 @@ async fn spec_a5a_producer_flush_partial_batch_on_backpressure() {
         .producer(
             ProducerConfig::new()
                 .with_max_unacked_bytes(1024 * 1024)
-                .unwrap()
                 .with_max_batch_bytes(1024 * 1024)
-                .unwrap()
                 .with_linger(Duration::MAX),
         )
         .unwrap();
@@ -585,9 +594,7 @@ async fn spec_a5a_producer_flush_partial_batch_on_backpressure() {
             .producer(
                 ProducerConfig::new()
                     .with_max_unacked_bytes(1024 * 1024)
-                    .unwrap()
                     .with_max_batch_bytes(1024 * 1024)
-                    .unwrap()
                     .with_linger(Duration::from_secs(3600)),
             )
             .unwrap(),
@@ -917,7 +924,6 @@ async fn spec_a6_a9_outcome_table_all_five_scenarios_and_producer_passthrough() 
         .producer(
             ProducerConfig::new()
                 .with_max_batch_records(1)
-                .unwrap()
                 .with_linger(Duration::from_secs(60)),
         )
         .unwrap();
@@ -989,7 +995,6 @@ async fn spec_a7_producer_flush_isolation_and_close_interaction() {
             .producer(
                 ProducerConfig::new()
                     .with_max_batch_records(10)
-                    .unwrap()
                     .with_linger(Duration::from_secs(3600)),
             )
             .unwrap(),
@@ -1764,7 +1769,6 @@ async fn session_abort_try_ack_fused_and_validation_context() {
         .producer(
             ProducerConfig::new()
                 .with_max_batch_bytes(16)
-                .unwrap()
                 .with_linger(Duration::from_secs(60)),
         )
         .unwrap();
@@ -1864,11 +1868,7 @@ async fn spec_a8c_explicit_abort_append_session_and_producer() {
     .await;
     let session = active_server
         .stream(no_retry_config())
-        .append_session(
-            AppendSessionConfig::new()
-                .with_max_unacked_batches(3)
-                .unwrap(),
-        )
+        .append_session(AppendSessionConfig::new().with_max_unacked_batches(3))
         .unwrap();
     let ta = session.submit(sized_append_input(40 * 1024)).await.unwrap();
     let tb = session.submit(sized_append_input(40 * 1024)).await.unwrap();
@@ -2022,9 +2022,7 @@ async fn spec_a8c_explicit_abort_append_session_and_producer() {
             .producer(
                 ProducerConfig::new()
                     .with_max_unacked_bytes(1024 * 1024)
-                    .unwrap()
                     .with_max_batch_bytes(1024 * 1024)
-                    .unwrap()
                     .with_linger(Duration::from_secs(60)),
             )
             .unwrap(),

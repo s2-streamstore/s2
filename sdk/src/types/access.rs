@@ -851,18 +851,14 @@ impl IssueAccessTokenInput {
     /// [`S2Config::new`](crate::S2Config::new).
     ///
     /// Accepts timestamps from `0000-01-01T00:00:00Z` through [`Timestamp::MAX`]
-    /// (`9999-12-30T22:00:00.999999999Z`).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ValidationError`] if `expires_at` precedes year `0000` (outside the RFC 3339
-    /// year range).
-    pub fn with_expires_at(self, expires_at: Timestamp) -> Result<Self, ValidationError> {
-        let expires_at = validate_rfc3339_timestamp(expires_at)?;
-        Ok(Self {
+    /// (`9999-12-30T22:00:00.999999999Z`); timestamps preceding year `0000` (outside the RFC 3339
+    /// year range) fail with [`ValidationError`] in
+    /// [`S2::issue_access_token`](crate::S2::issue_access_token).
+    pub fn with_expires_at(self, expires_at: Timestamp) -> Self {
+        Self {
             expires_at: Some(expires_at),
             ..self
-        })
+        }
     }
 
     /// Set whether to automatically prefix stream names during creation and strip the prefix during
@@ -876,13 +872,18 @@ impl IssueAccessTokenInput {
         }
     }
 
-    pub(crate) fn into_api(self) -> api::access::IssueAccessTokenRequest {
-        api::access::IssueAccessTokenRequest {
+    pub(crate) fn try_into_api(
+        self,
+    ) -> Result<api::access::IssueAccessTokenRequest, ValidationError> {
+        if let Some(expires_at) = self.expires_at {
+            validate_rfc3339_timestamp(expires_at)?;
+        }
+        Ok(api::access::IssueAccessTokenRequest {
             id: self.id,
             expires_at: self.expires_at,
             auto_prefix_streams: self.auto_prefix_streams.then_some(true),
             scope: self.scope.into_api(),
             network_policy: self.network_policy,
-        }
+        })
     }
 }
