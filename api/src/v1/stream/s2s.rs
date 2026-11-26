@@ -213,10 +213,22 @@ impl CompressedData {
         }
     }
 
+    /// Decode the protobuf payload, copying `Bytes` fields into independent allocations so
+    /// untrusted inputs cannot retain oversized frame buffers via skipped unknown fields.
     pub fn try_into_proto<P: prost::Message + Default>(self) -> std::io::Result<P> {
         let payload = self.decompressed()?;
         P::decode(payload.as_ref())
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
+
+    /// Decode the protobuf payload zero-copy by slicing `Bytes` fields directly from the frame
+    /// buffer.
+    ///
+    /// Intended for trusted response frames (such as SDK read streams) where avoiding per-field
+    /// copies is desirable and callers understand decoded `Bytes` slices share the frame buffer.
+    pub fn try_into_proto_zero_copy<P: prost::Message + Default>(self) -> std::io::Result<P> {
+        let payload = self.decompressed()?;
+        P::decode(payload).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
     }
 }
 
@@ -398,7 +410,172 @@ where
     }
 }
 
+fn parse_frame_length(src: &[u8]) -> std::io::Result<usize> {
+    let length = ((src[0] as usize) << 16) | ((src[1] as usize) << 8) | (src[2] as usize);
+    if length > MAX_FRAME_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "frame exceeds decode limit",
+        ));
+    }
+    Ok(length)
+}
+
+/// Reserve capacity for an in-progress straddled S2S frame in geometric steps bounded by 4x the
+/// bytes actually received so far, clamping to exact `total_size` once reached. This prevents a
+/// stalled 3-byte prefix from pre-allocating a 2.5 MiB buffer while keeping completed straddled
+/// frames at 1.0x capacity.
+fn reserve_for_partial_frame(buffer: &mut Vec<u8>, total_size: usize, incoming_len: usize) {
+    let next_len = buffer.len().saturating_add(incoming_len);
+    if next_len > buffer.capacity() {
+        let target = total_size.min(next_len.saturating_mul(4)).max(next_len);
+        buffer.reserve_exact(target.saturating_sub(buffer.len()));
+    }
+}
+
 pub struct FrameDecoder;
+
+impl FrameDecoder {
+    /// Decode one complete S2S frame directly from a [`Bytes`] buffer without copying.
+    ///
+    /// Returns `Ok(None)` without modifying `src` if fewer bytes than a complete frame are
+    /// present.
+    pub fn decode_bytes(src: &mut Bytes) -> std::io::Result<Option<SessionMessage>> {
+        if src.len() < LENGTH_PREFIX_SIZE {
+            return Ok(None);
+        }
+
+        let length = parse_frame_length(src)?;
+        let total_size = LENGTH_PREFIX_SIZE + length;
+        if src.len() < total_size {
+            return Ok(None);
+        }
+
+        src.advance(LENGTH_PREFIX_SIZE);
+        let frame_bytes = src.split_to(length);
+        Ok(Some(SessionMessage::decode_message(frame_bytes)?))
+    }
+
+    /// Peek the total wire size (`3 + length`) of the next S2S frame if at least 3 bytes are
+    /// available, validating against the maximum frame size limit.
+    pub fn peek_total_frame_len(src: &[u8]) -> std::io::Result<Option<usize>> {
+        if src.len() < LENGTH_PREFIX_SIZE {
+            return Ok(None);
+        }
+        Ok(Some(LENGTH_PREFIX_SIZE + parse_frame_length(src)?))
+    }
+}
+
+/// Incremental S2S frame decoder for chunked [`Bytes`] streams.
+///
+/// Complete frames inside an incoming `Bytes` chunk are decoded zero-copy via
+/// [`FrameDecoder::decode_bytes`]. Only frames straddling chunk boundaries are reassembled into an
+/// isolated per-frame buffer (taken on completion so idle sessions retain zero slab capacity).
+///
+/// By default ([`Self::new`]), partial-frame buffer reservations grow geometrically capped at `4x`
+/// bytes received so far (safe for untrusted server inputs). Trusted client streams may opt into
+/// [`Self::with_full_pre_reserve`] to reserve the validated frame length up front in a single
+/// allocation once the 3-byte length prefix arrives.
+#[derive(Debug, Default)]
+pub struct ChunkFrameDecoder {
+    buffer: Vec<u8>,
+    pre_reserve_full: bool,
+}
+
+impl ChunkFrameDecoder {
+    /// Create a decoder with bounded geometric (`<= 4x` received bytes) partial-frame reservation,
+    /// suitable for untrusted peers such as server-side append extractors.
+    pub fn new() -> Self {
+        Self {
+            buffer: Vec::new(),
+            pre_reserve_full: false,
+        }
+    }
+
+    /// Create a decoder that pre-reserves the exact validated frame length once the 3-byte prefix
+    /// arrives (1 allocation per large straddled frame), suitable for trusted streams such as the
+    /// SDK client.
+    pub fn with_full_pre_reserve() -> Self {
+        Self {
+            buffer: Vec::new(),
+            pre_reserve_full: true,
+        }
+    }
+
+    /// Number of buffered bytes belonging to an incomplete trailing frame.
+    pub fn remaining_len(&self) -> usize {
+        self.buffer.len()
+    }
+
+    fn reserve_partial(&mut self, total_size: usize, incoming_len: usize) {
+        if self.pre_reserve_full {
+            let needed = total_size.saturating_sub(self.buffer.len());
+            if self.buffer.capacity() < total_size {
+                self.buffer.reserve_exact(needed);
+            }
+        } else {
+            reserve_for_partial_frame(&mut self.buffer, total_size, incoming_len);
+        }
+    }
+
+    /// Decode the next complete S2S frame from `chunk` (and any previously buffered straddled
+    /// prefix).
+    ///
+    /// Call in a loop until `Ok(None)` is returned; once `Ok(None)` is returned, `chunk` has been
+    /// completely consumed (with any trailing partial frame buffered internally).
+    pub fn decode_next(&mut self, chunk: &mut Bytes) -> std::io::Result<Option<SessionMessage>> {
+        if !self.buffer.is_empty() {
+            if chunk.is_empty() {
+                return Ok(None);
+            }
+            if self.buffer.len() < LENGTH_PREFIX_SIZE {
+                let header_needed = (LENGTH_PREFIX_SIZE - self.buffer.len()).min(chunk.len());
+                self.buffer
+                    .extend_from_slice(&chunk.split_to(header_needed));
+                if self.buffer.len() < LENGTH_PREFIX_SIZE {
+                    return Ok(None);
+                }
+            }
+            let total_size = LENGTH_PREFIX_SIZE + parse_frame_length(&self.buffer)?;
+            let needed = total_size.saturating_sub(self.buffer.len());
+            if chunk.len() < needed {
+                if !chunk.is_empty() {
+                    self.reserve_partial(total_size, chunk.len());
+                    self.buffer.extend_from_slice(chunk);
+                    chunk.clear();
+                } else if self.pre_reserve_full {
+                    self.reserve_partial(total_size, 0);
+                }
+                return Ok(None);
+            }
+            if needed > 0 {
+                self.buffer.reserve_exact(needed);
+                self.buffer.extend_from_slice(&chunk.split_to(needed));
+            }
+            let frame = std::mem::take(&mut self.buffer);
+            let mut frame_bytes = Bytes::from(frame);
+            let msg = FrameDecoder::decode_bytes(&mut frame_bytes)?
+                .expect("frame buffer holds complete frame");
+            debug_assert!(frame_bytes.is_empty());
+            return Ok(Some(msg));
+        }
+
+        if chunk.is_empty() {
+            return Ok(None);
+        }
+        if let Some(msg) = FrameDecoder::decode_bytes(chunk)? {
+            return Ok(Some(msg));
+        }
+        if !chunk.is_empty() {
+            if let Ok(Some(total_size)) = FrameDecoder::peek_total_frame_len(chunk) {
+                self.reserve_partial(total_size, chunk.len());
+            }
+            self.buffer.extend_from_slice(chunk);
+            chunk.clear();
+        }
+        Ok(None)
+    }
+}
 
 impl tokio_util::codec::Decoder for FrameDecoder {
     type Item = SessionMessage;
@@ -409,15 +586,7 @@ impl tokio_util::codec::Decoder for FrameDecoder {
             return Ok(None);
         }
 
-        let length = ((src[0] as usize) << 16) | ((src[1] as usize) << 8) | (src[2] as usize);
-
-        if length > MAX_FRAME_BYTES {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "frame exceeds decode limit",
-            ));
-        }
-
+        let length = parse_frame_length(src)?;
         let total_size = LENGTH_PREFIX_SIZE + length;
         if src.len() < total_size {
             return Ok(None);
@@ -961,5 +1130,177 @@ mod test {
             Poll::Ready(None) => {}
             other => panic!("expected stream to terminate after encoding error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn decode_bytes_round_trips_all_algorithms() {
+        for algo in [
+            CompressionAlgorithm::None,
+            CompressionAlgorithm::Gzip,
+            CompressionAlgorithm::Zstd,
+        ] {
+            for size in [0usize, 16, COMPRESSION_THRESHOLD_BYTES - 1, 8192] {
+                let proto = TestProto::new(vec![0x5Au8; size]);
+                let frame = SessionMessage::regular(algo, &proto).unwrap().encode();
+
+                assert_eq!(
+                    FrameDecoder::peek_total_frame_len(&frame).unwrap(),
+                    Some(frame.len())
+                );
+                let mut bytes = frame.clone();
+                let decoded = FrameDecoder::decode_bytes(&mut bytes)
+                    .unwrap()
+                    .expect("complete frame");
+                assert!(bytes.is_empty());
+                let SessionMessage::Regular(data) = decoded else {
+                    panic!("expected regular frame");
+                };
+                assert_eq!(data.clone().try_into_proto::<TestProto>().unwrap(), proto);
+                assert_eq!(data.try_into_proto_zero_copy::<TestProto>().unwrap(), proto);
+            }
+        }
+    }
+
+    #[test]
+    fn try_into_proto_copies_while_zero_copy_aliases_frame_buffer() {
+        #[derive(Clone, PartialEq, prost::Message)]
+        struct BytesProto {
+            #[prost(bytes = "bytes", tag = "1")]
+            payload: Bytes,
+        }
+
+        let proto = BytesProto {
+            payload: Bytes::from_static(b"small-record-body"),
+        };
+        let frame = SessionMessage::regular(CompressionAlgorithm::None, &proto)
+            .unwrap()
+            .encode();
+        let frame_start = frame.as_ptr() as usize;
+        let frame_end = frame_start + frame.len();
+
+        let mut wire = frame.clone();
+        let SessionMessage::Regular(data) = FrameDecoder::decode_bytes(&mut wire).unwrap().unwrap()
+        else {
+            panic!("expected regular frame");
+        };
+
+        let copied = data.clone().try_into_proto::<BytesProto>().unwrap();
+        assert_eq!(copied, proto);
+        let copied_ptr = copied.payload.as_ptr() as usize;
+        assert!(
+            copied_ptr < frame_start || copied_ptr >= frame_end,
+            "try_into_proto must copy out of the frame buffer"
+        );
+
+        let zero_copy = data.try_into_proto_zero_copy::<BytesProto>().unwrap();
+        assert_eq!(zero_copy, proto);
+        let zc_start = zero_copy.payload.as_ptr() as usize;
+        let zc_end = zc_start + zero_copy.payload.len();
+        assert!(
+            zc_start >= frame_start && zc_end <= frame_end,
+            "try_into_proto_zero_copy must alias the frame buffer"
+        );
+    }
+
+    #[test]
+    fn chunk_frame_decoder_bounds_stalled_prefixes_and_pre_reserves_without_realloc() {
+        // 1. Server mode (`new()`): stalled 3-byte prefix claiming 2.5 MiB must not pre-allocate.
+        let mut server = ChunkFrameDecoder::new();
+        let mut stalled = Bytes::from_static(&[0x20, 0x00, 0x00]); // ~2 MiB frame
+        assert!(server.decode_next(&mut stalled).unwrap().is_none());
+        assert_eq!(server.remaining_len(), 3);
+        assert!(
+            server.buffer.capacity() <= 64,
+            "unexpected server pre-allocation on 3-byte prefix: {}",
+            server.buffer.capacity()
+        );
+
+        // Server mode converges to exact capacity across multi-chunk frames and drops idle slab.
+        for payload_len in [307 * 1024, 1024 * 1024 + 5] {
+            let proto = TestProto::new(vec![0xAB; payload_len]);
+            let frame = SessionMessage::regular(CompressionAlgorithm::None, &proto)
+                .unwrap()
+                .encode();
+            let mut dec = ChunkFrameDecoder::new();
+            let mut decoded = None;
+            for piece in frame.chunks(16 * 1024) {
+                let mut chunk = Bytes::copy_from_slice(piece);
+                while let Some(msg) = dec.decode_next(&mut chunk).unwrap() {
+                    decoded = Some(msg);
+                }
+            }
+            assert_eq!(dec.remaining_len(), 0);
+            assert_eq!(dec.buffer.capacity(), 0);
+            let SessionMessage::Regular(data) = decoded.expect("frame decoded") else {
+                panic!("expected regular frame");
+            };
+            assert_eq!(data.try_into_proto::<TestProto>().unwrap(), proto);
+        }
+
+        // 2. Client mode (`with_full_pre_reserve()`): split 3-byte prefix + 512 KiB frame whose
+        //    final 16 KiB chunk crosses into small Frame 2 + partial Frame 3 pre-reserves once with
+        //    zero reallocation and drops the large buffer immediately on Frame 1 completion.
+        let f1 = SessionMessage::regular(
+            CompressionAlgorithm::None,
+            &TestProto::new(vec![0xEE; 512 * 1024]),
+        )
+        .unwrap()
+        .encode();
+        let f2 =
+            SessionMessage::regular(CompressionAlgorithm::None, &TestProto::new(vec![0x42; 64]))
+                .unwrap()
+                .encode();
+        let f3 =
+            SessionMessage::regular(CompressionAlgorithm::None, &TestProto::new(vec![0x77; 128]))
+                .unwrap()
+                .encode();
+        let mut wire = Vec::with_capacity(f1.len() + f2.len() + 10);
+        wire.extend_from_slice(&f1);
+        wire.extend_from_slice(&f2);
+        wire.extend_from_slice(&f3[..10]);
+
+        let mut chunks = vec![Bytes::copy_from_slice(&wire[..1])];
+        for slice in wire[1..].chunks(16 * 1024) {
+            chunks.push(Bytes::copy_from_slice(slice));
+        }
+
+        let mut client = ChunkFrameDecoder::with_full_pre_reserve();
+        let mut reserved_ptr: Option<*const u8> = None;
+        let mut decoded_count = 0usize;
+        for mut chunk in chunks {
+            while let Some(msg) = client.decode_next(&mut chunk).unwrap() {
+                assert!(matches!(msg, SessionMessage::Regular(_)));
+                decoded_count += 1;
+                if decoded_count == 1 {
+                    assert_eq!(
+                        client.buffer.capacity(),
+                        0,
+                        "large Frame 1 buffer must be taken immediately"
+                    );
+                    assert!(
+                        !chunk.is_empty(),
+                        "Frame 2 and partial Frame 3 must remain in chunk for zero-copy decode"
+                    );
+                }
+            }
+            if decoded_count == 0 && client.remaining_len() >= 3 {
+                assert!(client.buffer.capacity() >= f1.len());
+                match reserved_ptr {
+                    None => reserved_ptr = Some(client.buffer.as_ptr()),
+                    Some(ptr) => assert_eq!(
+                        client.buffer.as_ptr(),
+                        ptr,
+                        "pre-reserved frame must not reallocate on subsequent chunks"
+                    ),
+                }
+            }
+        }
+        assert_eq!(decoded_count, 2);
+        assert_eq!(client.remaining_len(), 10);
+        assert!(
+            client.buffer.capacity() <= f3.len() + 64,
+            "partial Frame 3 must use a small buffer, got {}",
+            client.buffer.capacity()
+        );
     }
 }
