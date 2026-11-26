@@ -190,7 +190,7 @@ impl S2 {
         Ok(Self { base, ..self })
     }
 
-    /// Close the client, aborting all active sessions and in-flight requests and terminating all
+    /// Close the client, aborting all open sessions and in-flight requests and terminating all
     /// connections without waiting for the server.
     ///
     /// Repeated calls are idempotent. After `close()`, any new operation on this client or handles

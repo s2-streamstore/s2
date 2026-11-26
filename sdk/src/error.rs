@@ -1986,7 +1986,7 @@ pub enum ReadSessionError {
     /// The requested read position has not been written.
     #[error(transparent)]
     ReadUnwritten(#[from] ReadUnwrittenError),
-    /// The session closed cleanly before catching up (surfaced by `caught_up()`).
+    /// The session closed without a failure while not caught up (surfaced by `caught_up()`).
     #[error(transparent)]
     SessionClosed(#[from] SessionClosedError<Self>),
     /// Input validation failed.

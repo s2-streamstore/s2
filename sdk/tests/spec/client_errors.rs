@@ -2442,15 +2442,19 @@ async fn with_retry_overrides_pool_sharing_and_validation() {
     assert_eq!(pt.await.unwrap().seq_num, 0);
     prod.close().await.unwrap();
 
-    // 5. ReadSession inherits S2Stream::with_retry.
+    // 5. ReadSession inherits S2Stream::with_retry and retains caught-up state after clean stop.
     let mut rs = all_stream
         .read_session(
             ReadInput::new(ReadStart::SeqNum(0)).with_count(1),
             ReadSessionConfig::default(),
         )
         .unwrap();
+    let closed_rs_state = rs.state();
     assert_eq!(rs.next().await.unwrap().unwrap().seq_num, 0);
     assert!(rs.next().await.is_none());
+    assert!(closed_rs_state.is_caught_up());
+    drop(rs);
+    assert!(closed_rs_state.is_caught_up());
 
     // 6. All requests across base & derived handles shared the single pooled HTTP/2 connection!
     assert_eq!(
@@ -2459,7 +2463,8 @@ async fn with_retry_overrides_pool_sharing_and_validation() {
         "derived with_retry handles must share the underlying HTTP/2 connection pool"
     );
 
-    // 7. Closing base_s2 immediately closes/aborts derived handles and their active sessions (C12).
+    // 7. Closing base_s2 immediately closes/aborts open derived handles and their active sessions,
+    //    while leaving already-closed sessions untouched (C12, R9).
     let mut live_rs = all_stream
         .read_session(
             ReadInput::new(ReadStart::SeqNum(0)),
@@ -2478,6 +2483,11 @@ async fn with_retry_overrides_pool_sharing_and_validation() {
     assert!(live_rs.is_caught_up());
     let live_state = live_rs.state();
     base_s2.close();
+    assert!(
+        closed_rs_state.is_caught_up(),
+        "C12/R9: S2::close() must not alter already-closed caught-up read sessions"
+    );
+    assert_eq!(closed_rs_state.caught_up().await.unwrap().seq_num, 1);
     assert!(
         !live_state.is_caught_up(),
         "C12/R9d: is_caught_up must clear immediately on S2::close() even while parked"

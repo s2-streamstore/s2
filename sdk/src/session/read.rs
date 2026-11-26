@@ -215,13 +215,15 @@ struct CaughtUpWaits {
 /// Future returned by [`ReadSession::caught_up`], [`ReadBatchSession::caught_up`], and
 /// [`ReadSessionState::caught_up`].
 ///
-/// Resolves to the stream tail position when the session is caught up, or fails with the session's
-/// terminal error (or [`SessionClosedError`] if the session closes cleanly before catching up).
+/// Resolves to the stream tail position when the session is caught up (including after a caught-up
+/// clean stop), or fails with the session's terminal error (or [`SessionClosedError`] if an open
+/// session is dropped or stops cleanly without catching up).
 ///
 /// **Important:** Does not drive reading — continue polling the session concurrently (for example
 /// via [`ReadSession::next`] in another task or `tokio::select!`) while awaiting this future, even
-/// on an empty stream. Calling [`S2::close`](crate::S2::close) or dropping the session still
-/// fails a pending `CaughtUp` future immediately even when no task is polling the session.
+/// on an empty stream. Calling [`S2::close`](crate::S2::close) or dropping an open session still
+/// fails a pending `CaughtUp` future immediately even when no task is polling the session; once
+/// closed, later drops or client closes have no effect.
 ///
 /// Once resolved, its value never changes, and re-polling returns the same outcome without
 /// panicking.
@@ -325,7 +327,6 @@ impl FusedFuture for CaughtUp {
 enum RequestPhase {
     Connecting,
     Open { latest_tail: Option<StreamPosition> },
-    Ended,
 }
 
 enum CatchUpSlot {
@@ -379,9 +380,8 @@ struct ReadStateInner {
     last_observed_tail: Option<StreamPosition>,
     phase: RequestPhase,
     catch_up: CatchUpSlot,
-    /// Locked-in session close reason (`R9`). Once set, later aborts or closes have no effect.
-    /// When `Clean` is reached while already caught up, `phase` stays `Open` until iteration
-    /// returns `None` so `is_caught_up()` stays `true` per `R7c`.
+    /// Locked-in session close reason (`R9`). Once set, the session is closed: `R7` state and
+    /// `caught_up()` retain their final values, and later drops or client closes have no effect.
     closed: Option<TerminalClose>,
     context: ErrorContext,
     /// Current retry attempt number (`E7`), updated on each attempt start and reset to `1` on
@@ -406,6 +406,12 @@ impl ReadStateInner {
         self.context.clone().with_attempts(self.attempts)
     }
 
+    fn is_caught_up(&self, shutdown: &CancellationToken) -> bool {
+        // C12 / R7 / R7c / R9: closing the client clears `is_caught_up` immediately on open
+        // sessions even while parked, but has no effect on already-closed sessions.
+        !(self.closed.is_none() && shutdown.is_cancelled()) && self.catch_up.is_caught_up()
+    }
+
     fn compute_caught_up_tail(&self) -> Option<StreamPosition> {
         let RequestPhase::Open {
             latest_tail: Some(tail),
@@ -417,7 +423,7 @@ impl ReadStateInner {
     }
 
     fn recompute_caught_up(&mut self, wake: &mut PendingWake) {
-        if self.phase == RequestPhase::Ended {
+        if self.closed.is_some() {
             return;
         }
         match self.compute_caught_up_tail() {
@@ -445,26 +451,59 @@ impl ReadStateInner {
         }
     }
 
-    fn is_closed_or_ended(&self) -> bool {
-        self.phase == RequestPhase::Ended || self.closed.is_some()
+    fn fail_catch_up(&mut self, err: ReadSessionError, wake: &mut PendingWake) {
+        // Any future handed out *before* closing retains its resolved tail (`R8a`).
+        // Pending and subsequent `caught_up()` calls see `err` (`R8d`).
+        let prev = std::mem::replace(&mut self.catch_up, CatchUpSlot::Ended(err.clone()));
+        if let CatchUpSlot::Pending(Some(signal)) = prev {
+            wake.set(signal.set_result(Err(err)));
+        }
     }
 
-    fn lock_in_clean_close(&mut self, wake: &mut PendingWake) {
+    /// Close cleanly under `R9a`, preserving `CatchUpSlot::CaughtUp` if caught up (`R7c`, `R8`,
+    /// `R9`).
+    fn close_clean(&mut self, wake: &mut PendingWake) {
         if self.closed.is_some() {
             return;
         }
         self.closed = Some(TerminalClose::Clean);
         if !self.catch_up.is_caught_up() {
-            self.on_ended(&TerminalClose::Clean, wake);
+            self.fail_catch_up(
+                ReadSessionError::SessionClosed(SessionClosedError::new_with_context(
+                    None,
+                    self.context.clone(),
+                )),
+                wake,
+            );
         }
     }
 
-    fn finish_batch_action(&mut self, after_batch: AfterBatch, wake: &mut PendingWake) {
-        match after_batch {
-            AfterBatch::None => {}
-            AfterBatch::CloseClean => self.lock_in_clean_close(wake),
-            AfterBatch::Disconnect => self.on_disconnected(wake),
+    /// Close an open session on drop (`R9b`), clearing `is_caught_up` and failing `caught_up()`
+    /// with `SessionClosedError` (`R7`, `R7c`, `R8d`).
+    fn close_for_drop(&mut self, wake: &mut PendingWake) {
+        if self.closed.is_some() {
+            return;
         }
+        self.closed = Some(TerminalClose::Clean);
+        self.phase = RequestPhase::Connecting;
+        self.fail_catch_up(
+            ReadSessionError::SessionClosed(SessionClosedError::new_with_context(
+                None,
+                self.context.clone(),
+            )),
+            wake,
+        );
+    }
+
+    /// Close an open session on terminal failure (`R9c`) or abort (`R9d`), clearing `is_caught_up`
+    /// and failing `caught_up()` with `err` (`R7c`, `R8d`).
+    fn close_with_error(&mut self, err: ReadSessionError, wake: &mut PendingWake) {
+        if self.closed.is_some() {
+            return;
+        }
+        self.closed = Some(TerminalClose::Error(err.clone()));
+        self.phase = RequestPhase::Connecting;
+        self.fail_catch_up(err, wake);
     }
 
     /// Apply a tail-only observation (heartbeat or stop-condition `416` carrying a tail): advance
@@ -488,10 +527,10 @@ impl ReadStateInner {
         &mut self,
         tail: Option<StreamPosition>,
         delivered_last_seq: u64,
-        after_batch: AfterBatch,
+        close_clean: bool,
         wake: &mut PendingWake,
     ) {
-        if self.is_closed_or_ended() {
+        if self.closed.is_some() {
             return;
         }
         self.attempts = 1;
@@ -501,47 +540,38 @@ impl ReadStateInner {
         self.phase = RequestPhase::Open { latest_tail: tail };
         self.next_seq_num = Some(delivered_last_seq.saturating_add(1));
         self.recompute_caught_up(wake);
-        self.finish_batch_action(after_batch, wake);
+        if close_clean {
+            self.close_clean(wake);
+        }
     }
 
     /// Record delivery of a subsequent record from the current batch.
-    fn on_record_delivered(
-        &mut self,
-        seq_num: u64,
-        after_batch: AfterBatch,
-        wake: &mut PendingWake,
-    ) {
-        if self.is_closed_or_ended() {
+    fn on_record_delivered(&mut self, seq_num: u64, close_clean: bool, wake: &mut PendingWake) {
+        if self.closed.is_some() {
             return;
         }
         self.next_seq_num = Some(seq_num.saturating_add(1));
         self.recompute_caught_up(wake);
-        self.finish_batch_action(after_batch, wake);
+        if close_clean {
+            self.close_clean(wake);
+        }
     }
 
     /// Record a decoded heartbeat (`records` empty, `tail` present). Because reading is on-demand
     /// (`R6b`), no records remain undelivered when a heartbeat is decoded.
-    fn on_heartbeat(
-        &mut self,
-        tail: StreamPosition,
-        disconnected_for_advice: bool,
-        wake: &mut PendingWake,
-    ) {
-        if self.is_closed_or_ended() {
+    fn on_heartbeat(&mut self, tail: StreamPosition, wake: &mut PendingWake) {
+        if self.closed.is_some() {
             return;
         }
         self.attempts = 1;
         self.observe_tail_without_records(tail, wake);
-        if disconnected_for_advice {
-            self.on_disconnected(wake);
-        }
     }
 
     /// Record an empty regular message carrying neither records nor a tail (`R7c`): clears the
     /// active request's latest tail so `is_caught_up()` reflects the most recent decoded message,
     /// while preserving `last_observed_tail` and `next_seq_num`.
     fn on_empty_frame_without_tail(&mut self, wake: &mut PendingWake) {
-        if self.is_closed_or_ended() {
+        if self.closed.is_some() {
             return;
         }
         if matches!(self.phase, RequestPhase::Open { .. }) {
@@ -551,42 +581,46 @@ impl ReadStateInner {
     }
 
     fn on_disconnected(&mut self, wake: &mut PendingWake) {
-        if self.is_closed_or_ended() {
+        if self.closed.is_some() {
             return;
         }
         self.phase = RequestPhase::Connecting;
         self.recompute_caught_up(wake);
     }
 
-    /// Apply a clean stop when iteration is returning end-of-stream (`R9a`, `R11d`).
-    fn on_clean_end_now(&mut self, tail: Option<StreamPosition>, wake: &mut PendingWake) {
-        if self.closed.is_none() {
-            if let Some(tail) = tail {
-                self.observe_tail_without_records(tail, wake);
-            }
-            self.closed = Some(TerminalClose::Clean);
+    /// Record the start of a new or replacement request (`E7`, `T6a`, `R7c`, `R11c`): updates the
+    /// attempt count and clears `is_caught_up` until the new request decodes a tailing message.
+    fn on_attempt_starting(&mut self, attempts: u32, wake: &mut PendingWake) {
+        if self.closed.is_some() {
+            return;
         }
+        self.attempts = attempts;
+        self.phase = RequestPhase::Connecting;
+        self.recompute_caught_up(wake);
+    }
+
+    /// Apply a clean stop (`R9a`, `R11d`), catching up first if a stop-condition `416` carried a
+    /// representable tail and preserving caught-up state if caught up (`R7c`, `R8`, `R9`).
+    fn on_clean_end_now(&mut self, tail: Option<StreamPosition>, wake: &mut PendingWake) {
+        if self.closed.is_some() {
+            return;
+        }
+        if let Some(tail) = tail {
+            self.observe_tail_without_records(tail, wake);
+        }
+        self.close_clean(wake);
     }
 
     fn abort_for_client_close(&mut self, wake: &mut PendingWake) {
-        match &self.closed {
-            Some(TerminalClose::Clean) => {
-                // Keep the locked-in clean outcome (`R9`), but end caught-up observation
-                // immediately on client close (`R7`/`R7c`).
-                self.on_ended(&TerminalClose::Clean, wake);
-            }
-            Some(TerminalClose::Error(_)) => {}
-            None => {
-                if self.phase == RequestPhase::Ended {
-                    return;
-                }
-                let close = TerminalClose::Error(ReadSessionError::Aborted(
-                    AbortedError::new_with_context("client closed", self.current_context()),
-                ));
-                self.on_ended(&close, wake);
-                self.closed = Some(close);
-            }
+        if self.closed.is_some() {
+            // C12 / R9: once closed, a later client close has no effect.
+            return;
         }
+        let err = ReadSessionError::Aborted(AbortedError::new_with_context(
+            "client closed",
+            self.current_context(),
+        ));
+        self.close_with_error(err, wake);
     }
 
     fn lock_in_abort_if_cancelled(
@@ -598,26 +632,6 @@ impl ReadStateInner {
             self.abort_for_client_close(wake);
         }
         self.closed.clone()
-    }
-
-    fn on_ended(&mut self, close: &TerminalClose, wake: &mut PendingWake) {
-        if self.phase == RequestPhase::Ended {
-            return;
-        }
-        self.phase = RequestPhase::Ended;
-
-        let terminal_err = match close {
-            TerminalClose::Error(err) => err.clone(),
-            TerminalClose::Clean => ReadSessionError::SessionClosed(
-                SessionClosedError::new_with_context(None, self.context.clone()),
-            ),
-        };
-        // Any future handed out *before* ending retains its resolved tail (`R8a`).
-        // Subsequent `caught_up()` calls after the session ends see the terminal error (`R8d`).
-        let prev = std::mem::replace(&mut self.catch_up, CatchUpSlot::Ended(terminal_err.clone()));
-        if let CatchUpSlot::Pending(Some(signal)) = prev {
-            wake.set(signal.set_result(Err(terminal_err)));
-        }
     }
 }
 
@@ -636,7 +650,7 @@ pub struct ReadSessionState {
 impl fmt::Debug for ReadSessionState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let inner = self.inner.lock().unwrap();
-        let caught_up = !self.shutdown.is_cancelled() && inner.catch_up.is_caught_up();
+        let caught_up = inner.is_caught_up(&self.shutdown);
         f.debug_struct("ReadSessionState")
             .field("next_seq_num", &inner.next_seq_num)
             .field("last_observed_tail", &inner.last_observed_tail)
@@ -664,7 +678,8 @@ impl ReadSessionState {
     ///
     /// An unclamped `ReadStart::SeqNum` start is known immediately; any other start returns `None`
     /// until resolved by the first decoded server message. Updated before each record (or batch)
-    /// is handed to the caller, and advances on heartbeats. Retained after iteration ends.
+    /// is handed to the caller, and advances on heartbeats and stop-condition `416` responses.
+    /// Retained after the session closes.
     #[must_use]
     pub fn next_seq_num(&self) -> Option<u64> {
         self.inner.lock().unwrap().next_seq_num
@@ -674,33 +689,42 @@ impl ReadSessionState {
     ///
     /// Because reading is on-demand, this does not reflect newer appends while the session is
     /// parked; use [`S2Stream::check_tail`](crate::S2Stream::check_tail) for a fresh stream tail.
-    /// Never moves backward, persists across retries and handovers, and is retained after
-    /// iteration ends.
+    /// Never moves backward, persists across retries and handovers, and is retained after the
+    /// session closes.
     #[must_use]
     pub fn last_observed_tail(&self) -> Option<StreamPosition> {
         self.inner.lock().unwrap().last_observed_tail
     }
 
-    /// Return whether the session is open with an active request whose most recent decoded
-    /// message (as of the last pull) reported a tail equal to [`next_seq_num`](Self::next_seq_num).
+    /// Return whether the session is caught up to a reported stream tail.
     ///
-    /// Because reading is on-demand, this is not a live lag or liveness check while the session is
-    /// parked; use [`S2Stream::check_tail`](crate::S2Stream::check_tail) for a fresh stream tail.
-    /// Returns `false` while reconnecting, after [`S2::close`](crate::S2::close) or session drop,
-    /// or once iteration has ended.
+    /// True while the session is open — or after it has closed cleanly on a stop condition — once
+    /// the most recent message decoded on the current or final attempt (or a stop-condition `416`
+    /// carrying a tail) reported a tail equal to [`next_seq_num`](Self::next_seq_num), and no
+    /// disconnect, retry, or replacement request has followed it.
+    ///
+    /// Because reading is on-demand, this reflects messages and disconnects decoded as of the last
+    /// pull rather than live stream lag or liveness while parked; use
+    /// [`S2Stream::check_tail`](crate::S2Stream::check_tail) for a fresh stream tail. Returns
+    /// `false` on non-tailing messages, while reconnecting or starting a replacement request, on a
+    /// non-caught-up clean stop, on terminal failure, or when an open session is dropped or
+    /// aborted via [`S2::close`](crate::S2::close). Once closed, the final value is retained and
+    /// later drops or [`S2::close`](crate::S2::close) calls have no effect.
     #[must_use]
     pub fn is_caught_up(&self) -> bool {
         let inner = self.inner.lock().unwrap();
-        !self.shutdown.is_cancelled() && inner.catch_up.is_caught_up()
+        inner.is_caught_up(&self.shutdown)
     }
 
     /// Return a future that resolves to the tail position once the session is caught up.
     ///
-    /// Resolves immediately if currently caught up, or the next time the session becomes caught
-    /// up. Once resolved, its value never changes. Does not drive reading — continue polling the
-    /// session while awaiting it (even on an empty stream). Remains pending across retries and
-    /// handovers. Fails immediately on session close or [`S2::close`](crate::S2::close), even when
-    /// no task is polling the session.
+    /// Resolves immediately if [`is_caught_up`](Self::is_caught_up) is currently `true` (including
+    /// after a caught-up clean stop), or the next time the session becomes caught up. Once
+    /// resolved, its value never changes. Does not drive reading — continue polling the session
+    /// while awaiting it (even on an empty stream). Remains pending across retries and handovers.
+    /// Fails immediately if an open session closes before catching up — including on drop or
+    /// [`S2::close`](crate::S2::close) while not being iterated — or if the session is already
+    /// closed with [`is_caught_up`](Self::is_caught_up) `false`.
     pub fn caught_up(&self) -> CaughtUp {
         let future = self.update(|inner, wake| {
             if self.shutdown.is_cancelled() {
@@ -724,10 +748,6 @@ impl ReadSessionState {
         };
         wake.wake();
         out
-    }
-
-    fn set_attempt(&self, attempts: u32) {
-        self.inner.lock().unwrap().attempts = attempts;
     }
 
     fn on_disconnected(&self) {
@@ -822,20 +842,11 @@ impl ReusableSleep {
     }
 }
 
-/// Transition applied once the final record of a decoded batch has been delivered.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AfterBatch {
-    None,
-    /// Remaining `count` or `bytes` reached `0` (`R11c`): lock in clean close (`R9a`).
-    CloseClean,
-    /// `T6a` reconnect advice acted on: transition to `Connecting` after delivering the batch so
-    /// its tail still resolves pending `caught_up()` uniformly across views and batch sizes.
-    Disconnect,
-}
-
 struct DecodedBatch {
     batch: ReadBatch,
-    after_batch: AfterBatch,
+    /// Remaining `count` or `bytes` reached `0` (`R11c`): lock in clean close (`R9a`) once the
+    /// final record of this batch is delivered.
+    close_clean: bool,
 }
 
 enum DriverStep {
@@ -979,8 +990,8 @@ impl ReadSessionCore {
         self.lifecycle == StreamLifecycle::Terminated
     }
 
-    /// Tear down local transport/client state after `inner.closed` and `RequestPhase::Ended` have
-    /// already been committed under the state lock (`C12`).
+    /// Tear down local transport/client state after `inner.closed` has already been committed
+    /// under the state lock (`C12`).
     fn finish_already_closed(&mut self, closed: TerminalClose) -> TerminalClose {
         self.transport_mut().reset_to_idle();
         self.client = None;
@@ -998,15 +1009,13 @@ impl ReadSessionCore {
         f: impl FnOnce(&mut ReadStateInner, &mut PendingWake) -> TerminalClose,
     ) -> TerminalClose {
         let closed = self.state.update(|inner, wake| {
-            let closed = if let Some(closed) =
-                inner.lock_in_abort_if_cancelled(&self.state.shutdown, wake)
-            {
+            if let Some(closed) = inner.lock_in_abort_if_cancelled(&self.state.shutdown, wake) {
                 closed
             } else {
-                f(inner, wake)
-            };
-            inner.on_ended(&closed, wake);
-            closed
+                let closed = f(inner, wake);
+                debug_assert!(inner.closed.is_some());
+                closed
+            }
         });
         self.finish_already_closed(closed)
     }
@@ -1019,7 +1028,6 @@ impl ReadSessionCore {
     ) -> Result<(), TerminalClose> {
         let closed = self.state.update(|inner, wake| {
             if let Some(closed) = inner.lock_in_abort_if_cancelled(&self.state.shutdown, wake) {
-                inner.on_ended(&closed, wake);
                 Some(closed)
             } else {
                 f(inner, wake);
@@ -1035,12 +1043,12 @@ impl ReadSessionCore {
     fn commit_record_delivered(
         &mut self,
         seq_num: u64,
-        after_batch: AfterBatch,
+        close_clean: bool,
     ) -> Result<(), TerminalClose> {
         self.update_open_or_finish(|inner, wake| {
-            inner.on_record_delivered(seq_num, after_batch, wake);
+            inner.on_record_delivered(seq_num, close_clean, wake);
         })?;
-        if after_batch == AfterBatch::CloseClean {
+        if close_clean {
             // Close reason is now locked in (`R9`), so no further request can open and dropping
             // the last `BasinClient` cannot alter `ReadSessionState`.
             self.client = None;
@@ -1052,12 +1060,12 @@ impl ReadSessionCore {
         &mut self,
         tail: Option<StreamPosition>,
         delivered_last_seq: u64,
-        after_batch: AfterBatch,
+        close_clean: bool,
     ) -> Result<(), TerminalClose> {
         self.update_open_or_finish(|inner, wake| {
-            inner.on_batch_decoded_and_delivered(tail, delivered_last_seq, after_batch, wake);
+            inner.on_batch_decoded_and_delivered(tail, delivered_last_seq, close_clean, wake);
         })?;
-        if after_batch == AfterBatch::CloseClean {
+        if close_clean {
             self.client = None;
         }
         Ok(())
@@ -1066,11 +1074,9 @@ impl ReadSessionCore {
     /// If the session has already closed (`R9`) or client shutdown (`C12`/`R9d`) is active,
     /// finalize under a single lock and return the committed [`TerminalClose`].
     fn take_closed_or_abort(&mut self) -> Option<TerminalClose> {
-        let closed = self.state.update(|inner, wake| {
-            let closed = inner.lock_in_abort_if_cancelled(&self.state.shutdown, wake)?;
-            inner.on_ended(&closed, wake);
-            Some(closed)
-        })?;
+        let closed = self
+            .state
+            .update(|inner, wake| inner.lock_in_abort_if_cancelled(&self.state.shutdown, wake))?;
         Some(self.finish_already_closed(closed))
     }
 
@@ -1090,10 +1096,12 @@ impl ReadSessionCore {
         Poll::Pending
     }
 
-    fn start_open_attempt(&mut self) {
+    fn start_open_attempt(&mut self) -> Result<(), TerminalClose> {
         self.end.wait = remaining_wait(self.baseline_wait, self.idle_since);
         let attempt_num = self.retry_backoff.attempt_number();
-        self.state.set_attempt(attempt_num);
+        self.update_open_or_finish(|inner, wake| {
+            inner.on_attempt_starting(attempt_num, wake);
+        })?;
         let snapshot = AttemptSnapshot {
             was_resumed: self.has_received_response,
             sent_seq_num: self.start.seq_num,
@@ -1127,6 +1135,7 @@ impl ReadSessionCore {
             handle: AbortOnDropHandle::new(tokio::spawn(fut)),
             snapshot,
         };
+        Ok(())
     }
 
     fn finish_clean_end_now(&mut self, tail: Option<StreamPosition>) -> TerminalClose {
@@ -1137,8 +1146,8 @@ impl ReadSessionCore {
     }
 
     fn finish_terminal_error(&mut self, err: ReadSessionError) -> TerminalClose {
-        self.finish_session(|inner, _wake| {
-            inner.closed = Some(TerminalClose::Error(err.clone()));
+        self.finish_session(|inner, wake| {
+            inner.close_with_error(err.clone(), wake);
             TerminalClose::Error(err)
         })
     }
@@ -1267,17 +1276,18 @@ impl ReadSessionCore {
             );
         }
 
-        let limits_exhausted = has_records && read_limits_exhausted(&self.end);
-        let after_batch = if limits_exhausted {
+        let close_clean = has_records && read_limits_exhausted(&self.end);
+        let advised_reconnect =
+            !close_clean && reconnect_advised && self.advised_reconnects.should_reconnect();
+        if close_clean {
             // R11c / T10: stop condition met; end the underlying request immediately without
             // waiting for trailing EOF or opening another request.
             debug!("read session count/bytes limit exhausted");
             self.transport_mut().phase = DriverPhase::Idle;
-            AfterBatch::CloseClean
-        } else if reconnect_advised && self.advised_reconnects.should_reconnect() {
-            // T6a / T10: end the advised attempt immediately (releasing the retiring server) and
-            // open the replacement request on the next transport pull (immediately for a
-            // heartbeat, since iteration keeps pulling).
+        } else if advised_reconnect {
+            // T6a / T10: end the advised attempt immediately (releasing the retiring server); the
+            // replacement request opens on the next transport pull (immediately for a heartbeat,
+            // since iteration keeps pulling), clearing `is_caught_up` when it begins.
             self.transport_mut().phase = DriverPhase::Idle;
             self.advised_reconnects.record();
             debug!(
@@ -1285,17 +1295,20 @@ impl ReadSessionCore {
                 advised_reconnects = self.advised_reconnects.total(),
                 "reconnecting read session on server advice"
             );
-            AfterBatch::Disconnect
-        } else {
-            AfterBatch::None
-        };
+        }
 
         if has_records {
-            return BatchStep::Yield(DecodedBatch { batch, after_batch });
+            return BatchStep::Yield(DecodedBatch { batch, close_clean });
         }
         let tail = batch.tail.expect("empty frame handled above");
         match self.update_open_or_finish(|inner, wake| {
-            inner.on_heartbeat(tail, after_batch == AfterBatch::Disconnect, wake);
+            inner.on_heartbeat(tail, wake);
+            if advised_reconnect {
+                // Replacement request starts immediately on the next loop iteration because
+                // iteration is already waiting for a record; clear `is_caught_up` atomically
+                // before releasing the lock and waking `caught_up()` waiters (`T6a`).
+                inner.on_disconnected(wake);
+            }
         }) {
             Ok(()) => BatchStep::Continue,
             Err(closed) => BatchStep::Done(closed),
@@ -1337,8 +1350,14 @@ impl ReadSessionCore {
         snapshot: AttemptSnapshot,
     ) -> DriverStep {
         // R11d: 416 on a resumed request with no remaining wait is a clean stop unless the
-        // reported tail regressed below the sequence number sent on that request.
-        if let ResumedStop::CleanEnd(tail) = check_resumed_unwritten_stop(snapshot, &err) {
+        // reported tail regressed below the sequence number sent on that request (or already
+        // advanced past it on this attempt).
+        let effective_snapshot = AttemptSnapshot {
+            sent_seq_num: snapshot.sent_seq_num.max(self.start.seq_num),
+            ..snapshot
+        };
+        if let ResumedStop::CleanEnd(tail) = check_resumed_unwritten_stop(effective_snapshot, &err)
+        {
             debug!(?tail, "read session reached tail on resumed stop condition");
             return DriverStep::Done(self.finish_clean_end_now(tail));
         }
@@ -1348,7 +1367,11 @@ impl ReadSessionCore {
         // reconnecting with count=0/bytes=0.
         if self.has_received_response && read_limits_exhausted(&self.end) {
             debug!("read session limits exhausted after stream error");
-            return DriverStep::Done(self.finish_clean_end_now(None));
+            return DriverStep::Done(self.finish_session(|inner, wake| {
+                inner.on_disconnected(wake);
+                inner.on_clean_end_now(None, wake);
+                TerminalClose::Clean
+            }));
         }
 
         self.state.on_disconnected();
@@ -1373,8 +1396,8 @@ impl ReadSessionCore {
         }
         let _entered = self.span.clone().entered();
         loop {
-            // Fast path: while `lifecycle == Active`, `inner.closed` can only be set by
-            // `AfterBatch::CloseClean` (which clears `self.client = None`) or `S2::close()`
+            // Fast path: while `lifecycle == Active`, `inner.closed` can only be set by a
+            // `count`/`bytes == 0` clean close (which clears `self.client = None`) or `S2::close()`
             // (`shutdown.is_cancelled()`), so steady-state polls avoid locking `state.inner`.
             if (self.client.is_none() || self.state.shutdown.is_cancelled())
                 && let Some(closed) = self.take_closed_or_abort()
@@ -1391,7 +1414,9 @@ impl ReadSessionCore {
 
             match phase {
                 DriverPhase::Idle => {
-                    self.start_open_attempt();
+                    if let Err(closed) = self.start_open_attempt() {
+                        return Poll::Ready(Err(closed));
+                    }
                 }
                 DriverPhase::Opening { handle, snapshot } => match Pin::new(handle).poll(cx) {
                     Poll::Pending => return self.pending_or_abort(cx),
@@ -1531,12 +1556,15 @@ impl ReadSessionCore {
 impl Drop for ReadSessionCore {
     fn drop(&mut self) {
         self.state.update(|inner, wake| {
-            if inner.closed.is_none() && self.state.shutdown.is_cancelled() {
+            if inner.closed.is_some() {
+                // R9: once closed, a later drop has no effect on R7 state or `caught_up()`.
+                return;
+            }
+            if self.state.shutdown.is_cancelled() {
                 inner.abort_for_client_close(wake);
                 return;
             }
-            let close = inner.closed.get_or_insert(TerminalClose::Clean).clone();
-            inner.on_ended(&close, wake);
+            inner.close_for_drop(wake);
         });
     }
 }
@@ -1546,8 +1574,8 @@ impl Drop for ReadSessionCore {
 /// Reads on demand with no session-level read-ahead: opening sends no request, and the session
 /// decodes zero batches ahead of the batch currently being delivered, relying on transport flow
 /// control for byte-level network read-ahead. Yields individual [`SequencedRecord`]s in
-/// sequence-number order. Dropping the session closes it immediately. Use [`state`](Self::state)
-/// to observe progress concurrently from other tasks.
+/// sequence-number order. Dropping an open session closes it immediately. Use
+/// [`state`](Self::state) to observe progress concurrently from other tasks.
 ///
 /// Both [`next`](Self::next) and [`Stream::poll_next`](futures_core::Stream::poll_next) are
 /// cancel safe and have identical behavior.
@@ -1555,8 +1583,9 @@ impl Drop for ReadSessionCore {
 pub struct ReadSession {
     core: ReadSessionCore,
     current_batch: std::vec::IntoIter<SequencedRecord>,
-    /// Transition to apply once the final buffered record of `current_batch` is delivered.
-    after_current_batch: AfterBatch,
+    /// Whether delivering the final buffered record of `current_batch` locks in a clean close
+    /// (`R9a` / `R11c`).
+    close_after_current_batch: bool,
 }
 
 impl fmt::Debug for ReadSession {
@@ -1580,7 +1609,7 @@ impl ReadSession {
         Self {
             core: ReadSessionCore::open(client, name, headers, input, config, "read_session"),
             current_batch: Vec::new().into_iter(),
-            after_current_batch: AfterBatch::None,
+            close_after_current_batch: false,
         }
     }
 
@@ -1616,8 +1645,10 @@ impl ReadSession {
         self.core.state.last_observed_tail()
     }
 
-    /// Return whether the session is open with an active request whose most recent decoded
-    /// message (as of the last pull) reported a tail equal to [`next_seq_num`](Self::next_seq_num).
+    /// Return whether the session is caught up to a reported stream tail (as of the last pull).
+    ///
+    /// Retained as `true` after a caught-up clean stop. See
+    /// [`ReadSessionState::is_caught_up`] for full semantics.
     #[must_use]
     pub fn is_caught_up(&self) -> bool {
         self.core.state.is_caught_up()
@@ -1645,17 +1676,14 @@ impl Stream for ReadSession {
         }
 
         if let Some(record) = this.current_batch.next() {
-            let after_batch = if this.current_batch.len() == 0 {
-                std::mem::replace(&mut this.after_current_batch, AfterBatch::None)
-            } else {
-                AfterBatch::None
-            };
+            let close_clean = this.current_batch.len() == 0
+                && std::mem::take(&mut this.close_after_current_batch);
             if let Err(closed) = this
                 .core
-                .commit_record_delivered(record.seq_num, after_batch)
+                .commit_record_delivered(record.seq_num, close_clean)
             {
                 this.current_batch = Vec::new().into_iter();
-                this.after_current_batch = AfterBatch::None;
+                this.close_after_current_batch = false;
                 return Poll::Ready(closed.into_stream_item());
             }
             return Poll::Ready(Some(Ok(record)));
@@ -1668,19 +1696,19 @@ impl Stream for ReadSession {
                 let record = iter
                     .next()
                     .expect("poll_next_batch only yields non-empty batches");
-                let (after_this, after_rest) = if iter.len() == 0 {
-                    (decoded.after_batch, AfterBatch::None)
+                let (close_now, close_later) = if iter.len() == 0 {
+                    (decoded.close_clean, false)
                 } else {
-                    (AfterBatch::None, decoded.after_batch)
+                    (false, decoded.close_clean)
                 };
                 if let Err(closed) =
                     this.core
-                        .commit_batch_delivered(tail, record.seq_num, after_this)
+                        .commit_batch_delivered(tail, record.seq_num, close_now)
                 {
                     return Poll::Ready(closed.into_stream_item());
                 }
                 this.current_batch = iter;
-                this.after_current_batch = after_rest;
+                this.close_after_current_batch = close_later;
                 Poll::Ready(Some(Ok(record)))
             }
             Poll::Ready(Err(closed)) => Poll::Ready(closed.into_stream_item()),
@@ -1700,7 +1728,7 @@ impl FusedStream for ReadSession {
 /// Reads on demand with no session-level read-ahead: opening sends no request, and the session
 /// decodes zero batches ahead, relying on transport flow control for byte-level network
 /// read-ahead. Delivers each server batch whole, skips empty heartbeat frames while updating
-/// session state, and follows all read-session rules per batch. Dropping the session closes it
+/// session state, and follows all read-session rules per batch. Dropping an open session closes it
 /// immediately.
 ///
 /// Both [`next`](Self::next) and [`Stream::poll_next`](futures_core::Stream::poll_next) are
@@ -1765,8 +1793,10 @@ impl ReadBatchSession {
         self.core.state.last_observed_tail()
     }
 
-    /// Return whether the session is open with an active request whose most recent decoded
-    /// message (as of the last pull) reported a tail equal to [`next_seq_num`](Self::next_seq_num).
+    /// Return whether the session is caught up to a reported stream tail (as of the last pull).
+    ///
+    /// Retained as `true` after a caught-up clean stop. See
+    /// [`ReadSessionState::is_caught_up`] for full semantics.
     #[must_use]
     pub fn is_caught_up(&self) -> bool {
         self.core.state.is_caught_up()
@@ -1800,7 +1830,7 @@ impl Stream for ReadBatchSession {
                     .seq_num;
                 if let Err(closed) =
                     this.core
-                        .commit_batch_delivered(tail, last_seq, decoded.after_batch)
+                        .commit_batch_delivered(tail, last_seq, decoded.close_clean)
                 {
                     return Poll::Ready(closed.into_stream_item());
                 }
@@ -2142,9 +2172,10 @@ mod tests {
         assert_eq!(remaining_wait(Some(10), Some(start)), Some(0));
     }
 
+    // spec: r1 C12, R7, R7c, R8, R9, R9a, R11c
     #[tokio::test]
-    async fn clean_stop_final_record_catches_up_then_iteration_end_resets_is_caught_up() {
-        let (mut session, tx, _state, _shutdown) = test_session_with_active_stream(
+    async fn clean_stop_final_record_catches_up_and_preserves_state_after_end() {
+        let (mut session, tx, state, shutdown) = test_session_with_active_stream(
             ReadInput::new(crate::types::ReadStart::SeqNum(0)).with_count(2),
         );
         let cu = session.caught_up();
@@ -2165,15 +2196,23 @@ mod tests {
         let cu_while_caught = session.caught_up();
 
         assert!(session.next().await.is_none());
-        assert!(!session.is_caught_up());
+        assert!(session.is_caught_up());
         assert!(session.core.client.is_none());
         assert_eq!(session.next_seq_num(), Some(2));
         assert_eq!(session.last_observed_tail(), Some(position(2)));
         assert_eq!(cu_while_caught.await.unwrap(), position(2));
-        assert!(matches!(
-            session.caught_up().await,
-            Err(ReadSessionError::SessionClosed(e)) if e.failure().is_none()
-        ));
+        assert_eq!(session.caught_up().await.unwrap(), position(2));
+
+        // R9 / C12: once closed under caught-up R9a, dropping the session and closing the client
+        // have no effect on retained state or subsequent `caught_up()` calls.
+        drop(session);
+        assert!(state.is_caught_up());
+        assert_eq!(state.caught_up().await.unwrap(), position(2));
+
+        shutdown.cancel();
+        assert!(state.is_caught_up());
+        assert!(format!("{state:?}").contains("is_caught_up: true"));
+        assert_eq!(state.caught_up().await.unwrap(), position(2));
     }
 
     #[tokio::test]
@@ -2208,9 +2247,11 @@ mod tests {
         assert_eq!(cu.await.unwrap(), position(5));
     }
 
+    // spec: r1 C12, R7, R7c, R8, R9, R9a
     #[tokio::test]
     async fn clean_stop_after_heartbeat_preserves_progress_and_catch_up() {
-        let (mut session, tx, _state, _shutdown) = test_session_with_active_stream(
+        // 1. `[Heartbeat(tail), EOF]` buffered together in a single poll.
+        let (mut session, tx, state, shutdown) = test_session_with_active_stream(
             ReadInput::new(crate::types::ReadStart::SeqNum(0)).with_wait_secs(5),
         );
         let cu = session.caught_up();
@@ -2225,12 +2266,42 @@ mod tests {
         assert!(session.next().await.is_none());
         assert_eq!(session.next_seq_num(), Some(5));
         assert_eq!(session.last_observed_tail(), Some(position(5)));
-        assert!(!session.is_caught_up());
+        assert!(session.is_caught_up());
         assert_eq!(cu.await.unwrap(), position(5));
-        assert!(matches!(
-            session.caught_up().await,
-            Err(ReadSessionError::SessionClosed(e)) if e.failure().is_none()
-        ));
+        assert_eq!(session.caught_up().await.unwrap(), position(5));
+
+        drop(session);
+        shutdown.cancel();
+        assert!(state.is_caught_up());
+        assert_eq!(state.caught_up().await.unwrap(), position(5));
+
+        // 2. `[Heartbeat(tail)]` followed separately by `EOF`.
+        let (mut session, tx, state, shutdown) = test_session_with_active_stream(
+            ReadInput::new(crate::types::ReadStart::SeqNum(0)).with_wait_secs(5),
+        );
+        let cu = session.caught_up();
+
+        tx.send(Ok(S2sFrame {
+            msg: proto_batch(&[], Some(7)),
+            reconnect_advised: false,
+        }))
+        .unwrap();
+        {
+            let mut next = Box::pin(session.next());
+            assert!(poll!(next.as_mut()).is_pending());
+        }
+        assert!(session.is_caught_up());
+        assert_eq!(cu.await.unwrap(), position(7));
+
+        drop(tx);
+        assert!(session.next().await.is_none());
+        assert!(session.is_caught_up());
+        assert_eq!(session.caught_up().await.unwrap(), position(7));
+
+        drop(session);
+        shutdown.cancel();
+        assert!(state.is_caught_up());
+        assert_eq!(state.caught_up().await.unwrap(), position(7));
     }
 
     #[tokio::test]
@@ -2433,13 +2504,13 @@ mod tests {
             test_session_with_active_stream(ReadInput::new(crate::types::ReadStart::SeqNum(0)));
         shutdown.cancel();
         assert!(matches!(
-            session.core.commit_record_delivered(0, AfterBatch::None),
+            session.core.commit_record_delivered(0, false),
             Err(TerminalClose::Error(ReadSessionError::Aborted(_)))
         ));
         assert!(matches!(
             session
                 .core
-                .commit_batch_delivered(Some(position(1)), 0, AfterBatch::None),
+                .commit_batch_delivered(Some(position(1)), 0, false),
             Err(TerminalClose::Error(ReadSessionError::Aborted(_)))
         ));
         assert_eq!(state.next_seq_num(), Some(0));
@@ -2858,8 +2929,8 @@ mod tests {
         assert!(!state.is_caught_up());
         assert!(session.next().await.is_none());
 
-        // 2. Caught-up count=1 (ReadSession): client released immediately, while `is_caught_up`
-        //    stays true until trailing `None` (`R7c`).
+        // 2. Caught-up count=1 (ReadSession): client released immediately, and `is_caught_up` stays
+        //    true both before and after trailing `None` (`R7c`, `R9`).
         let (mut session, tx, state, _shutdown) = test_session_with_active_stream(
             ReadInput::new(crate::types::ReadStart::SeqNum(0)).with_count(1),
         );
@@ -2872,12 +2943,15 @@ mod tests {
         assert!(session.core.client.is_none());
         assert!(state.is_caught_up());
         assert!(session.next().await.is_none());
-        assert!(!state.is_caught_up());
+        assert!(state.is_caught_up());
+        assert_eq!(state.caught_up().await.unwrap(), position(1));
 
-        // 3. ReadBatchSession count=1: client released immediately on returning the final batch.
-        let (mut batch_sess, batch_tx, _state, _shutdown) = test_batch_session_with_active_stream(
-            ReadInput::new(crate::types::ReadStart::SeqNum(0)).with_count(1),
-        );
+        // 3. ReadBatchSession count=1: client released immediately on returning the final batch,
+        //    and caught-up vs non-caught-up state is preserved after `None`.
+        let (mut batch_sess, batch_tx, batch_state, _shutdown) =
+            test_batch_session_with_active_stream(
+                ReadInput::new(crate::types::ReadStart::SeqNum(0)).with_count(1),
+            );
         batch_tx
             .send(Ok(S2sFrame {
                 msg: proto_batch(&[0], Some(5)),
@@ -2886,7 +2960,26 @@ mod tests {
             .unwrap();
         assert_eq!(batch_sess.next().await.unwrap().unwrap().records.len(), 1);
         assert!(batch_sess.core.client.is_none());
+        assert!(!batch_state.is_caught_up());
         assert!(batch_sess.next().await.is_none());
+        assert!(!batch_state.is_caught_up());
+
+        let (mut batch_sess, batch_tx, batch_state, _shutdown) =
+            test_batch_session_with_active_stream(
+                ReadInput::new(crate::types::ReadStart::SeqNum(0)).with_count(1),
+            );
+        batch_tx
+            .send(Ok(S2sFrame {
+                msg: proto_batch(&[0], Some(1)),
+                reconnect_advised: false,
+            }))
+            .unwrap();
+        assert_eq!(batch_sess.next().await.unwrap().unwrap().records.len(), 1);
+        assert!(batch_sess.core.client.is_none());
+        assert!(batch_state.is_caught_up());
+        assert!(batch_sess.next().await.is_none());
+        assert!(batch_state.is_caught_up());
+        assert_eq!(batch_state.caught_up().await.unwrap(), position(1));
     }
 
     // spec: r1 T7d
@@ -3001,13 +3094,11 @@ mod tests {
         }
     }
 
-    // spec: r1 R7, R7c, R9, R9a, T6a, T10
+    // spec: r1 C12, R7, R7c, R8, R8d, R9, R9a, R9b, R9d, R11c, T6a, T10
     #[tokio::test]
-    async fn client_close_after_caught_up_r9a_clears_is_caught_up_and_advised_batch_resolves_caught_up()
-     {
-        // R7 / R7c / R9 / R9a: After caught-up R9a lock-in, S2::close() ends caught-up observation
-        // immediately while keeping the clean outcome (`None` on iteration, SessionClosedError on
-        // new caught_up(), prior resolved caught_up() retained).
+    async fn close_and_drop_before_vs_after_caught_up_r9a_and_t6a_advised_handover() {
+        // 1a. After caught-up R9a lock-in (even before `None` is polled), `S2::close()` and
+        //     `Drop` are complete no-ops on `ReadSessionState`, `CaughtUp`, and iteration.
         let (mut session, tx, state, shutdown) = test_session_with_active_stream(
             ReadInput::new(crate::types::ReadStart::SeqNum(0)).with_count(1),
         );
@@ -3021,17 +3112,107 @@ mod tests {
         let prior_cu = state.caught_up();
 
         shutdown.cancel();
+        assert!(state.is_caught_up());
+        assert!(format!("{state:?}").contains("is_caught_up: true"));
+        assert_eq!(prior_cu.await.unwrap(), position(1));
+        assert_eq!(state.caught_up().await.unwrap(), position(1));
+        assert!(session.next().await.is_none());
+        assert!(state.is_caught_up());
+        assert_eq!(state.caught_up().await.unwrap(), position(1));
+
+        drop(session);
+        assert!(state.is_caught_up());
+        assert_eq!(state.caught_up().await.unwrap(), position(1));
+
+        // 1b. Dropping a session right after caught-up R9a lock-in (without polling `None`), then
+        //     closing the client, also preserves `is_caught_up == true` and `caught_up() == Ok`.
+        let (mut session, tx, state, shutdown) = test_session_with_active_stream(
+            ReadInput::new(crate::types::ReadStart::SeqNum(0)).with_count(1),
+        );
+        tx.send(Ok(S2sFrame {
+            msg: proto_batch(&[0], Some(1)),
+            reconnect_advised: false,
+        }))
+        .unwrap();
+        assert_eq!(session.next().await.unwrap().unwrap().seq_num, 0);
+        drop(session);
+        assert!(state.is_caught_up());
+        assert_eq!(state.caught_up().await.unwrap(), position(1));
+        shutdown.cancel();
+        assert!(state.is_caught_up());
+        assert_eq!(state.caught_up().await.unwrap(), position(1));
+
+        // 1c. While OPEN and parked with `is_caught_up == true` (e.g. `wait` active, EOF not yet
+        //     decoded), `Drop` (R9b) and `S2::close()` (R9d) still clear `is_caught_up` and fail
+        //     subsequent `caught_up()` immediately even when not iterating.
+        let (mut session, tx, state, _shutdown) = test_session_with_active_stream(
+            ReadInput::new(crate::types::ReadStart::SeqNum(0)).with_wait_secs(5),
+        );
+        tx.send(Ok(S2sFrame {
+            msg: proto_batch(&[0], Some(1)),
+            reconnect_advised: false,
+        }))
+        .unwrap();
+        assert_eq!(session.next().await.unwrap().unwrap().seq_num, 0);
+        assert!(state.is_caught_up());
+        let prior_cu = state.caught_up();
+        drop(session);
         assert!(!state.is_caught_up());
         assert_eq!(prior_cu.await.unwrap(), position(1));
         assert!(matches!(
             state.caught_up().await,
-            Err(ReadSessionError::SessionClosed(_))
+            Err(ReadSessionError::SessionClosed(e)) if e.failure().is_none()
         ));
-        assert!(session.next().await.is_none());
 
-        // T6a / T10 / R6a: A batch carrying `reconnect_advised` that reaches `tail` resolves
-        // pending `caught_up()` uniformly across batch view and record view (regardless of batch
-        // size), then transitions to `Connecting` so `is_caught_up()` is false.
+        let (mut session, tx, state, shutdown) = test_session_with_active_stream(
+            ReadInput::new(crate::types::ReadStart::SeqNum(0)).with_wait_secs(5),
+        );
+        tx.send(Ok(S2sFrame {
+            msg: proto_batch(&[0], Some(1)),
+            reconnect_advised: false,
+        }))
+        .unwrap();
+        assert_eq!(session.next().await.unwrap().unwrap().seq_num, 0);
+        assert!(state.is_caught_up());
+        shutdown.cancel();
+        assert!(!state.is_caught_up());
+        assert!(matches!(
+            state.caught_up().await,
+            Err(ReadSessionError::Aborted(_))
+        ));
+        assert!(matches!(
+            session.next().await,
+            Some(Err(ReadSessionError::Aborted(_)))
+        ));
+
+        // 1d. While OPEN and draining a buffered `count=2` batch (record 1 still buffered so R9a
+        //     has not locked in yet), `Drop` (R9b) immediately fails pending `caught_up()`.
+        let (mut session, tx, state, _shutdown) = test_session_with_active_stream(
+            ReadInput::new(crate::types::ReadStart::SeqNum(0)).with_count(2),
+        );
+        let pending_cu = state.caught_up();
+        tx.send(Ok(S2sFrame {
+            msg: proto_batch(&[0, 1], Some(2)),
+            reconnect_advised: false,
+        }))
+        .unwrap();
+        assert_eq!(session.next().await.unwrap().unwrap().seq_num, 0);
+        assert!(!state.is_caught_up());
+        drop(session);
+        assert!(!state.is_caught_up());
+        assert!(matches!(
+            pending_cu.await,
+            Err(ReadSessionError::SessionClosed(e)) if e.failure().is_none()
+        ));
+        assert!(matches!(
+            state.caught_up().await,
+            Err(ReadSessionError::SessionClosed(e)) if e.failure().is_none()
+        ));
+
+        // 2a. T6a / T10 / R6a: A batch carrying `reconnect_advised` (with limits not exhausted)
+        //     ends the advised attempt immediately, lets its tail take effect normally so
+        //     `is_caught_up()` stays `true` upon returning the final record/batch, and clears
+        //     `is_caught_up()` when the next pull starts the replacement request.
         let (mut batch_sess, batch_tx, batch_state, _shutdown) =
             test_batch_session_with_active_stream(ReadInput::new(crate::types::ReadStart::SeqNum(
                 0,
@@ -3045,10 +3226,22 @@ mod tests {
             .unwrap();
         assert_eq!(batch_sess.next().await.unwrap().unwrap().records.len(), 2);
         assert_eq!(pending_cu.await.unwrap(), position(2));
+        assert!(batch_state.is_caught_up());
+        assert_eq!(batch_state.caught_up().await.unwrap(), position(2));
+        assert!(matches!(
+            batch_sess.core.transport_mut().phase,
+            DriverPhase::Idle
+        ));
+        // Next pull starts the replacement request and clears `is_caught_up`.
+        {
+            let mut next = Box::pin(batch_sess.next());
+            let _ = poll!(next.as_mut());
+        }
         assert!(!batch_state.is_caught_up());
+        let mut post_handover_cu = batch_state.caught_up();
+        assert!(poll!(Pin::new(&mut post_handover_cu)).is_pending());
 
-        // Record view with a 2-record advised batch `[0, 1]` and tail `2`: record 0 does not yet
-        // catch up; record 1 resolves pending `caught_up()` to `2` and then drops `is_caught_up`.
+        // 2b. Record view with a 2-record advised batch `[0, 1]` and tail `2`.
         let (mut rec_sess, rec_tx, rec_state, _shutdown) =
             test_session_with_active_stream(ReadInput::new(crate::types::ReadStart::SeqNum(0)));
         let mut pending_cu = rec_state.caught_up();
@@ -3062,17 +3255,26 @@ mod tests {
         assert_eq!(rec_state.next_seq_num(), Some(1));
         assert!(!rec_state.is_caught_up());
         assert!(poll!(Pin::new(&mut pending_cu)).is_pending());
-        // A waiter registered between record 0 and record 1 also resolves on record 1.
         let mid_batch_cu = rec_state.caught_up();
         assert_eq!(rec_sess.next().await.unwrap().unwrap().seq_num, 1);
         assert_eq!(rec_state.next_seq_num(), Some(2));
         assert_eq!(pending_cu.await.unwrap(), position(2));
         assert_eq!(mid_batch_cu.await.unwrap(), position(2));
+        assert!(rec_state.is_caught_up());
+        assert_eq!(rec_state.caught_up().await.unwrap(), position(2));
+        assert!(matches!(
+            rec_sess.core.transport_mut().phase,
+            DriverPhase::Idle
+        ));
+        {
+            let mut next = Box::pin(rec_sess.next());
+            let _ = poll!(next.as_mut());
+        }
         assert!(!rec_state.is_caught_up());
         let mut post_handover_cu = rec_state.caught_up();
         assert!(poll!(Pin::new(&mut post_handover_cu)).is_pending());
 
-        // Record view with a 1-record advised batch `[0]` and tail `1` behaves identically.
+        // 2c. Record view with a 1-record advised batch `[0]` and tail `1`.
         let (mut one_sess, one_tx, one_state, _shutdown) =
             test_session_with_active_stream(ReadInput::new(crate::types::ReadStart::SeqNum(0)));
         let pending_cu = one_state.caught_up();
@@ -3084,7 +3286,74 @@ mod tests {
             .unwrap();
         assert_eq!(one_sess.next().await.unwrap().unwrap().seq_num, 0);
         assert_eq!(pending_cu.await.unwrap(), position(1));
+        assert!(one_state.is_caught_up());
+        assert_eq!(one_state.caught_up().await.unwrap(), position(1));
+        {
+            let mut next = Box::pin(one_sess.next());
+            let _ = poll!(next.as_mut());
+        }
         assert!(!one_state.is_caught_up());
+
+        // 2d. Advised heartbeat resolves pending `caught_up()` to its tail and immediately clears
+        //     `is_caught_up()` as the replacement request starts in the same pull.
+        let (mut hb_sess, hb_tx, hb_state, _shutdown) =
+            test_session_with_active_stream(ReadInput::new(crate::types::ReadStart::SeqNum(0)));
+        let hb_cu = hb_state.caught_up();
+        hb_tx
+            .send(Ok(S2sFrame {
+                msg: proto_batch(&[], Some(5)),
+                reconnect_advised: true,
+            }))
+            .unwrap();
+        {
+            let mut next = Box::pin(hb_sess.next());
+            let _ = poll!(next.as_mut());
+        }
+        assert_eq!(hb_cu.await.unwrap(), position(5));
+        assert_eq!(hb_state.next_seq_num(), Some(5));
+        assert_eq!(hb_state.last_observed_tail(), Some(position(5)));
+        assert!(!hb_state.is_caught_up());
+        assert!(matches!(
+            hb_sess.core.transport_mut().phase,
+            DriverPhase::Opening { .. }
+        ));
+
+        // 2e. T6a + R9a + R11c: when `count` or `bytes` reaches `0` on an advised message, the
+        //     session closes cleanly without opening a replacement request and preserves
+        //     `is_caught_up == true`.
+        let (mut count_sess, count_tx, count_state, _shutdown) = test_session_with_active_stream(
+            ReadInput::new(crate::types::ReadStart::SeqNum(0)).with_count(2),
+        );
+        count_tx
+            .send(Ok(S2sFrame {
+                msg: proto_batch(&[0, 1], Some(2)),
+                reconnect_advised: true,
+            }))
+            .unwrap();
+        assert_eq!(count_sess.next().await.unwrap().unwrap().seq_num, 0);
+        assert_eq!(count_sess.next().await.unwrap().unwrap().seq_num, 1);
+        assert!(count_sess.core.client.is_none());
+        assert!(count_state.is_caught_up());
+        assert!(count_sess.next().await.is_none());
+        assert!(count_state.is_caught_up());
+        assert_eq!(count_state.caught_up().await.unwrap(), position(2));
+
+        let exact_bytes = record(0).metered_bytes() as u64;
+        let (mut bytes_sess, bytes_tx, bytes_state, _shutdown) = test_session_with_active_stream(
+            ReadInput::new(crate::types::ReadStart::SeqNum(0)).with_bytes(exact_bytes),
+        );
+        bytes_tx
+            .send(Ok(S2sFrame {
+                msg: proto_batch(&[0], Some(1)),
+                reconnect_advised: true,
+            }))
+            .unwrap();
+        assert_eq!(bytes_sess.next().await.unwrap().unwrap().seq_num, 0);
+        assert!(bytes_sess.core.client.is_none());
+        assert!(bytes_state.is_caught_up());
+        assert!(bytes_sess.next().await.is_none());
+        assert!(bytes_state.is_caught_up());
+        assert_eq!(bytes_state.caught_up().await.unwrap(), position(1));
     }
 
     // spec: r1 T7d

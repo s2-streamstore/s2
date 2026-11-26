@@ -343,12 +343,17 @@ async fn spec_r5_r6_r7_r8_read_session_records_batches_readahead_state_and_caugh
             ReadSessionConfig::default(),
         )
         .unwrap();
+    let batch_state = batch_session.state();
     let b = batch_session.next().await.unwrap().unwrap();
     assert_eq!(b.records.len(), 2);
     assert_eq!(batch_session.next_seq_num(), Some(2));
     assert!(batch_session.is_caught_up());
     assert!(batch_session.next().await.is_none());
-    assert!(!batch_session.is_caught_up());
+    assert!(batch_session.is_caught_up());
+    assert_eq!(batch_session.caught_up().await.unwrap().seq_num, 2);
+    drop(batch_session);
+    assert!(batch_state.is_caught_up());
+    assert_eq!(batch_state.caught_up().await.unwrap().seq_num, 2);
 
     // 3. R6b: Zero decoded batches ahead + deterministic synchronous draining (`now_or_never`) of
     //    already-buffered frames! All 4 small S2S frames are coalesced into a single HTTP/2 DATA
@@ -905,17 +910,23 @@ async fn spec_r11_t5_t5b_read_session_resume_clamp_wait_416_and_unbounded() {
     assert_eq!(unbounded_attempts.load(Ordering::SeqCst), 6);
 }
 
-// spec: r1 T6a, R7c, R8
+// spec: r1 T6a, R7c, R8, R9a, R11c
 #[tokio::test]
 async fn spec_t6a_read_session_reconnect_advice_cooldown() {
     let seen_conns = Arc::new(Mutex::new(Vec::<usize>::new()));
     let req_idx = Arc::new(AtomicUsize::new(0));
+    let req2_arrived = Arc::new(tokio::sync::Notify::new());
+    let release_req2 = Arc::new(tokio::sync::Notify::new());
     let server = MockH2Server::start({
         let seen_conns = seen_conns.clone();
         let req_idx = req_idx.clone();
+        let req2_arrived = req2_arrived.clone();
+        let release_req2 = release_req2.clone();
         move |conn_id, _req, respond| {
             let seen_conns = seen_conns.clone();
             let req_idx = req_idx.clone();
+            let req2_arrived = req2_arrived.clone();
+            let release_req2 = release_req2.clone();
             async move {
                 let n = req_idx.fetch_add(1, Ordering::SeqCst);
                 seen_conns.lock().unwrap().push(conn_id);
@@ -924,11 +935,13 @@ async fn spec_t6a_read_session_reconnect_advice_cooldown() {
                 };
                 if n == 0 {
                     // Multi-record batch `[0, 1]` with `tail = 2` and reconnect-advised bit ->
-                    // catches up on final record 1 (`T6a`/`R7c`), drops `is_caught_up`, and opens
-                    // the replacement request lazily on the next pull on a different connection.
+                    // catches up on final record 1 (`T6a`/`R7c`), keeps `is_caught_up == true`
+                    // until the next pull opens the replacement request on a different connection.
                     s2s.send_regular(&proto_read_batch_records(&[0, 1], Some(2)), true, false);
                     std::future::pending::<()>().await;
                 } else {
+                    req2_arrived.notify_one();
+                    release_req2.notified().await;
                     // Request 2: Record 2 WITH reconnect-advised bit (ignored within 60 s
                     // cooldown!), then Record 3 on the SAME request before clean EOF.
                     s2s.send_regular(&proto_read_batch(2, 3), true, false);
@@ -947,6 +960,7 @@ async fn spec_t6a_read_session_reconnect_advice_cooldown() {
         )
         .unwrap();
 
+    let state = session.state();
     let mut cu = session.caught_up();
 
     // Record 0: still mid-batch, not yet caught up.
@@ -956,7 +970,8 @@ async fn spec_t6a_read_session_reconnect_advice_cooldown() {
     assert!(!session.is_caught_up());
     assert!(futures_util::poll!(std::pin::Pin::new(&mut cu)).is_pending());
 
-    // Waiter created mid-batch also resolves when record 1 delivers the advised batch's tail.
+    // Waiter created mid-batch also resolves when record 1 delivers the advised batch's tail, and
+    // `is_caught_up` stays `true` until iteration next pulls from the transport (`T6a`/`R7c`).
     let mut mid_cu = session.caught_up();
     let rec1 = session.next().await.unwrap().unwrap();
     assert_eq!(rec1.seq_num, 1);
@@ -970,20 +985,45 @@ async fn spec_t6a_read_session_reconnect_advice_cooldown() {
         std::task::Poll::Ready(Ok(tail)) if tail.seq_num == 2
     ));
     assert!(
-        !session.is_caught_up(),
-        "T6a/R7c: is_caught_up must be false once final advised record is returned"
+        session.is_caught_up(),
+        "T6a/R7c: is_caught_up must stay true on advised batch delivery until replacement request begins"
     );
+    assert_eq!(session.caught_up().await.unwrap().seq_num, 2);
     assert_eq!(
         server.request_count(),
         1,
         "T6/R6b: replacement request must not open until iteration next pulls"
     );
 
-    let mut seqs = vec![rec0.seq_num, rec1.seq_num];
+    // Next pull opens request 2 on a different connection and clears `is_caught_up`.
+    let mut next_pull = Box::pin(session.next());
+    tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::select! {
+            res = &mut next_pull => panic!("unexpected result before request 2 released: {res:?}"),
+            _ = req2_arrived.notified() => {}
+        }
+    })
+    .await
+    .expect("T6a: next pull must open replacement request");
+    assert!(
+        !state.is_caught_up(),
+        "T6a/R7c: is_caught_up must clear when replacement request begins"
+    );
+    let cu_req2 = state.caught_up();
+    release_req2.notify_one();
+
+    let rec2 = next_pull.await.unwrap().unwrap();
+    assert_eq!(rec2.seq_num, 2);
+    assert_eq!(cu_req2.await.unwrap().seq_num, 3);
+    assert!(session.is_caught_up());
+
+    let mut seqs = vec![rec0.seq_num, rec1.seq_num, rec2.seq_num];
     while let Some(res) = session.next().await {
         seqs.push(res.unwrap().seq_num);
     }
     assert_eq!(seqs, vec![0, 1, 2, 3]);
+    assert!(session.is_caught_up());
+    assert_eq!(session.caught_up().await.unwrap().seq_num, 4);
     let conns = seen_conns.lock().unwrap().clone();
     assert_eq!(
         conns.len(),
@@ -994,6 +1034,198 @@ async fn spec_t6a_read_session_reconnect_advice_cooldown() {
         conns[0], conns[1],
         "T6a: first reconnect advice must move to a different connection"
     );
+
+    // Batch view (`ReadBatchSession`): advised batch stays caught up on delivery and clears on the
+    // next pull when the replacement request begins on a different connection.
+    let batch_conns = Arc::new(Mutex::new(Vec::<usize>::new()));
+    let batch_req_idx = Arc::new(AtomicUsize::new(0));
+    let batch_req2_arrived = Arc::new(tokio::sync::Notify::new());
+    let batch_release_req2 = Arc::new(tokio::sync::Notify::new());
+    let batch_server = MockH2Server::start({
+        let batch_conns = batch_conns.clone();
+        let batch_req_idx = batch_req_idx.clone();
+        let batch_req2_arrived = batch_req2_arrived.clone();
+        let batch_release_req2 = batch_release_req2.clone();
+        move |conn_id, _req, respond| {
+            let batch_conns = batch_conns.clone();
+            let batch_req_idx = batch_req_idx.clone();
+            let batch_req2_arrived = batch_req2_arrived.clone();
+            let batch_release_req2 = batch_release_req2.clone();
+            async move {
+                let n = batch_req_idx.fetch_add(1, Ordering::SeqCst);
+                batch_conns.lock().unwrap().push(conn_id);
+                let Some(mut s2s) = S2sResponder::open(respond) else {
+                    return;
+                };
+                if n == 0 {
+                    s2s.send_regular(&proto_read_batch_records(&[0, 1], Some(2)), true, false);
+                    std::future::pending::<()>().await;
+                } else {
+                    batch_req2_arrived.notify_one();
+                    batch_release_req2.notified().await;
+                    s2s.send_regular(&proto_read_batch(2, 3), false, true);
+                }
+            }
+        }
+    })
+    .await;
+
+    let mut batch_sess = batch_server
+        .stream(no_retry_config())
+        .read_batch_session(
+            ReadInput::new(ReadStart::SeqNum(0)).with_count(3),
+            ReadSessionConfig::default(),
+        )
+        .unwrap();
+    let batch_state = batch_sess.state();
+    let b1 = batch_sess.next().await.unwrap().unwrap();
+    assert_eq!(b1.records.len(), 2);
+    assert!(batch_state.is_caught_up());
+    assert_eq!(batch_state.caught_up().await.unwrap().seq_num, 2);
+    assert_eq!(batch_server.request_count(), 1);
+
+    let mut next_batch = Box::pin(batch_sess.next());
+    tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::select! {
+            res = &mut next_batch => panic!("unexpected batch before release: {res:?}"),
+            _ = batch_req2_arrived.notified() => {}
+        }
+    })
+    .await
+    .expect("T6a: batch session next pull must open replacement request");
+    assert!(!batch_state.is_caught_up());
+    batch_release_req2.notify_one();
+    let b2 = next_batch.await.unwrap().unwrap();
+    assert_eq!(b2.records[0].seq_num, 2);
+    assert!(batch_sess.next().await.is_none());
+    assert!(batch_state.is_caught_up());
+    assert_eq!(batch_state.caught_up().await.unwrap().seq_num, 3);
+    let b_conns = batch_conns.lock().unwrap().clone();
+    assert_eq!(b_conns.len(), 2);
+    assert_ne!(b_conns[0], b_conns[1]);
+
+    // Advised heartbeat resolves pending `caught_up()` to its tail, immediately opens replacement
+    // request on a different connection, and clears `is_caught_up`.
+    let hb_conns = Arc::new(Mutex::new(Vec::<usize>::new()));
+    let hb_req_idx = Arc::new(AtomicUsize::new(0));
+    let hb_req2_arrived = Arc::new(tokio::sync::Notify::new());
+    let hb_release_req2 = Arc::new(tokio::sync::Notify::new());
+    let hb_server = MockH2Server::start({
+        let hb_conns = hb_conns.clone();
+        let hb_req_idx = hb_req_idx.clone();
+        let hb_req2_arrived = hb_req2_arrived.clone();
+        let hb_release_req2 = hb_release_req2.clone();
+        move |conn_id, _req, respond| {
+            let hb_conns = hb_conns.clone();
+            let hb_req_idx = hb_req_idx.clone();
+            let hb_req2_arrived = hb_req2_arrived.clone();
+            let hb_release_req2 = hb_release_req2.clone();
+            async move {
+                let n = hb_req_idx.fetch_add(1, Ordering::SeqCst);
+                hb_conns.lock().unwrap().push(conn_id);
+                let Some(mut s2s) = S2sResponder::open(respond) else {
+                    return;
+                };
+                if n == 0 {
+                    s2s.send_regular(&proto_heartbeat(5), true, false);
+                    std::future::pending::<()>().await;
+                } else {
+                    hb_req2_arrived.notify_one();
+                    hb_release_req2.notified().await;
+                    s2s.send_regular(&proto_read_batch(5, 6), false, true);
+                }
+            }
+        }
+    })
+    .await;
+
+    let mut hb_sess = hb_server
+        .stream(no_retry_config())
+        .read_session(
+            ReadInput::new(ReadStart::SeqNum(0)).with_count(1),
+            ReadSessionConfig::default(),
+        )
+        .unwrap();
+    let hb_state = hb_sess.state();
+    let hb_cu = hb_state.caught_up();
+    let mut hb_pull = Box::pin(hb_sess.next());
+    tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::select! {
+            res = &mut hb_pull => panic!("unexpected result before request 2 released: {res:?}"),
+            _ = hb_req2_arrived.notified() => {}
+        }
+    })
+    .await
+    .expect("T6a: advised heartbeat must immediately start replacement request");
+    assert_eq!(hb_cu.await.unwrap().seq_num, 5);
+    assert!(!hb_state.is_caught_up());
+    hb_release_req2.notify_one();
+    assert_eq!(hb_pull.await.unwrap().unwrap().seq_num, 5);
+    assert!(hb_sess.next().await.is_none());
+    assert!(hb_state.is_caught_up());
+    assert_eq!(hb_state.caught_up().await.unwrap().seq_num, 6);
+    let h_conns = hb_conns.lock().unwrap().clone();
+    assert_eq!(h_conns.len(), 2);
+    assert_ne!(h_conns[0], h_conns[1]);
+
+    // T6a + R9a + R11c: when remaining `count` or `bytes` reaches `0` on an advised message, the
+    // session closes cleanly without opening a replacement request and preserves caught-up state.
+    let limit_reqs = Arc::new(AtomicUsize::new(0));
+    let limit_server = MockH2Server::start({
+        let limit_reqs = limit_reqs.clone();
+        move |_conn_id, _req, respond| {
+            let limit_reqs = limit_reqs.clone();
+            async move {
+                limit_reqs.fetch_add(1, Ordering::SeqCst);
+                if let Some(mut s2s) = S2sResponder::open(respond) {
+                    s2s.send_regular(&proto_read_batch_records(&[0], Some(1)), true, false);
+                    std::future::pending::<()>().await;
+                }
+            }
+        }
+    })
+    .await;
+
+    // count=1 exhausted on advised message -> no replacement request.
+    let mut count_advised = limit_server
+        .stream(no_retry_config())
+        .read_session(
+            ReadInput::new(ReadStart::SeqNum(0)).with_count(1),
+            ReadSessionConfig::default(),
+        )
+        .unwrap();
+    let r0 = count_advised.next().await.unwrap().unwrap();
+    assert_eq!(r0.seq_num, 0);
+    assert!(count_advised.is_caught_up());
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), count_advised.next())
+            .await
+            .expect("R11c/T6a must close promptly")
+            .is_none()
+    );
+    assert!(count_advised.is_caught_up());
+    assert_eq!(count_advised.caught_up().await.unwrap().seq_num, 1);
+    assert_eq!(limit_reqs.load(Ordering::SeqCst), 1);
+
+    // bytes exhausted on advised message -> no replacement request.
+    let mut bytes_advised = limit_server
+        .stream(no_retry_config())
+        .read_session(
+            ReadInput::new(ReadStart::SeqNum(0)).with_bytes(r0.metered_bytes() as u64),
+            ReadSessionConfig::default(),
+        )
+        .unwrap();
+    assert_eq!(bytes_advised.next().await.unwrap().unwrap().seq_num, 0);
+    assert!(bytes_advised.is_caught_up());
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), bytes_advised.next())
+            .await
+            .expect("R11c/T6a bytes stop must close promptly")
+            .is_none()
+    );
+    assert!(bytes_advised.is_caught_up());
+    assert_eq!(bytes_advised.caught_up().await.unwrap().seq_num, 1);
+    assert_eq!(limit_reqs.load(Ordering::SeqCst), 2);
 }
 
 // spec: r1 R11c
@@ -1129,14 +1361,18 @@ async fn regression_read_session_r11d_caught_up_and_count_exhausted() {
     })
     .await;
 
-    let mut r11d_sess = r11d_server
-        .stream(fast_retry_config(2))
+    let r11d_client = r11d_server.client(fast_retry_config(2));
+    let (basin, stream) = test_basin_and_stream();
+    let mut r11d_sess = r11d_client
+        .basin(basin)
+        .stream(stream)
         .read_session(
             ReadInput::new(ReadStart::SeqNum(0)).with_count(10),
             ReadSessionConfig::default(),
         )
         .unwrap();
 
+    let r11d_state = r11d_sess.state();
     let cu = r11d_sess.caught_up();
     assert_eq!(r11d_sess.next().await.unwrap().unwrap().seq_num, 0);
     assert!(!r11d_sess.is_caught_up());
@@ -1144,7 +1380,16 @@ async fn regression_read_session_r11d_caught_up_and_count_exhausted() {
     assert!(r11d_sess.next().await.is_none());
     assert_eq!(r11d_sess.next_seq_num(), Some(5));
     assert_eq!(r11d_sess.last_observed_tail().unwrap().seq_num, 5);
+    assert!(
+        r11d_sess.is_caught_up(),
+        "R11d/R7c: stop-condition 416 with representable tail must keep is_caught_up true"
+    );
     assert_eq!(cu.await.unwrap().seq_num, 5);
+    assert_eq!(r11d_sess.caught_up().await.unwrap().seq_num, 5);
+    drop(r11d_sess);
+    r11d_client.close();
+    assert!(r11d_state.is_caught_up());
+    assert_eq!(r11d_state.caught_up().await.unwrap().seq_num, 5);
 
     // 2. R11d recreated-stream guard: resumed zero-wait 416 whose tail.seq_num < resume_seq_num
     //    MUST surface ReadUnwrittenError (not silently stop cleanly!).
@@ -1636,6 +1881,7 @@ async fn regression_read_session_stops_on_exhausted_count_and_rejects_u64_max_se
     let rec = sess.next().await.unwrap().unwrap();
     assert_eq!(rec.seq_num, 0);
     assert_eq!(cu.await.unwrap().seq_num, 1);
+    assert!(sess.is_caught_up());
     let end = tokio::time::timeout(Duration::from_secs(2), sess.next())
         .await
         .expect("read session must close promptly once count=1 is exhausted");
@@ -1643,6 +1889,8 @@ async fn regression_read_session_stops_on_exhausted_count_and_rejects_u64_max_se
         end.is_none(),
         "expected clean end after count=1, got {end:?}"
     );
+    assert!(sess.is_caught_up());
+    assert_eq!(sess.caught_up().await.unwrap().seq_num, 1);
 
     // 2. R7a + E7: A record at seq_num == u64::MAX has no representable successor `next_seq_num`,
     //    so the session fails with ProtocolError before delivering it — and if it arrived after a
@@ -2061,4 +2309,145 @@ async fn spec_r6b_t8_partial_frame_survives_canceled_wait() {
     assert_eq!(rec2.seq_num, 2);
     assert_eq!(rec2.body.as_ref(), b"rec-2");
     assert_eq!(server.request_count(), 1);
+}
+
+// spec: r1 C12, R7, R7c, R8, R8d, R9, R9a, R9b, R9c, R9d, R11c, R11d
+#[tokio::test]
+async fn spec_r7c_r8d_r9_r11d_preserve_caught_up_on_clean_stop_and_post_close_noop() {
+    let (basin, stream) = test_basin_and_stream();
+
+    // 1. `[Heartbeat(tail), EOF]` coalesced in one HTTP/2 DATA chunk (`next()` returns `None` in
+    //    one pull): `is_caught_up` stays `true`, pending and subsequent `caught_up()` resolve to
+    //    `Ok(tail)`, and later `Drop` / `S2::close()` are no-ops.
+    let hb_eof_server = MockH2Server::start(|_conn_id, _req, respond| async move {
+        if let Some(mut s2s) = S2sResponder::open(respond) {
+            s2s.send_regular(&proto_heartbeat(5), false, true);
+        }
+    })
+    .await;
+    let hb_client = hb_eof_server.client(no_retry_config());
+    let mut hb_sess = hb_client
+        .basin(basin.clone())
+        .stream(stream.clone())
+        .read_session(
+            ReadInput::new(ReadStart::SeqNum(0)).with_wait_secs(5),
+            ReadSessionConfig::default(),
+        )
+        .unwrap();
+    let hb_state = hb_sess.state();
+    let hb_cu = hb_state.caught_up();
+    assert!(hb_sess.next().await.is_none());
+    assert_eq!(hb_state.next_seq_num(), Some(5));
+    assert_eq!(hb_state.last_observed_tail().unwrap().seq_num, 5);
+    assert!(hb_state.is_caught_up());
+    assert_eq!(hb_cu.await.unwrap().seq_num, 5);
+    assert_eq!(hb_state.caught_up().await.unwrap().seq_num, 5);
+    drop(hb_sess);
+    hb_client.close();
+    assert!(hb_state.is_caught_up());
+    assert_eq!(hb_state.caught_up().await.unwrap().seq_num, 5);
+
+    // 2. Caught-up `count=1` clean stop: `S2::close()` BEFORE `None` is polled (record view) and
+    //    `Drop` BEFORE `None` is polled (batch view) are both complete no-ops on retained state.
+    let count_server = MockH2Server::start(|_conn_id, _req, respond| async move {
+        if let Some(mut s2s) = S2sResponder::open(respond) {
+            s2s.send_regular(&proto_read_batch_records(&[0], Some(1)), false, false);
+            std::future::pending::<()>().await;
+        }
+    })
+    .await;
+
+    let c_rec = count_server.client(no_retry_config());
+    let mut s_rec = c_rec
+        .basin(basin.clone())
+        .stream(stream.clone())
+        .read_session(
+            ReadInput::new(ReadStart::SeqNum(0)).with_count(1),
+            ReadSessionConfig::default(),
+        )
+        .unwrap();
+    let st_rec = s_rec.state();
+    assert_eq!(s_rec.next().await.unwrap().unwrap().seq_num, 0);
+    assert!(st_rec.is_caught_up());
+    // Close client BEFORE polling trailing `None`: R9a already locked in!
+    c_rec.close();
+    assert!(st_rec.is_caught_up());
+    assert_eq!(st_rec.caught_up().await.unwrap().seq_num, 1);
+    assert!(s_rec.next().await.is_none());
+    drop(s_rec);
+    assert!(st_rec.is_caught_up());
+    assert_eq!(st_rec.caught_up().await.unwrap().seq_num, 1);
+
+    let c_batch = count_server.client(no_retry_config());
+    let mut s_batch = c_batch
+        .basin(basin.clone())
+        .stream(stream.clone())
+        .read_batch_session(
+            ReadInput::new(ReadStart::SeqNum(0)).with_count(1),
+            ReadSessionConfig::default(),
+        )
+        .unwrap();
+    let st_batch = s_batch.state();
+    let batch = s_batch.next().await.unwrap().unwrap();
+    assert_eq!(batch.records.len(), 1);
+    assert!(st_batch.is_caught_up());
+    // Drop session BEFORE polling trailing `None`, then close client: both are no-ops!
+    drop(s_batch);
+    assert!(st_batch.is_caught_up());
+    assert_eq!(st_batch.caught_up().await.unwrap().seq_num, 1);
+    c_batch.close();
+    assert!(st_batch.is_caught_up());
+    assert_eq!(st_batch.caught_up().await.unwrap().seq_num, 1);
+
+    // 3. Non-caught-up `R11d` stop-condition `416` with malformed body (no representable tail):
+    //    closes cleanly (`None`) with `is_caught_up == false` and `SessionClosed(None)`, and
+    //    subsequent `S2::close()` does not overwrite it with `Aborted`.
+    let malformed_attempt = Arc::new(AtomicUsize::new(0));
+    let malformed_gate = Arc::new(tokio::sync::Notify::new());
+    let malformed_416_server = MockH2Server::start({
+        let malformed_attempt = malformed_attempt.clone();
+        let malformed_gate = malformed_gate.clone();
+        move |_conn_id, _req, respond| {
+            let malformed_attempt = malformed_attempt.clone();
+            let malformed_gate = malformed_gate.clone();
+            async move {
+                let n = malformed_attempt.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    if let Some(mut s2s) = S2sResponder::open(respond) {
+                        s2s.send_regular(&proto_read_batch(0, 3), false, false);
+                        malformed_gate.notified().await;
+                        s2s.reset(h2::Reason::INTERNAL_ERROR);
+                    }
+                } else {
+                    send_json(respond, 416, r#"{"tail":"not-an-object"}"#);
+                }
+            }
+        }
+    })
+    .await;
+    let c_mal = malformed_416_server.client(fast_retry_config(2));
+    let mut s_mal = c_mal
+        .basin(basin)
+        .stream(stream)
+        .read_session(
+            ReadInput::new(ReadStart::SeqNum(0)).with_count(10),
+            ReadSessionConfig::default(),
+        )
+        .unwrap();
+    let st_mal = s_mal.state();
+    let cu_mal = st_mal.caught_up();
+    assert_eq!(s_mal.next().await.unwrap().unwrap().seq_num, 0);
+    malformed_gate.notify_one();
+    assert!(s_mal.next().await.is_none());
+    assert!(!st_mal.is_caught_up());
+    assert!(matches!(
+        cu_mal.await,
+        Err(ReadSessionError::SessionClosed(e)) if e.failure().is_none()
+    ));
+    c_mal.close();
+    assert!(!st_mal.is_caught_up());
+    assert!(matches!(
+        st_mal.caught_up().await,
+        Err(ReadSessionError::SessionClosed(e)) if e.failure().is_none()
+    ));
 }
