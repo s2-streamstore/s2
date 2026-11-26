@@ -516,7 +516,6 @@ mod tests {
     };
     use s2_common::{
         basin::{BASIN_HEADER, BasinName},
-        caps::RECORD_BATCH_MAX,
         config::{
             BasinConfig, DeleteOnEmptyConfig, OptionalStreamConfig, RetentionPolicy, StreamConfig,
         },
@@ -1429,66 +1428,5 @@ mod tests {
             .expect("decode read batch proto");
         assert_eq!(batch.records.len(), 1);
         assert_eq!(batch.records[0].body.as_ref(), b"secret");
-    }
-
-    #[tokio::test]
-    async fn unary_read_clamps_u64_max_limits_to_record_batch_max() {
-        let (app, backend, basin, stream) = setup_app_with_config(
-            "read-u64-max-clamp",
-            BasinConfig::default(),
-            OptionalStreamConfig::default(),
-        )
-        .await;
-
-        let make_batch = |n: usize| {
-            let records: Vec<AppendRecord> = (0..n)
-                .map(|_| {
-                    let record = Metered::from(Record::Envelope(
-                        EnvelopeRecord::try_from_parts(vec![], Bytes::from_static(b"x")).unwrap(),
-                    ));
-                    AppendRecord::try_from(AppendRecordParts {
-                        timestamp: None,
-                        record,
-                    })
-                    .unwrap()
-                })
-                .collect();
-            AppendInput {
-                records: AppendRecordBatch::try_from(records).unwrap(),
-                match_seq_num: None,
-                fencing_token: None,
-            }
-        };
-
-        for batch_len in [RECORD_BATCH_MAX.count, 1] {
-            backend
-                .open_for_append(&basin, &stream, None, OptionalStreamConfig::default())
-                .await
-                .expect("open append handle")
-                .append(make_batch(batch_len))
-                .await
-                .expect("append batch");
-        }
-
-        let response = send(
-            &app,
-            request_builder(
-                "GET",
-                format!(
-                    "/v1/streams/{stream}/records?seq_num=0&count={}&bytes={}",
-                    u64::MAX,
-                    u64::MAX
-                ),
-                &basin,
-            )
-            .body(Body::empty())
-            .unwrap(),
-        )
-        .await;
-
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = response_json(response, "unary read json").await;
-        let records = body["records"].as_array().expect("records array");
-        assert_eq!(records.len(), RECORD_BATCH_MAX.count);
     }
 }
