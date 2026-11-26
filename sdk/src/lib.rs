@@ -111,7 +111,9 @@ All of these convert into [`S2Error`]; [`S2Error`] and the five operation error 
 [`is_retryable`](S2Error::is_retryable),
 [`has_no_side_effects`](S2Error::has_no_side_effects),
 [`server_error`](S2Error::server_error), [`known_code`](S2Error::known_code), and
-[`has_error_code`](S2Error::has_error_code).
+[`has_error_code`](S2Error::has_error_code), and wrapper-bearing enums also expose
+[`root_cause`](S2Error::root_cause) to unwrap nested [`IndefiniteAppend`](S2Error::IndefiniteAppend)
+and [`SessionClosed`](S2Error::SessionClosed) wrappers.
 
 ## Reconfiguration
 

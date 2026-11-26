@@ -1,11 +1,1 @@
-[[exception]]
-crate = "url"
-version = "2.5.9"
-advisory = "RUSTSEC-2026-0592"
-reason = "Fixes stack overflow in Url::origin() on nested blob: URLs"
-
-[[exception]]
-crate = "form_urlencoded"
-version = "1.2.3"
-advisory = "RUSTSEC-2026-0592"
-reason = "Required dependency of url 2.5.9, which fixes the Url::origin() nested blob: stack overflow"
+exception = []

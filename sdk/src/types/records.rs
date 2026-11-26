@@ -768,16 +768,21 @@ pub enum ReadStart {
     SeqNum(u64),
     /// Read from this timestamp.
     Timestamp(u64),
-    /// Read from N records before the tail.
+    /// Read from N records before the tail (`TailOffset(0)` starts at the tail).
     TailOffset(u64),
+}
+
+impl ReadStart {
+    /// Start reading from the current tail of the stream (`TailOffset(0)`).
+    pub const TAIL: Self = Self::TailOffset(0);
 }
 
 /// Input for [`read`](crate::S2Stream::read), [`read_session`](crate::S2Stream::read_session),
 /// and [`read_batch_session`](crate::S2Stream::read_batch_session) operations.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[must_use]
 pub struct ReadInput {
-    start: Option<ReadStart>,
+    start: ReadStart,
     clamp: bool,
     count: Option<u64>,
     bytes: Option<u64>,
@@ -788,19 +793,30 @@ pub struct ReadInput {
 
 impl From<ReadStart> for ReadInput {
     fn from(start: ReadStart) -> Self {
-        Self::new().with_start(start)
+        Self::new(start)
     }
 }
 
 impl ReadInput {
-    /// Create a new [`ReadInput`] with default values.
-    pub fn new() -> Self {
-        Self::default()
+    /// Create a new [`ReadInput`] starting at `start`.
+    ///
+    /// Use `ReadStart::SeqNum(0)` to read from the beginning of the stream, or [`ReadStart::TAIL`]
+    /// (`ReadStart::TailOffset(0)`) to start at the tail.
+    pub fn new(start: ReadStart) -> Self {
+        Self {
+            start,
+            clamp: false,
+            count: None,
+            bytes: None,
+            until: None,
+            wait_secs: None,
+            stream_config: None,
+        }
     }
 
-    /// Return the starting position, if specified (otherwise begins at the tail).
+    /// Return the starting position.
     #[must_use]
-    pub fn start(&self) -> Option<ReadStart> {
+    pub fn start(&self) -> ReadStart {
         self.start
     }
 
@@ -841,13 +857,8 @@ impl ReadInput {
     }
 
     /// Set the starting position.
-    ///
-    /// Defaults to `None` (no start parameter is sent, causing the API to begin at the tail).
     pub fn with_start(self, start: ReadStart) -> Self {
-        Self {
-            start: Some(start),
-            ..self
-        }
+        Self { start, ..self }
     }
 
     /// Set whether to start from tail if the requested starting position is beyond it.
@@ -925,10 +936,10 @@ impl ReadInput {
         Option<StreamConfig>,
     ) {
         let (seq_num, timestamp, tail_offset) = match self.start {
-            Some(ReadStart::SeqNum(n)) => (Some(n), None, None),
-            Some(ReadStart::Timestamp(t)) => (None, Some(t), None),
-            Some(ReadStart::TailOffset(o)) => (None, None, Some(o)),
-            None => (None, None, None),
+            ReadStart::SeqNum(n) => (Some(n), None, None),
+            ReadStart::Timestamp(t) => (None, Some(t), None),
+            ReadStart::TailOffset(0) => (None, None, None),
+            ReadStart::TailOffset(o) => (None, None, Some(o)),
         };
         let start = api::stream::ReadStart {
             seq_num,

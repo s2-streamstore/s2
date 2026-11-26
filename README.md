@@ -31,14 +31,14 @@ This repository contains:
 
 ## Development
 
-Use the nightly Cargo dependency commands so that the repository publication cooldown applies:
+Use Cargo dependency commands so that the repository publication cooldown applies:
 
 ```bash
-cargo +nightly add <crate>
-cargo +nightly update
-cargo +nightly update -p <crate>
-cargo +nightly remove <crate>
-cargo +nightly generate-lockfile
+cargo add <crate>
+cargo update
+cargo update -p <crate>
+cargo remove <crate>
+cargo generate-lockfile
 ```
 
 Use `--locked` with normal build, check, test, run, document, fetch, and metadata commands. The simulator is temporarily exempt until its separate lockfile is regenerated. The pull request dependency check verifies every proposed lock-file change before Rust build jobs start.

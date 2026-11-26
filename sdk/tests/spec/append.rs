@@ -640,7 +640,7 @@ async fn spec_a5a_producer_flush_partial_batch_on_backpressure() {
     prod_steady.close().await.unwrap();
 }
 
-// spec: r1 A6, A6a, A6b, A6c, A6d, A8, A8b, A9, T10
+// spec: r1 A6, A6a, A6b, A6c, A6d, A8, A8b, A9, E5c, T10
 #[tokio::test]
 async fn spec_a6_a9_outcome_table_all_five_scenarios_and_producer_passthrough() {
     // Helper: runs the exact 3-batch scenario (A=40 KiB, B=40 KiB, C=1 KiB) where A and B fill
@@ -852,6 +852,26 @@ async fn spec_a6_a9_outcome_table_all_five_scenarios_and_producer_passthrough() 
         matches!(eclose, AppendSessionError::IndefiniteAppend(ref w) if matches!(w.final_attempt_error(), AppendSessionError::SeqNumMismatch(_))),
         "Row 4 close: {eclose:?}"
     );
+    // E5c: root_cause() unwraps 1-, 2-, and 3-layer wrappers uniformly while E5a keeps
+    // outer server_error() hidden.
+    for (label, err) in [
+        ("Row 4 A", &ea),
+        ("Row 4 B", &eb),
+        ("Row 4 C", &ec),
+        ("Row 4 close", &eclose),
+    ] {
+        assert!(err.server_error().is_none(), "E5a {label}: {err:?}");
+        assert!(
+            matches!(err.root_cause(), AppendSessionError::SeqNumMismatch(_)),
+            "E5c {label}: {err:?}"
+        );
+        let s2_err: s2_sdk::S2Error = err.clone().into();
+        assert!(s2_err.server_error().is_none(), "E5a S2Error {label}");
+        assert!(
+            matches!(s2_err.root_cause(), s2_sdk::S2Error::SeqNumMismatch(_)),
+            "E5c S2Error {label}"
+        );
+    }
 
     // Row 5: Client closed while A and B await acks -> A=Aborted, B=Aborted,
     // C=SessionClosed(Aborted), close=Aborted
@@ -861,6 +881,10 @@ async fn spec_a6_a9_outcome_table_all_five_scenarios_and_producer_passthrough() 
     assert!(
         matches!(ec, AppendSessionError::SessionClosed(ref c) if matches!(c.failure(), Some(AppendSessionError::Aborted(_)))),
         "Row 5 C: {ec:?}"
+    );
+    assert!(
+        matches!(ec.root_cause(), AppendSessionError::Aborted(_)),
+        "E5c Row 5 C: {ec:?}"
     );
     assert!(
         matches!(eclose, AppendSessionError::Aborted(_)),
