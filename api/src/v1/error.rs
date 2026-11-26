@@ -308,3 +308,23 @@ impl axum::response::IntoResponse for ErrorResponse {
         response
     }
 }
+
+impl From<ErrorResponse> for super::stream::s2s::TerminalMessage {
+    fn from(resp: ErrorResponse) -> Self {
+        let (status, mut body) = resp.to_parts();
+        if body.len() > super::stream::s2s::MAX_TERMINAL_BODY_BYTES {
+            body = serde_json::to_string(&ErrorInfo {
+                code: match &resp {
+                    ErrorResponse::Standard(s) => s.info.code,
+                    _ => ErrorCode::Other.into(),
+                },
+                message: "error message exceeded frame limit".to_owned(),
+            })
+            .expect("compact fallback ErrorInfo serializes");
+        }
+        super::stream::s2s::TerminalMessage {
+            status: status.as_u16(),
+            body: body.into(),
+        }
+    }
+}
