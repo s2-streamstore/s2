@@ -216,10 +216,7 @@ pub async fn read(
                     format, &batch,
                 ))
                 .into_response()),
-                JsonOrProto::Proto => {
-                    let batch: v1t::stream::proto::ReadBatch = batch.into();
-                    Ok(Proto(batch).into_response())
-                }
+                JsonOrProto::Proto => Ok(Proto(v1t::stream::proto::Direct(batch)).into_response()),
             }
         }
         v1t::stream::ReadRequest::EventStream {
@@ -300,13 +297,7 @@ pub async fn read(
                 .await?
                 .read(start, end)
                 .await?
-                .map_ok(|msg| match msg {
-                    ReadSessionOutput::Heartbeat(tail) => v1t::stream::proto::ReadBatch {
-                        records: vec![],
-                        tail: Some(tail.into()),
-                    },
-                    ReadSessionOutput::Batch(batch) => v1t::stream::proto::ReadBatch::from(batch),
-                })
+                .map_ok(v1t::stream::proto::Direct)
                 .map_err(ServiceError::from);
             let response_stream =
                 s2s::FramedMessageStream::<_>::new(response_compression, Box::pin(s2s_stream));

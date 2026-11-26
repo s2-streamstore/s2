@@ -1,8 +1,28 @@
 use std::str::FromStr;
 
 use base64ct::{Base64, Encoding as _};
-use bytes::Bytes;
+use bytes::{BufMut, Bytes};
 use s2_common::ValidationError;
+
+/// Direct protobuf wire encoder, implemented for all [`prost::Message`] types as well as
+/// zero-intermediate-allocation wrappers such as [`crate::v1::stream::proto::Direct`].
+pub trait EncodeProto {
+    /// Exact encoded protobuf byte length.
+    fn encoded_len(&self) -> usize;
+
+    /// Append the protobuf wire encoding into `buf`.
+    fn encode_raw(&self, buf: &mut impl BufMut);
+}
+
+impl<T: prost::Message> EncodeProto for T {
+    fn encoded_len(&self) -> usize {
+        prost::Message::encoded_len(self)
+    }
+
+    fn encode_raw(&self, buf: &mut impl BufMut) {
+        prost::Message::encode_raw(self, buf);
+    }
+}
 
 #[derive(Debug)]
 pub struct Json<T>(pub T);
@@ -24,14 +44,15 @@ pub struct Proto<T>(pub T);
 #[cfg(feature = "axum")]
 impl<T> axum::response::IntoResponse for Proto<T>
 where
-    T: prost::Message,
+    T: EncodeProto,
 {
     fn into_response(self) -> axum::response::Response {
         let headers = [(
             http::header::CONTENT_TYPE,
             http::header::HeaderValue::from_static("application/protobuf"),
         )];
-        let body = self.0.encode_to_vec();
+        let mut body = Vec::with_capacity(self.0.encoded_len());
+        self.0.encode_raw(&mut body);
         (headers, body).into_response()
     }
 }

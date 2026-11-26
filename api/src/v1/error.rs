@@ -308,3 +308,59 @@ impl axum::response::IntoResponse for ErrorResponse {
         response
     }
 }
+
+impl From<ErrorResponse> for super::stream::s2s::TerminalMessage {
+    fn from(resp: ErrorResponse) -> Self {
+        let (status, mut body) = resp.to_parts();
+        if body.len() > super::stream::s2s::MAX_TERMINAL_BODY_BYTES {
+            body = serde_json::to_string(&ErrorInfo {
+                code: match &resp {
+                    ErrorResponse::Standard(s) => s.info.code,
+                    _ => ErrorCode::Other.into(),
+                },
+                message: "error message exceeded frame limit".to_owned(),
+            })
+            .expect("compact fallback ErrorInfo serializes");
+        }
+        super::stream::s2s::TerminalMessage {
+            status: status.as_u16(),
+            body: body.into(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::v1::stream::s2s::{MAX_TERMINAL_BODY_BYTES, TerminalMessage};
+
+    #[test]
+    fn error_response_into_terminal_message_falls_back_when_oversized() {
+        let small = ErrorResponse::Standard(StandardError {
+            status: ErrorCode::Invalid.status(),
+            info: ErrorInfo {
+                code: ErrorCode::Invalid.into(),
+                message: "bad input".to_owned(),
+            },
+        });
+        let term = TerminalMessage::from(small);
+        assert_eq!(term.status, 422);
+        let parsed: serde_json::Value = serde_json::from_slice(&term.body).unwrap();
+        assert_eq!(parsed["code"], "invalid");
+        assert_eq!(parsed["message"], "bad input");
+
+        let huge = ErrorResponse::Standard(StandardError {
+            status: ErrorCode::Invalid.status(),
+            info: ErrorInfo {
+                code: ErrorCode::Invalid.into(),
+                message: "x".repeat(MAX_TERMINAL_BODY_BYTES + 128),
+            },
+        });
+        let term = TerminalMessage::from(huge);
+        assert_eq!(term.status, 422);
+        assert!(term.body.len() <= MAX_TERMINAL_BODY_BYTES);
+        let parsed: serde_json::Value = serde_json::from_slice(&term.body).unwrap();
+        assert_eq!(parsed["code"], "invalid");
+        assert_eq!(parsed["message"], "error message exceeded frame limit");
+    }
+}
