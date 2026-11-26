@@ -484,6 +484,8 @@ impl ReadStateInner {
         if self.closed.is_some() {
             return;
         }
+        // Session is being dropped and can no longer be polled; locking in `Clean` here prevents a
+        // later `S2::close()` from overwriting `catch_up` with `Aborted` (`R9`).
         self.closed = Some(TerminalClose::Clean);
         self.phase = RequestPhase::Connecting;
         self.fail_catch_up(
@@ -708,8 +710,10 @@ impl ReadSessionState {
     /// [`S2Stream::check_tail`](crate::S2Stream::check_tail) for a fresh stream tail. Returns
     /// `false` on non-tailing messages, while reconnecting or starting a replacement request, on a
     /// non-caught-up clean stop, on terminal failure, or when an open session is dropped or
-    /// aborted via [`S2::close`](crate::S2::close). Once closed, the final value is retained and
-    /// later drops or [`S2::close`](crate::S2::close) calls have no effect.
+    /// aborted via [`S2::close`](crate::S2::close) (including breaking out of iteration and
+    /// dropping before observing end-of-stream or a limit-exhausting final record). Once closed,
+    /// the final value is retained and later drops or [`S2::close`](crate::S2::close) calls have
+    /// no effect.
     #[must_use]
     pub fn is_caught_up(&self) -> bool {
         let inner = self.inner.lock().unwrap();
@@ -3342,6 +3346,19 @@ mod tests {
             hb_sess.core.transport_mut().phase,
             DriverPhase::Opening { .. }
         ));
+        // Dropping while the T6a replacement request is `Opening` closes under `R9b` and fails
+        // pending/subsequent `caught_up()` with `SessionClosed(None)`.
+        let opening_cu = hb_state.caught_up();
+        drop(hb_sess);
+        assert!(!hb_state.is_caught_up());
+        assert!(matches!(
+            opening_cu.await,
+            Err(ReadSessionError::SessionClosed(e)) if e.failure().is_none()
+        ));
+        assert!(matches!(
+            hb_state.caught_up().await,
+            Err(ReadSessionError::SessionClosed(e)) if e.failure().is_none()
+        ));
 
         // 2e. T6a + R9a + R11c: when `count` or `bytes` reaches `0` on an advised message, the
         //     session closes cleanly without opening a replacement request and preserves
@@ -3379,6 +3396,34 @@ mod tests {
         assert!(bytes_sess.next().await.is_none());
         assert!(bytes_state.is_caught_up());
         assert_eq!(bytes_state.caught_up().await.unwrap(), position(1));
+
+        // 2f. `count(0)` safety net: a stream error after a heartbeat ends cleanly without
+        //     reconnecting, and clears `is_caught_up` since a disconnect occurred (`R7c`).
+        let (mut zero_sess, zero_tx, zero_state, _shutdown) = test_session_with_active_stream(
+            ReadInput::new(crate::types::ReadStart::SeqNum(0)).with_count(0),
+        );
+        zero_tx
+            .send(Ok(S2sFrame {
+                msg: proto_batch(&[], Some(3)),
+                reconnect_advised: false,
+            }))
+            .unwrap();
+        zero_tx
+            .send(Err(ReadSessionError::ConnectionLost(
+                ConnectionLostError::new_with_context(
+                    "transient",
+                    true,
+                    ErrorContext::default().into_read_only(),
+                ),
+            )))
+            .unwrap();
+        assert!(zero_sess.next().await.is_none());
+        assert_eq!(zero_state.next_seq_num(), Some(3));
+        assert!(!zero_state.is_caught_up());
+        assert!(matches!(
+            zero_state.caught_up().await,
+            Err(ReadSessionError::SessionClosed(e)) if e.failure().is_none()
+        ));
     }
 
     // spec: r1 T7d

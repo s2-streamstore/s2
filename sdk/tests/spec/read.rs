@@ -1226,11 +1226,47 @@ async fn spec_t6a_read_session_reconnect_advice_cooldown() {
     assert!(bytes_advised.is_caught_up());
     assert_eq!(bytes_advised.caught_up().await.unwrap().seq_num, 1);
     assert_eq!(limit_reqs.load(Ordering::SeqCst), 2);
+
+    // T6a + R11d: an advised caught-up batch whose replacement request receives an HTTP 416 with
+    // representable tail ends as a caught-up clean stop on that tail.
+    let advised_416_reqs = Arc::new(AtomicUsize::new(0));
+    let advised_416_server = MockH2Server::start({
+        let advised_416_reqs = advised_416_reqs.clone();
+        move |_conn_id, _req, respond| {
+            let advised_416_reqs = advised_416_reqs.clone();
+            async move {
+                let n = advised_416_reqs.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    if let Some(mut s2s) = S2sResponder::open(respond) {
+                        s2s.send_regular(&proto_read_batch_records(&[0], Some(1)), true, false);
+                        std::future::pending::<()>().await;
+                    }
+                } else {
+                    send_tail_json(respond, 416, 1, 1000);
+                }
+            }
+        }
+    })
+    .await;
+    let mut advised_416 = advised_416_server
+        .stream(no_retry_config())
+        .read_session(
+            ReadInput::new(ReadStart::SeqNum(0)).with_count(10),
+            ReadSessionConfig::default(),
+        )
+        .unwrap();
+    assert_eq!(advised_416.next().await.unwrap().unwrap().seq_num, 0);
+    assert!(advised_416.is_caught_up());
+    assert!(advised_416.next().await.is_none());
+    assert!(advised_416.is_caught_up());
+    assert_eq!(advised_416.caught_up().await.unwrap().seq_num, 1);
+    assert_eq!(advised_416_reqs.load(Ordering::SeqCst), 2);
 }
 
-// spec: r1 R11c
+// spec: r1 R7c, R8d, R11c
 // Regression: ReadSession R11c reduced-wait after fetching a new record must reconnect with
-// refreshed remaining wait instead of prematurely terminating on the server's shorter timer.
+// refreshed remaining wait instead of prematurely terminating on the server's shorter timer, and
+// starting that replacement request clears `is_caught_up`.
 #[tokio::test]
 async fn regression_read_session_r11c_reduced_wait_refreshes_after_record() {
     // Baseline wait = 4s.
@@ -1238,18 +1274,24 @@ async fn regression_read_session_r11c_reduced_wait_refreshes_after_record() {
     //   resets connection.
     // - Attempt 2 arrives with reduced wait (< 4s), delivers a new record (restarts idle clock to
     //   full 4s!), then server closes cleanly -> client MUST reconnect (Attempt 3) with refreshed
-    //   wait!
+    //   wait and clear `is_caught_up` when Attempt 3 starts!
     let observed_waits = Arc::new(Mutex::new(Vec::<Option<u32>>::new()));
     let attempt_idx = Arc::new(AtomicUsize::new(0));
     let trigger_reset = Arc::new(tokio::sync::Notify::new());
+    let attempt3_arrived = Arc::new(tokio::sync::Notify::new());
+    let release_attempt3 = Arc::new(tokio::sync::Notify::new());
     let r11c_server = MockH2Server::start({
         let observed_waits = observed_waits.clone();
         let attempt_idx = attempt_idx.clone();
         let trigger_reset = trigger_reset.clone();
+        let attempt3_arrived = attempt3_arrived.clone();
+        let release_attempt3 = release_attempt3.clone();
         move |_conn_id, req, respond| {
             let observed_waits = observed_waits.clone();
             let attempt_idx = attempt_idx.clone();
             let trigger_reset = trigger_reset.clone();
+            let attempt3_arrived = attempt3_arrived.clone();
+            let release_attempt3 = release_attempt3.clone();
             async move {
                 let wait_param = query_pairs(req.uri())
                     .get("wait")
@@ -1270,7 +1312,10 @@ async fn regression_read_session_r11c_reduced_wait_refreshes_after_record() {
                         s2s.send_regular(&proto_read_batch(0, 1), false, true);
                     }
                     _ => {
-                        // Attempt 3: deliver record 1 and end cleanly.
+                        // Attempt 3: pause so test observes `is_caught_up == false`, then deliver
+                        // record 1 and end cleanly.
+                        attempt3_arrived.notify_one();
+                        release_attempt3.notified().await;
                         s2s.send_regular(&proto_read_batch(1, 2), false, true);
                     }
                 }
@@ -1288,6 +1333,7 @@ async fn regression_read_session_r11c_reduced_wait_refreshes_after_record() {
             ReadSessionConfig::default(),
         )
         .unwrap();
+    let state = sess.state();
 
     // Drive iteration while awaiting Attempt 1's heartbeat (`R8b`), which initializes `idle_since`
     // before resolving caught_up.
@@ -1306,11 +1352,32 @@ async fn regression_read_session_r11c_reduced_wait_refreshes_after_record() {
     advance_virtual_time(Duration::from_millis(1200)).await;
     trigger_reset.notify_one();
 
-    let mut seqs = Vec::new();
-    while let Some(res) = sess.next().await {
-        seqs.push(res.unwrap().seq_num);
-    }
-    assert_eq!(seqs, vec![0, 1]);
+    // Attempt 2 delivers record 0 (tail = 1 -> caught up).
+    assert_eq!(sess.next().await.unwrap().unwrap().seq_num, 0);
+    assert!(state.is_caught_up());
+
+    // Next pull sees Attempt 2's clean EOF and starts refreshed-wait Attempt 3, clearing
+    // `is_caught_up` (`R7c`, `R11c`).
+    let mut next_pull = Box::pin(sess.next());
+    tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::select! {
+            res = &mut next_pull => panic!("unexpected result before attempt 3 released: {res:?}"),
+            _ = attempt3_arrived.notified() => {}
+        }
+    })
+    .await
+    .expect("R11c: must open refreshed-wait attempt 3");
+    assert!(
+        !state.is_caught_up(),
+        "R7c/R11c: starting refreshed-wait replacement request must clear is_caught_up"
+    );
+    release_attempt3.notify_one();
+
+    assert_eq!(next_pull.await.unwrap().unwrap().seq_num, 1);
+    assert!(sess.next().await.is_none());
+    assert!(state.is_caught_up());
+    assert_eq!(state.caught_up().await.unwrap().seq_num, 2);
+
     let waits = observed_waits.lock().unwrap().clone();
     assert_eq!(waits.len(), 3, "must reconnect after reduced-wait attempt");
     assert_eq!(waits[0], Some(4));
@@ -1323,6 +1390,73 @@ async fn regression_read_session_r11c_reduced_wait_refreshes_after_record() {
         Some(4),
         "attempt 3 should refresh wait after new record: {waits:?}"
     );
+
+    // Subcase: if the refreshed-wait replacement request ends cleanly with EOF before any new
+    // message, `is_caught_up` stays `false` and `caught_up()` fails with `SessionClosed(None)`.
+    let empty_attempt_idx = Arc::new(AtomicUsize::new(0));
+    let empty_reset = Arc::new(tokio::sync::Notify::new());
+    let empty_r11c_server = MockH2Server::start({
+        let empty_attempt_idx = empty_attempt_idx.clone();
+        let empty_reset = empty_reset.clone();
+        move |_conn_id, _req, respond| {
+            let empty_attempt_idx = empty_attempt_idx.clone();
+            let empty_reset = empty_reset.clone();
+            async move {
+                let n = empty_attempt_idx.fetch_add(1, Ordering::SeqCst);
+                let Some(mut s2s) = S2sResponder::open(respond) else {
+                    return;
+                };
+                match n {
+                    0 => {
+                        s2s.send_regular(&proto_heartbeat(0), false, false);
+                        empty_reset.notified().await;
+                        s2s.reset(h2::Reason::INTERNAL_ERROR);
+                    }
+                    1 => {
+                        s2s.send_regular(&proto_read_batch(0, 1), false, true);
+                    }
+                    _ => {
+                        // Refreshed-wait Attempt 3 ends cleanly without any message.
+                        s2s.send_eof();
+                    }
+                }
+            }
+        }
+    })
+    .await;
+
+    let mut empty_sess = empty_r11c_server
+        .stream(fast_retry_config(3))
+        .read_session(
+            ReadInput::new(ReadStart::SeqNum(0))
+                .with_wait_secs(4)
+                .with_count(2),
+            ReadSessionConfig::default(),
+        )
+        .unwrap();
+    let mut cu0 = empty_sess.caught_up();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::select! {
+            res = &mut cu0 => res.unwrap(),
+            item = empty_sess.next() => panic!("unexpected item before heartbeat: {item:?}"),
+        }
+    })
+    .await
+    .expect("heartbeat must resolve caught_up");
+    advance_virtual_time(Duration::from_millis(1200)).await;
+    empty_reset.notify_one();
+
+    assert_eq!(empty_sess.next().await.unwrap().unwrap().seq_num, 0);
+    assert!(empty_sess.is_caught_up());
+    assert!(empty_sess.next().await.is_none());
+    assert!(
+        !empty_sess.is_caught_up(),
+        "R7c/R11c: empty EOF on replacement request must not keep prior attempt's is_caught_up"
+    );
+    assert!(matches!(
+        empty_sess.caught_up().await,
+        Err(ReadSessionError::SessionClosed(e)) if e.failure().is_none()
+    ));
 }
 
 // spec: r1 R11d
