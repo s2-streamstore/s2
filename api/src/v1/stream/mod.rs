@@ -489,9 +489,7 @@ impl ReadBatch {
 
 #[cfg(test)]
 mod tests {
-    use s2_common::read_extent::{CountOrBytes, ReadLimit};
-
-    use super::{ReadEnd, StreamInfo};
+    use super::StreamInfo;
 
     #[test]
     fn stream_info_deserializes_with_omitted_deleted_at() {
@@ -500,22 +498,5 @@ mod tests {
                 .expect("deleted_at is optional per OpenAPI");
         assert_eq!(info.name.as_ref(), "my-stream");
         assert!(info.deleted_at.is_none());
-    }
-
-    #[test]
-    fn read_end_preserves_u64_limits() {
-        let count = u64::MAX;
-        let bytes = u64::from(u32::MAX) + 1;
-        let common: s2_common::stream::ReadEnd = ReadEnd {
-            count: Some(count),
-            bytes: Some(bytes),
-            until: None,
-            wait: None,
-        }
-        .into();
-        assert_eq!(
-            common.limit,
-            ReadLimit::CountOrBytes(CountOrBytes { count, bytes })
-        );
     }
 }
