@@ -114,9 +114,7 @@ pub fn encode_regular_frame(
 ) -> std::io::Result<Bytes> {
     let encoded_len = proto.encoded_len();
     encode_regular_frame_with(compression, encoded_len, |buf| {
-        proto
-            .encode(buf)
-            .expect("buffer has exact capacity for proto");
+        proto.encode_raw(buf);
     })
 }
 
