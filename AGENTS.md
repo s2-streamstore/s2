@@ -7,9 +7,8 @@
 ## Cargo Dependency Safety
 
 - Use `--locked` for Cargo commands that build, check, test, run, document, fetch, or read metadata.
-- Use `cargo +nightly add`, `cargo +nightly update`, `cargo +nightly remove`, or `cargo +nightly generate-lockfile` for dependency changes. The repository Cargo configuration applies the publication cooldown.
-- Do not use the stable forms of these dependency commands.
-- Do not edit dependency declarations or `Cargo.lock` directly.
+- Use `cargo add`, `cargo update`, `cargo remove`, or `cargo generate-lockfile` for dependency changes. The repository Cargo configuration applies the publication cooldown.
+- Avoid editing dependency declarations or `Cargo.lock` directly; if you need to, ask for explicit permission first and flag the risk.
 - Do not install Cargo tools as part of a coding task.
 
 ## API Evolution
