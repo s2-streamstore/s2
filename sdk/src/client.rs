@@ -994,6 +994,14 @@ fn shrink_if_excess_slack(buf: &mut Vec<u8>, max_slack: usize) {
     }
 }
 
+/// Upper bound on compressed output size for `raw_len` bytes of incompressible input.
+///
+/// Matches a branchless upper bound on libzstd's `ZSTD_COMPRESSBOUND` (and covers gzip's framing
+/// and stored-block overhead) so incompressible payloads do not overflow and reallocate mid-write.
+fn compressed_capacity_bound(raw_len: usize) -> usize {
+    raw_len.saturating_add(raw_len >> 8).saturating_add(64)
+}
+
 fn compress_body(
     body: Body,
     compression: Compression,
@@ -1006,7 +1014,7 @@ fn compress_body(
             "streaming request bodies cannot be compressed".into(),
         ));
     };
-    let initial_capacity = data.len() + (data.len() >> 8) + 64;
+    let initial_capacity = compressed_capacity_bound(data.len());
     match compression {
         Compression::None => unreachable!(),
         Compression::Gzip => {

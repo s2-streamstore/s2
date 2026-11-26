@@ -86,6 +86,14 @@ fn zstd_encode_into(raw: &[u8], out: Vec<u8>) -> std::io::Result<Vec<u8>> {
     encoder.finish()
 }
 
+/// Upper bound on compressed output size for `raw_len` bytes of incompressible input.
+///
+/// Matches a branchless upper bound on libzstd's `ZSTD_COMPRESSBOUND` (and covers gzip's framing
+/// and stored-block overhead) so incompressible payloads do not overflow and reallocate mid-write.
+fn compressed_capacity_bound(raw_len: usize) -> usize {
+    raw_len.saturating_add(raw_len >> 8).saturating_add(64)
+}
+
 /// Compress `raw` by appending to `out`, enforcing `MAX_FRAME_PAYLOAD_BYTES` on the newly appended
 /// compressed payload bytes and trimming excess pre-allocated slack.
 fn compress_into(
@@ -189,7 +197,7 @@ pub fn encode_regular_frame(
     }
 
     let flag = regular_flag(compression, false);
-    let mut out = Vec::with_capacity(REGULAR_HEADER_SIZE + raw.len() + (raw.len() >> 8) + 64);
+    let mut out = Vec::with_capacity(REGULAR_HEADER_SIZE + compressed_capacity_bound(raw.len()));
     out.extend_from_slice(&[0, 0, 0, flag]);
     let mut out = compress_into(compression, &raw, out)?;
     let payload_len = out.len() - REGULAR_HEADER_SIZE;
@@ -273,7 +281,7 @@ impl CompressedData {
         let buf = compress_into(
             compression,
             data.as_slice(),
-            Vec::with_capacity(data.len() + (data.len() >> 8) + 64),
+            Vec::with_capacity(compressed_capacity_bound(data.len())),
         )?;
         Ok(Self {
             compression,
