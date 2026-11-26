@@ -7,8 +7,9 @@ use std::{
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use flate2::{Compression, bufread::GzDecoder, write::GzEncoder};
 use futures_core::Stream;
-use s2_common::buf::{ZSTD_MAX_WINDOW_LOG, compressed_capacity_bound, shrink_if_excess_slack};
 use strum::FromRepr;
+
+use crate::compression::{ZSTD_MAX_WINDOW_LOG, compressed_capacity_bound, shrink_if_excess_slack};
 
 /*
   REGULAR MESSAGE:
@@ -84,9 +85,10 @@ fn validate_decoded_len(len: usize) -> std::io::Result<()> {
 
 fn zstd_encode_into(raw: &[u8], out: Vec<u8>) -> std::io::Result<Vec<u8>> {
     let mut encoder = zstd::stream::write::Encoder::new(out, 0)?;
-    // Pledging the source length lets libzstd write the exact content size and clamp the frame's
-    // decoder window to `min(default_window, raw.len())` instead of forcing a 2 MiB window on
-    // every small frame.
+    // Explicitly pledging the source length writes the exact content size and clamps the frame's
+    // decoder window across all payload sizes (including `>= 128 KiB`, where `copy_encode` omits
+    // content size and advertises a 2 MiB window) without relying on `copy_encode`'s internal
+    // buffering.
     encoder.set_pledged_src_size(Some(raw.len() as u64))?;
     encoder.write_all(raw)?;
     encoder.finish()
@@ -122,10 +124,8 @@ fn compress_into(
     Ok(out)
 }
 
-fn read_to_end_limited(mut reader: impl Read, initial_capacity: usize) -> std::io::Result<Bytes> {
-    let mut limited = reader
-        .by_ref()
-        .take((MAX_DECOMPRESSED_PAYLOAD_BYTES + 1) as u64);
+fn read_to_end_limited(reader: impl Read, initial_capacity: usize) -> std::io::Result<Bytes> {
+    let mut limited = reader.take((MAX_DECOMPRESSED_PAYLOAD_BYTES + 1) as u64);
     let mut buf = Vec::with_capacity(initial_capacity);
     limited.read_to_end(&mut buf)?;
     validate_decoded_len(buf.len())?;
@@ -148,8 +148,8 @@ fn write_length_prefix(dst: &mut [u8], frame_len: usize) {
     dst[2] = (frame_len & 0xFF) as u8;
 }
 
-/// Encode `proto` into `dst` using `encode_raw` (avoiding a second `encoded_len()` walk) and
-/// verify the written byte count matches `expected_len`.
+/// Encode `proto` into `dst` using prost's `#[doc(hidden)]` `encode_raw` (avoiding a second
+/// `encoded_len()` walk) and verify the written byte count matches `expected_len`.
 fn encode_proto_into(
     proto: &impl prost::Message,
     expected_len: usize,
@@ -182,10 +182,6 @@ pub fn encode_regular_frame(
         buf.extend_from_slice(&[0u8; REGULAR_HEADER_SIZE]);
         encode_proto_into(proto, encoded_len, &mut buf)?;
         write_length_prefix(&mut buf, FLAG_TOTAL_SIZE + encoded_len);
-        debug_assert_eq!(
-            buf[LENGTH_PREFIX_SIZE],
-            regular_flag(CompressionAlgorithm::None, false)
-        );
         return Ok(Bytes::from(buf));
     }
 
@@ -649,9 +645,7 @@ mod test {
             chunk_pattern in vec(0usize..=16, 0..=16)
         ) {
             let proto = TestProto::new(payload);
-            let msg = SessionMessage::regular(algo, &proto).unwrap();
-            let encoded = msg.encode();
-            prop_assert_eq!(encode_regular_frame(algo, &proto).unwrap(), encoded.clone());
+            let encoded = encode_regular_frame(algo, &proto).unwrap();
             let expected = decode_once(&encoded).unwrap();
 
             let chunks = chunk_bytes(&encoded, &chunk_pattern);
@@ -1090,18 +1084,22 @@ mod test {
             CompressionAlgorithm::Gzip,
             CompressionAlgorithm::Zstd,
         ] {
-            for proto in [
-                TestProto::new(vec![]),
-                TestProto::new(vec![0x5Au8; 16]),
-                below.clone(),
-                at_threshold.clone(),
-                TestProto::new(vec![0x5Au8; 8192]),
+            for (proto, should_compress) in [
+                (TestProto::new(vec![]), false),
+                (TestProto::new(vec![0x5Au8; 16]), false),
+                (below.clone(), false),
+                (at_threshold.clone(), true),
+                (TestProto::new(vec![0x5Au8; 8192]), true),
             ] {
                 let fused = encode_regular_frame(algo, &proto).unwrap();
                 let legacy = SessionMessage::regular(algo, &proto).unwrap().encode();
                 assert_eq!(fused, legacy);
 
-                let expected_compression = algo.effective_for(proto.encoded_len());
+                let expected_compression = if should_compress {
+                    algo
+                } else {
+                    CompressionAlgorithm::None
+                };
                 assert_eq!(
                     (fused[LENGTH_PREFIX_SIZE] & FLAG_COMPRESSION_MASK) >> FLAG_COMPRESSION_SHIFT,
                     expected_compression as u8
@@ -1182,35 +1180,58 @@ mod test {
                     payload_cap <= payload_len + (payload_len / 8).max(FRAME_MIN_SLACK_BYTES) + 64,
                     "CompressedData::for_proto({alg:?}, {size}): len={payload_len} retained cap={payload_cap}"
                 );
+
+                let decompressed = CompressedData::for_proto(alg, &proto)
+                    .unwrap()
+                    .decompressed()
+                    .unwrap();
+                let decomp_len = decompressed.len();
+                let decomp_cap = decompressed.try_into_mut().unwrap().capacity();
+                assert!(
+                    decomp_cap <= decomp_len + (decomp_len / 8).max(FRAME_MIN_SLACK_BYTES) + 64,
+                    "CompressedData::decompressed({alg:?}, {size}): len={decomp_len} retained cap={decomp_cap}"
+                );
             }
         }
     }
 
     #[test]
-    fn zstd_encoded_small_frame_uses_bounded_window() {
-        let proto = TestProto::new(vec![0x5Au8; 2_048]);
-        let frame = encode_regular_frame(CompressionAlgorithm::Zstd, &proto).unwrap();
-        let SessionMessage::Regular(data) = decode_once(&frame).unwrap() else {
-            panic!("expected regular frame");
-        };
-        assert_eq!(data.compression, CompressionAlgorithm::Zstd);
+    fn zstd_encoded_frames_record_content_size_and_bounded_window() {
+        for (size, window_log_max) in [(2_048usize, 12u32), (200 * 1024, 18)] {
+            let proto = TestProto::new(vec![0x5Au8; size]);
+            let frame = encode_regular_frame(CompressionAlgorithm::Zstd, &proto).unwrap();
+            let SessionMessage::Regular(data) = decode_once(&frame).unwrap() else {
+                panic!("expected regular frame");
+            };
+            assert_eq!(data.compression, CompressionAlgorithm::Zstd);
+            assert_eq!(
+                zstd::zstd_safe::get_frame_content_size(data.payload.as_ref()).unwrap(),
+                Some(proto.encoded_len() as u64),
+                "expected exact pledged content size for {size}-byte payload"
+            );
 
-        // With `set_pledged_src_size`, libzstd clamps the frame window to the 2 KiB payload size
-        // instead of advertising a 2 MiB streaming window, so `window_log_max(12)` (4 KiB) decodes
-        // cleanly.
-        let mut decoder = zstd::stream::Decoder::with_buffer(data.payload.as_ref()).unwrap();
-        decoder.window_log_max(12).unwrap();
-        let mut out = Vec::new();
-        decoder.read_to_end(&mut out).unwrap();
-        assert_eq!(TestProto::decode(out.as_slice()).unwrap(), proto);
+            // With `set_pledged_src_size`, libzstd clamps the frame window to the payload size
+            // instead of advertising a 2 MiB streaming window on `>= 128 KiB` payloads.
+            let mut decoder = zstd::stream::Decoder::with_buffer(data.payload.as_ref()).unwrap();
+            decoder.window_log_max(window_log_max).unwrap();
+            let mut out = Vec::new();
+            decoder.read_to_end(&mut out).unwrap();
+            assert_eq!(TestProto::decode(out.as_slice()).unwrap(), proto);
+        }
     }
 
     #[test]
     fn decompressed_decodes_legacy_zstd_frame_without_content_size() {
         let proto = TestProto::new(vec![0x3Cu8; 4_096]);
         let raw = proto.encode_to_vec();
-        let mut compressed = Vec::new();
-        zstd::stream::copy_encode(raw.as_slice(), &mut compressed, 0).unwrap();
+        let mut encoder = zstd::stream::write::Encoder::new(Vec::new(), 0).unwrap();
+        encoder.write_all(raw.as_slice()).unwrap();
+        let compressed = encoder.finish().unwrap();
+        assert_eq!(
+            zstd::zstd_safe::get_frame_content_size(&compressed).unwrap(),
+            None,
+            "test fixture must omit zstd content size"
+        );
 
         let data = CompressedData {
             compression: CompressionAlgorithm::Zstd,

@@ -28,7 +28,7 @@ use hyper::{
 };
 use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
 use hyper_util::{client::legacy::connect::HttpConnector, rt::TokioTimer};
-use s2_common::buf::{ZSTD_MAX_WINDOW_LOG, compressed_capacity_bound, shrink_if_excess_slack};
+use s2_api::compression::{ZSTD_MAX_WINDOW_LOG, compressed_capacity_bound, shrink_if_excess_slack};
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::{
     sync::{Notify, watch},

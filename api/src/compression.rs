@@ -1,3 +1,5 @@
+//! Internal compression and buffer sizing helpers shared across workspace crates.
+
 /// Maximum zstd decoder window log (2^24 = 16 MiB).
 ///
 /// Covers standard streaming zstd encoders (e.g. 8 MiB default `windowLog=23`) while bounding
@@ -14,8 +16,8 @@ pub fn shrink_if_excess_slack(buf: &mut Vec<u8>, min_slack: usize) {
 
 /// Upper bound on compressed output size for `raw_len` bytes of incompressible input.
 ///
-/// Matches a branchless upper bound on libzstd's `ZSTD_COMPRESSBOUND` (and covers gzip's framing
-/// and stored-block overhead) so incompressible payloads do not overflow and reallocate mid-write.
+/// Covers libzstd's `ZSTD_COMPRESSBOUND` and gzip's framing/stored-block overhead so
+/// incompressible payloads do not overflow and reallocate mid-write.
 #[must_use]
 pub const fn compressed_capacity_bound(raw_len: usize) -> usize {
     raw_len.saturating_add(raw_len >> 8).saturating_add(64)

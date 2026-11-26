@@ -2,8 +2,6 @@
 
 pub mod access;
 pub mod basin;
-#[doc(hidden)]
-pub mod buf;
 pub mod caps;
 pub mod config;
 pub mod deep_size;
