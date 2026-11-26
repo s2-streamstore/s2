@@ -959,12 +959,18 @@ async fn spec_t6a_read_session_reconnect_advice_cooldown() {
     assert!(futures_util::poll!(std::pin::Pin::new(&mut cu)).is_pending());
 
     // Waiter created mid-batch also resolves when record 1 delivers the advised batch's tail.
-    let mid_cu = session.caught_up();
+    let mut mid_cu = session.caught_up();
     let rec1 = session.next().await.unwrap().unwrap();
     assert_eq!(rec1.seq_num, 1);
     assert_eq!(session.next_seq_num(), Some(2));
-    assert_eq!(cu.await.unwrap().seq_num, 2);
-    assert_eq!(mid_cu.await.unwrap().seq_num, 2);
+    assert!(matches!(
+        futures_util::poll!(std::pin::Pin::new(&mut cu)),
+        std::task::Poll::Ready(Ok(tail)) if tail.seq_num == 2
+    ));
+    assert!(matches!(
+        futures_util::poll!(std::pin::Pin::new(&mut mid_cu)),
+        std::task::Poll::Ready(Ok(tail)) if tail.seq_num == 2
+    ));
     assert!(
         !session.is_caught_up(),
         "T6a/R7c: is_caught_up must be false once final advised record is returned"

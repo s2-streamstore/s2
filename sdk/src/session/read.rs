@@ -784,7 +784,7 @@ enum DriverPhase {
 /// session parks immediately after receiving a frame).
 #[derive(Default)]
 struct ReusableSleep {
-    sleep: Option<Pin<Box<Sleep>>>,
+    sleep: Option<(tokio::runtime::Id, Pin<Box<Sleep>>)>,
 }
 
 impl ReusableSleep {
@@ -792,9 +792,13 @@ impl ReusableSleep {
         if Instant::now() >= deadline {
             return Poll::Ready(());
         }
-        let sleep = self
+        let runtime_id = tokio::runtime::Handle::current().id();
+        if self.sleep.as_ref().is_some_and(|(id, _)| *id != runtime_id) {
+            self.sleep = None;
+        }
+        let (_, sleep) = self
             .sleep
-            .get_or_insert_with(|| Box::pin(tokio::time::sleep_until(deadline)));
+            .get_or_insert_with(|| (runtime_id, Box::pin(tokio::time::sleep_until(deadline))));
         if sleep.deadline() != deadline {
             sleep.as_mut().reset(deadline);
         }
@@ -3140,6 +3144,7 @@ mod tests {
             .sleep
             .as_ref()
             .expect("sleep allocated on first pending heartbeat")
+            .1
             .as_ref()
             .get_ref() as *const Sleep as usize;
 
@@ -3164,6 +3169,7 @@ mod tests {
             .sleep
             .as_ref()
             .unwrap()
+            .1
             .as_ref()
             .get_ref() as *const Sleep as usize;
         assert_eq!(reused_addr, sleep_addr);
@@ -3191,6 +3197,7 @@ mod tests {
             .sleep
             .as_ref()
             .unwrap()
+            .1
             .as_ref()
             .get_ref() as *const Sleep as usize;
         assert_eq!(backoff_addr, sleep_addr);
@@ -3234,6 +3241,36 @@ mod tests {
             max_session.next().await,
             Some(Err(ReadSessionError::Aborted(_)))
         ));
+    }
+
+    #[test]
+    fn reusable_sleep_rebinds_when_moved_to_another_tokio_runtime() {
+        let mut timer = ReusableSleep::default();
+
+        let rt1 = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        rt1.block_on(async {
+            let deadline = Instant::now() + Duration::from_secs(60);
+            let mut wait = std::future::poll_fn(|cx| timer.poll_until(deadline, cx));
+            assert!(poll!(Pin::new(&mut wait)).is_pending());
+        });
+        drop(rt1);
+
+        let rt2 = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        rt2.block_on(async {
+            let deadline = Instant::now() + Duration::from_millis(25);
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                std::future::poll_fn(|cx| timer.poll_until(deadline, cx)),
+            )
+            .await
+            .expect("timer must rebind to the new Tokio runtime and wake cleanly");
+        });
     }
 
     // spec: r1 R5
