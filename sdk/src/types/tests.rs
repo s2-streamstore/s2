@@ -311,23 +311,32 @@ fn http2_config_bounds() {
         )
     };
 
-    let max_cfg = Http2Config::new()
-        .with_max_concurrent_requests(Http2Config::MAX_CONCURRENT_REQUESTS)
+    let max_window_cfg = Http2Config::new()
+        .with_max_concurrent_requests(1)
         .with_stream_receive_window(Http2Config::MAX_RECEIVE_WINDOW)
         .with_connection_receive_window(Http2Config::MAX_RECEIVE_WINDOW);
+    assert_eq!(max_window_cfg.max_concurrent_requests(), Some(1));
     assert_eq!(
-        max_cfg.max_concurrent_requests(),
+        max_window_cfg.stream_receive_window(),
+        Some(Http2Config::MAX_RECEIVE_WINDOW)
+    );
+    assert_eq!(
+        max_window_cfg.connection_receive_window(),
+        Some(Http2Config::MAX_RECEIVE_WINDOW)
+    );
+    assert!(new_client(max_window_cfg).is_ok());
+
+    let max_concurrent_cfg = Http2Config::new()
+        .with_max_concurrent_requests(Http2Config::MAX_CONCURRENT_REQUESTS)
+        .with_stream_receive_window(
+            Http2Config::MAX_RECEIVE_WINDOW / Http2Config::MAX_CONCURRENT_REQUESTS as u32,
+        )
+        .with_connection_receive_window(Http2Config::MAX_RECEIVE_WINDOW);
+    assert_eq!(
+        max_concurrent_cfg.max_concurrent_requests(),
         Some(Http2Config::MAX_CONCURRENT_REQUESTS)
     );
-    assert_eq!(
-        max_cfg.stream_receive_window(),
-        Some(Http2Config::MAX_RECEIVE_WINDOW)
-    );
-    assert_eq!(
-        max_cfg.connection_receive_window(),
-        Some(Http2Config::MAX_RECEIVE_WINDOW)
-    );
-    assert!(new_client(max_cfg).is_ok());
+    assert!(new_client(max_concurrent_cfg).is_ok());
 
     let min_cfg = Http2Config::new()
         .with_max_concurrent_requests(1)
@@ -364,14 +373,31 @@ fn http2_config_bounds() {
     );
     assert!(new_client(Http2Config::new().with_connection_receive_window(u32::MAX)).is_err());
 
-    // Cross-field C13d validation rejects connection_receive_window < stream_receive_window.
+    // Cross-field C13d validation rejects explicit connection_receive_window smaller than
+    // max_concurrent_requests * stream_receive_window.
     let smaller_conn = Http2Config::new()
         .with_connection_receive_window(Http2Config::MIN_CONNECTION_RECEIVE_WINDOW);
     assert!(new_client(smaller_conn).is_err());
-    let matching_windows = Http2Config::new()
+    let undersized_for_default_concurrency = Http2Config::new()
         .with_stream_receive_window(Http2Config::MIN_CONNECTION_RECEIVE_WINDOW)
         .with_connection_receive_window(Http2Config::MIN_CONNECTION_RECEIVE_WINDOW);
-    assert!(new_client(matching_windows).is_ok());
+    assert!(new_client(undersized_for_default_concurrency).is_err());
+    let undersized_for_two_streams = Http2Config::new()
+        .with_max_concurrent_requests(2)
+        .with_stream_receive_window(4 * 1024 * 1024)
+        .with_connection_receive_window(4 * 1024 * 1024);
+    assert!(new_client(undersized_for_two_streams).is_err());
+
+    let isolated_single = Http2Config::new()
+        .with_max_concurrent_requests(1)
+        .with_stream_receive_window(Http2Config::MIN_CONNECTION_RECEIVE_WINDOW)
+        .with_connection_receive_window(Http2Config::MIN_CONNECTION_RECEIVE_WINDOW);
+    assert!(new_client(isolated_single).is_ok());
+
+    let isolated_small_streams = Http2Config::new()
+        .with_stream_receive_window(64 * 1024)
+        .with_connection_receive_window(4 * 1024 * 1024);
+    assert!(new_client(isolated_small_streams).is_ok());
 }
 
 // spec: r1 C2

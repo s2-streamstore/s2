@@ -294,6 +294,48 @@ impl S2sResponder {
     pub fn reset(&mut self, reason: h2::Reason) {
         self.0.send_reset(reason);
     }
+
+    /// Push `frame` chunks using HTTP/2 send flow control until the stream receive window is
+    /// completely exhausted (`capacity() == 0` and `poll_capacity` returns `Poll::Pending`),
+    /// proving the peer has buffered the full window without releasing credit. Returns the total
+    /// number of bytes pushed before exhaustion.
+    pub async fn saturate_stream_window(&mut self, frame: &Bytes) -> usize {
+        let mut total_sent = 0;
+        loop {
+            self.0.reserve_capacity(frame.len());
+            let poll_cap =
+                std::future::poll_fn(|cx| std::task::Poll::Ready(self.0.poll_capacity(cx)));
+            match poll_cap.await {
+                std::task::Poll::Ready(Some(Ok(cap))) if cap > 0 => {
+                    let n = cap.min(frame.len());
+                    let _ = self.0.send_data(frame.slice(..n), false);
+                    total_sent += n;
+                    // Yield so the h2 connection driver can flush DATA frames to the socket.
+                    tokio::task::yield_now().await;
+                }
+                std::task::Poll::Pending => {
+                    // Confirm capacity stays exhausted briefly rather than seeing a transient
+                    // `Pending` while a `WINDOW_UPDATE` is still in flight.
+                    let reopened = tokio::time::timeout(
+                        Duration::from_millis(20),
+                        std::future::poll_fn(|cx| self.0.poll_capacity(cx)),
+                    )
+                    .await;
+                    if let Ok(Some(Ok(cap))) = reopened
+                        && cap > 0
+                    {
+                        let n = cap.min(frame.len());
+                        let _ = self.0.send_data(frame.slice(..n), false);
+                        total_sent += n;
+                        tokio::task::yield_now().await;
+                        continue;
+                    }
+                    return total_sent;
+                }
+                _ => return total_sent,
+            }
+        }
+    }
 }
 
 pub fn send_json(mut respond: SendResponse<Bytes>, status: u16, body: impl Into<Bytes>) {
@@ -327,16 +369,6 @@ pub fn send_tail_json(respond: SendResponse<Bytes>, status: u16, seq_num: u64, t
         status,
         format!(r#"{{"tail":{{"seq_num":{seq_num},"timestamp":{timestamp}}}}}"#),
     );
-}
-
-pub async fn wait_until(timeout: Duration, mut pred: impl FnMut() -> bool, msg: &str) {
-    tokio::time::timeout(timeout, async {
-        while !pred() {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("timed out waiting: {msg}"));
 }
 
 pub async fn advance_virtual_time(duration: Duration) {

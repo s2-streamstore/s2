@@ -895,9 +895,10 @@ impl Http2Config {
     /// on the connection.
     ///
     /// Must be between [`Self::MIN_CONNECTION_RECEIVE_WINDOW`] and
-    /// [`Self::MAX_RECEIVE_WINDOW`], and at least the per-stream receive
-    /// window; out-of-range values fail with [`ValidationError`] in
-    /// [`S2::new`](crate::S2::new).
+    /// [`Self::MAX_RECEIVE_WINDOW`], and at least the per-connection concurrent
+    /// request limit multiplied by the per-stream receive window (preserving
+    /// HTTP/2 flow-control isolation across concurrent streams); out-of-range
+    /// values fail with [`ValidationError`] in [`S2::new`](crate::S2::new).
     pub fn with_connection_receive_window(self, connection_receive_window: u32) -> Self {
         Self {
             connection_receive_window: Some(connection_receive_window),
@@ -931,12 +932,17 @@ impl Http2Config {
         let stream_window = self
             .stream_receive_window
             .unwrap_or(crate::client::DEFAULT_STREAM_RECEIVE_WINDOW);
+        let max_concurrent = self
+            .max_concurrent_requests
+            .unwrap_or(crate::client::DEFAULT_MAX_CONCURRENT_REQUESTS_PER_CONNECTION);
+        let required_conn_window = (max_concurrent as u64).saturating_mul(u64::from(stream_window));
         if let Some(conn_window) = self.connection_receive_window
-            && conn_window < stream_window
+            && u64::from(conn_window) < required_conn_window
         {
             return Err(format!(
                 "HTTP/2 connection receive window ({conn_window} bytes) must be at least \
-                 the stream receive window ({stream_window} bytes)"
+                 max_concurrent_requests ({max_concurrent}) * stream_receive_window \
+                 ({stream_window} bytes) = {required_conn_window} bytes"
             )
             .into());
         }

@@ -44,7 +44,7 @@ use crate::{
 };
 
 const APPLICATION_JSON: HeaderValue = HeaderValue::from_static("application/json");
-const DEFAULT_MAX_CONCURRENT_REQUESTS_PER_CONNECTION: usize = 50;
+pub(crate) const DEFAULT_MAX_CONCURRENT_REQUESTS_PER_CONNECTION: usize = 50;
 // 50 concurrent streams × 4 MiB = 200 MiB < 256 MiB, so paused read sessions on a shared
 // connection cannot exhaust the connection-level flow-control window and stall sibling appends
 // or unary calls.
@@ -451,6 +451,18 @@ pub(crate) struct RetireHandle {
 impl RetireHandle {
     fn new(target: Weak<dyn RetireTarget>, id: ConnectionId) -> Self {
         Self { target, id }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn noop() -> Self {
+        struct NoopTarget;
+        impl RetireTarget for NoopTarget {
+            fn retire(&self, _id: ConnectionId) {}
+        }
+        Self {
+            target: Weak::<NoopTarget>::new(),
+            id: ConnectionId(0),
+        }
     }
 
     pub(crate) fn retire(&self) {
@@ -2796,12 +2808,12 @@ mod tests {
         );
         assert_eq!(effective_max_concurrent_requests(cfg), 31);
 
-        // Explicit connection_receive_window override is always honored verbatim.
+        // Explicit connection_receive_window validated per C13d is honored verbatim.
         let cfg = Http2Config::new()
-            .with_max_concurrent_requests(100)
+            .with_max_concurrent_requests(16)
             .with_connection_receive_window(64 * MIB);
         assert_eq!(effective_receive_windows(cfg), (4 * MIB, 64 * MIB));
-        assert_eq!(effective_max_concurrent_requests(cfg), 100);
+        assert_eq!(effective_max_concurrent_requests(cfg), 16);
     }
 
     // spec: r1 C13a

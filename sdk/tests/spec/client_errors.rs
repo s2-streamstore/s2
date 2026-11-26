@@ -1169,7 +1169,6 @@ async fn spec_refused_stream_classified_as_definite_and_retried_under_no_side_ef
 #[tokio::test]
 async fn spec_c5_c7_c10_c11_d1_a1_transport_user_agent_inputs_concurrency_and_binary_records() {
     fn assert_send_sync<T: Send + Sync>() {}
-    fn assert_send<T: Send>() {}
 
     assert_send_sync::<S2>();
     assert_send_sync::<S2Basin>();
@@ -1177,8 +1176,9 @@ async fn spec_c5_c7_c10_c11_d1_a1_transport_user_agent_inputs_concurrency_and_bi
     assert_send_sync::<AppendSession>();
     assert_send_sync::<Producer>();
     assert_send_sync::<ReadSessionState>();
-    assert_send::<ReadSession>();
-    assert_send::<ReadBatchSession>();
+    assert_send_sync::<ReadSession>();
+    assert_send_sync::<ReadBatchSession>();
+    assert_send_sync::<s2_sdk::read_session::CaughtUp>();
 
     let seen_user_agents = Arc::new(Mutex::new(Vec::<String>::new()));
     let stored = Arc::new(Mutex::new(Vec::<api::stream::proto::AppendRecord>::new()));
@@ -2417,8 +2417,26 @@ async fn with_retry_overrides_pool_sharing_and_validation() {
             ReadSessionConfig::default(),
         )
         .unwrap();
-    live_rs.caught_up().await.unwrap();
+    let mut live_cu = live_rs.caught_up();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::select! {
+            res = &mut live_cu => res.unwrap(),
+            item = live_rs.next() => panic!("unexpected record/end before catchup: {item:?}"),
+        }
+    })
+    .await
+    .expect("read session must catch up while iterating");
+    assert!(live_rs.is_caught_up());
+    let live_state = live_rs.state();
     base_s2.close();
+    assert!(
+        !live_state.is_caught_up(),
+        "C12/R9d: is_caught_up must clear immediately on S2::close() even while parked"
+    );
+    assert!(matches!(
+        live_state.caught_up().await,
+        Err(ReadSessionError::Aborted(_))
+    ));
     let abort_err = live_rs.next().await.unwrap().unwrap_err();
     assert!(
         matches!(abort_err, ReadSessionError::Aborted(_)),
