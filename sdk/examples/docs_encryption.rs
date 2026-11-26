@@ -49,11 +49,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     stream.append(AppendRecord::new("top secret")?).await?;
 
     let batch = stream
-        .read(
-            ReadInput::new()
-                .with_start(ReadStart::SeqNum(0))
-                .with_count(10),
-        )
+        .read(ReadInput::new(ReadStart::SeqNum(0)).with_count(10))
         .await?;
     // ANCHOR_END: append-read
 

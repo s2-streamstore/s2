@@ -215,16 +215,20 @@ fn default_headers_reject_forbidden_headers() {
     }
 }
 
+// spec: r1 R1
 #[test]
 fn read_input_to_api_sets_only_selected_position_field() {
+    assert_eq!(ReadStart::TAIL, ReadStart::TailOffset(0));
     for (start, expected) in [
         (ReadStart::SeqNum(7), (Some(7), None, None)),
         (ReadStart::Timestamp(42), (None, Some(42), None)),
+        (ReadStart::TailOffset(0), (None, None, None)),
+        (ReadStart::TAIL, (None, None, None)),
         (ReadStart::TailOffset(3), (None, None, Some(3))),
     ] {
         for clamp in [false, true] {
-            let input = ReadInput::new().with_start(start).with_clamp(clamp);
-            assert_eq!(input.start(), Some(start));
+            let input = ReadInput::new(start).with_clamp(clamp);
+            assert_eq!(input.start(), start);
             let (api, _, _) = input.into_api_parts();
             assert_eq!((api.seq_num, api.timestamp, api.tail_offset), expected);
             assert_eq!(api.clamp, clamp.then_some(true));

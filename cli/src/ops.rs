@@ -720,11 +720,11 @@ pub fn read(
             let ago_ms = u64::try_from(ago.as_millis()).unwrap_or(u64::MAX);
             ReadStart::Timestamp(now_ms.saturating_sub(ago_ms))
         }
-        (None, None, None, None) => ReadStart::TailOffset(0),
+        (None, None, None, None) => ReadStart::TAIL,
         _ => unreachable!("clap ensures only one start option"),
     };
 
-    let mut input = ReadInput::new().with_start(from).with_clamp(args.clamp);
+    let mut input = ReadInput::new(from).with_clamp(args.clamp);
     if let Some(count) = args.count {
         input = input.with_count(count);
     }
@@ -867,9 +867,7 @@ pub fn tail(
 
     // Use clamp to handle empty streams gracefully - if we ask for
     // TailOffset(10) but there are fewer records, clamp to the actual start.
-    let mut input = ReadInput::new()
-        .with_start(ReadStart::TailOffset(args.lines))
-        .with_clamp(true);
+    let mut input = ReadInput::new(ReadStart::TailOffset(args.lines)).with_clamp(true);
     if !args.follow {
         input = input.with_count(args.lines);
     }

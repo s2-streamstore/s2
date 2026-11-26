@@ -63,14 +63,14 @@ async fn spec_r2_r3_r4_unary_read_stop_options_empty_batch_416_and_check_tail() 
 
     // R2 + R3: unary read with omitted stop options sends none of count/bytes/until/wait and
     // returns empty server batch verbatim.
-    let empty_batch = stream.read(ReadInput::new()).await.unwrap();
+    let empty_batch = stream.read(ReadInput::new(ReadStart::TAIL)).await.unwrap();
     assert!(empty_batch.records.is_empty());
     assert_eq!(empty_batch.tail.unwrap().seq_num, 42);
 
     // R2 + R3: explicit count/bytes/until/wait=0 serialized; 416 surfaces as ReadUnwrittenError.
     let err = stream
         .read(
-            ReadInput::new()
+            ReadInput::new(ReadStart::TAIL)
                 .with_count(10)
                 .with_bytes(1024)
                 .with_until(9999)
@@ -93,10 +93,11 @@ async fn spec_r2_r3_r4_unary_read_stop_options_empty_batch_416_and_check_tail() 
         !log[0].3,
         "R4/C4: check_tail must not send s2-stream-config"
     );
-    // Call 2: ReadInput::new() -> omitted stop params left unset
+    // Call 2: ReadInput::new(ReadStart::TAIL) -> tail_offset=0 elided (R1) and omitted stop params
+    // left unset (R2).
     assert!(
         log[1].1.is_empty(),
-        "R2: omitted options must be unset: {:?}",
+        "R1/R2: tail_offset=0 and omitted stop options must be unset: {:?}",
         log[1].1
     );
     assert!(log[1].2, "C4: read must send s2-encryption-key");
@@ -172,7 +173,7 @@ async fn spec_r5_r6_r7_r8_read_session_records_batches_readahead_state_and_caugh
 
     let mut session = stream
         .read_session(
-            ReadInput::new().with_start(ReadStart::SeqNum(0)),
+            ReadInput::new(ReadStart::SeqNum(0)),
             ReadSessionConfig::default(),
         )
         .expect("R5: sync open succeeds");
@@ -338,9 +339,7 @@ async fn spec_r5_r6_r7_r8_read_session_records_batches_readahead_state_and_caugh
     let mut batch_session = batch_server
         .stream(no_retry_config())
         .read_batch_session(
-            ReadInput::new()
-                .with_start(ReadStart::SeqNum(0))
-                .with_count(2),
+            ReadInput::new(ReadStart::SeqNum(0)).with_count(2),
             ReadSessionConfig::default(),
         )
         .unwrap();
@@ -384,7 +383,7 @@ async fn spec_r5_r6_r7_r8_read_session_records_batches_readahead_state_and_caugh
     let mut ra_session = readahead_server
         .stream(no_retry_config())
         .read_session(
-            ReadInput::new().with_start(ReadStart::SeqNum(0)),
+            ReadInput::new(ReadStart::SeqNum(0)),
             ReadSessionConfig::default(),
         )
         .unwrap();
@@ -438,7 +437,7 @@ async fn spec_r5_r6_r7_r8_read_session_records_batches_readahead_state_and_caugh
     let mut ra_batch_session = readahead_server
         .stream(no_retry_config())
         .read_batch_session(
-            ReadInput::new().with_start(ReadStart::SeqNum(0)),
+            ReadInput::new(ReadStart::SeqNum(0)),
             ReadSessionConfig::default(),
         )
         .unwrap();
@@ -497,7 +496,10 @@ async fn spec_r9_r10_read_session_closing_buffered_delivery_and_abort() {
 
     // Without stop option -> retried (2 attempts) then fails with ConnectionLostError.
     let mut no_stop = stream
-        .read_session(ReadInput::new(), ReadSessionConfig::default())
+        .read_session(
+            ReadInput::new(ReadStart::TAIL),
+            ReadSessionConfig::default(),
+        )
         .unwrap();
     let err = no_stop.next().await.unwrap().unwrap_err();
     assert!(
@@ -511,7 +513,10 @@ async fn spec_r9_r10_read_session_closing_buffered_delivery_and_abort() {
 
     // With stop option -> ends cleanly (None).
     let mut with_stop = stream
-        .read_session(ReadInput::new().with_count(5), ReadSessionConfig::default())
+        .read_session(
+            ReadInput::new(ReadStart::TAIL).with_count(5),
+            ReadSessionConfig::default(),
+        )
         .unwrap();
     assert!(with_stop.next().await.is_none());
 
@@ -529,7 +534,7 @@ async fn spec_r9_r10_read_session_closing_buffered_delivery_and_abort() {
     let mut fail_sess = fail_server
         .stream(no_retry_config())
         .read_session(
-            ReadInput::new().with_start(ReadStart::SeqNum(0)),
+            ReadInput::new(ReadStart::SeqNum(0)),
             ReadSessionConfig::default(),
         )
         .unwrap();
@@ -570,7 +575,7 @@ async fn spec_r9_r10_read_session_closing_buffered_delivery_and_abort() {
         .basin(basin_name)
         .stream(stream_name)
         .read_session(
-            ReadInput::new().with_start(ReadStart::SeqNum(0)),
+            ReadInput::new(ReadStart::SeqNum(0)),
             ReadSessionConfig::default(),
         )
         .unwrap();
@@ -635,7 +640,7 @@ async fn spec_t7d_read_session_heartbeat_timeout_and_backpressure_pause() {
     let mut session = server
         .stream(fast_retry_2)
         .read_session(
-            ReadInput::new().with_start(ReadStart::SeqNum(0)),
+            ReadInput::new(ReadStart::SeqNum(0)),
             ReadSessionConfig::default(),
         )
         .unwrap();
@@ -743,8 +748,7 @@ async fn spec_r11_t5_t5b_read_session_resume_clamp_wait_416_and_unbounded() {
     let mut session = server
         .stream(fast_retry_2)
         .read_session(
-            ReadInput::new()
-                .with_start(ReadStart::TailOffset(2))
+            ReadInput::new(ReadStart::TailOffset(2))
                 .with_clamp(true)
                 .with_count(5)
                 .with_wait_secs(10),
@@ -859,9 +863,7 @@ async fn spec_r11_t5_t5b_read_session_resume_clamp_wait_416_and_unbounded() {
     let mut neg_sess = r11d_neg_server
         .stream(fast_retry_2)
         .read_session(
-            ReadInput::new()
-                .with_start(ReadStart::SeqNum(0))
-                .with_wait_secs(30),
+            ReadInput::new(ReadStart::SeqNum(0)).with_wait_secs(30),
             ReadSessionConfig::default(),
         )
         .unwrap();
@@ -894,9 +896,7 @@ async fn spec_r11_t5_t5b_read_session_resume_clamp_wait_416_and_unbounded() {
     let mut unbounded_sess = unbounded_server
         .stream(fast_retry_2)
         .read_session(
-            ReadInput::new()
-                .with_start(ReadStart::SeqNum(0))
-                .with_count(1),
+            ReadInput::new(ReadStart::SeqNum(0)).with_count(1),
             ReadSessionConfig::new().with_retry_policy(ReadSessionRetryPolicy::Unbounded),
         )
         .unwrap();
@@ -942,9 +942,7 @@ async fn spec_t6a_read_session_reconnect_advice_cooldown() {
     let mut session = server
         .stream(no_retry_config())
         .read_session(
-            ReadInput::new()
-                .with_start(ReadStart::SeqNum(0))
-                .with_count(4),
+            ReadInput::new(ReadStart::SeqNum(0)).with_count(4),
             ReadSessionConfig::default(),
         )
         .unwrap();
@@ -1052,8 +1050,7 @@ async fn regression_read_session_r11c_reduced_wait_refreshes_after_record() {
     let mut sess = r11c_server
         .stream(fast_retry_config(3))
         .read_session(
-            ReadInput::new()
-                .with_start(ReadStart::SeqNum(0))
+            ReadInput::new(ReadStart::SeqNum(0))
                 .with_wait_secs(4)
                 .with_count(2),
             ReadSessionConfig::default(),
@@ -1135,9 +1132,7 @@ async fn regression_read_session_r11d_caught_up_and_count_exhausted() {
     let mut r11d_sess = r11d_server
         .stream(fast_retry_config(2))
         .read_session(
-            ReadInput::new()
-                .with_start(ReadStart::SeqNum(0))
-                .with_count(10),
+            ReadInput::new(ReadStart::SeqNum(0)).with_count(10),
             ReadSessionConfig::default(),
         )
         .unwrap();
@@ -1185,9 +1180,7 @@ async fn regression_read_session_r11d_caught_up_and_count_exhausted() {
     let mut recreated_sess = recreated_server
         .stream(fast_retry_config(2))
         .read_session(
-            ReadInput::new()
-                .with_start(ReadStart::SeqNum(0))
-                .with_wait_secs(0),
+            ReadInput::new(ReadStart::SeqNum(0)).with_wait_secs(0),
             ReadSessionConfig::default(),
         )
         .unwrap();
@@ -1232,9 +1225,7 @@ async fn regression_read_session_r11d_caught_up_and_count_exhausted() {
     let mut count_sess = count_server
         .stream(fast_retry_config(3))
         .read_session(
-            ReadInput::new()
-                .with_start(ReadStart::SeqNum(0))
-                .with_count(1),
+            ReadInput::new(ReadStart::SeqNum(0)).with_count(1),
             ReadSessionConfig::default(),
         )
         .unwrap();
@@ -1258,12 +1249,8 @@ async fn spec_r11d_416_after_retry_before_any_response_is_read_unwritten() {
     // (`tail.seq_num == sent_seq_num`) on attempt 2 must still fail with ReadUnwrittenError rather
     // than closing cleanly.
     for input in [
-        ReadInput::new()
-            .with_start(ReadStart::SeqNum(5))
-            .with_count(10),
-        ReadInput::new()
-            .with_start(ReadStart::SeqNum(5))
-            .with_wait_secs(0),
+        ReadInput::new(ReadStart::SeqNum(5)).with_count(10),
+        ReadInput::new(ReadStart::SeqNum(5)).with_wait_secs(0),
     ] {
         let attempts = Arc::new(AtomicUsize::new(0));
         let server = MockH2Server::start({
@@ -1329,7 +1316,7 @@ async fn spec_t5a_empty_frame_does_not_reset_budget_and_r9_close_boundary() {
     let mut empty_sess = empty_server
         .stream(fast_retry_config(2))
         .read_session(
-            ReadInput::new().with_start(ReadStart::SeqNum(0)),
+            ReadInput::new(ReadStart::SeqNum(0)),
             ReadSessionConfig::default(),
         )
         .unwrap();
@@ -1382,9 +1369,7 @@ async fn spec_t5a_empty_frame_does_not_reset_budget_and_r9_close_boundary() {
     let mut advised_after_sess = advised_empty_after_progress_server
         .stream(no_retry_config())
         .read_session(
-            ReadInput::new()
-                .with_start(ReadStart::SeqNum(0))
-                .with_count(2),
+            ReadInput::new(ReadStart::SeqNum(0)).with_count(2),
             ReadSessionConfig::default(),
         )
         .unwrap();
@@ -1432,7 +1417,7 @@ async fn spec_t5a_empty_frame_does_not_reset_budget_and_r9_close_boundary() {
     let mut advised_before_sess = advised_empty_before_progress_server
         .stream(fast_retry_config(2))
         .read_session(
-            ReadInput::new().with_start(ReadStart::SeqNum(0)),
+            ReadInput::new(ReadStart::SeqNum(0)),
             ReadSessionConfig::default(),
         )
         .unwrap();
@@ -1468,7 +1453,7 @@ async fn spec_t5a_empty_frame_does_not_reset_budget_and_r9_close_boundary() {
         .basin(basin)
         .stream(stream)
         .read_session(
-            ReadInput::new().with_start(ReadStart::SeqNum(0)),
+            ReadInput::new(ReadStart::SeqNum(0)),
             ReadSessionConfig::default(),
         )
         .unwrap();
@@ -1512,9 +1497,7 @@ async fn spec_t5a_empty_frame_does_not_reset_budget_and_r9_close_boundary() {
         .basin(basin)
         .stream(stream)
         .read_session(
-            ReadInput::new()
-                .with_start(ReadStart::SeqNum(0))
-                .with_count(1),
+            ReadInput::new(ReadStart::SeqNum(0)).with_count(1),
             ReadSessionConfig::default(),
         )
         .unwrap();
@@ -1554,9 +1537,7 @@ async fn spec_t5a_empty_frame_does_not_reset_budget_and_r9_close_boundary() {
         .basin(basin)
         .stream(stream)
         .read_session(
-            ReadInput::new()
-                .with_start(ReadStart::SeqNum(0))
-                .with_count(2),
+            ReadInput::new(ReadStart::SeqNum(0)).with_count(2),
             ReadSessionConfig::default(),
         )
         .unwrap();
@@ -1604,9 +1585,7 @@ async fn spec_t5a_empty_frame_does_not_reset_budget_and_r9_close_boundary() {
         .basin(basin)
         .stream(stream)
         .read_session(
-            ReadInput::new()
-                .with_start(ReadStart::SeqNum(0))
-                .with_count(2),
+            ReadInput::new(ReadStart::SeqNum(0)).with_count(2),
             ReadSessionConfig::default(),
         )
         .unwrap();
@@ -1649,9 +1628,7 @@ async fn regression_read_session_stops_on_exhausted_count_and_rejects_u64_max_se
     let mut sess = server
         .stream(no_retry_config())
         .read_session(
-            ReadInput::new()
-                .with_start(ReadStart::SeqNum(0))
-                .with_count(1),
+            ReadInput::new(ReadStart::SeqNum(0)).with_count(1),
             ReadSessionConfig::default(),
         )
         .unwrap();
@@ -1690,7 +1667,7 @@ async fn regression_read_session_stops_on_exhausted_count_and_rejects_u64_max_se
     let mut overflow_sess = overflow_server
         .stream(fast_retry_config(2))
         .read_session(
-            ReadInput::new().with_start(ReadStart::SeqNum(u64::MAX)),
+            ReadInput::new(ReadStart::SeqNum(u64::MAX)),
             ReadSessionConfig::default(),
         )
         .unwrap();
@@ -1778,7 +1755,7 @@ async fn spec_c13d_parked_reader_with_explicit_windows_does_not_stall_sibling_ca
 
     let mut parked_reader = stream
         .read_session(
-            ReadInput::new().with_start(ReadStart::SeqNum(0)),
+            ReadInput::new(ReadStart::SeqNum(0)),
             ReadSessionConfig::default(),
         )
         .unwrap();
@@ -1834,7 +1811,7 @@ async fn spec_t7b_parked_opening_request_timeout_and_e7_abort_attempt_count() {
                 .with_request_timeout(Duration::from_millis(200))
         })
         .read_session(
-            ReadInput::new().with_start(ReadStart::SeqNum(0)),
+            ReadInput::new(ReadStart::SeqNum(0)),
             ReadSessionConfig::default(),
         )
         .unwrap();
@@ -1892,7 +1869,7 @@ async fn spec_t7b_parked_opening_request_timeout_and_e7_abort_attempt_count() {
                 .with_request_timeout(Duration::from_millis(500))
         })
         .read_session(
-            ReadInput::new().with_start(ReadStart::SeqNum(0)),
+            ReadInput::new(ReadStart::SeqNum(0)),
             ReadSessionConfig::default(),
         )
         .unwrap();
@@ -1952,7 +1929,7 @@ async fn spec_t7b_parked_opening_request_timeout_and_e7_abort_attempt_count() {
         .basin(basin)
         .stream(stream)
         .read_session(
-            ReadInput::new().with_start(ReadStart::SeqNum(0)),
+            ReadInput::new(ReadStart::SeqNum(0)),
             ReadSessionConfig::default(),
         )
         .unwrap();
@@ -2045,7 +2022,7 @@ async fn spec_r6b_t8_partial_frame_survives_canceled_wait() {
     let mut session = server
         .stream(no_retry_config())
         .read_session(
-            ReadInput::new().with_start(ReadStart::SeqNum(0)),
+            ReadInput::new(ReadStart::SeqNum(0)),
             ReadSessionConfig::default(),
         )
         .unwrap();

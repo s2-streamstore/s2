@@ -571,7 +571,7 @@ pub fn bench_read(
     bench_read_inner(
         stream,
         record_size,
-        ReadInput::new().with_start(ReadStart::SeqNum(0)),
+        ReadInput::new(ReadStart::SeqNum(0)),
         Some(write_done_records),
         bench_start,
     )
@@ -585,9 +585,7 @@ pub fn bench_read_catchup(
     bench_read_inner(
         stream,
         record_size,
-        ReadInput::new()
-            .with_start(ReadStart::SeqNum(0))
-            .with_wait_secs(0),
+        ReadInput::new(ReadStart::SeqNum(0)).with_wait_secs(0),
         None,
         bench_start,
     )
