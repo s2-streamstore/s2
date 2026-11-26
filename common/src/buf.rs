@@ -1,5 +1,12 @@
-/// Trim unused trailing capacity from `buf` when it exceeds `max_slack` bytes.
-pub fn shrink_if_excess_slack(buf: &mut Vec<u8>, max_slack: usize) {
+/// Maximum zstd decoder window log (2^24 = 16 MiB).
+///
+/// Covers standard streaming zstd encoders (e.g. 8 MiB default `windowLog=23`) while bounding
+/// decoder memory well below libzstd's 128 MiB default.
+pub const ZSTD_MAX_WINDOW_LOG: u32 = 24;
+
+/// Trim unused trailing capacity from `buf` when it exceeds `max(buf.len() / 8, min_slack)` bytes.
+pub fn shrink_if_excess_slack(buf: &mut Vec<u8>, min_slack: usize) {
+    let max_slack = (buf.len() / 8).max(min_slack);
     if buf.capacity().saturating_sub(buf.len()) > max_slack {
         buf.shrink_to_fit();
     }
@@ -30,11 +37,18 @@ mod tests {
             oversized.capacity()
         );
 
-        let mut within_budget = Vec::with_capacity(4096);
-        within_budget.extend_from_slice(&[0xCD; 2048]);
-        let before = within_budget.capacity();
-        shrink_if_excess_slack(&mut within_budget, 4096);
-        assert_eq!(within_budget.capacity(), before);
+        let mut within_floor = Vec::with_capacity(4096);
+        within_floor.extend_from_slice(&[0xCD; 2048]);
+        let before = within_floor.capacity();
+        shrink_if_excess_slack(&mut within_floor, 4096);
+        assert_eq!(within_floor.capacity(), before);
+
+        // Slack above min_slack (4096) but within len / 8 (8192) is preserved.
+        let mut within_ratio = Vec::with_capacity(64 * 1024 + 6000);
+        within_ratio.resize(64 * 1024, 0xEF);
+        let before = within_ratio.capacity();
+        shrink_if_excess_slack(&mut within_ratio, 4096);
+        assert_eq!(within_ratio.capacity(), before);
     }
 
     #[test]
