@@ -190,14 +190,19 @@ fn endpoint_validation_edge_cases() {
 
 #[cfg(feature = "_hidden")]
 #[test]
-fn default_headers_reject_forbidden_headers() {
-    let err = S2Config::new("token")
-        .with_compression(Compression::Gzip)
-        .with_default_headers(HeaderMap::from_iter([(
-            http::header::CONTENT_ENCODING,
-            HeaderValue::from_static("gzip"),
-        )]))
-        .unwrap_err();
+fn default_headers_and_user_agent_validate_at_client_construction() {
+    let http_endpoints = S2Endpoints::for_endpoint("http://localhost:8080").unwrap();
+    let base = || S2Config::new("token").with_endpoints(http_endpoints.clone());
+
+    let err = crate::S2::new(
+        base()
+            .with_compression(Compression::Gzip)
+            .with_default_headers(HeaderMap::from_iter([(
+                http::header::CONTENT_ENCODING,
+                HeaderValue::from_static("gzip"),
+            )])),
+    )
+    .unwrap_err();
     assert!(err.0.contains("Content-Encoding") && err.0.contains("with_compression"));
 
     for name in [
@@ -205,14 +210,31 @@ fn default_headers_reject_forbidden_headers() {
         http::header::CONTENT_LENGTH,
         http::header::TRANSFER_ENCODING,
     ] {
-        let err = S2Config::new("token")
-            .with_default_headers(HeaderMap::from_iter([(
-                name.clone(),
-                HeaderValue::from_static("val"),
-            )]))
-            .unwrap_err();
+        let err = crate::S2::new(base().with_default_headers(HeaderMap::from_iter([(
+            name.clone(),
+            HeaderValue::from_static("val"),
+        )])))
+        .unwrap_err();
         assert!(err.0.contains(name.as_str()) && err.0.contains("framing"));
     }
+
+    // Replacing invalid default headers with valid ones before S2::new succeeds.
+    assert!(
+        crate::S2::new(
+            base()
+                .with_default_headers(HeaderMap::from_iter([(
+                    http::header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/json"),
+                )]))
+                .with_default_headers(HeaderMap::new()),
+        )
+        .is_ok()
+    );
+
+    // Invalid user agent fails at S2::new; valid custom user agent succeeds.
+    let err = crate::S2::new(base().with_user_agent("bad\r\nagent")).unwrap_err();
+    assert!(err.0.contains("invalid user agent"), "{err}");
+    assert!(crate::S2::new(base().with_user_agent("custom-agent/1.0")).is_ok());
 }
 
 // spec: r1 R1
@@ -709,15 +731,46 @@ fn list_inputs_omit_empty_prefix_and_start_after_on_wire() {
     assert!(n.prefix.is_none() && n.start_after.is_none());
 }
 
+// spec: r1 A2c
 #[test]
 fn server_oversized_fencing_token_rejected_when_reused_for_writes() {
     let oversized = FencingToken::from_server("x".repeat(40));
     assert!(oversized.validate().is_err());
 
-    // Batcher options reject oversized server tokens.
+    // Batcher and Producer options reject oversized server tokens when opened (`A2c`).
     let rec = AppendRecord::new("payload").unwrap();
     let cfg = crate::batching::BatcherConfig::new().with_fencing_token(oversized.clone());
-    assert!(crate::batching::batch_iter([rec], cfg).is_err());
+    assert!(crate::batching::batch_iter([rec], cfg.clone()).is_err());
+    assert!(
+        crate::batching::Batcher::new(futures_util::stream::empty::<AppendRecord>(), cfg.clone())
+            .is_err()
+    );
+    assert!(
+        crate::batching::TryBatcher::new(
+            futures_util::stream::empty::<Result<AppendRecord, ()>>(),
+            cfg,
+        )
+        .is_err()
+    );
+
+    let s2 = crate::S2::new(
+        S2Config::new("token")
+            .with_endpoints(S2Endpoints::for_endpoint("http://localhost:8080").unwrap()),
+    )
+    .unwrap();
+    let stream = s2
+        .basin("test-basin".parse().unwrap())
+        .stream("test-stream".parse().unwrap());
+    let err = stream
+        .producer(crate::producer::ProducerConfig::new().with_fencing_token(oversized.clone()))
+        .expect_err("oversized fencing token must fail when opening producer");
+    assert!(
+        matches!(err, crate::error::AppendSessionError::Validation(_)),
+        "{err:?}"
+    );
+    assert!(err.to_string().contains("producer"), "{err}");
+    assert!(err.to_string().contains("test-basin"), "{err}");
+    assert!(err.to_string().contains("test-stream"), "{err}");
 
     // CommandRecord::fence carrying an oversized server token is rejected on write validation.
     let fence_cmd = AppendRecord::from(CommandRecord::fence(oversized));

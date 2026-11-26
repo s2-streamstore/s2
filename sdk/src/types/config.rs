@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     env::VarError,
     fmt,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
@@ -950,6 +951,8 @@ impl Http2Config {
     }
 }
 
+const DEFAULT_USER_AGENT: &str = concat!("s2-sdk-rust/", env!("CARGO_PKG_VERSION"));
+
 /// Configuration for [`S2`](crate::S2).
 #[derive(Clone)]
 #[must_use]
@@ -961,7 +964,7 @@ pub struct S2Config {
     pub(crate) request_timeout: Duration,
     pub(crate) retry: RetryConfig,
     pub(crate) compression: Compression,
-    pub(crate) user_agent: HeaderValue,
+    pub(crate) user_agent: Cow<'static, str>,
     pub(crate) default_headers: HeaderMap,
     pub(crate) insecure_skip_cert_verification: bool,
     pub(crate) rustls_crypto_provider: Option<Arc<CryptoProvider>>,
@@ -1001,9 +1004,7 @@ impl S2Config {
             request_timeout: Duration::from_secs(5),
             retry: RetryConfig::new(),
             compression: Compression::None,
-            user_agent: concat!("s2-sdk-rust/", env!("CARGO_PKG_VERSION"))
-                .parse()
-                .expect("valid user agent"),
+            user_agent: Cow::Borrowed(DEFAULT_USER_AGENT),
             default_headers: HeaderMap::new(),
             insecure_skip_cert_verification: false,
             rustls_crypto_provider: None,
@@ -1095,15 +1096,41 @@ impl S2Config {
         self.rustls_crypto_provider.as_ref()
     }
 
-    pub(crate) fn validate(&self) -> Result<(), ValidationError> {
+    pub(crate) fn validate_and_parse_user_agent(&self) -> Result<HeaderValue, ValidationError> {
         if self.connection_timeout.is_zero() {
             return Err("connection_timeout must be greater than zero".into());
         }
         if self.request_timeout.is_zero() {
             return Err("request_timeout must be greater than zero".into());
         }
+        if self
+            .default_headers
+            .contains_key(http::header::CONTENT_ENCODING)
+        {
+            return Err(ValidationError(
+                "Content-Encoding cannot be set in default headers; use S2Config::with_compression instead"
+                    .into(),
+            ));
+        }
+        for name in [
+            http::header::CONTENT_TYPE,
+            http::header::CONTENT_LENGTH,
+            http::header::TRANSFER_ENCODING,
+        ] {
+            if self.default_headers.contains_key(&name) {
+                return Err(ValidationError(format!(
+                    "{name} cannot be set in default headers; the SDK controls request format and body framing"
+                )));
+            }
+        }
+        let user_agent = match &self.user_agent {
+            Cow::Borrowed(s) => HeaderValue::from_static(s),
+            Cow::Owned(s) => HeaderValue::from_str(s)
+                .map_err(|e| ValidationError(format!("invalid user agent: {e}")))?,
+        };
         self.retry.validate()?;
-        self.http2.validate()
+        self.http2.validate()?;
+        Ok(user_agent)
     }
 
     #[cfg(feature = "_hidden")]
@@ -1136,36 +1163,18 @@ impl S2Config {
     /// output. Do not use these defaults for per-request identifiers, since the
     /// same values are reused across requests.
     ///
-    /// # Errors
-    ///
-    /// Returns an error if `default_headers` contains `Content-Type`,
-    /// `Content-Encoding`, `Content-Length`, or `Transfer-Encoding`.
-    /// The SDK controls request format and body framing.
-    /// Use [`Self::with_compression`] to configure request body encoding.
+    /// `default_headers` must not contain `Content-Type`, `Content-Encoding`,
+    /// `Content-Length`, or `Transfer-Encoding`; forbidden headers fail with
+    /// [`ValidationError`] in [`S2::new`](crate::S2::new). The SDK controls
+    /// request format and body framing. Use [`Self::with_compression`] to
+    /// configure request body encoding.
     #[cfg(feature = "_hidden")]
     #[doc(hidden)]
-    pub fn with_default_headers(self, default_headers: HeaderMap) -> Result<Self, ValidationError> {
-        if default_headers.contains_key(http::header::CONTENT_ENCODING) {
-            return Err(ValidationError(
-                "Content-Encoding cannot be set in default headers; use S2Config::with_compression instead"
-                    .into(),
-            ));
-        }
-        for name in [
-            http::header::CONTENT_TYPE,
-            http::header::CONTENT_LENGTH,
-            http::header::TRANSFER_ENCODING,
-        ] {
-            if default_headers.contains_key(&name) {
-                return Err(ValidationError(format!(
-                    "{name} cannot be set in default headers; the SDK controls request format and body framing"
-                )));
-            }
-        }
-        Ok(Self {
+    pub fn with_default_headers(self, default_headers: HeaderMap) -> Self {
+        Self {
             default_headers,
             ..self
-        })
+        }
     }
 
     /// Override HTTP/2 transport settings for pooled connections.
@@ -1273,13 +1282,15 @@ impl S2Config {
         self.with_rustls_crypto_provider(rustls::crypto::ring::default_provider())
     }
 
+    /// Set a custom `User-Agent` header value.
+    ///
+    /// Invalid HTTP header values fail with [`ValidationError`] in [`S2::new`](crate::S2::new).
     #[doc(hidden)]
     #[cfg(feature = "_hidden")]
-    pub fn with_user_agent(self, user_agent: impl Into<String>) -> Result<Self, ValidationError> {
-        let user_agent = user_agent
-            .into()
-            .parse()
-            .map_err(|e| ValidationError(format!("invalid user agent: {e}")))?;
-        Ok(Self { user_agent, ..self })
+    pub fn with_user_agent(self, user_agent: impl Into<String>) -> Self {
+        Self {
+            user_agent: Cow::Owned(user_agent.into()),
+            ..self
+        }
     }
 }

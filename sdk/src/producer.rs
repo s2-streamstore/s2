@@ -175,17 +175,15 @@ impl ProducerConfig {
 
     /// Set the limit on total metered bytes of unacknowledged [`AppendRecord`]s held in memory.
     ///
+    /// Must be at least `1 MiB`; smaller values fail with [`ValidationError`] in
+    /// [`S2Stream::producer`](crate::S2Stream::producer).
+    ///
     /// Defaults to `5 MiB`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ValidationError`] if `max_unacked_bytes` is less than `1 MiB`.
-    pub fn with_max_unacked_bytes(self, max_unacked_bytes: usize) -> Result<Self, ValidationError> {
-        let max_unacked_bytes = validate_max_unacked_bytes(max_unacked_bytes)?;
-        Ok(Self {
+    pub fn with_max_unacked_bytes(self, max_unacked_bytes: usize) -> Self {
+        Self {
             max_unacked_bytes,
             ..self
-        })
+        }
     }
 
     /// Set how long to wait after the first record in a batch arrives before flushing it.
@@ -197,32 +195,28 @@ impl ProducerConfig {
 
     /// Set the maximum number of records per batch.
     ///
+    /// Must be within `1..=1000`; out-of-range values fail with [`ValidationError`] in
+    /// [`S2Stream::producer`](crate::S2Stream::producer).
+    ///
     /// Defaults to `1000`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ValidationError`] if `max_batch_records` is outside `1..=1000`.
-    pub fn with_max_batch_records(self, max_batch_records: usize) -> Result<Self, ValidationError> {
-        let max_batch_records = validate_max_batch_records(max_batch_records)?;
-        Ok(Self {
+    pub fn with_max_batch_records(self, max_batch_records: usize) -> Self {
+        Self {
             max_batch_records,
             ..self
-        })
+        }
     }
 
     /// Set the maximum metered bytes per batch.
     ///
+    /// Must be within `8..=1_048_576`; out-of-range values fail with [`ValidationError`] in
+    /// [`S2Stream::producer`](crate::S2Stream::producer).
+    ///
     /// Defaults to `1 MiB`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ValidationError`] if `max_batch_bytes` is outside `8..=1_048_576`.
-    pub fn with_max_batch_bytes(self, max_batch_bytes: usize) -> Result<Self, ValidationError> {
-        let max_batch_bytes = validate_max_batch_bytes(max_batch_bytes)?;
-        Ok(Self {
+    pub fn with_max_batch_bytes(self, max_batch_bytes: usize) -> Self {
+        Self {
             max_batch_bytes,
             ..self
-        })
+        }
     }
 
     /// Set the fencing token for all [`AppendInput`]s.
@@ -258,6 +252,16 @@ impl ProducerConfig {
             ..self
         }
     }
+
+    pub(crate) fn validate(&self) -> Result<(), ValidationError> {
+        validate_max_unacked_bytes(self.max_unacked_bytes)?;
+        validate_max_batch_records(self.max_batch_records)?;
+        validate_max_batch_bytes(self.max_batch_bytes)?;
+        if let Some(ref token) = self.fencing_token {
+            token.validate()?;
+        }
+        Ok(())
+    }
 }
 
 struct ProducerGate {
@@ -272,7 +276,6 @@ struct ProducerShared {
     cmd_tx: mpsc::UnboundedSender<Command>,
     permits: AppendPermits,
     max_batch_bytes: usize,
-    fencing_token_len: usize,
     unacked_records: AtomicUsize,
     acked_through_id: AtomicU64,
     lifecycle: Arc<SessionLifecycle>,
@@ -348,6 +351,7 @@ impl Producer {
         headers: StreamHeaders,
         config: ProducerConfig,
     ) -> Self {
+        debug_assert!(config.validate().is_ok());
         let basin = client.name.clone();
         let context = ErrorContext::stream("producer", basin.as_ref(), stream.as_ref(), false);
         let abort = SessionAbort::new(
@@ -358,7 +362,6 @@ impl Producer {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let permits = AppendPermits::new(None, config.max_unacked_bytes);
         let max_batch_bytes = config.max_batch_bytes;
-        let fencing_token_len = config.fencing_token.as_ref().map_or(0, |t| t.len());
         let gate = StdMutex::new(ProducerGate {
             match_seq: MatchSeqState::from_option(config.match_seq_num),
             last_accepted_id: 0,
@@ -380,7 +383,6 @@ impl Producer {
             cmd_tx,
             permits,
             max_batch_bytes,
-            fencing_token_len,
             unacked_records: AtomicUsize::new(0),
             acked_through_id: AtomicU64::new(0),
             lifecycle,
@@ -428,8 +430,6 @@ impl Producer {
         record: impl Into<AppendRecord>,
     ) -> Result<RecordSubmitTicket, AppendSessionError> {
         let record = record.into();
-        FencingToken::validate_len(self.shared.fencing_token_len)
-            .map_err(|e| self.shared.context.format_validation(e))?;
         record
             .validate_for_write()
             .map_err(|e| self.shared.context.format_validation(e))?;
@@ -664,8 +664,6 @@ impl RecordSubmitPermit {
         record: impl Into<AppendRecord>,
     ) -> Result<RecordSubmitTicket, AppendSessionError> {
         let record = record.into();
-        FencingToken::validate_len(self.shared.fencing_token_len)
-            .map_err(|e| self.shared.context.format_validation(e))?;
         record
             .validate_for_write()
             .map_err(|e| self.shared.context.format_validation(e))?;

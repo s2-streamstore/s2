@@ -22,7 +22,7 @@ use crate::{
 
 pub(crate) const RECORD_BATCH_MIN: BatchLimits = BatchLimits { count: 1, bytes: 8 };
 
-pub(crate) fn validate_max_batch_bytes(max_batch_bytes: usize) -> Result<usize, ValidationError> {
+pub(crate) fn validate_max_batch_bytes(max_batch_bytes: usize) -> Result<(), ValidationError> {
     if max_batch_bytes < RECORD_BATCH_MIN.bytes {
         return Err(ValidationError(format!(
             "max_batch_bytes ({max_batch_bytes}) must be at least {}",
@@ -35,12 +35,10 @@ pub(crate) fn validate_max_batch_bytes(max_batch_bytes: usize) -> Result<usize, 
             RECORD_BATCH_MAX.bytes
         )));
     }
-    Ok(max_batch_bytes)
+    Ok(())
 }
 
-pub(crate) fn validate_max_batch_records(
-    max_batch_records: usize,
-) -> Result<usize, ValidationError> {
+pub(crate) fn validate_max_batch_records(max_batch_records: usize) -> Result<(), ValidationError> {
     if max_batch_records < RECORD_BATCH_MIN.count {
         return Err(ValidationError(format!(
             "max_batch_records ({max_batch_records}) must be at least {}",
@@ -53,7 +51,7 @@ pub(crate) fn validate_max_batch_records(
             RECORD_BATCH_MAX.count
         )));
     }
-    Ok(max_batch_records)
+    Ok(())
 }
 
 pub(crate) fn validate_record_size(
@@ -189,32 +187,28 @@ impl BatcherConfig {
 
     /// Set the maximum number of records per batch.
     ///
+    /// Must be within `1..=1000`; out-of-range values fail with [`ValidationError`] in
+    /// [`Batcher::new`], [`TryBatcher::new`], [`batch_iter`], or [`try_batch_iter`].
+    ///
     /// Defaults to `1000`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ValidationError`] if `max_batch_records` is outside `1..=1000`.
-    pub fn with_max_batch_records(self, max_batch_records: usize) -> Result<Self, ValidationError> {
-        let max_batch_records = validate_max_batch_records(max_batch_records)?;
-        Ok(Self {
+    pub fn with_max_batch_records(self, max_batch_records: usize) -> Self {
+        Self {
             max_batch_records,
             ..self
-        })
+        }
     }
 
     /// Set the maximum metered bytes per batch.
     ///
+    /// Must be within `8..=1_048_576`; out-of-range values fail with [`ValidationError`] in
+    /// [`Batcher::new`], [`TryBatcher::new`], [`batch_iter`], or [`try_batch_iter`].
+    ///
     /// Defaults to `1 MiB`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ValidationError`] if `max_batch_bytes` is outside `8..=1_048_576`.
-    pub fn with_max_batch_bytes(self, max_batch_bytes: usize) -> Result<Self, ValidationError> {
-        let max_batch_bytes = validate_max_batch_bytes(max_batch_bytes)?;
-        Ok(Self {
+    pub fn with_max_batch_bytes(self, max_batch_bytes: usize) -> Self {
+        Self {
             max_batch_bytes,
             ..self
-        })
+        }
     }
 
     /// Set the fencing token attached to every emitted [`AppendInput`].
@@ -234,13 +228,23 @@ impl BatcherConfig {
             ..self
         }
     }
+
+    pub(crate) fn validate(&self) -> Result<(), ValidationError> {
+        validate_max_batch_records(self.max_batch_records)?;
+        validate_max_batch_bytes(self.max_batch_bytes)?;
+        if let Some(ref token) = self.fencing_token {
+            token.validate()?;
+        }
+        Ok(())
+    }
 }
 
 /// Error yielded by [`TryBatcher`] or [`try_batch_iter`] when either the input fails or batch
 /// validation fails.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum TryBatchError<E> {
-    /// A record exceeded `max_batch_bytes` or advancing `match_seq_num` overflowed `u64`.
+    /// Invalid [`BatcherConfig`], a record exceeded `max_batch_bytes`, or advancing
+    /// `match_seq_num` overflowed `u64`.
     #[error(transparent)]
     Validation(#[from] ValidationError),
     /// The underlying record source yielded an error.
@@ -255,8 +259,8 @@ pub enum TryBatchError<E> {
 ///
 /// # Errors
 ///
-/// Returns [`ValidationError`] if any record exceeds `max_batch_bytes` or if advancing
-/// `match_seq_num` overflows `u64`.
+/// Returns [`ValidationError`] if `config` is invalid, if any record exceeds `max_batch_bytes`, or
+/// if advancing `match_seq_num` overflows `u64`.
 ///
 /// ```rust
 /// # use s2_sdk::batching::{BatcherConfig, batch_iter};
@@ -284,8 +288,9 @@ pub fn batch_iter(
 ///
 /// # Errors
 ///
-/// Returns [`TryBatchError::Input`] on the first input error, or [`TryBatchError::Validation`] if
-/// any record exceeds `max_batch_bytes` or advancing `match_seq_num` overflows `u64`.
+/// Returns [`TryBatchError::Validation`] if `config` is invalid, if any record exceeds
+/// `max_batch_bytes`, or if advancing `match_seq_num` overflows `u64`; returns
+/// [`TryBatchError::Input`] on the first input error.
 pub fn try_batch_iter<R, E>(
     records: impl IntoIterator<Item = Result<R, E>>,
     config: BatcherConfig,
@@ -293,9 +298,7 @@ pub fn try_batch_iter<R, E>(
 where
     R: Into<AppendRecord>,
 {
-    if let Some(ref token) = config.fencing_token {
-        token.validate()?;
-    }
+    config.validate()?;
     let iter = records.into_iter();
     let initial_cap = iter.size_hint().0.min(config.max_batch_records);
     let mut inputs = Vec::new();
@@ -352,15 +355,20 @@ pin_project! {
 
 impl<S> Batcher<S> {
     /// Create a new [`Batcher`] over an infallible stream of records.
-    pub fn new<R>(records: S, config: BatcherConfig) -> Self
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ValidationError`] if `config` is invalid (such as `max_batch_records`,
+    /// `max_batch_bytes`, or `fencing_token` out of range).
+    pub fn new<R>(records: S, config: BatcherConfig) -> Result<Self, ValidationError>
     where
         S: Stream<Item = R>,
         R: Into<AppendRecord>,
     {
-        Self {
+        Ok(Self {
             records,
-            core: BatcherCore::new(config),
-        }
+            core: BatcherCore::new(config)?,
+        })
     }
 
     /// Return the next completed batch, or `None` when the input stream ends.
@@ -431,15 +439,20 @@ pin_project! {
 
 impl<S> TryBatcher<S> {
     /// Create a new [`TryBatcher`] over a fallible stream of records.
-    pub fn new<R, E>(records: S, config: BatcherConfig) -> Self
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ValidationError`] if `config` is invalid (such as `max_batch_records`,
+    /// `max_batch_bytes`, or `fencing_token` out of range).
+    pub fn new<R, E>(records: S, config: BatcherConfig) -> Result<Self, ValidationError>
     where
         S: Stream<Item = Result<R, E>>,
         R: Into<AppendRecord>,
     {
-        Self {
+        Ok(Self {
             records,
-            core: BatcherCore::new(config),
-        }
+            core: BatcherCore::new(config)?,
+        })
     }
 
     /// Return the next completed batch, or `None` when the input stream ends.
@@ -674,7 +687,8 @@ struct BatcherCore {
 }
 
 impl BatcherCore {
-    fn new(config: BatcherConfig) -> Self {
+    fn new(config: BatcherConfig) -> Result<Self, ValidationError> {
+        config.validate()?;
         let match_seq = MatchSeqState::from_option(config.match_seq_num);
         let acc = BatchAccumulator::with_capacity(
             config.max_batch_records,
@@ -683,7 +697,7 @@ impl BatcherCore {
             0,
         );
         let linger = Linger::new(config.linger);
-        Self {
+        Ok(Self {
             config,
             acc,
             match_seq,
@@ -691,7 +705,7 @@ impl BatcherCore {
             linger,
             exhausted: false,
             terminated: false,
-        }
+        })
     }
 
     fn push_record(
@@ -728,11 +742,6 @@ impl BatcherCore {
         if self.exhausted {
             self.terminated = true;
             return Poll::Ready(None);
-        }
-        if let Some(ref token) = self.config.fencing_token
-            && let Err(err) = token.validate()
-        {
-            return self.fail(TryBatchError::Validation(err));
         }
 
         // Seed from a previously overflowed record before polling the input again.
@@ -834,7 +843,7 @@ mod tests {
         let empty: Vec<_> = Batcher::new(
             futures_util::stream::iter(Vec::<AppendRecord>::new()),
             BatcherConfig::new(),
-        )
+        )?
         .collect()
         .await;
         assert!(empty.is_empty());
@@ -844,10 +853,10 @@ mod tests {
             .collect::<Result<_, _>>()?;
         let token: FencingToken = "tok".parse()?;
         let config = BatcherConfig::new()
-            .with_max_batch_records(3)?
+            .with_max_batch_records(3)
             .with_fencing_token(token.clone())
             .with_match_seq_num(10);
-        let inputs: Vec<_> = Batcher::new(futures_util::stream::iter(records), config)
+        let inputs: Vec<_> = Batcher::new(futures_util::stream::iter(records), config)?
             .try_collect()
             .await?;
 
@@ -873,8 +882,8 @@ mod tests {
         let single_record_bytes = records[0].metered_bytes();
         let max_batch_bytes = single_record_bytes * 3;
 
-        let config = BatcherConfig::new().with_max_batch_bytes(max_batch_bytes)?;
-        let inputs: Vec<_> = Batcher::new(futures_util::stream::iter(records), config)
+        let config = BatcherConfig::new().with_max_batch_bytes(max_batch_bytes);
+        let inputs: Vec<_> = Batcher::new(futures_util::stream::iter(records), config)?
             .try_collect()
             .await?;
 
@@ -895,7 +904,7 @@ mod tests {
             .collect::<Result<_, _>>()?;
         let records = futures_util::stream::iter(records).chain(futures_util::stream::pending());
         let config = BatcherConfig::new().with_linger(Duration::from_millis(5));
-        let mut batcher = Batcher::new(records, config);
+        let mut batcher = Batcher::new(records, config)?;
         let next_batch = tokio::spawn(async move { batcher.next().await });
 
         tokio::task::yield_now().await;
@@ -915,9 +924,9 @@ mod tests {
         let record_bytes = oversized.metered_bytes();
         let max_batch_bytes = 20;
 
-        let config = BatcherConfig::new().with_max_batch_bytes(max_batch_bytes)?;
+        let config = BatcherConfig::new().with_max_batch_bytes(max_batch_bytes);
         let results: Vec<_> =
-            Batcher::new(futures_util::stream::iter(vec![small, oversized]), config)
+            Batcher::new(futures_util::stream::iter(vec![small, oversized]), config)?
                 .collect()
                 .await;
 
@@ -943,8 +952,8 @@ mod tests {
             AppendRecord::new(format!("r{i}")).unwrap()
         });
 
-        let config = BatcherConfig::new().with_max_batch_records(2)?;
-        let mut batcher = Batcher::new(source, config);
+        let config = BatcherConfig::new().with_max_batch_records(2);
+        let mut batcher = Batcher::new(source, config)?;
 
         let first = batcher.next().await.unwrap()?;
         assert_eq!(first.records().len(), 2);
@@ -970,9 +979,9 @@ mod tests {
             .map(|i| AppendRecord::new(format!("r{i}")))
             .collect::<Result<_, _>>()?;
         let config = BatcherConfig::new()
-            .with_max_batch_records(5)?
+            .with_max_batch_records(5)
             .with_match_seq_num(u64::MAX - 2);
-        let results: Vec<_> = Batcher::new(futures_util::stream::iter(records), config)
+        let results: Vec<_> = Batcher::new(futures_util::stream::iter(records), config)?
             .collect()
             .await;
 
@@ -992,7 +1001,7 @@ mod tests {
         let overflow_first: Vec<_> = Batcher::new(
             futures_util::stream::iter([AppendRecord::new("x")?]),
             BatcherConfig::new().with_match_seq_num(u64::MAX),
-        )
+        )?
         .collect()
         .await;
         assert_eq!(overflow_first.len(), 1);
@@ -1005,7 +1014,7 @@ mod tests {
     async fn try_batcher_drops_partial_batch_on_input_error() -> Result<(), ValidationError> {
         let items: Vec<Result<AppendRecord, &'static str>> =
             vec![Ok(AppendRecord::new("ok")?), Err("boom")];
-        let mut batcher = TryBatcher::new(futures_util::stream::iter(items), BatcherConfig::new());
+        let mut batcher = TryBatcher::new(futures_util::stream::iter(items), BatcherConfig::new())?;
 
         assert!(!batcher.is_terminated());
         assert_matches!(
@@ -1026,7 +1035,7 @@ mod tests {
         let inputs = batch_iter(
             records.clone(),
             BatcherConfig::new()
-                .with_max_batch_records(2)?
+                .with_max_batch_records(2)
                 .with_match_seq_num(100),
         )?;
         assert_eq!(inputs.len(), 3);
@@ -1038,5 +1047,31 @@ mod tests {
             .unwrap_err();
         assert_eq!(err, TryBatchError::Input("boom"));
         Ok(())
+    }
+
+    // spec: r1 C2
+    #[test]
+    fn batcher_constructors_validate_config_before_consuming_input() {
+        for bad in [
+            BatcherConfig::new().with_max_batch_records(0),
+            BatcherConfig::new().with_max_batch_records(RECORD_BATCH_MAX.count + 1),
+            BatcherConfig::new().with_max_batch_bytes(RECORD_BATCH_MIN.bytes - 1),
+            BatcherConfig::new().with_max_batch_bytes(RECORD_BATCH_MAX.bytes + 1),
+        ] {
+            assert!(
+                Batcher::new(futures_util::stream::empty::<AppendRecord>(), bad.clone()).is_err()
+            );
+            assert!(
+                TryBatcher::new(
+                    futures_util::stream::empty::<Result<AppendRecord, &str>>(),
+                    bad.clone()
+                )
+                .is_err()
+            );
+            assert!(batch_iter(std::iter::empty::<AppendRecord>(), bad.clone()).is_err());
+            // Validation runs before inspecting any input error.
+            let err = try_batch_iter([Err::<AppendRecord, _>("boom")], bad).unwrap_err();
+            assert_matches!(err, TryBatchError::Validation(_));
+        }
     }
 }
