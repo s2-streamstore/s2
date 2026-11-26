@@ -1087,8 +1087,8 @@ impl S2Stream {
     /// request initiates on the first pull. Request errors surface through iteration.
     ///
     /// Decoded record `body` and header `Bytes` slices may share the backing allocation of their
-    /// batch or transport chunk (up to ~2.5 MiB); copy them (e.g. `.to_vec()`) if retaining small
-    /// records long-term independently of their batch.
+    /// decoded S2S frame (up to ~2.5 MiB) or incoming transport chunk; copy them (e.g. `.to_vec()`)
+    /// if retaining small records long-term independently of their batch.
     ///
     /// # Errors
     ///
@@ -1117,8 +1117,8 @@ impl S2Stream {
     /// request initiates on the first pull. Request errors surface through iteration.
     ///
     /// Decoded record `body` and header `Bytes` slices may share the backing allocation of their
-    /// batch or transport chunk (up to ~2.5 MiB); copy them (e.g. `.to_vec()`) if retaining small
-    /// records long-term independently of their batch.
+    /// decoded S2S frame (up to ~2.5 MiB) or incoming transport chunk; copy them (e.g. `.to_vec()`)
+    /// if retaining small records long-term independently of their batch.
     ///
     /// # Errors
     ///
