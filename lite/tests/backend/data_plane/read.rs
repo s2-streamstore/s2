@@ -22,6 +22,7 @@ use super::common::*;
 enum TailStartCase {
     TailOffset,
     SeqNumAtEnd,
+    SeqNumAfterEnd,
     TimestampAfterEnd,
 }
 
@@ -29,6 +30,7 @@ enum TailStartCase {
 enum TailEndCase {
     CountNoWait,
     CountZeroWait,
+    UnboundedZeroWait,
     TimestampMax,
 }
 
@@ -36,6 +38,7 @@ fn tail_read_from(case: TailStartCase, tail: &StreamPosition) -> ReadFrom {
     match case {
         TailStartCase::TailOffset => ReadFrom::TailOffset(0),
         TailStartCase::SeqNumAtEnd => ReadFrom::SeqNum(tail.seq_num),
+        TailStartCase::SeqNumAfterEnd => ReadFrom::SeqNum(tail.seq_num + 1),
         TailStartCase::TimestampAfterEnd => ReadFrom::Timestamp(tail.timestamp + 1),
     }
 }
@@ -49,6 +52,11 @@ fn tail_read_end(case: TailEndCase) -> ReadEnd {
         },
         TailEndCase::CountZeroWait => ReadEnd {
             limit: ReadLimit::Count(10),
+            until: ReadUntil::Unbounded,
+            wait: Some(Duration::ZERO),
+        },
+        TailEndCase::UnboundedZeroWait => ReadEnd {
+            limit: ReadLimit::Unbounded,
             until: ReadUntil::Unbounded,
             wait: Some(Duration::ZERO),
         },
@@ -276,14 +284,20 @@ async fn test_read_unwritten_clamp_behavior() {
 #[rstest]
 #[case::tail_offset_no_wait(TailStartCase::TailOffset, TailEndCase::CountNoWait, false)]
 #[case::tail_seq_num_zero_wait(TailStartCase::SeqNumAtEnd, TailEndCase::CountZeroWait, false)]
-#[case::tail_timestamp_max(TailStartCase::TimestampAfterEnd, TailEndCase::TimestampMax, false)]
+#[case::tail_seq_num_unbounded_zero_wait(
+    TailStartCase::SeqNumAtEnd,
+    TailEndCase::UnboundedZeroWait,
+    false
+)]
+#[case::tail_seq_num_until(TailStartCase::SeqNumAtEnd, TailEndCase::TimestampMax, false)]
+#[case::seq_num_after_end_with_clamp(TailStartCase::SeqNumAfterEnd, TailEndCase::CountNoWait, true)]
 #[case::timestamp_after_end_with_clamp(
     TailStartCase::TimestampAfterEnd,
     TailEndCase::CountNoWait,
     true
 )]
 #[tokio::test]
-async fn test_read_at_tail_without_follow_returns_unwritten(
+async fn test_read_at_tail_without_follow_emits_heartbeat(
     #[case] start_case: TailStartCase,
     #[case] end_case: TailEndCase,
     #[case] clamp: bool,
@@ -311,28 +325,105 @@ async fn test_read_at_tail_without_follow_returns_unwritten(
         clamp,
     };
     let end = tail_read_end(end_case);
+    let session = open_read_session(&backend, &basin_name, &stream_name, start, end).await;
+    let outputs: Vec<_> = session
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("at-tail streaming read should succeed");
+
+    assert_eq!(outputs.len(), 1, "{outputs:?}");
+    assert!(
+        matches!(outputs[0], ReadSessionOutput::Heartbeat(tail) if tail == ack.end),
+        "Expected Heartbeat({:?}), got {:?}",
+        ack.end,
+        outputs[0]
+    );
+}
+
+#[rstest]
+#[case::seq_num_beyond_tail(TailStartCase::SeqNumAfterEnd, TailEndCase::CountNoWait)]
+#[case::timestamp_beyond_tail(TailStartCase::TimestampAfterEnd, TailEndCase::TimestampMax)]
+#[tokio::test]
+async fn test_read_beyond_tail_without_clamp_returns_unwritten(
+    #[case] start_case: TailStartCase,
+    #[case] end_case: TailEndCase,
+) {
+    let (backend, basin_name, stream_name) = setup_backend_with_stream(
+        "read-beyond-tail",
+        "stream",
+        OptionalStreamConfig::default(),
+    )
+    .await;
+
+    let ack = append_timestamped_payloads(
+        &backend,
+        &basin_name,
+        &stream_name,
+        vec![
+            (Bytes::from_static(b"record 1"), 1000),
+            (Bytes::from_static(b"record 2"), 2000),
+        ],
+    )
+    .await;
+
+    let start = ReadStart {
+        from: tail_read_from(start_case, &ack.end),
+        clamp: false,
+    };
+    let end = tail_read_end(end_case);
     let result = try_open_read_session(&backend, &basin_name, &stream_name, start, end).await;
 
     match result {
         Err(ReadError::Unwritten(UnwrittenError(tail))) => {
             assert_eq!(tail, ack.end);
         }
-        Ok(_) => panic!(
-            "Expected Unwritten error for {start_case:?} / clamp={clamp} / {end_case:?}, got Ok"
-        ),
-        Err(e) => panic!(
-            "Expected Unwritten error for {start_case:?} / clamp={clamp} / {end_case:?}, got: {e:?}"
-        ),
+        Ok(_) => panic!("Expected Unwritten error for {start_case:?} / {end_case:?}, got Ok"),
+        Err(e) => panic!("Expected Unwritten error for {start_case:?} / {end_case:?}, got: {e:?}"),
     }
 }
 
 #[rstest]
 #[case::seq_num(ReadFrom::SeqNum(0))]
 #[case::timestamp(ReadFrom::Timestamp(0))]
+#[case::tail_offset_zero(ReadFrom::TailOffset(0))]
+#[case::tail_offset_nonzero(ReadFrom::TailOffset(5))]
 #[tokio::test]
-async fn test_read_at_tail_of_empty_stream_returns_unwritten(#[case] from: ReadFrom) {
+async fn test_read_at_tail_of_empty_stream_emits_heartbeat(#[case] from: ReadFrom) {
     let (backend, basin_name, stream_name) = setup_backend_with_stream(
         "read-empty-at-tail",
+        "stream",
+        OptionalStreamConfig::default(),
+    )
+    .await;
+
+    let start = ReadStart { from, clamp: false };
+    let end = tail_read_end(TailEndCase::CountNoWait);
+    let session = open_read_session(&backend, &basin_name, &stream_name, start, end).await;
+    let outputs: Vec<_> = session
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("at-tail streaming read on empty stream should succeed");
+
+    assert_eq!(outputs.len(), 1, "{outputs:?}");
+    assert!(
+        matches!(outputs[0], ReadSessionOutput::Heartbeat(tail) if tail == StreamPosition::MIN),
+        "Expected Heartbeat({:?}), got {:?}",
+        StreamPosition::MIN,
+        outputs[0]
+    );
+}
+
+#[rstest]
+#[case::seq_num(ReadFrom::SeqNum(1))]
+#[case::timestamp(ReadFrom::Timestamp(1))]
+#[tokio::test]
+async fn test_read_beyond_tail_of_empty_stream_returns_unwritten(#[case] from: ReadFrom) {
+    let (backend, basin_name, stream_name) = setup_backend_with_stream(
+        "read-empty-beyond-tail",
         "stream",
         OptionalStreamConfig::default(),
     )

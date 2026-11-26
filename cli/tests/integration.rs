@@ -650,7 +650,8 @@ fn read_with_stream_config() {
     let uri = format!("s2://{basin}/{stream}");
     s2().args(["read", &uri, "--count", "1", "--retention-policy", "1h"])
         .assert()
-        .failure();
+        .success()
+        .stdout(predicate::str::is_empty());
 
     s2().args(["stream", "get", &uri])
         .assert()

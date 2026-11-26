@@ -275,8 +275,10 @@ pub struct ReadEnd {
 
 impl ReadEnd {
     pub fn may_follow(&self) -> bool {
-        (self.limit.is_unbounded() && self.until.is_unbounded())
-            || self.wait.is_some_and(|d| d > Duration::ZERO)
+        match self.wait {
+            Some(wait) => !wait.is_zero(),
+            None => self.limit.is_unbounded() && self.until.is_unbounded(),
+        }
     }
 }
 
@@ -406,5 +408,50 @@ mod test {
         let decoded: StreamName = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, from_str);
         assert!(serde_json::from_str::<StreamName>(r#""""#).is_err());
+    }
+
+    #[rstest]
+    #[case::unbounded_omitted_wait(ReadLimit::Unbounded, ReadUntil::Unbounded, None, true)]
+    #[case::unbounded_zero_wait(
+        ReadLimit::Unbounded,
+        ReadUntil::Unbounded,
+        Some(Duration::ZERO),
+        false
+    )]
+    #[case::unbounded_nonzero_wait(
+        ReadLimit::Unbounded,
+        ReadUntil::Unbounded,
+        Some(Duration::from_secs(1)),
+        true
+    )]
+    #[case::count_omitted_wait(ReadLimit::Count(10), ReadUntil::Unbounded, None, false)]
+    #[case::count_zero_wait(
+        ReadLimit::Count(10),
+        ReadUntil::Unbounded,
+        Some(Duration::ZERO),
+        false
+    )]
+    #[case::count_nonzero_wait(
+        ReadLimit::Count(10),
+        ReadUntil::Unbounded,
+        Some(Duration::from_secs(1)),
+        true
+    )]
+    #[case::bytes_omitted_wait(ReadLimit::Bytes(1024), ReadUntil::Unbounded, None, false)]
+    #[case::until_omitted_wait(ReadLimit::Unbounded, ReadUntil::Timestamp(1000), None, false)]
+    #[case::until_nonzero_wait(
+        ReadLimit::Unbounded,
+        ReadUntil::Timestamp(1000),
+        Some(Duration::from_secs(1)),
+        true
+    )]
+    fn read_end_may_follow(
+        #[case] limit: ReadLimit,
+        #[case] until: ReadUntil,
+        #[case] wait: Option<Duration>,
+        #[case] expected: bool,
+    ) {
+        let end = ReadEnd { limit, until, wait };
+        assert_eq!(end.may_follow(), expected);
     }
 }

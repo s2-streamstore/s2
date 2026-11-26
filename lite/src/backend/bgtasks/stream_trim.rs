@@ -32,6 +32,16 @@ struct PendingTrim {
 }
 
 impl Backend {
+    #[cfg(test)]
+    pub(crate) async fn run_stream_trim_for_test(&self) {
+        while self
+            .clone()
+            .tick_stream_trim()
+            .await
+            .expect("stream trim tick")
+        {}
+    }
+
     pub(super) async fn tick_stream_trim(self) -> Result<bool, StorageError> {
         let page = self.list_stream_trim_pending().await?;
         if page.values.is_empty() {

@@ -113,7 +113,7 @@ async fn read_session(
     let stream_id = client.stream_id();
     let tail = client.check_tail().await?;
     let mut state = ReadSessionState {
-        start_seq_num: read_start_seq_num(&db, stream_id, start, end, tail).await?,
+        start_seq_num: read_start_seq_num(&db, stream_id, start, tail).await?,
         limit: EvaluatedReadLimit::Remaining(end.limit),
         until: end.until,
         wait: end.wait,
@@ -146,6 +146,7 @@ async fn read_session(
                 let mut records = Metered::with_capacity(
                     limit.into_allowance(caps::RECORD_BATCH_MAX).count as usize,
                 );
+                let mut stopped = false;
 
                 while let EvaluatedReadLimit::Remaining(limit) = state.limit {
                     let Some(kv) = it.next().await? else {
@@ -162,11 +163,8 @@ async fn read_session(
                             records.metered_size() as u64 + record.metered_size() as u64,
                         )
                     {
-                        if records.is_empty() {
-                            break 'session;
-                        } else {
-                            break;
-                        }
+                        stopped = true;
+                        break;
                     }
 
                     if records.len() == caps::RECORD_BATCH_MAX.count
@@ -192,12 +190,15 @@ async fn read_session(
                         records,
                         tail: None,
                     });
-                } else {
-                    state.start_seq_num = state.tail.seq_num;
                 }
+                if stopped {
+                    break 'session;
+                }
+                state.start_seq_num = state.tail.seq_num;
             } else {
                 assert_eq!(state.start_seq_num, state.tail.seq_num);
                 if !end.may_follow() {
+                    yield StoredReadSessionOutput::Heartbeat(state.tail);
                     break;
                 }
                 match client.follow(state.start_seq_num).await? {
@@ -262,7 +263,6 @@ async fn read_start_seq_num(
     db: &slatedb::Db,
     stream_id: StreamId,
     start: ReadStart,
-    end: ReadEnd,
     tail: StreamPosition,
 ) -> Result<SeqNum, ReadError> {
     let mut read_pos = match start.from {
@@ -282,20 +282,14 @@ async fn read_start_seq_num(
             return Err(UnwrittenError(tail).into());
         }
     }
-    // Resolve to a sequence number before deciding whether the read starts at the tail, so a
-    // timestamp start that resolves to the tail is treated like a sequence number start there.
     let start_seq_num = match read_pos {
         ReadPosition::SeqNum(start_seq_num) => start_seq_num,
         ReadPosition::Timestamp(start_timestamp) => {
             resolve_timestamp(db, stream_id, start_timestamp)
                 .await?
-                .unwrap_or(tail)
-                .seq_num
+                .map_or(tail.seq_num, |pos| pos.seq_num.min(tail.seq_num))
         }
     };
-    if start_seq_num == tail.seq_num && !end.may_follow() {
-        return Err(UnwrittenError(tail).into());
-    }
     Ok(start_seq_num)
 }
 
@@ -610,13 +604,110 @@ mod tests {
             .read(start, end)
             .await
             .unwrap();
-        let records: Vec<_> = tokio::time::timeout(
+        let outputs: Vec<_> = tokio::time::timeout(
             Duration::from_secs(2),
             futures::StreamExt::collect::<Vec<_>>(session),
         )
         .await
         .expect("read should not spin forever");
-        assert!(records.into_iter().all(|r| r.is_ok()));
+        assert_eq!(
+            outputs.len(),
+            1,
+            "expected single tail heartbeat: {outputs:?}"
+        );
+        assert!(matches!(
+            outputs[0],
+            Ok(ReadSessionOutput::Heartbeat(tail)) if tail == ack.end
+        ));
+    }
+
+    #[tokio::test]
+    async fn read_emits_tail_heartbeat_after_trailing_deleted_gap() {
+        let object_store = Arc::new(InMemory::new());
+        let db = Db::builder("/test", object_store).build().await.unwrap();
+        let backend = Backend::new(db, ByteSize::mib(10));
+
+        let basin: BasinName = "test-basin".parse().unwrap();
+        backend
+            .provision_basin(
+                basin.clone(),
+                BasinConfig::default(),
+                ProvisionMode::CreateOnly {
+                    request_token: None,
+                },
+            )
+            .await
+            .unwrap();
+        let stream: StreamName = "test-stream".parse().unwrap();
+        backend
+            .provision_stream(
+                basin.clone(),
+                stream.clone(),
+                OptionalStreamConfig::default(),
+                ProvisionMode::CreateOnly {
+                    request_token: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let mut acks = Vec::new();
+        for body in ["r0", "r1", "r2"] {
+            let input =
+                append_input(Record::try_from_parts(vec![], bytes::Bytes::from(body)).unwrap());
+            let ack = backend
+                .open_for_append(&basin, &stream, None, OptionalStreamConfig::default())
+                .await
+                .unwrap()
+                .append(input)
+                .await
+                .unwrap();
+            acks.push(ack);
+        }
+
+        // Delete records 1 and 2, leaving record 0 before a trailing gap up to tail=3.
+        let stream_id = StreamId::new(&basin, &stream);
+        let mut batch = WriteBatch::new();
+        for ack in &acks[1..] {
+            batch.delete(kv::stream_record_data::ser_key(stream_id, ack.start));
+        }
+        backend.db.write(batch).assert_durable().await;
+
+        let expected_tail = acks.last().unwrap().end;
+        let session = backend
+            .open_for_read(&basin, &stream, None, OptionalStreamConfig::default())
+            .await
+            .unwrap()
+            .read(
+                ReadStart {
+                    from: ReadFrom::SeqNum(0),
+                    clamp: false,
+                },
+                ReadEnd {
+                    limit: ReadLimit::Count(10),
+                    until: ReadUntil::Unbounded,
+                    wait: None,
+                },
+            )
+            .await
+            .unwrap();
+        let outputs: Vec<_> = session
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert_eq!(outputs.len(), 2, "{outputs:?}");
+        let ReadSessionOutput::Batch(ref batch) = outputs[0] else {
+            panic!("expected batch first: {outputs:?}");
+        };
+        assert_eq!(batch.records.len(), 1);
+        assert_eq!(batch.records[0].position().seq_num, 0);
+        assert!(matches!(
+            outputs[1],
+            ReadSessionOutput::Heartbeat(tail) if tail == expected_tail
+        ));
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
