@@ -590,14 +590,12 @@ impl AppendSessionCore {
         // focused on network I/O and state transitions.
         let record_count = input.records().len() as u64;
         let api_input = input.into_proto();
-        let frame = s2s::SessionMessage::regular(self.compression, &api_input)
-            .map_err(|err| {
-                AppendSessionError::Protocol(ProtocolError::new_definite(
-                    format!("failed to encode append frame: {err}"),
-                    self.context.clone(),
-                ))
-            })?
-            .encode();
+        let frame = s2s::encode_regular_frame(self.compression, &api_input).map_err(|err| {
+            AppendSessionError::Protocol(ProtocolError::new_definite(
+                format!("failed to encode append frame: {err}"),
+                self.context.clone(),
+            ))
+        })?;
 
         let (ack_tx, ack_rx) = oneshot::channel();
         {
