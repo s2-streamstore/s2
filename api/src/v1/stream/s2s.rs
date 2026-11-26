@@ -144,6 +144,23 @@ fn write_length_prefix(dst: &mut [u8], frame_len: usize) {
     dst[2] = (frame_len & 0xFF) as u8;
 }
 
+/// Encode `proto` into `dst` using `encode_raw` (avoiding a second `encoded_len()` walk) and
+/// verify the written byte count matches `expected_len`.
+fn encode_proto_into(
+    proto: &impl prost::Message,
+    expected_len: usize,
+    dst: &mut Vec<u8>,
+) -> std::io::Result<()> {
+    let start_len = dst.len();
+    proto.encode_raw(dst);
+    if dst.len() - start_len != expected_len {
+        return Err(std::io::Error::other(
+            "protobuf encoder wrote unexpected payload length",
+        ));
+    }
+    Ok(())
+}
+
 /// Encode a protobuf message directly into a wire-ready S2S regular frame.
 ///
 /// Output bytes, below-threshold uncompressed fallback (`< 1 KiB`), and error kinds/messages match
@@ -156,32 +173,19 @@ pub fn encode_regular_frame(
     validate_decompressed_len(encoded_len)?;
 
     if compression == CompressionAlgorithm::None || encoded_len < COMPRESSION_THRESHOLD_BYTES {
-        let mut buf = BytesMut::with_capacity(REGULAR_HEADER_SIZE + encoded_len);
-        buf.put_slice(&[0u8; REGULAR_HEADER_SIZE]);
-        // Use `encode_raw` to avoid a second `encoded_len()` walk (`encode` re-computes it).
-        proto.encode_raw(&mut buf);
-        let payload_len = buf.len() - REGULAR_HEADER_SIZE;
-        if payload_len != encoded_len {
-            return Err(std::io::Error::other(
-                "protobuf encoder wrote unexpected payload length",
-            ));
-        }
-        write_length_prefix(&mut buf, FLAG_TOTAL_SIZE + payload_len);
+        let mut buf = Vec::with_capacity(REGULAR_HEADER_SIZE + encoded_len);
+        buf.extend_from_slice(&[0u8; REGULAR_HEADER_SIZE]);
+        encode_proto_into(proto, encoded_len, &mut buf)?;
+        write_length_prefix(&mut buf, FLAG_TOTAL_SIZE + encoded_len);
         debug_assert_eq!(
             buf[LENGTH_PREFIX_SIZE],
             regular_flag(CompressionAlgorithm::None, false)
         );
-        return Ok(buf.freeze());
+        return Ok(Bytes::from(buf));
     }
 
     let mut raw = Vec::with_capacity(encoded_len);
-    // Use `encode_raw` to avoid a second `encoded_len()` walk (`encode` re-computes it).
-    proto.encode_raw(&mut raw);
-    if raw.len() != encoded_len {
-        return Err(std::io::Error::other(
-            "protobuf encoder wrote unexpected payload length",
-        ));
-    }
+    encode_proto_into(proto, encoded_len, &mut raw)?;
 
     let flag = regular_flag(compression, false);
     let mut out = Vec::with_capacity(REGULAR_HEADER_SIZE + compressed_capacity_bound(raw.len()));
