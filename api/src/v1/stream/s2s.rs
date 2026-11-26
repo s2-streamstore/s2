@@ -488,6 +488,20 @@ impl ChunkFrameDecoder {
         self.buffer.len()
     }
 
+    /// Validate that no incomplete trailing frame remains at end of stream.
+    pub fn finish(self) -> std::io::Result<()> {
+        if !self.buffer.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                format!(
+                    "truncated s2s frame at end of stream ({} bytes remaining)",
+                    self.buffer.len()
+                ),
+            ));
+        }
+        Ok(())
+    }
+
     fn reserve_partial(&mut self, total_size: usize, incoming_len: usize) {
         if self.pre_reserve_full {
             let needed = total_size.saturating_sub(self.buffer.len());
@@ -1400,5 +1414,9 @@ mod test {
             "partial Frame 3 must use a small buffer, got {}",
             client.buffer.capacity()
         );
+        let err = client.finish().expect_err("truncated trailing frame");
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+        assert!(err.to_string().contains("10 bytes remaining"));
+        ChunkFrameDecoder::new().finish().unwrap();
     }
 }

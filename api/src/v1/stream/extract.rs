@@ -96,17 +96,7 @@ where
                                 ));
                             }
                             None => {
-                                if decoder.remaining_len() > 0 {
-                                    return Err(AppendInputStreamError::FrameDecode(
-                                        std::io::Error::new(
-                                            std::io::ErrorKind::UnexpectedEof,
-                                            format!(
-                                                "truncated s2s frame at end of stream ({} bytes remaining)",
-                                                decoder.remaining_len()
-                                            ),
-                                        ),
-                                    ));
-                                }
+                                decoder.finish()?;
                                 return Ok(None);
                             }
                         }

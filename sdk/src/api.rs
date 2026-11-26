@@ -1000,16 +1000,13 @@ where
                 )?;
             }
         }
-        if decoder.remaining_len() > 0 {
-            Err(E::from(ConnectionLostError::new_with_context(
-                format!(
-                    "truncated s2s frame at end of stream ({} bytes remaining)",
-                    decoder.remaining_len()
-                ),
+        decoder.finish().map_err(|err| {
+            E::from(ConnectionLostError::new_with_context(
+                err.to_string(),
                 false,
                 ctx.clone(),
-            )))?;
-        }
+            ))
+        })?;
     })
 }
 
@@ -1696,6 +1693,17 @@ mod tests {
         );
         let auth_client = BaseClient::init(&config).unwrap();
         let ctx = OpScope::stream("read_session", "b", "s", true).context(1);
+        let open_stream = |chunks: Vec<Result<Bytes, client::HttpError>>,
+                           chunks_received: Arc<AtomicU64>| {
+            decode_s2s_stream::<ReadBatch, crate::error::ReadSessionError, _>(
+                futures_util::stream::iter(chunks),
+                client::RetireHandle::noop(),
+                chunks_received,
+                auth_client.clone(),
+                None,
+                ctx.clone(),
+            )
+        };
 
         // 1. Split 3-byte prefix of f0 across chunks (1 byte, then 1 byte, empty chunk, then rest
         //    of f0 + complete f1 + 2-byte prefix of f2 in a single chunk, then rest of f2).
@@ -1714,14 +1722,7 @@ mod tests {
             Ok(Bytes::copy_from_slice(&f2[2..])),
         ];
         let chunks_received = Arc::new(AtomicU64::new(0));
-        let mut stream = decode_s2s_stream::<ReadBatch, crate::error::ReadSessionError, _>(
-            futures_util::stream::iter(chunks),
-            client::RetireHandle::noop(),
-            chunks_received.clone(),
-            auth_client.clone(),
-            None,
-            ctx.clone(),
-        );
+        let mut stream = open_stream(chunks, chunks_received.clone());
         let mut decoded = Vec::new();
         while let Some(item) = stream.next().await {
             decoded.push(item.unwrap().msg);
@@ -1748,27 +1749,13 @@ mod tests {
             .map(|c| Ok(Bytes::copy_from_slice(c)))
             .collect();
         assert!(large_chunks.len() > 10);
-        let mut stream = decode_s2s_stream::<ReadBatch, crate::error::ReadSessionError, _>(
-            futures_util::stream::iter(large_chunks),
-            client::RetireHandle::noop(),
-            Arc::new(AtomicU64::new(0)),
-            auth_client.clone(),
-            None,
-            ctx.clone(),
-        );
+        let mut stream = open_stream(large_chunks, Arc::new(AtomicU64::new(0)));
         assert_eq!(stream.next().await.unwrap().unwrap().msg, large_batch);
         assert!(stream.next().await.is_none());
 
         // 3. Truncated trailing bytes must report ConnectionLost with the exact remaining count.
         let truncated = vec![Ok(Bytes::copy_from_slice(&wire[..wire.len() - 3]))];
-        let mut stream = decode_s2s_stream::<ReadBatch, crate::error::ReadSessionError, _>(
-            futures_util::stream::iter(truncated),
-            client::RetireHandle::noop(),
-            Arc::new(AtomicU64::new(0)),
-            auth_client,
-            None,
-            ctx,
-        );
+        let mut stream = open_stream(truncated, Arc::new(AtomicU64::new(0)));
         assert_eq!(stream.next().await.unwrap().unwrap().msg, b0);
         assert_eq!(stream.next().await.unwrap().unwrap().msg, b1);
         let err = stream.next().await.unwrap().err().unwrap();
