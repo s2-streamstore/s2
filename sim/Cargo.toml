@@ -44,7 +44,7 @@ rand = "0.10"
 s2-lite = { path = "../lite" }
 s2-sdk = { path = "../sdk", features = ["_hidden"] }
 # CI derives the Go checker revision directly from `sim/Cargo.lock` (see `.github/workflows/ci.yml`).
-s2-verification = { git = "https://github.com/s2-streamstore/s2-verification", rev = "e9190545409908fe190267521e22d7a3f12e2de7", version = "0.4.0" }
+s2-verification = { git = "https://github.com/s2-streamstore/s2-verification", rev = "bf02f0e47b0d54cf95187a7fbc73d8ec8c78101c", version = "0.4.0" }
 s3s = "0.17.0"
 serde_json = "1.0"
 slatedb = { version = "0.18", features = ["lz4", "zstd"] }

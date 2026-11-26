@@ -1,5 +1,5 @@
 use miette::Diagnostic;
-use s2_sdk::error::{ErrorCode, S2Error, ServerError};
+use s2_sdk::error::{ErrorCode, S2Error};
 use thiserror::Error;
 
 use crate::environment::Target;
@@ -248,31 +248,19 @@ impl std::fmt::Display for TokenSource {
     }
 }
 
-fn root_server_error(mut err: &SdkError) -> Option<&ServerError> {
-    loop {
-        if let Some(server) = err.server_error() {
-            return Some(server);
-        }
-        err = err.failure().or_else(|| err.final_attempt_error())?;
-    }
-}
-
 fn is_auth_error(err: &SdkError) -> bool {
-    root_server_error(err)
-        .and_then(ServerError::known_code)
+    err.root_cause()
+        .known_code()
         .is_some_and(ErrorCode::is_auth_error)
 }
 
 fn is_network_policy_denied(err: &SdkError) -> bool {
-    root_server_error(err)
-        .and_then(ServerError::known_code)
-        .is_some_and(|code| matches!(code, ErrorCode::NetworkPolicyDenied))
+    err.root_cause()
+        .has_error_code(ErrorCode::NetworkPolicyDenied)
 }
 
 fn is_not_implemented(err: &SdkError) -> bool {
-    root_server_error(err)
-        .and_then(ServerError::known_code)
-        .is_some_and(|code| matches!(code, ErrorCode::NotImplemented))
+    err.root_cause().has_error_code(ErrorCode::NotImplemented)
 }
 
 pub fn is_valid_access_token(token: &str) -> bool {
@@ -443,7 +431,7 @@ mod tests {
 
     #[test]
     fn wrapped_session_and_indefinite_errors_still_classify_server_codes() {
-        use s2_sdk::error::{IndefiniteAppendError, SessionClosedError, StatusCode};
+        use s2_sdk::error::{IndefiniteAppendError, ServerError, SessionClosedError, StatusCode};
 
         let auth_server =
             ServerError::new(StatusCode::UNAUTHORIZED, "invalid token").with_code("authn");

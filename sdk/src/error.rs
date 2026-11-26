@@ -1362,7 +1362,8 @@ impl S2Error {
     ///
     /// Wrapper errors ([`IndefiniteAppend`](Self::IndefiniteAppend) and
     /// [`SessionClosed`](Self::SessionClosed)) return `None`; inspect
-    /// [`final_attempt_error`](Self::final_attempt_error) or [`failure`](Self::failure) instead.
+    /// [`final_attempt_error`](Self::final_attempt_error), [`failure`](Self::failure), or
+    /// [`root_cause`](Self::root_cause) instead.
     #[must_use]
     pub fn server_error(&self) -> Option<&ServerError> {
         match self {
@@ -1402,6 +1403,31 @@ impl S2Error {
         match self {
             Self::SessionClosed(e) => e.failure(),
             _ => None,
+        }
+    }
+
+    /// Recursively unwrap [`IndefiniteAppend`](Self::IndefiniteAppend) and
+    /// [`SessionClosed`](Self::SessionClosed) wrappers to return the underlying root error.
+    ///
+    /// Stops at a clean [`SessionClosed`](Self::SessionClosed) (`failure() == None`) or any
+    /// non-wrapper error.
+    ///
+    /// Check [`has_no_side_effects`](Self::has_no_side_effects) and
+    /// [`is_retryable`](Self::is_retryable) on the **outer** error rather than the returned root
+    /// cause: wrapper errors carry side-effect and retry semantics that the unwrapped error does
+    /// not.
+    #[must_use]
+    pub fn root_cause(&self) -> &Self {
+        let mut err = self;
+        loop {
+            match err {
+                Self::IndefiniteAppend(e) => err = e.final_attempt_error(),
+                Self::SessionClosed(e) => match e.failure() {
+                    Some(failure) => err = failure,
+                    None => return err,
+                },
+                _ => return err,
+            }
         }
     }
 }
@@ -1695,7 +1721,8 @@ impl AppendError {
     /// Return the underlying [`ServerError`] for direct server errors (including `412` mismatches).
     ///
     /// Returns `None` for [`IndefiniteAppend`](Self::IndefiniteAppend); inspect
-    /// [`final_attempt_error`](Self::final_attempt_error) instead.
+    /// [`final_attempt_error`](Self::final_attempt_error) or [`root_cause`](Self::root_cause)
+    /// instead.
     #[must_use]
     pub fn server_error(&self) -> Option<&ServerError> {
         match self {
@@ -1726,6 +1753,22 @@ impl AppendError {
             Self::IndefiniteAppend(e) => Some(e.final_attempt_error()),
             _ => None,
         }
+    }
+
+    /// Recursively unwrap [`IndefiniteAppend`](Self::IndefiniteAppend) wrappers to return the
+    /// underlying root error.
+    ///
+    /// Check [`has_no_side_effects`](Self::has_no_side_effects) and
+    /// [`is_retryable`](Self::is_retryable) on the **outer** error rather than the returned root
+    /// cause: wrapper errors carry side-effect and retry semantics that the unwrapped error does
+    /// not.
+    #[must_use]
+    pub fn root_cause(&self) -> &Self {
+        let mut err = self;
+        while let Self::IndefiniteAppend(e) = err {
+            err = e.final_attempt_error();
+        }
+        err
     }
 }
 
@@ -1830,7 +1873,9 @@ impl AppendSessionError {
     /// Return the underlying [`ServerError`] for direct server errors (including `412` mismatches).
     ///
     /// Wrapper errors ([`IndefiniteAppend`](Self::IndefiniteAppend) and
-    /// [`SessionClosed`](Self::SessionClosed)) return `None`.
+    /// [`SessionClosed`](Self::SessionClosed)) return `None`; inspect
+    /// [`final_attempt_error`](Self::final_attempt_error), [`failure`](Self::failure), or
+    /// [`root_cause`](Self::root_cause) instead.
     #[must_use]
     pub fn server_error(&self) -> Option<&ServerError> {
         match self {
@@ -1869,6 +1914,31 @@ impl AppendSessionError {
         match self {
             Self::SessionClosed(e) => e.failure(),
             _ => None,
+        }
+    }
+
+    /// Recursively unwrap [`IndefiniteAppend`](Self::IndefiniteAppend) and
+    /// [`SessionClosed`](Self::SessionClosed) wrappers to return the underlying root error.
+    ///
+    /// Stops at a clean [`SessionClosed`](Self::SessionClosed) (`failure() == None`) or any
+    /// non-wrapper error.
+    ///
+    /// Check [`has_no_side_effects`](Self::has_no_side_effects) and
+    /// [`is_retryable`](Self::is_retryable) on the **outer** error rather than the returned root
+    /// cause: wrapper errors carry side-effect and retry semantics that the unwrapped error does
+    /// not.
+    #[must_use]
+    pub fn root_cause(&self) -> &Self {
+        let mut err = self;
+        loop {
+            match err {
+                Self::IndefiniteAppend(e) => err = e.final_attempt_error(),
+                Self::SessionClosed(e) => match e.failure() {
+                    Some(failure) => err = failure,
+                    None => return err,
+                },
+                _ => return err,
+            }
         }
     }
 
@@ -1984,7 +2054,7 @@ impl ReadSessionError {
     /// Return the underlying [`ServerError`], including for [`ReadUnwritten`](Self::ReadUnwritten).
     ///
     /// Returns `None` for [`SessionClosed`](Self::SessionClosed); inspect
-    /// [`failure`](Self::failure) instead.
+    /// [`failure`](Self::failure) or [`root_cause`](Self::root_cause) instead.
     #[must_use]
     pub fn server_error(&self) -> Option<&ServerError> {
         match self {
@@ -2014,6 +2084,26 @@ impl ReadSessionError {
             Self::SessionClosed(e) => e.failure(),
             _ => None,
         }
+    }
+
+    /// Recursively unwrap [`SessionClosed`](Self::SessionClosed) wrappers to return the underlying
+    /// root error.
+    ///
+    /// Stops at a clean [`SessionClosed`](Self::SessionClosed) (`failure() == None`) or any
+    /// non-wrapper error.
+    ///
+    /// Check [`is_retryable`](Self::is_retryable) on the **outer** error rather than the returned
+    /// root cause: wrapper errors carry retry semantics that the unwrapped error does not.
+    #[must_use]
+    pub fn root_cause(&self) -> &Self {
+        let mut err = self;
+        while let Self::SessionClosed(e) = err {
+            match e.failure() {
+                Some(failure) => err = failure,
+                None => break,
+            }
+        }
+        err
     }
 
     pub(crate) fn with_context(self, context: &ErrorContext) -> Self {
@@ -2408,6 +2498,114 @@ mod tests {
         assert!(closed_clean.failure().is_none());
         assert!(closed_clean.source().is_none());
         assert!(closed_clean.to_string().contains("my-basin"));
+        assert!(matches!(
+            closed_clean.root_cause(),
+            AppendSessionError::SessionClosed(c) if c.failure().is_none()
+        ));
+    }
+
+    // spec: r1 E5a, E5c
+    #[test]
+    fn root_cause_unwraps_nested_wrappers_and_stops_at_leaves_and_clean_close() {
+        let not_found = response(StatusCode::NOT_FOUND, Some("stream_not_found"));
+
+        // 1. Direct leaf returns itself.
+        let direct = AppendSessionError::Server(not_found.clone());
+        assert!(
+            direct
+                .root_cause()
+                .has_error_code(ErrorCode::StreamNotFound)
+        );
+        let aborted = AppendSessionError::Aborted(AbortedError::new("client closed"));
+        assert!(matches!(
+            aborted.root_cause(),
+            AppendSessionError::Aborted(_)
+        ));
+
+        // 2. AppendError 1-layer IndefiniteAppend.
+        let append_indef = AppendError::IndefiniteAppend(IndefiniteAppendError::new(
+            AppendError::Server(not_found.clone()),
+        ));
+        assert!(!append_indef.has_no_side_effects());
+        assert!(append_indef.server_error().is_none());
+        assert!(
+            append_indef
+                .root_cause()
+                .has_error_code(ErrorCode::StreamNotFound)
+        );
+        assert!(append_indef.root_cause().has_no_side_effects());
+
+        // 3. AppendSessionError 2-layer SessionClosed(IndefiniteAppend(StreamNotFound)).
+        let sess_indef = AppendSessionError::IndefiniteAppend(IndefiniteAppendError::new(
+            AppendSessionError::Server(not_found),
+        ));
+        let two_layer =
+            AppendSessionError::SessionClosed(SessionClosedError::new(Some(sess_indef)));
+        assert!(two_layer.has_no_side_effects());
+        assert!(!two_layer.has_error_code(ErrorCode::StreamNotFound));
+        assert!(
+            two_layer
+                .root_cause()
+                .has_error_code(ErrorCode::StreamNotFound)
+        );
+        let two_layer_s2: S2Error = two_layer.into();
+        assert!(!two_layer_s2.has_error_code(ErrorCode::StreamNotFound));
+        assert!(
+            two_layer_s2
+                .root_cause()
+                .has_error_code(ErrorCode::StreamNotFound)
+        );
+
+        // 4. AppendSessionError 3-layer IndefiniteAppend(SessionClosed(IndefiniteAppend(412))).
+        let inner_indef = AppendSessionError::IndefiniteAppend(IndefiniteAppendError::new(
+            AppendSessionError::SeqNumMismatch(SeqNumMismatchError::new(42)),
+        ));
+        let mid_closed =
+            AppendSessionError::SessionClosed(SessionClosedError::new(Some(inner_indef)));
+        let three_layer =
+            AppendSessionError::IndefiniteAppend(IndefiniteAppendError::new(mid_closed));
+        assert!(!three_layer.has_no_side_effects());
+        assert!(three_layer.server_error().is_none());
+        assert!(matches!(
+            three_layer.root_cause(),
+            AppendSessionError::SeqNumMismatch(e) if e.assignable_seq_num == 42
+        ));
+        assert_eq!(
+            three_layer.root_cause().server_error().unwrap().status,
+            StatusCode::PRECONDITION_FAILED
+        );
+        let three_layer_s2: S2Error = three_layer.into();
+        assert!(!three_layer_s2.has_no_side_effects());
+        assert!(three_layer_s2.server_error().is_none());
+        assert!(matches!(
+            three_layer_s2.root_cause(),
+            S2Error::SeqNumMismatch(e) if e.assignable_seq_num == 42
+        ));
+
+        // 5. ReadSessionError clean close vs failure wrapper.
+        let read_clean = ReadSessionError::SessionClosed(SessionClosedError::new(None));
+        assert!(matches!(
+            read_clean.root_cause(),
+            ReadSessionError::SessionClosed(c) if c.failure().is_none()
+        ));
+        let read_clean_s2: S2Error = read_clean.into();
+        assert!(matches!(
+            read_clean_s2.root_cause(),
+            S2Error::SessionClosed(c) if c.failure().is_none()
+        ));
+        let read_wrapped = ReadSessionError::SessionClosed(SessionClosedError::new(Some(
+            ReadSessionError::ReadUnwritten(ReadUnwrittenError::new(StreamPosition::new(9, 100))),
+        )));
+        assert!(read_wrapped.server_error().is_none());
+        assert!(matches!(
+            read_wrapped.root_cause(),
+            ReadSessionError::ReadUnwritten(e) if e.tail.seq_num == 9
+        ));
+        let read_wrapped_s2: S2Error = read_wrapped.into();
+        assert!(matches!(
+            read_wrapped_s2.root_cause(),
+            S2Error::ReadUnwritten(e) if e.tail.seq_num == 9
+        ));
     }
 
     // spec: r1 E1, E3

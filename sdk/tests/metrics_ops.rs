@@ -61,11 +61,7 @@ async fn append_sample(stream: &S2Stream) -> Result<(), Box<dyn std::error::Erro
 
 async fn read_sample(stream: &S2Stream) -> Result<(), Box<dyn std::error::Error>> {
     let _ = stream
-        .read(
-            ReadInput::new()
-                .with_start(ReadStart::SeqNum(0))
-                .with_count(1),
-        )
+        .read(ReadInput::new(ReadStart::SeqNum(0)).with_count(1))
         .await?;
     Ok(())
 }

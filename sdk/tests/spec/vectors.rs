@@ -329,7 +329,10 @@ async fn spec_vectors_keys() {
                 let key = result.unwrap_or_else(|e| panic!("{label}: unexpected error {e}"));
                 *seen_header.lock().unwrap() = None;
                 let stream = basin.stream(stream_name.clone()).with_encryption_key(key);
-                let _ = stream.read(ReadInput::new()).await.expect("mock read ok");
+                let _ = stream
+                    .read(ReadInput::new(ReadStart::TAIL))
+                    .await
+                    .expect("mock read ok");
                 assert_eq!(
                     seen_header.lock().unwrap().as_deref(),
                     Some(header.as_str()),
@@ -406,25 +409,37 @@ fn spec_vectors_numbers() {
                     assert_eq!(input.match_seq_num(), Some(v), "{label}");
                 }),
                 "read.start.seq_num" => check_u64(&|v| {
-                    let input = ReadInput::new().with_start(ReadStart::SeqNum(v));
-                    assert_eq!(input.start(), Some(ReadStart::SeqNum(v)), "{label}");
+                    let input = ReadInput::new(ReadStart::SeqNum(v));
+                    assert_eq!(input.start(), ReadStart::SeqNum(v), "{label}");
                 }),
                 "read.start.timestamp" => check_u64(&|v| {
-                    let input = ReadInput::new().with_start(ReadStart::Timestamp(v));
-                    assert_eq!(input.start(), Some(ReadStart::Timestamp(v)), "{label}");
+                    let input = ReadInput::new(ReadStart::Timestamp(v));
+                    assert_eq!(input.start(), ReadStart::Timestamp(v), "{label}");
                 }),
                 "read.start.tail_offset" => check_u64(&|v| {
-                    let input = ReadInput::new().with_start(ReadStart::TailOffset(v));
-                    assert_eq!(input.start(), Some(ReadStart::TailOffset(v)), "{label}");
+                    let input = ReadInput::new(ReadStart::TailOffset(v));
+                    assert_eq!(input.start(), ReadStart::TailOffset(v), "{label}");
                 }),
                 "read.stop.count" => check_u64(&|v| {
-                    assert_eq!(ReadInput::new().with_count(v).count(), Some(v), "{label}");
+                    assert_eq!(
+                        ReadInput::new(ReadStart::TAIL).with_count(v).count(),
+                        Some(v),
+                        "{label}"
+                    );
                 }),
                 "read.stop.bytes" => check_u64(&|v| {
-                    assert_eq!(ReadInput::new().with_bytes(v).bytes(), Some(v), "{label}");
+                    assert_eq!(
+                        ReadInput::new(ReadStart::TAIL).with_bytes(v).bytes(),
+                        Some(v),
+                        "{label}"
+                    );
                 }),
                 "read.stop.until" => check_u64(&|v| {
-                    assert_eq!(ReadInput::new().with_until(v).until(), Some(v), "{label}");
+                    assert_eq!(
+                        ReadInput::new(ReadStart::TAIL).with_until(v).until(),
+                        Some(v),
+                        "{label}"
+                    );
                 }),
                 "trim.seq_num" => check_u64(&|v| {
                     let rec: AppendRecord = CommandRecord::trim(v).into();
@@ -491,7 +506,9 @@ fn spec_vectors_numbers() {
                         Some(secs) => {
                             assert!(expect_valid, "{label}");
                             assert_eq!(
-                                ReadInput::new().with_wait_secs(secs).wait_secs(),
+                                ReadInput::new(ReadStart::TAIL)
+                                    .with_wait_secs(secs)
+                                    .wait_secs(),
                                 Some(secs),
                                 "{label}"
                             );
@@ -898,7 +915,10 @@ async fn spec_vectors_s2s_frames() {
         //    through the SDK's real ReadSessionError::from_terminal_message & stream decoder!
         *pending_wire.lock().unwrap() = Bytes::copy_from_slice(&wire[end_slice_offset..]);
         let mut sess = stream
-            .read_session(ReadInput::new().with_count(1), ReadSessionConfig::default())
+            .read_session(
+                ReadInput::new(ReadStart::TAIL).with_count(1),
+                ReadSessionConfig::default(),
+            )
             .unwrap();
         let outcome = sess.next().await;
         match case.expect.end.kind.as_str() {
@@ -1139,7 +1159,7 @@ async fn spec_vectors_errors() {
             }
             "read" => {
                 let err = stream
-                    .read(ReadInput::new())
+                    .read(ReadInput::new(ReadStart::TAIL))
                     .await
                     .expect_err(&format!("{label}: expected read error"));
 

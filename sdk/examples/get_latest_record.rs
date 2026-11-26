@@ -15,9 +15,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let s2 = S2::from_env()?;
     let stream = s2.basin(basin_name).stream(stream_name);
 
-    let input = ReadInput::new()
-        .with_start(ReadStart::TailOffset(1))
-        .with_count(1);
+    let input = ReadInput::new(ReadStart::TailOffset(1)).with_count(1);
     let batch = stream.read(input).await?;
     println!("{batch:#?}");
 

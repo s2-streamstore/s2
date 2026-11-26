@@ -51,11 +51,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ANCHOR: simple-read
     let batch = stream
-        .read(
-            ReadInput::new()
-                .with_start(ReadStart::SeqNum(0))
-                .with_count(100),
-        )
+        .read(ReadInput::new(ReadStart::SeqNum(0)).with_count(100))
         .await?;
 
     for record in batch.records {
@@ -150,9 +146,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .as_millisecond()
         .max(0) as u64;
     let mut session = stream.read_session(
-        ReadInput::new()
-            .with_start(ReadStart::SeqNum(0))
-            .with_until(one_hour_ago),
+        ReadInput::new(ReadStart::SeqNum(0)).with_until(one_hour_ago),
         ReadSessionConfig::new(),
     )?;
 
@@ -166,9 +160,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Read all available records, and once reaching the current tail, wait an additional 30 seconds
     // for new ones
     let mut session = stream.read_session(
-        ReadInput::new()
-            .with_start(ReadStart::SeqNum(0))
-            .with_wait_secs(30),
+        ReadInput::new(ReadStart::SeqNum(0)).with_wait_secs(30),
         ReadSessionConfig::new(),
     )?;
 
