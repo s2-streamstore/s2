@@ -967,7 +967,14 @@ impl BasinClient {
                             Err::<(), E>(error)?;
                         }
                         Ok(None) => {
-                            release_excess_s2s_buffer(&mut buffer, &mut buffer_peak_capacity);
+                            if buffer.is_empty() {
+                                release_excess_s2s_buffer(&mut buffer, &mut buffer_peak_capacity);
+                            } else {
+                                reserve_for_incomplete_s2s_frame(
+                                    &mut buffer,
+                                    &mut buffer_peak_capacity,
+                                );
+                            }
                             break;
                         }
                         Err(err) => Err(E::from(ProtocolError::new_with_context(
@@ -1037,6 +1044,25 @@ fn release_excess_s2s_buffer(buffer: &mut BytesMut, peak_capacity: &mut usize) {
     if *peak_capacity > S2S_READ_BUFFER_MAX_IDLE_CAPACITY && buffer.is_empty() {
         *buffer = BytesMut::new();
         *peak_capacity = 0;
+    }
+}
+
+/// Pre-reserve space for an incomplete S2S frame once its 3-byte length prefix has arrived.
+///
+/// Called only after [`FrameDecoder::decode`] returned `Ok(None)`, which has already verified the
+/// frame length is within the S2S decode limit. Keeps large-frame decoding to a single allocation
+/// after [`release_excess_s2s_buffer`] without adding pre-reserve amplification to server-side
+/// decoding.
+fn reserve_for_incomplete_s2s_frame(buffer: &mut BytesMut, peak_capacity: &mut usize) {
+    if buffer.len() < 3 {
+        return;
+    }
+    let frame_len =
+        ((buffer[0] as usize) << 16) | ((buffer[1] as usize) << 8) | (buffer[2] as usize);
+    let total_size = 3 + frame_len;
+    if total_size > buffer.len() {
+        buffer.reserve(total_size - buffer.len());
+        *peak_capacity = (*peak_capacity).max(buffer.capacity());
     }
 }
 
@@ -1679,5 +1705,35 @@ mod tests {
         let _ = small.split_to(512);
         release_excess_s2s_buffer(&mut small, &mut small_peak);
         assert!(small.capacity() >= 512);
+
+        // Large incomplete frame pre-reserves its full size after the 3-byte prefix arrives so
+        // subsequent 16 KiB chunks do not trigger repeated doubling reallocations, and is still
+        // released once drained.
+        let frame_len: usize = 512 * 1024;
+        let total_size = 3 + frame_len;
+        let mut streaming = BytesMut::new();
+        let mut streaming_peak = 0;
+        let mut chunk = vec![0xEE; 16 * 1024];
+        chunk[0] = ((frame_len >> 16) & 0xff) as u8;
+        chunk[1] = ((frame_len >> 8) & 0xff) as u8;
+        chunk[2] = (frame_len & 0xff) as u8;
+        streaming.extend_from_slice(&chunk);
+        reserve_for_incomplete_s2s_frame(&mut streaming, &mut streaming_peak);
+        let reserved_ptr = streaming.as_ptr();
+        assert!(streaming.capacity() >= total_size);
+        assert!(streaming_peak >= total_size);
+        while streaming.len() < total_size {
+            let take = (16 * 1024).min(total_size - streaming.len());
+            streaming.extend_from_slice(&vec![0xEE; take]);
+            reserve_for_incomplete_s2s_frame(&mut streaming, &mut streaming_peak);
+        }
+        assert_eq!(
+            streaming.as_ptr(),
+            reserved_ptr,
+            "subsequent chunks must not reallocate once pre-reserved"
+        );
+        let _frame = streaming.split_to(total_size);
+        release_excess_s2s_buffer(&mut streaming, &mut streaming_peak);
+        assert_eq!(streaming_peak, 0);
     }
 }

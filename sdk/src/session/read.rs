@@ -173,6 +173,23 @@ enum CaughtUpFuture {
     Ready(CaughtUpResult),
 }
 
+/// Zero-lock `Sync` wrapper around a `Send` value accessed exclusively via `&mut self`.
+///
+/// Uses [`StdMutex::get_mut`] solely to opt into `Sync` (`Mutex<T>: Sync` for `T: Send`) without
+/// ever locking at runtime or adding an external crate dependency.
+#[derive(Default)]
+struct SyncCell<T>(StdMutex<T>);
+
+impl<T> SyncCell<T> {
+    fn new(value: T) -> Self {
+        Self(StdMutex::new(value))
+    }
+
+    fn get_mut(&mut self) -> &mut T {
+        self.0.get_mut().expect("SyncCell mutex is never locked")
+    }
+}
+
 /// Register `cx` with `shutdown` (lazily allocating a cancellation future) and return `true` if
 /// client shutdown has already fired.
 fn poll_shutdown(
@@ -212,9 +229,7 @@ struct CaughtUpWaits {
 pub struct CaughtUp {
     inner: CaughtUpFuture,
     state: ReadSessionState,
-    /// Wrapped in `StdMutex` solely to preserve `Sync` (`Mutex<T>: Sync` for `T: Send`).
-    /// Accessed exclusively via `get_mut()` inside `Future::poll` with zero runtime locking.
-    waits: StdMutex<CaughtUpWaits>,
+    waits: SyncCell<CaughtUpWaits>,
     done: bool,
 }
 
@@ -223,7 +238,7 @@ impl Clone for CaughtUp {
         Self {
             inner: self.inner.clone(),
             state: self.state.clone(),
-            waits: StdMutex::new(CaughtUpWaits::default()),
+            waits: SyncCell::default(),
             done: false,
         }
     }
@@ -258,10 +273,7 @@ impl Future for CaughtUp {
                 Poll::Ready(result.clone())
             }
             CaughtUpFuture::Pending(signal) => {
-                let waits = this
-                    .waits
-                    .get_mut()
-                    .expect("CaughtUp waits mutex is never locked");
+                let waits = this.waits.get_mut();
 
                 // Always check the catch-up signal first so an already-resolved tail (`R8a`) or
                 // already-locked close reason (`R9`) is never overwritten by a later client
@@ -699,7 +711,7 @@ impl ReadSessionState {
         CaughtUp {
             inner: future,
             state: self.clone(),
-            waits: StdMutex::new(CaughtUpWaits::default()),
+            waits: SyncCell::default(),
             done: false,
         }
     }
@@ -893,10 +905,7 @@ struct ReadSessionCore {
     idle_since: Option<Instant>,
     has_received_response: bool,
     last_fetched_seq: Option<u64>,
-    /// Non-`Sync` on-demand transport state wrapped in `StdMutex` solely to keep `ReadSession`
-    /// and `ReadBatchSession` `Sync` (`Mutex<T>: Sync` for `T: Send`). Accessed exclusively via
-    /// `get_mut()` on `&mut self`, so polling incurs zero runtime locking.
-    transport: StdMutex<PollTransport>,
+    transport: SyncCell<PollTransport>,
     lifecycle: StreamLifecycle,
 }
 
@@ -946,15 +955,13 @@ impl ReadSessionCore {
             idle_since: None,
             has_received_response: false,
             last_fetched_seq: None,
-            transport: StdMutex::new(PollTransport::new()),
+            transport: SyncCell::new(PollTransport::new()),
             lifecycle: StreamLifecycle::Active,
         }
     }
 
     fn transport_mut(&mut self) -> &mut PollTransport {
-        self.transport
-            .get_mut()
-            .expect("read transport mutex is never locked")
+        self.transport.get_mut()
     }
 
     fn poll_if_ended(&mut self) -> bool {
@@ -1074,11 +1081,7 @@ impl ReadSessionCore {
         cx: &mut Context<'_>,
     ) -> Poll<Result<DecodedBatch, TerminalClose>> {
         let shutdown = &self.state.shutdown;
-        let wait_slot = &mut self
-            .transport
-            .get_mut()
-            .expect("read transport mutex is never locked")
-            .shutdown_wait;
+        let wait_slot = &mut self.transport.get_mut().shutdown_wait;
         if poll_shutdown(shutdown, wait_slot, cx)
             && let Some(closed) = self.take_closed_or_abort()
         {
@@ -1340,7 +1343,8 @@ impl ReadSessionCore {
             return DriverStep::Done(self.finish_clean_end_now(tail));
         }
 
-        // If `count` or `bytes` is already exhausted after receiving data, end cleanly rather than
+        // Safety net for `count(0)`/`bytes(0)` (where a heartbeat sets `has_received_response`
+        // without triggering `handle_decoded_batch`'s record-limit close): end cleanly rather than
         // reconnecting with count=0/bytes=0.
         if self.has_received_response && read_limits_exhausted(&self.end) {
             debug!("read session limits exhausted after stream error");
@@ -1383,10 +1387,7 @@ impl ReadSessionCore {
                 heartbeat_deadline,
                 sleep,
                 ..
-            } = self
-                .transport
-                .get_mut()
-                .expect("read transport mutex is never locked");
+            } = self.transport.get_mut();
 
             match phase {
                 DriverPhase::Idle => {
@@ -1407,6 +1408,8 @@ impl ReadSessionCore {
                             Err(err) if err.is_panic() => {
                                 std::panic::resume_unwind(err.into_panic())
                             }
+                            // A non-panic `JoinError` means the spawning Tokio runtime shut down
+                            // while opening; surface a non-retryable abort rather than retrying.
                             Err(_) => {
                                 Err(ReadSessionError::Aborted(AbortedError::new_with_context(
                                     "read session open task cancelled",
