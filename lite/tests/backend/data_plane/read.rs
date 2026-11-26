@@ -532,7 +532,7 @@ async fn test_read_with_bytes_limit_exact_fit() {
         Bytes::from_static(b"record-1"),
         Bytes::from_static(b"record-2"),
     ]);
-    let exact_limit = expected_batch[0].metered_size() + expected_batch[1].metered_size();
+    let exact_limit = (expected_batch[0].metered_size() + expected_batch[1].metered_size()) as u64;
 
     let start = ReadStart {
         from: ReadFrom::SeqNum(0),
@@ -563,7 +563,7 @@ async fn test_read_with_bytes_limit_smaller_than_first_record_returns_empty() {
     append_payloads(&backend, &basin_name, &stream_name, &[b"oversized"]).await;
 
     let first_size =
-        create_test_record_batch(vec![Bytes::from_static(b"oversized")])[0].metered_size();
+        create_test_record_batch(vec![Bytes::from_static(b"oversized")])[0].metered_size() as u64;
     assert!(first_size > 0);
 
     let start = ReadStart {
@@ -630,7 +630,7 @@ async fn test_read_with_count_or_bytes_limit_bytes_wins() {
     .await;
 
     let per_record_bytes =
-        create_test_record_batch(vec![Bytes::from_static(b"slot-0")])[0].metered_size();
+        create_test_record_batch(vec![Bytes::from_static(b"slot-0")])[0].metered_size() as u64;
 
     let start = ReadStart {
         from: ReadFrom::SeqNum(0),
@@ -730,7 +730,7 @@ async fn test_read_until_with_additional_limits() {
     .await;
 
     let per_record_bytes =
-        create_test_record_batch(vec![Bytes::from_static(b"ts-1000")])[0].metered_size();
+        create_test_record_batch(vec![Bytes::from_static(b"ts-1000")])[0].metered_size() as u64;
     let cases = vec![
         (
             "count wins",

@@ -144,9 +144,7 @@ async fn read_session(
                     .await?;
 
                 let mut records = Metered::with_capacity(
-                    limit.count()
-                        .unwrap_or(usize::MAX)
-                        .min(caps::RECORD_BATCH_MAX.count),
+                    limit.into_allowance(caps::RECORD_BATCH_MAX).count as usize,
                 );
 
                 while let EvaluatedReadLimit::Remaining(limit) = state.limit {
@@ -159,7 +157,10 @@ async fn read_session(
                     let record = kv::stream_record_data::deser_value(kv.value)?.sequenced(pos);
 
                     if end.until.deny(pos.timestamp)
-                        || limit.deny(records.len() + 1, records.metered_size() + record.metered_size())
+                        || limit.deny(
+                            records.len() as u64 + 1,
+                            records.metered_size() as u64 + record.metered_size() as u64,
+                        )
                     {
                         if records.is_empty() {
                             break 'session;
@@ -172,9 +173,10 @@ async fn read_session(
                         || records.metered_size() + record.metered_size() > caps::RECORD_BATCH_MAX.bytes
                     {
                         let new_records_buf = Metered::with_capacity(
-                            limit.count()
-                                .map_or(usize::MAX, |n| n.saturating_sub(records.len()))
-                                .min(caps::RECORD_BATCH_MAX.count),
+                            limit
+                                .count()
+                                .map_or(u64::MAX, |n| n.saturating_sub(records.len() as u64))
+                                .min(caps::RECORD_BATCH_MAX.count as u64) as usize,
                         );
                         yield state.on_batch(StoredReadBatch {
                             records: std::mem::replace(&mut records, new_records_buf),
@@ -362,8 +364,8 @@ impl ReadSessionState {
         let EvaluatedReadLimit::Remaining(limit) = self.limit else {
             panic!("batch after exhausted limit");
         };
-        let count = batch.records.len();
-        let bytes = batch.records.metered_size();
+        let count = batch.records.len() as u64;
+        let bytes = batch.records.metered_size() as u64;
         let last_position = last_record.position();
         assert!(limit.allow(count, bytes));
         assert!(self.until.allow(last_position.timestamp));
@@ -379,16 +381,18 @@ fn count_allowed_records(
     until: ReadUntil,
     records: &[Metered<StoredSequencedRecord>],
 ) -> usize {
-    let mut acc_size = 0;
-    let mut acc_count = 0;
+    let mut acc_size = 0u64;
+    let mut acc_count = 0usize;
     for record in records {
-        if limit.deny(acc_count + 1, acc_size + record.metered_size())
-            || until.deny(record.position().timestamp)
+        if limit.deny(
+            acc_count as u64 + 1,
+            acc_size + record.metered_size() as u64,
+        ) || until.deny(record.position().timestamp)
         {
             break;
         }
         acc_count += 1;
-        acc_size += record.metered_size();
+        acc_size += record.metered_size() as u64;
     }
     acc_count
 }

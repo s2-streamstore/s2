@@ -11,15 +11,16 @@ use std::{
 
 use futures_core::{FusedStream, Stream};
 use pin_project_lite::pin_project;
-use s2_common::read_extent::CountOrBytes;
 use tokio::time::{Instant, Sleep};
 
 use crate::{
     error::ValidationError,
-    types::{AppendInput, AppendRecord, AppendRecordBatch, FencingToken, RECORD_BATCH_MAX},
+    types::{
+        AppendInput, AppendRecord, AppendRecordBatch, BatchLimits, FencingToken, RECORD_BATCH_MAX,
+    },
 };
 
-pub(crate) const RECORD_BATCH_MIN: CountOrBytes = CountOrBytes { count: 1, bytes: 8 };
+pub(crate) const RECORD_BATCH_MIN: BatchLimits = BatchLimits { count: 1, bytes: 8 };
 
 pub(crate) fn validate_max_batch_bytes(max_batch_bytes: usize) -> Result<usize, ValidationError> {
     if max_batch_bytes < RECORD_BATCH_MIN.bytes {

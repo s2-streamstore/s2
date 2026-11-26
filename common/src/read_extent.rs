@@ -2,16 +2,16 @@ use crate::record::Timestamp;
 
 #[derive(Debug, Default, PartialEq, Eq, Hash, Clone, Copy)]
 pub struct CountOrBytes {
-    pub count: usize,
-    pub bytes: usize,
+    pub count: u64,
+    pub bytes: u64,
 }
 
 impl CountOrBytes {
     pub const ZERO: CountOrBytes = CountOrBytes { count: 0, bytes: 0 };
 
     pub const MAX: CountOrBytes = CountOrBytes {
-        count: usize::MAX,
-        bytes: usize::MAX,
+        count: u64::MAX,
+        bytes: u64::MAX,
     };
 }
 
@@ -19,12 +19,12 @@ impl CountOrBytes {
 pub enum ReadLimit {
     #[default]
     Unbounded,
-    Count(usize),
-    Bytes(usize),
+    Count(u64),
+    Bytes(u64),
     CountOrBytes(CountOrBytes),
 }
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Eq, Debug)]
 pub enum EvaluatedReadLimit {
     Remaining(ReadLimit),
     Exhausted,
@@ -39,7 +39,7 @@ impl ReadLimit {
         !matches!(self, ReadLimit::Unbounded)
     }
 
-    pub fn from_count_and_bytes(count: Option<usize>, bytes: Option<usize>) -> Self {
+    pub fn from_count_and_bytes(count: Option<u64>, bytes: Option<u64>) -> Self {
         match (count, bytes) {
             (None, None) => Self::Unbounded,
             (Some(0), _) | (_, Some(0)) => Self::Count(0),
@@ -49,7 +49,7 @@ impl ReadLimit {
         }
     }
 
-    pub fn count(&self) -> Option<usize> {
+    pub fn count(&self) -> Option<u64> {
         match self {
             ReadLimit::Unbounded => None,
             ReadLimit::Count(count) => Some(*count),
@@ -58,7 +58,7 @@ impl ReadLimit {
         }
     }
 
-    pub fn bytes(&self) -> Option<usize> {
+    pub fn bytes(&self) -> Option<u64> {
         match self {
             ReadLimit::Unbounded => None,
             ReadLimit::Count(_) => None,
@@ -67,7 +67,10 @@ impl ReadLimit {
         }
     }
 
-    pub fn into_allowance(self, max: CountOrBytes) -> CountOrBytes {
+    /// Clamp each dimension of this limit to `max`, filling any unbounded dimension with the
+    /// corresponding bound from `max`.
+    pub fn into_allowance(self, max: impl Into<CountOrBytes>) -> CountOrBytes {
+        let max = max.into();
         match self {
             ReadLimit::Unbounded => max,
             ReadLimit::Count(count) => CountOrBytes {
@@ -85,7 +88,7 @@ impl ReadLimit {
         }
     }
 
-    pub fn allow(&self, additional_count: usize, additional_bytes: usize) -> bool {
+    pub fn allow(&self, additional_count: u64, additional_bytes: u64) -> bool {
         match self {
             ReadLimit::Unbounded => true,
             ReadLimit::Count(count) => additional_count <= *count,
@@ -96,7 +99,7 @@ impl ReadLimit {
         }
     }
 
-    pub fn deny(&self, additional_count: usize, additional_bytes: usize) -> bool {
+    pub fn deny(&self, additional_count: u64, additional_bytes: u64) -> bool {
         match self {
             ReadLimit::Unbounded => false,
             ReadLimit::Count(count) => additional_count > *count,
@@ -109,7 +112,7 @@ impl ReadLimit {
 
     /// Given the amount of records already consumed, generate a new `ReadLimit` representing
     /// the remaining limit, or none if the limit has been met.
-    pub fn remaining(&self, consumed_count: usize, consumed_bytes: usize) -> EvaluatedReadLimit {
+    pub fn remaining(&self, consumed_count: u64, consumed_bytes: u64) -> EvaluatedReadLimit {
         let remaining = match self {
             ReadLimit::Unbounded => Some(ReadLimit::Unbounded),
             ReadLimit::Count(count) => {
@@ -197,15 +200,77 @@ mod test {
     )]
     #[case(ReadLimit::CountOrBytes(CountOrBytes{count: 50, bytes: 50}), 40, 45, EvaluatedReadLimit::Remaining(ReadLimit::CountOrBytes(CountOrBytes{count: 10, bytes: 5})))]
     #[case(ReadLimit::CountOrBytes(CountOrBytes{count: 50, bytes: 50}), 51, 45, EvaluatedReadLimit::Exhausted)]
+    #[case(
+        ReadLimit::CountOrBytes(CountOrBytes {
+            count: u64::from(u32::MAX) + 10,
+            bytes: u64::MAX,
+        }),
+        10,
+        100,
+        EvaluatedReadLimit::Remaining(ReadLimit::CountOrBytes(CountOrBytes {
+            count: u64::from(u32::MAX),
+            bytes: u64::MAX - 100,
+        }))
+    )]
     fn remaining(
         #[case] old_limit: ReadLimit,
-        #[case] consumed_count: usize,
-        #[case] consumed_bytes: usize,
+        #[case] consumed_count: u64,
+        #[case] consumed_bytes: u64,
         #[case] remaining_limit: EvaluatedReadLimit,
     ) {
         assert_eq!(
             old_limit.remaining(consumed_count, consumed_bytes),
             remaining_limit
         )
+    }
+
+    #[rstest]
+    #[case::unbounded(
+        ReadLimit::Unbounded,
+        CountOrBytes {
+            count: crate::caps::RECORD_BATCH_MAX.count as u64,
+            bytes: crate::caps::RECORD_BATCH_MAX.bytes as u64,
+        }
+    )]
+    #[case::count_below_cap(
+        ReadLimit::Count(500),
+        CountOrBytes {
+            count: 500,
+            bytes: crate::caps::RECORD_BATCH_MAX.bytes as u64,
+        }
+    )]
+    #[case::count_above_cap(
+        ReadLimit::Count(u64::MAX),
+        CountOrBytes {
+            count: crate::caps::RECORD_BATCH_MAX.count as u64,
+            bytes: crate::caps::RECORD_BATCH_MAX.bytes as u64,
+        }
+    )]
+    #[case::bytes_below_cap(
+        ReadLimit::Bytes(1024),
+        CountOrBytes {
+            count: crate::caps::RECORD_BATCH_MAX.count as u64,
+            bytes: 1024,
+        }
+    )]
+    #[case::bytes_above_cap(
+        ReadLimit::Bytes(u64::MAX),
+        CountOrBytes {
+            count: crate::caps::RECORD_BATCH_MAX.count as u64,
+            bytes: crate::caps::RECORD_BATCH_MAX.bytes as u64,
+        }
+    )]
+    #[case::both_mixed(
+        ReadLimit::from_count_and_bytes(Some(500), Some(u64::MAX)),
+        CountOrBytes {
+            count: 500,
+            bytes: crate::caps::RECORD_BATCH_MAX.bytes as u64,
+        }
+    )]
+    fn into_allowance_with_batch_limits(#[case] limit: ReadLimit, #[case] expected: CountOrBytes) {
+        assert_eq!(
+            limit.into_allowance(crate::caps::RECORD_BATCH_MAX),
+            expected
+        );
     }
 }

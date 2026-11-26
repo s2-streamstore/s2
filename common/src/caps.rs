@@ -10,10 +10,28 @@ pub const MAX_ACCESS_TOKEN_ID_LEN: usize = 96;
 /// Most access tokens a single `token-activity` metrics request may look up.
 pub const MAX_TOKEN_ACTIVITY_LOOKUPS: usize = 50;
 
+/// Record count and metered byte limits for a single batch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BatchLimits {
+    /// Number of records.
+    pub count: usize,
+    /// Metered bytes.
+    pub bytes: usize,
+}
+
+impl From<BatchLimits> for crate::read_extent::CountOrBytes {
+    fn from(limits: BatchLimits) -> Self {
+        Self {
+            count: limits.count as u64,
+            bytes: limits.bytes as u64,
+        }
+    }
+}
+
 /// All record batches in the system are limited to 1000 records.
 /// Batches are limited to a collective size of 1 MiB, which is also the maximum size of a single
 /// record.
-pub const RECORD_BATCH_MAX: crate::read_extent::CountOrBytes = crate::read_extent::CountOrBytes {
+pub const RECORD_BATCH_MAX: BatchLimits = BatchLimits {
     count: 1000,
     bytes: 1024 * 1024,
 };

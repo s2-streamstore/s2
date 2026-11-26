@@ -48,9 +48,7 @@ where
 {
     match read_limit {
         EvaluatedReadLimit::Remaining(limit) => {
-            Metered::with_capacity(limit.count().map_or(caps::RECORD_BATCH_MAX.count, |n| {
-                n.min(caps::RECORD_BATCH_MAX.count)
-            }))
+            Metered::with_capacity(limit.into_allowance(caps::RECORD_BATCH_MAX).count as usize)
         }
         EvaluatedReadLimit::Exhausted => Metered::default(),
     }
@@ -83,8 +81,8 @@ where
             match self.record_iterator.next() {
                 Some(Ok(record)) => {
                     if remaining_limit.deny(
-                        self.buffered_records.len() + 1,
-                        self.buffered_records.metered_size() + record.metered_size(),
+                        self.buffered_records.len() as u64 + 1,
+                        self.buffered_records.metered_size() as u64 + record.metered_size() as u64,
                     ) || self.until.deny(record.position().timestamp)
                     {
                         self.read_limit = EvaluatedReadLimit::Exhausted;
@@ -114,8 +112,8 @@ where
         if !self.buffered_records.is_empty() {
             self.read_limit = match self.read_limit {
                 EvaluatedReadLimit::Remaining(read_limit) => read_limit.remaining(
-                    self.buffered_records.len(),
-                    self.buffered_records.metered_size(),
+                    self.buffered_records.len() as u64,
+                    self.buffered_records.metered_size() as u64,
                 ),
                 EvaluatedReadLimit::Exhausted => EvaluatedReadLimit::Exhausted,
             };
@@ -303,7 +301,7 @@ mod tests {
         let first_size = expected[0].metered_size();
         let mut batcher = RecordBatcher::new(
             to_iter(expected.clone()),
-            ReadLimit::Bytes(first_size),
+            ReadLimit::Bytes(first_size as u64),
             ReadUntil::Unbounded,
         );
 

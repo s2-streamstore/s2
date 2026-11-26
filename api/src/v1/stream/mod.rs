@@ -204,12 +204,8 @@ impl From<ReadEnd> for s2_common::stream::ReadEnd {
     fn from(value: ReadEnd) -> Self {
         Self {
             limit: s2_common::read_extent::ReadLimit::from_count_and_bytes(
-                value
-                    .count
-                    .map(|c| usize::try_from(c).unwrap_or(usize::MAX)),
-                value
-                    .bytes
-                    .map(|b| usize::try_from(b).unwrap_or(usize::MAX)),
+                value.count,
+                value.bytes,
             ),
             until: value.until.into(),
             wait: value.wait.map(|w| Duration::from_secs(w as u64)),
@@ -493,7 +489,9 @@ impl ReadBatch {
 
 #[cfg(test)]
 mod tests {
-    use super::StreamInfo;
+    use s2_common::read_extent::{CountOrBytes, ReadLimit};
+
+    use super::{ReadEnd, StreamInfo};
 
     #[test]
     fn stream_info_deserializes_with_omitted_deleted_at() {
@@ -502,5 +500,22 @@ mod tests {
                 .expect("deleted_at is optional per OpenAPI");
         assert_eq!(info.name.as_ref(), "my-stream");
         assert!(info.deleted_at.is_none());
+    }
+
+    #[test]
+    fn read_end_preserves_u64_limits() {
+        let count = u64::MAX;
+        let bytes = u64::from(u32::MAX) + 1;
+        let common: s2_common::stream::ReadEnd = ReadEnd {
+            count: Some(count),
+            bytes: Some(bytes),
+            until: None,
+            wait: None,
+        }
+        .into();
+        assert_eq!(
+            common.limit,
+            ReadLimit::CountOrBytes(CountOrBytes { count, bytes })
+        );
     }
 }
