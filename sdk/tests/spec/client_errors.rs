@@ -1689,13 +1689,32 @@ async fn spec_t2_t7_t7b_m1_retry_safety_request_tokens_and_timeouts() {
 // spec: r1 E4, E8, L1, L2, L3
 #[tokio::test(flavor = "current_thread")]
 async fn spec_e4_e8_l1_l2_l3_logging_levels_secret_redaction_and_unobserved_errors() {
-    use std::sync::atomic::AtomicU64;
+    use std::sync::{OnceLock, atomic::AtomicU64};
 
     use tracing::{
-        Event, Id, Level, Metadata, Subscriber,
+        Dispatch, Event, Id, Level, Metadata, Subscriber,
         field::{Field, Visit},
+        level_filters::LevelFilter,
         span::{Attributes, Record},
     };
+
+    struct AlwaysOffSubscriber;
+    impl Subscriber for AlwaysOffSubscriber {
+        fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
+            false
+        }
+        fn max_level_hint(&self) -> Option<LevelFilter> {
+            Some(LevelFilter::OFF)
+        }
+        fn new_span(&self, _span: &Attributes<'_>) -> Id {
+            Id::from_u64(1)
+        }
+        fn record(&self, _span: &Id, _values: &Record<'_>) {}
+        fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+        fn event(&self, _event: &Event<'_>) {}
+        fn enter(&self, _span: &Id) {}
+        fn exit(&self, _span: &Id) {}
+    }
 
     #[derive(Clone, Default)]
     struct CaptureSubscriber {
@@ -1732,6 +1751,21 @@ async fn spec_e4_e8_l1_l2_l3_logging_levels_secret_redaction_and_unobserved_erro
         fn enter(&self, _span: &Id) {}
         fn exit(&self, _span: &Id) {}
     }
+
+    // Work around a `tracing-core` callsite interest caching bug under parallel tests: when at
+    // most one `Dispatch` is registered, `Dispatchers::has_just_one` stays `true`, so any
+    // callsite first reached on a sibling test thread (which has no thread-local subscriber)
+    // evaluates `NoSubscriber::register_callsite` and permanently caches `Interest::never()`.
+    // Registering two `LevelFilter::OFF` dispatches first disables that fast path before the
+    // global max level is raised, ensuring newly-registered callsites consult all active
+    // dispatchers and cache `Interest::sometimes()`.
+    static MULTI_DISPATCH_GUARD: OnceLock<[Dispatch; 2]> = OnceLock::new();
+    let _ = MULTI_DISPATCH_GUARD.get_or_init(|| {
+        [
+            Dispatch::new(AlwaysOffSubscriber),
+            Dispatch::new(AlwaysOffSubscriber),
+        ]
+    });
 
     let capture = CaptureSubscriber::default();
     let _guard = tracing::subscriber::set_default(capture.clone());
@@ -1881,10 +1915,18 @@ async fn spec_e4_e8_l1_l2_l3_logging_levels_secret_redaction_and_unobserved_erro
         .iter()
         .filter(|(target, _, _)| target.starts_with("s2_sdk"))
         .collect();
-    assert!(
-        !sdk_events.is_empty(),
-        "expected SDK debug events during retries"
-    );
+    for expected_target in [
+        "s2_sdk::api",
+        "s2_sdk::session::append",
+        "s2_sdk::session::read",
+    ] {
+        assert!(
+            sdk_events
+                .iter()
+                .any(|(target, _, _)| target == expected_target),
+            "expected SDK debug events from {expected_target} during retries; got {sdk_events:?}"
+        );
+    }
     for (target, level, msg) in &sdk_events {
         assert!(
             *level == Level::DEBUG || *level == Level::TRACE,
