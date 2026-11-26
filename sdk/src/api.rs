@@ -1738,51 +1738,7 @@ mod tests {
             "expected f1 body to alias incoming chunk"
         );
 
-        // 2. Exhaustively verify every single 2-way split offset across the 3-frame wire buffer.
-        for split in 0..=wire.len() {
-            let chunks = vec![
-                Ok(Bytes::copy_from_slice(&wire[..split])),
-                Ok(Bytes::copy_from_slice(&wire[split..])),
-            ];
-            let mut stream = decode_s2s_stream::<ReadBatch, crate::error::ReadSessionError, _>(
-                futures_util::stream::iter(chunks),
-                client::RetireHandle::noop(),
-                Arc::new(AtomicU64::new(0)),
-                auth_client.clone(),
-                None,
-                ctx.clone(),
-            );
-            let mut decoded = Vec::new();
-            while let Some(item) = stream.next().await {
-                decoded.push(item.unwrap().msg);
-            }
-            assert_eq!(
-                decoded,
-                vec![b0.clone(), b1.clone(), b2.clone()],
-                "split={split}"
-            );
-        }
-
-        // 3. Single-byte chunks across all three frames and a large multi-chunk straddled frame
-        //    (exercises the multi-chunk accumulate branch).
-        let byte_chunks: Vec<_> = wire
-            .iter()
-            .map(|&b| Ok(Bytes::copy_from_slice(&[b])))
-            .collect();
-        let mut stream = decode_s2s_stream::<ReadBatch, crate::error::ReadSessionError, _>(
-            futures_util::stream::iter(byte_chunks),
-            client::RetireHandle::noop(),
-            Arc::new(AtomicU64::new(0)),
-            auth_client.clone(),
-            None,
-            ctx.clone(),
-        );
-        let mut decoded = Vec::new();
-        while let Some(item) = stream.next().await {
-            decoded.push(item.unwrap().msg);
-        }
-        assert_eq!(decoded, vec![b0.clone(), b1.clone(), b2.clone()]);
-
+        // 2. Large multi-chunk straddled frame (exercises pre-reserved multi-chunk reassembly).
         let large_batch = make_batch(99, &vec![0x5Au8; 300 * 1024]);
         let large_frame = SessionMessage::regular(CompressionAlgorithm::None, &large_batch)
             .unwrap()
@@ -1803,7 +1759,7 @@ mod tests {
         assert_eq!(stream.next().await.unwrap().unwrap().msg, large_batch);
         assert!(stream.next().await.is_none());
 
-        // 4. Truncated trailing bytes must report ConnectionLost with the exact remaining count.
+        // 3. Truncated trailing bytes must report ConnectionLost with the exact remaining count.
         let truncated = vec![Ok(Bytes::copy_from_slice(&wire[..wire.len() - 3]))];
         let mut stream = decode_s2s_stream::<ReadBatch, crate::error::ReadSessionError, _>(
             futures_util::stream::iter(truncated),

@@ -317,7 +317,8 @@ mod tests {
                     if e.kind() == std::io::ErrorKind::InvalidData
             ));
 
-            // Underlying body transport error must remain reachable via `Error::source()`.
+            // Underlying body transport error must preserve `ErrorKind::Other` wrapping
+            // `axum::Error` so callers can classify transport body disconnects.
             let err_res = extract_s2s_inputs(vec![Err(std::io::Error::new(
                 std::io::ErrorKind::ConnectionReset,
                 "peer reset",
@@ -327,7 +328,13 @@ mod tests {
             let Err(AppendInputStreamError::FrameDecode(ref err)) = err_res[0] else {
                 panic!("expected FrameDecode");
             };
-            assert!(std::error::Error::source(err).is_some());
+            assert_eq!(err.kind(), std::io::ErrorKind::Other);
+            assert!(
+                err.get_ref()
+                    .and_then(|e| e.downcast_ref::<axum::Error>())
+                    .is_some(),
+                "expected FrameDecode error to wrap axum::Error"
+            );
         });
     }
 }

@@ -949,9 +949,10 @@ impl ReadInput {
 /// Record that is durably sequenced on a stream.
 ///
 /// Note: `body` and header `Bytes` slices may share the backing allocation of the network chunk
-/// or batch frame they were decoded from. Copy into an independent allocation (for example via
-/// `.to_vec()` or `Bytes::copy_from_slice`) if retaining small records long-term independently of
-/// their batch (`Bytes::clone` still shares the underlying buffer).
+/// or batch frame they were decoded from, so retaining a single record can keep its entire batch
+/// or transport buffer alive (up to ~2.5 MiB). Copy into an independent allocation (for example
+/// via `.to_vec()` or `Bytes::copy_from_slice`) if retaining small records long-term independently
+/// of their batch (`Bytes::clone` still shares the underlying buffer).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct SequencedRecord {
@@ -1036,6 +1037,10 @@ impl MeteredBytes for SequencedRecord {
 
 /// Batch of records returned by [`read`](crate::S2Stream::read) or streamed by
 /// [`read_batch_session`](crate::S2Stream::read_batch_session).
+///
+/// Note: record `body` and header `Bytes` slices may share the backing allocation of the decoded
+/// batch or network chunk (up to ~2.5 MiB); see [`SequencedRecord`] if retaining individual
+/// records long-term.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct ReadBatch {
