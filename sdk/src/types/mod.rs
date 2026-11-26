@@ -76,13 +76,13 @@ use crate::error::ValidationError;
 /// Record count and metered byte limits for a batch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BatchLimits {
-    /// Maximum number of records in a batch (`1000`).
+    /// Number of records.
     pub count: usize,
-    /// Maximum metered bytes in a batch (`1 MiB`).
+    /// Metered bytes.
     pub bytes: usize,
 }
 
-/// Maximum record batch limits (count and metered bytes).
+/// Maximum record batch limits (`1000` records, `1 MiB` metered bytes).
 pub const RECORD_BATCH_MAX: BatchLimits = BatchLimits {
     count: s2_common::caps::RECORD_BATCH_MAX.count,
     bytes: s2_common::caps::RECORD_BATCH_MAX.bytes,

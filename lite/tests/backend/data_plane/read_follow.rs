@@ -202,7 +202,7 @@ async fn test_follow_mode_broadcast_lag_respects_count_limit() {
         clamp: false,
     };
     let end = ReadEnd {
-        limit: ReadLimit::Count(count_limit),
+        limit: ReadLimit::Count(count_limit as u64),
         until: ReadUntil::Unbounded,
         wait: Some(Duration::from_secs(3)),
     };
@@ -244,7 +244,7 @@ async fn test_follow_mode_broadcast_lag_respects_bytes_limit() {
     append_payloads(&backend, &basin_name, &stream_name, &[b"item-00"]).await;
 
     let per_record_bytes =
-        create_test_record_batch(vec![Bytes::from_static(b"item-00")])[0].metered_size();
+        create_test_record_batch(vec![Bytes::from_static(b"item-00")])[0].metered_size() as u64;
     let message_count = FOLLOWER_MAX_LAG + 25;
     let bytes_limit = per_record_bytes * 3;
 
@@ -751,7 +751,7 @@ async fn test_follow_mode_with_bytes_limit_truncates_live_batch() {
     append_payloads(&backend, &basin_name, &stream_name, &[b"item-00"]).await;
 
     let per_record_bytes =
-        create_test_record_batch(vec![Bytes::from_static(b"item-00")])[0].metered_size();
+        create_test_record_batch(vec![Bytes::from_static(b"item-00")])[0].metered_size() as u64;
 
     let session = open_read_session(
         &backend,
@@ -818,7 +818,7 @@ async fn test_follow_mode_with_bytes_limit_smaller_than_first_live_record_closes
     append_payloads(&backend, &basin_name, &stream_name, &[b"item-00"]).await;
 
     let per_record_bytes =
-        create_test_record_batch(vec![Bytes::from_static(b"item-00")])[0].metered_size();
+        create_test_record_batch(vec![Bytes::from_static(b"item-00")])[0].metered_size() as u64;
 
     let session = open_read_session(
         &backend,

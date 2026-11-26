@@ -204,12 +204,8 @@ impl From<ReadEnd> for s2_common::stream::ReadEnd {
     fn from(value: ReadEnd) -> Self {
         Self {
             limit: s2_common::read_extent::ReadLimit::from_count_and_bytes(
-                value
-                    .count
-                    .map(|c| usize::try_from(c).unwrap_or(usize::MAX)),
-                value
-                    .bytes
-                    .map(|b| usize::try_from(b).unwrap_or(usize::MAX)),
+                value.count,
+                value.bytes,
             ),
             until: value.until.into(),
             wait: value.wait.map(|w| Duration::from_secs(w as u64)),
