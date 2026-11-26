@@ -77,7 +77,7 @@ fn read_to_end_limited(mut reader: impl Read, initial_capacity: usize) -> std::i
             "decompressed payload exceeds limit",
         ));
     }
-    let max_slack = (buf.len() / 8).max(4096);
+    let max_slack = (buf.len() / 8).max(64);
     shrink_if_excess_slack(&mut buf, max_slack);
     Ok(Bytes::from(buf))
 }
@@ -125,6 +125,7 @@ pub fn encode_regular_frame(
 ///
 /// `encode_payload` must append exactly `encoded_len` bytes to the provided buffer without
 /// clearing or modifying any existing bytes in it.
+#[doc(hidden)]
 pub fn encode_regular_frame_with(
     compression: CompressionAlgorithm,
     encoded_len: usize,
@@ -191,7 +192,7 @@ pub fn encode_regular_frame_with(
     write_length_prefix(&mut out, FLAG_TOTAL_SIZE + payload_len);
     // Trim excess pre-allocated slack when compression ratio is high so inflight frames
     // don't pin an uncompressed-sized allocation while awaiting acknowledgement.
-    let max_slack = (out.len() / 8).max(4096);
+    let max_slack = (out.len() / 8).max(64);
     shrink_if_excess_slack(&mut out, max_slack);
     Ok(Bytes::from(out))
 }
@@ -286,7 +287,7 @@ impl CompressedData {
             }
             CompressionAlgorithm::None => unreachable!("handled above"),
         };
-        let max_slack = (buf.len() / 8).max(4096);
+        let max_slack = (buf.len() / 8).max(64);
         shrink_if_excess_slack(&mut buf, max_slack);
         let payload = Bytes::from(buf);
         if payload.len() > MAX_FRAME_PAYLOAD_BYTES {
@@ -1233,12 +1234,28 @@ mod test {
     }
 
     #[test]
-    fn compressed_data_for_proto_trims_slack_on_highly_compressible_payload() {
-        let proto = TestProto::new(vec![0u8; 256 * 1024]);
-        for alg in [CompressionAlgorithm::Gzip, CompressionAlgorithm::Zstd] {
-            let compressed = CompressedData::for_proto(alg, &proto).unwrap();
-            assert!(compressed.payload.len() < 4096);
-            assert_eq!(compressed.try_into_proto::<TestProto>().unwrap(), proto);
+    fn compressed_frames_trim_slack_for_small_and_large_compressible_payloads() {
+        for size in [2_000usize, 4_000, 256 * 1024] {
+            let proto = TestProto::new(vec![0u8; size]);
+            for alg in [CompressionAlgorithm::Gzip, CompressionAlgorithm::Zstd] {
+                let frame = encode_regular_frame(alg, &proto).unwrap();
+                let frame_len = frame.len();
+                let frame_cap = frame.try_into_mut().unwrap().capacity();
+                assert!(
+                    frame_cap <= frame_len + (frame_len / 8).max(64) + 64,
+                    "encode_regular_frame({alg:?}, {size}): len={frame_len} retained cap={frame_cap}"
+                );
+
+                let compressed = CompressedData::for_proto(alg, &proto).unwrap();
+                let payload_len = compressed.payload.len();
+                let payload_cap = compressed.payload.try_into_mut().unwrap().capacity();
+                assert!(
+                    payload_cap <= payload_len + (payload_len / 8).max(64) + 64,
+                    "CompressedData::for_proto({alg:?}, {size}): len={payload_len} retained cap={payload_cap}"
+                );
+                let roundtrip = CompressedData::for_proto(alg, &proto).unwrap();
+                assert_eq!(roundtrip.try_into_proto::<TestProto>().unwrap(), proto);
+            }
         }
     }
 }

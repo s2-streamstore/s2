@@ -1064,8 +1064,9 @@ impl ReadInput {
 /// Record that is durably sequenced on a stream.
 ///
 /// Note: `body` and header `Bytes` slices may share the backing allocation of the network chunk
-/// or batch frame they were decoded from. Clone into an owned `Vec<u8>` (or
-/// `Bytes::copy_from_slice`) if retaining small records long-term independently of their batch.
+/// or batch frame they were decoded from. Copy into an independent allocation (for example via
+/// `.to_vec()` or `Bytes::copy_from_slice`) if retaining small records long-term independently of
+/// their batch (`Bytes::clone` still shares the underlying buffer).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct SequencedRecord {
@@ -1236,6 +1237,10 @@ mod tests {
                     )),
                     AppendRecord::from(CommandRecord::trim(42)).with_timestamp(123456),
                     AppendRecord::new(Bytes::new()).unwrap(),
+                    AppendRecord::new(vec![0x5Au8; 200])
+                        .unwrap()
+                        .with_headers(vec![Header::new(vec![b'k'; 160], vec![b'v'; 200])])
+                        .unwrap(),
                 ])
                 .unwrap(),
             )
