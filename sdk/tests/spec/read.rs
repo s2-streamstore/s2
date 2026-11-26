@@ -1249,6 +1249,58 @@ async fn regression_read_session_r11d_caught_up_and_count_exhausted() {
     );
 }
 
+// spec: r1 R11d
+#[tokio::test]
+async fn spec_r11d_416_after_retry_before_any_response_is_read_unwritten() {
+    // R11d applies only after the session has decoded at least one record batch or heartbeat.
+    // Starting at an unclamped unwritten seq_num with no wait remaining (either omitted wait with
+    // `count` set or explicit `wait = 0`) that retries a transient 503 on attempt 1 and gets 416
+    // (`tail.seq_num == sent_seq_num`) on attempt 2 must still fail with ReadUnwrittenError rather
+    // than closing cleanly.
+    for input in [
+        ReadInput::new()
+            .with_start(ReadStart::SeqNum(5))
+            .with_count(10),
+        ReadInput::new()
+            .with_start(ReadStart::SeqNum(5))
+            .with_wait_secs(0),
+    ] {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let server = MockH2Server::start({
+            let attempts = attempts.clone();
+            move |_conn_id, _req, respond| {
+                let attempts = attempts.clone();
+                async move {
+                    let n = attempts.fetch_add(1, Ordering::SeqCst);
+                    if n == 0 {
+                        send_json(respond, 503, r#"{"code":"unavailable","message":"retry"}"#);
+                    } else {
+                        send_tail_json(respond, 416, 5, 5000);
+                    }
+                }
+            }
+        })
+        .await;
+
+        let mut session = server
+            .stream(fast_retry_config(2))
+            .read_session(input, ReadSessionConfig::default())
+            .unwrap();
+
+        let err = session
+            .next()
+            .await
+            .expect("R11d: 416 before any decoded response must yield an error, not clean end")
+            .expect_err("expected ReadUnwrittenError");
+        assert!(
+            matches!(err, ReadSessionError::ReadUnwritten(ref e) if e.tail.seq_num == 5),
+            "R11d: expected ReadUnwrittenError with tail=5, got {err:?}"
+        );
+        assert_eq!(server.request_count(), 2);
+        assert!(session.next().await.is_none());
+    }
+}
+
 // spec: r1 T5a, R9, R9a, R9c, R9d, R10
 #[tokio::test]
 async fn spec_t5a_empty_frame_does_not_reset_budget_and_r9_close_boundary() {

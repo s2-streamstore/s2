@@ -925,62 +925,70 @@ impl BasinClient {
 
         let stream = Box::pin(try_stream! {
             while let Some(chunk) = bytes_stream.next().await {
-                let chunk = chunk.map_err(|e| E::from_http(e, ctx.clone()))?;
-                if !chunk.is_empty() {
+                let mut remaining = chunk.map_err(|e| E::from_http(e, ctx.clone()))?;
+                if !remaining.is_empty() {
                     stream_chunks.fetch_add(1, Ordering::Relaxed);
                 }
-                buffer.extend_from_slice(&chunk);
-                buffer_peak_capacity = buffer_peak_capacity.max(buffer.capacity());
 
-                loop {
-                    match decoder.decode(&mut buffer) {
-                        Ok(Some(SessionMessage::Regular(msg))) => {
-                            let reconnect_advised = msg.reconnect_advised();
-                            if reconnect_advised {
-                                stream_retire.retire();
-                            }
-                            let decoded = msg.try_into_proto().map_err(|e| {
-                                E::from(ProtocolError::new_with_context(
-                                    format!("protobuf decode: {e}"),
-                                    ctx.clone(),
-                                ))
-                            })?;
-                            // Release any oversized backing allocation when the buffer is empty at
-                            // a frame boundary so a parked session does not pin a 1–2.5 MiB
-                            // BytesMut allocation (even when `split_to` left
-                            // `buffer.capacity() == 0`).
-                            release_excess_s2s_buffer(&mut buffer, &mut buffer_peak_capacity);
-                            yield S2sFrame {
-                                msg: decoded,
-                                reconnect_advised,
-                            };
-                        }
-                        Ok(Some(SessionMessage::Terminal(msg))) => {
-                            let error = E::from_terminal_message(msg, ctx.clone());
-                            if error.should_retire_connection() {
-                                stream_retire.retire();
-                            }
-                            auth_client.invalidate_access_token_if_rejected(
-                                &error,
-                                access_token.as_deref(),
-                            );
-                            Err::<(), E>(error)?;
-                        }
-                        Ok(None) => {
-                            if buffer.is_empty() {
+                while !remaining.is_empty() {
+                    let take = next_s2s_chunk_take(&buffer, remaining.len());
+                    let piece = remaining.split_to(take);
+                    buffer.extend_from_slice(&piece);
+                    buffer_peak_capacity = buffer_peak_capacity.max(buffer.capacity());
+
+                    loop {
+                        match decoder.decode(&mut buffer) {
+                            Ok(Some(SessionMessage::Regular(msg))) => {
+                                let reconnect_advised = msg.reconnect_advised();
+                                if reconnect_advised {
+                                    stream_retire.retire();
+                                }
+                                let decoded = msg.try_into_proto().map_err(|e| {
+                                    E::from(ProtocolError::new_with_context(
+                                        format!("protobuf decode: {e}"),
+                                        ctx.clone(),
+                                    ))
+                                })?;
+                                // Release any oversized backing allocation when the buffer is empty
+                                // at a frame boundary so a parked session does not pin a 1–2.5 MiB
+                                // BytesMut allocation (even when `split_to` left
+                                // `buffer.capacity() == 0`).
                                 release_excess_s2s_buffer(&mut buffer, &mut buffer_peak_capacity);
-                            } else {
-                                reserve_for_incomplete_s2s_frame(
-                                    &mut buffer,
-                                    &mut buffer_peak_capacity,
-                                );
+                                yield S2sFrame {
+                                    msg: decoded,
+                                    reconnect_advised,
+                                };
                             }
-                            break;
+                            Ok(Some(SessionMessage::Terminal(msg))) => {
+                                let error = E::from_terminal_message(msg, ctx.clone());
+                                if error.should_retire_connection() {
+                                    stream_retire.retire();
+                                }
+                                auth_client.invalidate_access_token_if_rejected(
+                                    &error,
+                                    access_token.as_deref(),
+                                );
+                                Err::<(), E>(error)?;
+                            }
+                            Ok(None) => {
+                                if buffer.is_empty() {
+                                    release_excess_s2s_buffer(
+                                        &mut buffer,
+                                        &mut buffer_peak_capacity,
+                                    );
+                                } else {
+                                    reserve_for_incomplete_s2s_frame(
+                                        &mut buffer,
+                                        &mut buffer_peak_capacity,
+                                    );
+                                }
+                                break;
+                            }
+                            Err(err) => Err(E::from(ProtocolError::new_with_context(
+                                format!("s2s frame decode: {err}"),
+                                ctx.clone(),
+                            )))?,
                         }
-                        Err(err) => Err(E::from(ProtocolError::new_with_context(
-                            format!("s2s frame decode: {err}"),
-                            ctx.clone(),
-                        )))?,
                     }
                 }
             }
@@ -1047,6 +1055,34 @@ fn release_excess_s2s_buffer(buffer: &mut BytesMut, peak_capacity: &mut usize) {
     }
 }
 
+/// Total wire length (`3 + frame_len`) of an incomplete S2S frame already buffered in `buffer`.
+///
+/// Must only be called when [`FrameDecoder::decode`] has already returned `Ok(None)` on `buffer`,
+/// which guarantees any 3-byte length prefix present is within the S2S decode limit.
+fn incomplete_s2s_frame_total_size(buffer: &[u8]) -> Option<usize> {
+    if buffer.len() < 3 {
+        return None;
+    }
+    let frame_len =
+        ((buffer[0] as usize) << 16) | ((buffer[1] as usize) << 8) | (buffer[2] as usize);
+    let total_size = 3 + frame_len;
+    (total_size > buffer.len()).then_some(total_size)
+}
+
+/// Number of bytes from the next incoming HTTP/2 chunk to append to `buffer`.
+///
+/// When `buffer` already holds an incomplete frame whose length prefix has been validated and
+/// pre-reserved, capping the append at that frame's boundary avoids overflowing the exact
+/// reservation and copying a large frame just before decoding it. It also leaves `buffer` empty
+/// immediately after that frame decodes so [`release_excess_s2s_buffer`] can drop the oversized
+/// backing allocation before yielding.
+fn next_s2s_chunk_take(buffer: &[u8], remaining_len: usize) -> usize {
+    match incomplete_s2s_frame_total_size(buffer) {
+        Some(total_size) => (total_size - buffer.len()).min(remaining_len),
+        None => remaining_len,
+    }
+}
+
 /// Pre-reserve space for an incomplete S2S frame once its 3-byte length prefix has arrived.
 ///
 /// Called only after [`FrameDecoder::decode`] returned `Ok(None)`, which has already verified the
@@ -1054,13 +1090,7 @@ fn release_excess_s2s_buffer(buffer: &mut BytesMut, peak_capacity: &mut usize) {
 /// after [`release_excess_s2s_buffer`] without adding pre-reserve amplification to server-side
 /// decoding.
 fn reserve_for_incomplete_s2s_frame(buffer: &mut BytesMut, peak_capacity: &mut usize) {
-    if buffer.len() < 3 {
-        return;
-    }
-    let frame_len =
-        ((buffer[0] as usize) << 16) | ((buffer[1] as usize) << 8) | (buffer[2] as usize);
-    let total_size = 3 + frame_len;
-    if total_size > buffer.len() {
+    if let Some(total_size) = incomplete_s2s_frame_total_size(buffer) {
         buffer.reserve(total_size - buffer.len());
         *peak_capacity = (*peak_capacity).max(buffer.capacity());
     }
@@ -1706,34 +1736,174 @@ mod tests {
         release_excess_s2s_buffer(&mut small, &mut small_peak);
         assert!(small.capacity() >= 512);
 
-        // Large incomplete frame pre-reserves its full size after the 3-byte prefix arrives so
-        // subsequent 16 KiB chunks do not trigger repeated doubling reallocations, and is still
-        // released once drained.
-        let frame_len: usize = 512 * 1024;
-        let total_size = 3 + frame_len;
+        // Helper to build a valid uncompressed regular S2S wire frame: 3-byte length prefix,
+        // 1-byte flags (0 = regular, uncompressed), and payload.
+        let encode_regular_frame = |payload: &[u8]| -> Vec<u8> {
+            let frame_len = 1 + payload.len();
+            let mut out = Vec::with_capacity(3 + frame_len);
+            out.push(((frame_len >> 16) & 0xff) as u8);
+            out.push(((frame_len >> 8) & 0xff) as u8);
+            out.push((frame_len & 0xff) as u8);
+            out.push(0x00);
+            out.extend_from_slice(payload);
+            out
+        };
+
+        // 1. Split 3-byte length prefix + large frame whose final 16 KiB HTTP/2 chunk crosses the
+        //    frame boundary into a small Frame 2 and a partial Frame 3.
+        let frame1 = encode_regular_frame(&vec![0xEE; 512 * 1024 - 1]);
+        let frame2 = encode_regular_frame(&[0x42; 64]);
+        let frame3 = encode_regular_frame(&[0x77; 128]);
+        let mut wire = Vec::with_capacity(frame1.len() + frame2.len() + 10);
+        wire.extend_from_slice(&frame1);
+        wire.extend_from_slice(&frame2);
+        wire.extend_from_slice(&frame3[..10]);
+
+        // Split into chunks: 1 byte (incomplete prefix), then 16 KiB chunks so the last chunk of
+        // frame1 crosses into frame2 and frame3.
+        let mut chunks = Vec::new();
+        chunks.push(bytes::Bytes::copy_from_slice(&wire[..1]));
+        for slice in wire[1..].chunks(16 * 1024) {
+            chunks.push(bytes::Bytes::copy_from_slice(slice));
+        }
+
+        let mut decoder = FrameDecoder;
         let mut streaming = BytesMut::new();
         let mut streaming_peak = 0;
-        let mut chunk = vec![0xEE; 16 * 1024];
-        chunk[0] = ((frame_len >> 16) & 0xff) as u8;
-        chunk[1] = ((frame_len >> 8) & 0xff) as u8;
-        chunk[2] = (frame_len & 0xff) as u8;
-        streaming.extend_from_slice(&chunk);
-        reserve_for_incomplete_s2s_frame(&mut streaming, &mut streaming_peak);
-        let reserved_ptr = streaming.as_ptr();
-        assert!(streaming.capacity() >= total_size);
-        assert!(streaming_peak >= total_size);
-        while streaming.len() < total_size {
-            let take = (16 * 1024).min(total_size - streaming.len());
-            streaming.extend_from_slice(&vec![0xEE; take]);
-            reserve_for_incomplete_s2s_frame(&mut streaming, &mut streaming_peak);
+        let mut reserved_ptr: Option<*const u8> = None;
+        let mut decoded_count = 0usize;
+
+        for mut remaining in chunks {
+            while !remaining.is_empty() {
+                let take = next_s2s_chunk_take(&streaming, remaining.len());
+                let piece = remaining.split_to(take);
+                streaming.extend_from_slice(&piece);
+                streaming_peak = streaming_peak.max(streaming.capacity());
+
+                if decoded_count == 0
+                    && let Some(ptr) = reserved_ptr
+                {
+                    assert_eq!(
+                        streaming.as_ptr(),
+                        ptr,
+                        "subsequent chunks (including boundary-crossing chunk) must not reallocate once pre-reserved"
+                    );
+                }
+
+                loop {
+                    match decoder.decode(&mut streaming).unwrap() {
+                        Some(SessionMessage::Regular(_)) => {
+                            decoded_count += 1;
+                            release_excess_s2s_buffer(&mut streaming, &mut streaming_peak);
+                            if decoded_count == 1 {
+                                assert!(
+                                    streaming.is_empty(),
+                                    "boundary-capped append must leave buffer empty after Frame 1"
+                                );
+                                assert_eq!(
+                                    streaming_peak, 0,
+                                    "large Frame 1 slab must be released immediately even when remaining holds Frame 2"
+                                );
+                                assert!(
+                                    !remaining.is_empty(),
+                                    "Frame 2 and partial Frame 3 must remain in the chunk tail"
+                                );
+                            }
+                        }
+                        Some(SessionMessage::Terminal(_)) => panic!("unexpected terminal frame"),
+                        None => {
+                            if streaming.is_empty() {
+                                release_excess_s2s_buffer(&mut streaming, &mut streaming_peak);
+                            } else {
+                                reserve_for_incomplete_s2s_frame(
+                                    &mut streaming,
+                                    &mut streaming_peak,
+                                );
+                                if decoded_count == 0
+                                    && streaming.len() >= 3
+                                    && reserved_ptr.is_none()
+                                {
+                                    assert!(streaming.capacity() >= frame1.len());
+                                    assert!(streaming_peak >= frame1.len());
+                                    reserved_ptr = Some(streaming.as_ptr());
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
         }
-        assert_eq!(
-            streaming.as_ptr(),
-            reserved_ptr,
-            "subsequent chunks must not reallocate once pre-reserved"
+        assert_eq!(decoded_count, 2);
+        assert_eq!(streaming.as_ref(), &frame3[..10]);
+        assert!(
+            streaming.capacity() <= S2S_READ_BUFFER_MAX_IDLE_CAPACITY,
+            "Frame 2 and partial Frame 3 must use a small buffer after Frame 1 slab release, got {}",
+            streaming.capacity()
         );
-        let _frame = streaming.split_to(total_size);
-        release_excess_s2s_buffer(&mut streaming, &mut streaming_peak);
-        assert_eq!(streaming_peak, 0);
+
+        // 2. Shared backing allocation: a small Frame A is still held alive after split_to while
+        //    the leftover prefix of a 512 KiB Frame B in the same first chunk pre-reserves once and
+        //    does not reallocate on subsequent chunks (including a boundary-crossing tail).
+        let small_a = encode_regular_frame(&[0x11; 64]);
+        let large_b = encode_regular_frame(&vec![0x22; 512 * 1024 - 1]);
+        let trailing_c = encode_regular_frame(&[0x33; 32]);
+        let mut wire2 = Vec::with_capacity(small_a.len() + large_b.len() + trailing_c.len());
+        wire2.extend_from_slice(&small_a);
+        wire2.extend_from_slice(&large_b);
+        wire2.extend_from_slice(&trailing_c);
+
+        let mut buf2 = BytesMut::new();
+        let mut peak2 = 0;
+        let mut held_a = None;
+        let mut large_b_ptr: Option<*const u8> = None;
+        let mut decoded2 = 0usize;
+
+        for mut remaining in wire2.chunks(16 * 1024).map(bytes::Bytes::copy_from_slice) {
+            while !remaining.is_empty() {
+                let take = next_s2s_chunk_take(&buf2, remaining.len());
+                let piece = remaining.split_to(take);
+                buf2.extend_from_slice(&piece);
+                peak2 = peak2.max(buf2.capacity());
+                if decoded2 == 1
+                    && let Some(ptr) = large_b_ptr
+                {
+                    assert_eq!(
+                        buf2.as_ptr(),
+                        ptr,
+                        "pre-reserved Frame B must not reallocate while Frame A is still held"
+                    );
+                }
+                loop {
+                    match decoder.decode(&mut buf2).unwrap() {
+                        Some(SessionMessage::Regular(msg)) => {
+                            decoded2 += 1;
+                            if decoded2 == 1 {
+                                held_a = Some(msg);
+                            }
+                            release_excess_s2s_buffer(&mut buf2, &mut peak2);
+                            if decoded2 == 2 {
+                                assert_eq!(peak2, 0);
+                            }
+                        }
+                        Some(SessionMessage::Terminal(_)) => panic!("unexpected terminal frame"),
+                        None => {
+                            if buf2.is_empty() {
+                                release_excess_s2s_buffer(&mut buf2, &mut peak2);
+                            } else {
+                                reserve_for_incomplete_s2s_frame(&mut buf2, &mut peak2);
+                                if decoded2 == 1 && large_b_ptr.is_none() {
+                                    assert!(buf2.capacity() >= large_b.len());
+                                    large_b_ptr = Some(buf2.as_ptr());
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(held_a.is_some());
+        assert_eq!(decoded2, 3);
     }
 }
