@@ -568,4 +568,68 @@ mod test {
 
         backend.close().await.expect("close backend");
     }
+
+    #[tokio::test]
+    async fn control_plane_returns_basin_not_found_and_deletion_pending() {
+        let (app, backend, basin) = setup_app("basin-errors").await;
+        let missing_basin = "missing-basin-name";
+
+        for (method, uri) in [("GET", "/v1/streams/s"), ("DELETE", "/v1/streams/s")] {
+            let response = send(
+                &app,
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header(BASIN_HEADER.as_str(), missing_basin)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+            assert_eq!(response_json(response).await["code"], "basin_not_found");
+        }
+
+        let response = create_stream(&app, &basin, "s").await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        backend
+            .delete_basin(basin.clone())
+            .await
+            .expect("delete basin");
+
+        let response = send(
+            &app,
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/basins/{basin}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            response_json(response).await["code"],
+            "basin_deletion_pending"
+        );
+
+        for (method, uri) in [("GET", "/v1/streams/s"), ("DELETE", "/v1/streams/s")] {
+            let response = send(
+                &app,
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header(BASIN_HEADER.as_str(), basin.as_ref())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+            assert_eq!(
+                response_json(response).await["code"],
+                "basin_deletion_pending"
+            );
+        }
+
+        backend.close().await.expect("close backend");
+    }
 }

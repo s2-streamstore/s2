@@ -96,7 +96,6 @@ mod tests {
         let min = Duration::from_millis(100);
         let config = RetryConfig::new()
             .with_max_attempts(max_attempts)
-            .unwrap()
             .with_min_base_delay(min)
             .with_max_base_delay(max_base_delay);
         let mut backoff = RetryBackoff::from_config(&config);

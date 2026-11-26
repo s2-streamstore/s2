@@ -349,6 +349,7 @@ impl From<GetBasinConfigError> for ProvisionStreamError {
         match err {
             GetBasinConfigError::Storage(e) => Self::Storage(e),
             GetBasinConfigError::BasinNotFound(e) => Self::BasinNotFound(e),
+            GetBasinConfigError::BasinDeletionPending(e) => Self::BasinDeletionPending(e),
         }
     }
 }
@@ -357,6 +358,10 @@ impl From<GetBasinConfigError> for ProvisionStreamError {
 pub enum GetStreamConfigError {
     #[error(transparent)]
     Storage(#[from] StorageError),
+    #[error(transparent)]
+    BasinNotFound(#[from] BasinNotFoundError),
+    #[error(transparent)]
+    BasinDeletionPending(#[from] BasinDeletionPendingError),
     #[error(transparent)]
     StreamNotFound(#[from] StreamNotFoundError),
     #[error(transparent)]
@@ -373,6 +378,10 @@ pub enum DeleteStreamError {
     StreamerMissingInActionError(#[from] StreamerMissingInActionError),
     #[error(transparent)]
     RequestDroppedError(#[from] RequestDroppedError),
+    #[error(transparent)]
+    BasinNotFound(#[from] BasinNotFoundError),
+    #[error(transparent)]
+    BasinDeletionPending(#[from] BasinDeletionPendingError),
     #[error(transparent)]
     StreamNotFound(#[from] StreamNotFoundError),
 }
@@ -473,6 +482,8 @@ pub enum GetBasinConfigError {
     Storage(#[from] StorageError),
     #[error(transparent)]
     BasinNotFound(#[from] BasinNotFoundError),
+    #[error(transparent)]
+    BasinDeletionPending(#[from] BasinDeletionPendingError),
 }
 
 #[derive(Debug, Clone, thiserror::Error)]

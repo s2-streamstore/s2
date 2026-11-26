@@ -3,6 +3,7 @@ use std::time::Duration;
 use futures::{Stream, StreamExt, TryStreamExt, stream::FuturesOrdered};
 use s2_sdk::{
     self as sdk, S2, S2Stream,
+    error::{ErrorCode, StatusCode},
     producer::{ProducerConfig, RecordAck},
     read_session::{ReadBatchSession, ReadSessionConfig},
     types::{
@@ -400,6 +401,60 @@ pub async fn get_default_location(s2: &S2) -> Result<LocationInfo, CliError> {
     s2.get_default_location()
         .await
         .map_err(|e| CliError::op(OpKind::GetDefaultLocation, e))
+}
+
+fn is_discovery_unavailable(error: &s2_sdk::error::RequestError) -> bool {
+    error.server_error().is_some_and(|error| {
+        matches!(
+            error.known_code(),
+            Some(ErrorCode::NotImplemented | ErrorCode::PermissionDenied)
+        ) || error.status == StatusCode::NOT_FOUND
+    })
+}
+
+/// Returns the location of an existing basin, or `None` when the basin has no location (e.g.
+/// `s2-lite`), does not appear in the listing, or basin listing is unavailable for this token.
+pub async fn basin_location(s2: &S2, basin: &BasinName) -> Result<Option<LocationName>, CliError> {
+    let input = ListBasinsInput::new()
+        .with_prefix(basin.clone().into())
+        .with_limit(1);
+    match s2.list_basins(input).await {
+        Ok(page) => Ok(page
+            .values
+            .into_iter()
+            .find(|info| info.name == *basin)
+            .and_then(|info| info.location)),
+        Err(error) if is_discovery_unavailable(&error) => Ok(None),
+        Err(error) => Err(CliError::op(OpKind::ListBasins, error)),
+    }
+}
+
+/// Returns the available locations, or `None` when location discovery is unavailable (for example
+/// against `s2-lite` or with a token lacking permission).
+pub async fn list_locations_optional(s2: &S2) -> Result<Option<Vec<LocationInfo>>, CliError> {
+    match s2.list_locations().await {
+        Ok(locations) => Ok(Some(locations)),
+        Err(error) if is_discovery_unavailable(&error) => Ok(None),
+        Err(error) => Err(CliError::op(OpKind::ListLocations, error)),
+    }
+}
+
+/// Returns the default storage class for the given basin's location, or `None` when the basin's
+/// location or its default storage class cannot be discovered.
+pub async fn basin_default_storage_class(
+    s2: &S2,
+    basin: &BasinName,
+) -> Result<Option<String>, CliError> {
+    let Some(location) = basin_location(s2, basin).await? else {
+        return Ok(None);
+    };
+    let Some(locations) = list_locations_optional(s2).await? else {
+        return Ok(None);
+    };
+    Ok(locations
+        .into_iter()
+        .find(|info| info.name == location)
+        .and_then(|info| info.default_storage_class))
 }
 
 pub async fn set_default_location(

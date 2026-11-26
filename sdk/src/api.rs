@@ -1,6 +1,9 @@
 use std::{
     pin::Pin,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     task::{Context, Poll},
     time::Duration,
 };
@@ -45,6 +48,22 @@ pub(crate) const APPLICATION_PROTOBUF: HeaderValue =
 const S2_ATTEMPT: HeaderName = HeaderName::from_static("s2-attempt");
 const RETRY_AFTER_MS_HEADER: HeaderName = HeaderName::from_static("retry-after-ms");
 
+fn attempt_header_value(attempt: u32) -> HeaderValue {
+    match attempt {
+        1 => HeaderValue::from_static("1"),
+        2 => HeaderValue::from_static("2"),
+        3 => HeaderValue::from_static("3"),
+        4 => HeaderValue::from_static("4"),
+        5 => HeaderValue::from_static("5"),
+        6 => HeaderValue::from_static("6"),
+        7 => HeaderValue::from_static("7"),
+        8 => HeaderValue::from_static("8"),
+        9 => HeaderValue::from_static("9"),
+        10 => HeaderValue::from_static("10"),
+        n => HeaderValue::from(n),
+    }
+}
+
 pub(crate) struct S2sFrame<T> {
     pub(crate) msg: T,
     pub(crate) reconnect_advised: bool,
@@ -53,11 +72,31 @@ pub(crate) struct S2sFrame<T> {
 pub(crate) struct Streaming<R, E> {
     stream: Pin<Box<dyn Send + Stream<Item = Result<S2sFrame<R>, E>>>>,
     retire_handle: client::RetireHandle,
+    chunks_received: Arc<AtomicU64>,
 }
 
 impl<R, E> Streaming<R, E> {
     pub(crate) fn retire_connection(&self) {
         self.retire_handle.retire();
+    }
+
+    pub(crate) fn chunks_received(&self) -> u64 {
+        self.chunks_received.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_stream_with_chunks_for_test<S>(
+        stream: S,
+        chunks_received: Arc<AtomicU64>,
+    ) -> Self
+    where
+        S: Stream<Item = Result<S2sFrame<R>, E>> + Send + 'static,
+    {
+        Self {
+            stream: Box::pin(stream),
+            retire_handle: client::RetireHandle::noop(),
+            chunks_received,
+        }
     }
 }
 
@@ -70,39 +109,39 @@ impl<R, E> Stream for Streaming<R, E> {
 }
 
 pub(crate) fn basin_path(name: &BasinName) -> String {
-    format!("v1/basins/{}", urlencoding::encode(name))
+    format!("/v1/basins/{}", urlencoding::encode(name))
 }
 
 pub(crate) fn stream_path(name: &StreamName) -> String {
-    format!("v1/streams/{}", urlencoding::encode(name))
+    format!("/v1/streams/{}", urlencoding::encode(name))
 }
 
 pub(crate) fn stream_records_path(name: &StreamName) -> String {
-    format!("v1/streams/{}/records", urlencoding::encode(name))
+    format!("/v1/streams/{}/records", urlencoding::encode(name))
 }
 
 pub(crate) fn stream_tail_path(name: &StreamName) -> String {
-    format!("v1/streams/{}/records/tail", urlencoding::encode(name))
+    format!("/v1/streams/{}/records/tail", urlencoding::encode(name))
 }
 
 pub(crate) fn token_path(id: &AccessTokenId) -> String {
-    format!("v1/access-tokens/{}", urlencoding::encode(id))
+    format!("/v1/access-tokens/{}", urlencoding::encode(id))
 }
 
 pub(crate) fn network_policy_path(selector: &NetworkPolicySelector) -> String {
     format!(
-        "v1/network-policies/{}",
+        "/v1/network-policies/{}",
         urlencoding::encode(&selector.to_string())
     )
 }
 
 pub(crate) fn metrics_basin_path(basin: &BasinName) -> String {
-    format!("v1/metrics/{}", urlencoding::encode(basin))
+    format!("/v1/metrics/{}", urlencoding::encode(basin))
 }
 
 pub(crate) fn metrics_stream_path(basin: &BasinName, stream: &StreamName) -> String {
     format!(
-        "v1/metrics/{}/{}",
+        "/v1/metrics/{}/{}",
         urlencoding::encode(basin),
         urlencoding::encode(stream)
     )
@@ -230,7 +269,11 @@ impl BaseClient {
             connector,
             config.connection_timeout,
             config.http2,
-            shutdown.clone(),
+            // Give the pool a child token so `S2::close()` cancels both client sessions and pool
+            // tasks, while dropping the last client handle (`Pool::drop`) tears down pool tasks
+            // without falsely signalling `S2::close()` to a finished session that already
+            // released its `BasinClient`.
+            shutdown.child_token(),
         );
         #[cfg(not(feature = "_hidden"))]
         let _ = access_token_provider;
@@ -337,13 +380,19 @@ impl BaseClient {
         mut request: client::Request,
         context: ErrorContext,
     ) -> Result<(StreamingResponse, Option<String>), E> {
-        let shutdown = self.shutdown_token();
-        let access_token = tokio::select! {
-            biased;
-            _ = shutdown.cancelled() => {
+        let access_token = if self.refreshes_tokens() {
+            tokio::select! {
+                biased;
+                _ = self.inner.shutdown.cancelled() => {
+                    return Err(AbortedError::new_with_context("client closed", context).into());
+                }
+                res = self.authorize::<E>(&mut request, || context.clone()) => res?,
+            }
+        } else {
+            if self.is_closed() {
                 return Err(AbortedError::new_with_context("client closed", context).into());
             }
-            res = self.authorize::<E>(&mut request, || context.clone()) => res?,
+            None
         };
         let response = self
             .inner
@@ -360,13 +409,23 @@ impl BaseClient {
         scope: OpScope<'_>,
         attempts: u32,
     ) -> Result<(UnaryResponse, Option<String>), E> {
-        let shutdown = self.shutdown_token();
-        let access_token = tokio::select! {
-            biased;
-            _ = shutdown.cancelled() => {
-                return Err(AbortedError::new_with_context("client closed", scope.context(attempts)).into());
+        let access_token = if self.refreshes_tokens() {
+            tokio::select! {
+                biased;
+                _ = self.inner.shutdown.cancelled() => {
+                    return Err(AbortedError::new_with_context("client closed", scope.context(attempts)).into());
+                }
+                res = self.authorize::<E>(&mut request, || scope.context(attempts)) => res?,
             }
-            res = self.authorize::<E>(&mut request, || scope.context(attempts)) => res?,
+        } else {
+            if self.is_closed() {
+                return Err(AbortedError::new_with_context(
+                    "client closed",
+                    scope.context(attempts),
+                )
+                .into());
+            }
+            None
         };
         let response = self
             .inner
@@ -507,6 +566,7 @@ impl<'a> UnaryCall<'a> {
 
         let mut retry_backoff = RetryBackoff::from_config(&self.client.retry_config());
         let mut prior_uncertainty = false;
+        let mut request = Some(request);
 
         loop {
             let attempts = retry_backoff.attempt_number();
@@ -515,9 +575,17 @@ impl<'a> UnaryCall<'a> {
             let send_gate = gate_body.then(SendGate::new);
 
             let attempt_request = {
-                let mut r = request.try_clone().expect("body should not be a stream");
+                let mut r = if retry_backoff.is_exhausted() {
+                    request.take().expect("request available on final attempt")
+                } else {
+                    request
+                        .as_ref()
+                        .expect("request available before final attempt")
+                        .try_clone()
+                        .expect("body should not be a stream")
+                };
                 r.headers_mut()
-                    .insert(S2_ATTEMPT, HeaderValue::from(attempts));
+                    .insert(S2_ATTEMPT, attempt_header_value(attempts));
                 if let Some(ref gate) = send_gate {
                     r = r.with_gated_body(gate.clone());
                 }
@@ -745,7 +813,7 @@ impl BasinClient {
         self.base.shutdown_token()
     }
 
-    fn uri(&self, path: impl AsRef<str>) -> Uri {
+    pub(crate) fn uri(&self, path: impl AsRef<str>) -> Uri {
         client::uri_with_path(&self.base_url, path)
     }
 
@@ -815,7 +883,7 @@ impl BasinClient {
     {
         let mut request = builder
             .header(CONTENT_TYPE, CONTENT_TYPE_S2S)
-            .header(S2_ATTEMPT, HeaderValue::from(attempt))
+            .header(S2_ATTEMPT, attempt_header_value(attempt))
             .build()
             .map_err(|e| E::from_http(e, ctx.clone()))?;
         self.apply_basin_header(&mut request);
@@ -839,9 +907,11 @@ impl BasinClient {
         }
 
         let (bytes_stream, retire_handle) = response.into_stream();
+        let chunks_received = Arc::new(AtomicU64::new(0));
         let stream = decode_s2s_stream(
             bytes_stream,
-            Some(retire_handle.clone()),
+            retire_handle.clone(),
+            chunks_received.clone(),
             self.base.clone(),
             access_token,
             ctx,
@@ -849,6 +919,7 @@ impl BasinClient {
         Ok(Streaming {
             stream,
             retire_handle,
+            chunks_received,
         })
     }
 
@@ -890,21 +961,10 @@ impl BasinClient {
     }
 }
 
-/// Reserve capacity for an in-progress straddled S2S frame in geometric steps bounded by 4x the
-/// bytes actually received so far, clamping to exact `total_size` once reached. This prevents a
-/// stalled 3-byte prefix from pre-allocating a 2.5 MiB buffer while keeping completed straddled
-/// frames at 1.0x capacity.
-fn reserve_for_partial_frame(buffer: &mut Vec<u8>, total_size: usize, incoming_len: usize) {
-    let next_len = buffer.len().saturating_add(incoming_len);
-    if next_len > buffer.capacity() {
-        let target = total_size.min(next_len.saturating_mul(4)).max(next_len);
-        buffer.reserve_exact(target.saturating_sub(buffer.len()));
-    }
-}
-
 fn decode_s2s_stream<T, E, S>(
     bytes_stream: S,
-    stream_retire: Option<client::RetireHandle>,
+    stream_retire: client::RetireHandle,
+    stream_chunks: Arc<AtomicU64>,
     auth_client: BaseClient,
     access_token: Option<String>,
     ctx: ErrorContext,
@@ -923,6 +983,7 @@ where
             if chunk.is_empty() {
                 continue;
             }
+            stream_chunks.fetch_add(1, Ordering::Relaxed);
 
             // When a partial frame straddles chunks, copy only the exact bytes needed to
             // finish that single frame so trailing frames in `chunk` still decode zero-copy.
@@ -945,7 +1006,7 @@ where
                 let needed = total_size.saturating_sub(buffer.len());
                 if chunk.len() < needed {
                     if !chunk.is_empty() {
-                        reserve_for_partial_frame(&mut buffer, total_size, chunk.len());
+                        buffer.reserve_exact(needed);
                         buffer.extend_from_slice(&chunk);
                     }
                     continue;
@@ -954,17 +1015,13 @@ where
                     buffer.reserve_exact(needed);
                     buffer.extend_from_slice(&chunk.split_to(needed));
                 }
-                let mut frame = std::mem::take(&mut buffer);
-                let max_slack = (frame.len() / 8).max(4096);
-                if frame.capacity().saturating_sub(frame.len()) > max_slack {
-                    frame.shrink_to_fit();
-                }
+                let frame = std::mem::take(&mut buffer);
                 let mut frame_bytes = Bytes::from(frame);
                 match FrameDecoder::decode_bytes(&mut frame_bytes) {
                     Ok(Some(msg)) => {
                         yield decode_s2s_message::<T, E>(
                             msg,
-                            stream_retire.as_ref(),
+                            &stream_retire,
                             &auth_client,
                             access_token.as_deref(),
                             &ctx,
@@ -984,7 +1041,7 @@ where
                     Ok(Some(msg)) => {
                         yield decode_s2s_message::<T, E>(
                             msg,
-                            stream_retire.as_ref(),
+                            &stream_retire,
                             &auth_client,
                             access_token.as_deref(),
                             &ctx,
@@ -999,7 +1056,7 @@ where
             }
             if !chunk.is_empty() {
                 if let Ok(Some(total_size)) = FrameDecoder::peek_total_frame_len(&chunk) {
-                    reserve_for_partial_frame(&mut buffer, total_size, chunk.len());
+                    buffer.reserve_exact(total_size);
                 }
                 buffer.extend_from_slice(&chunk);
             }
@@ -1019,7 +1076,7 @@ where
 
 fn decode_s2s_message<T, E>(
     msg: SessionMessage,
-    stream_retire: Option<&client::RetireHandle>,
+    stream_retire: &client::RetireHandle,
     auth_client: &BaseClient,
     access_token: Option<&str>,
     ctx: &ErrorContext,
@@ -1031,8 +1088,8 @@ where
     match msg {
         SessionMessage::Regular(msg) => {
             let reconnect_advised = msg.reconnect_advised();
-            if reconnect_advised && let Some(retire) = stream_retire {
-                retire.retire();
+            if reconnect_advised {
+                stream_retire.retire();
             }
             let decoded = msg.try_into_proto_zero_copy().map_err(|e| {
                 E::from(ProtocolError::new_with_context(
@@ -1047,10 +1104,8 @@ where
         }
         SessionMessage::Terminal(msg) => {
             let error = E::from_terminal_message(msg, ctx.clone());
-            if error.should_retire_connection()
-                && let Some(retire) = stream_retire
-            {
-                retire.retire();
+            if error.should_retire_connection() {
+                stream_retire.retire();
             }
             auth_client.invalidate_access_token_if_rejected(&error, access_token);
             Err(error)
@@ -1222,8 +1277,7 @@ mod tests {
         let retry = RetryConfig::new()
             .with_min_base_delay(Duration::ZERO)
             .with_max_base_delay(Duration::ZERO)
-            .with_max_attempts(2)
-            .unwrap();
+            .with_max_attempts(2);
         let base = base_with_executor(&config, executor.clone(), retry);
 
         let account_uri: Uri = "http://example.test/v1/basins".parse().unwrap();
@@ -1524,8 +1578,7 @@ mod tests {
         let retry = RetryConfig::new()
             .with_min_base_delay(Duration::ZERO)
             .with_max_base_delay(Duration::ZERO)
-            .with_max_attempts(2)
-            .unwrap();
+            .with_max_attempts(2);
         let client = BaseClient {
             inner: Arc::new(BaseClientInner {
                 client: executor.clone(),
@@ -1660,6 +1713,7 @@ mod tests {
         assert!(valid.is_sensitive());
     }
 
+<<<<<<< HEAD
     #[tokio::test]
     async fn decode_s2s_stream_handles_prefix_straddle_and_handoff_to_zero_copy() {
         use bytes::Bytes;
@@ -1715,9 +1769,11 @@ mod tests {
             Ok(combined_bytes),
             Ok(Bytes::copy_from_slice(&f2[2..])),
         ];
+        let chunks_received = Arc::new(AtomicU64::new(0));
         let mut stream = decode_s2s_stream::<ReadBatch, crate::error::ReadSessionError, _>(
             futures_util::stream::iter(chunks),
-            None,
+            client::RetireHandle::noop(),
+            chunks_received.clone(),
             auth_client.clone(),
             None,
             ctx.clone(),
@@ -1727,6 +1783,8 @@ mod tests {
             decoded.push(item.unwrap().msg);
         }
         assert_eq!(decoded, vec![b0.clone(), b1.clone(), b2.clone()]);
+        // Empty chunk must not increment chunks_received (4 non-empty chunks).
+        assert_eq!(chunks_received.load(Ordering::Relaxed), 4);
         // Verify f1 decoded zero-copy directly out of the `combined` chunk.
         let b1_body = &decoded[1].records[0].body;
         let body_start = b1_body.as_ptr() as usize;
@@ -1744,7 +1802,8 @@ mod tests {
             ];
             let mut stream = decode_s2s_stream::<ReadBatch, crate::error::ReadSessionError, _>(
                 futures_util::stream::iter(chunks),
-                None,
+                client::RetireHandle::noop(),
+                Arc::new(AtomicU64::new(0)),
                 auth_client.clone(),
                 None,
                 ctx.clone(),
@@ -1768,7 +1827,8 @@ mod tests {
             .collect();
         let mut stream = decode_s2s_stream::<ReadBatch, crate::error::ReadSessionError, _>(
             futures_util::stream::iter(byte_chunks),
-            None,
+            client::RetireHandle::noop(),
+            Arc::new(AtomicU64::new(0)),
             auth_client.clone(),
             None,
             ctx.clone(),
@@ -1788,7 +1848,8 @@ mod tests {
         assert!(large_chunks.len() > 10);
         let mut stream = decode_s2s_stream::<ReadBatch, crate::error::ReadSessionError, _>(
             futures_util::stream::iter(large_chunks),
-            None,
+            client::RetireHandle::noop(),
+            Arc::new(AtomicU64::new(0)),
             auth_client.clone(),
             None,
             ctx.clone(),
@@ -1800,7 +1861,8 @@ mod tests {
         let truncated = vec![Ok(Bytes::copy_from_slice(&wire[..wire.len() - 3]))];
         let mut stream = decode_s2s_stream::<ReadBatch, crate::error::ReadSessionError, _>(
             futures_util::stream::iter(truncated),
-            None,
+            client::RetireHandle::noop(),
+            Arc::new(AtomicU64::new(0)),
             auth_client,
             None,
             ctx,
@@ -1812,36 +1874,5 @@ mod tests {
             matches!(err, crate::error::ReadSessionError::ConnectionLost(ref c) if c.message.contains(&format!("{} bytes remaining", f2.len() - 3))),
             "unexpected error: {err:?}"
         );
-    }
-
-    #[test]
-    fn reserve_for_partial_frame_bounds_stalled_prefixes_and_converges_to_exact_size() {
-        // Stalled 3-byte prefix claiming a 2.5 MiB frame must not pre-allocate 2.5 MiB.
-        let mut stalled = Vec::new();
-        reserve_for_partial_frame(&mut stalled, 2_500_000, 3);
-        assert!(
-            stalled.capacity() <= 64,
-            "unexpected pre-allocation on 3-byte prefix: {}",
-            stalled.capacity()
-        );
-
-        // Multi-chunk frames (307 KiB and 1 MiB + 5) arriving in 16 KiB chunks converge to exact
-        // frame size without 2x over-allocation.
-        for total_size in [307 * 1024, 1024 * 1024 + 5] {
-            let mut buf = Vec::new();
-            let mut remaining = total_size;
-            while remaining > 0 {
-                let take = remaining.min(16 * 1024);
-                reserve_for_partial_frame(&mut buf, total_size, take);
-                buf.resize(buf.len() + take, 0);
-                remaining -= take;
-            }
-            assert_eq!(buf.len(), total_size);
-            assert!(
-                buf.capacity() <= total_size + 64,
-                "total_size={total_size} retained capacity={}",
-                buf.capacity()
-            );
-        }
     }
 }

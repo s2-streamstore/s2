@@ -96,11 +96,13 @@ class CooldownSecurityExceptionTests(unittest.TestCase):
     def run_gate(
         self,
         publication_times: dict[str, dict[str, datetime]] | None = None,
+        extra_args: list[str] | None = None,
     ) -> tuple[int, str, str, list[str]]:
         published = publication_times or {
             "rustls": {"0.23.45": NOW - timedelta(days=1)},
         }
         output, errors = io.StringIO(), io.StringIO()
+        argv = ["check.py", "--repo-root", str(self.repo), *(extra_args or []), "HEAD"]
         with ExitStack() as stack:
             for name, value in {
                 "ACTION_ROOT": self.action,
@@ -110,9 +112,7 @@ class CooldownSecurityExceptionTests(unittest.TestCase):
                 "SECURITY_EXCEPTIONS": self.exceptions,
             }.items():
                 stack.enter_context(patch.object(check, name, value))
-            stack.enter_context(
-                patch.object(sys, "argv", ["check.py", "--repo-root", str(self.repo), "HEAD"])
-            )
+            stack.enter_context(patch.object(sys, "argv", argv))
             clock = stack.enter_context(patch.object(check, "datetime", wraps=datetime))
             clock.now.return_value = NOW
             lookup = stack.enter_context(
@@ -157,18 +157,42 @@ class CooldownSecurityExceptionTests(unittest.TestCase):
         self.assertIn("another-crate 1.0.0", errors)
         self.assertNotIn("rustls 0.23.45", errors)
 
-    def test_consumer_repository_cannot_supply_its_own_exception(self) -> None:
-        unapproved = {**APPROVED_EXCEPTION, "version": "0.23.46"}
-        consumer_action = self.repo / ".github" / "actions" / "rust-dependency-cooldown"
-        consumer_action.mkdir(parents=True)
-        for directory in [self.repo, self.repo / ".cargo", consumer_action]:
-            (directory / "security-exceptions.toml").write_text(exception_document(unapproved))
+    def test_consumer_repo_exceptions_file_is_loaded_and_validated(self) -> None:
+        repo_exception = {**APPROVED_EXCEPTION, "version": "0.23.46"}
+        repo_file = self.repo / ".cargo" / "cooldown-exceptions.toml"
+        repo_file.write_text(exception_document(repo_exception))
         self.write_lock(("rustls", "0.23.46", check.CRATES_IO_SOURCE))
+        status, output, errors, _ = self.run_gate(
+            {"rustls": {"0.23.46": NOW - timedelta(days=1)}}
+        )
+        self.assertEqual(status, 0, errors)
+        self.assertIn("rustls 0.23.46", output)
+
+        # Malformed repo exceptions fail closed.
+        repo_file.write_text("[[exception]")
         status, _, errors, _ = self.run_gate(
             {"rustls": {"0.23.46": NOW - timedelta(days=1)}}
         )
-        self.assertEqual(status, 1)
-        self.assertIn("rustls 0.23.46", errors)
+        self.assertEqual(status, 2)
+        self.assertIn("minimum-publish-age error", errors)
+
+        # Explicit --exceptions path is loaded and fails closed if missing.
+        repo_file.unlink()
+        custom = self.repo / ".github" / "exceptions.toml"
+        custom.parent.mkdir(parents=True)
+        custom.write_text(exception_document(repo_exception))
+        status, _, errors, _ = self.run_gate(
+            {"rustls": {"0.23.46": NOW - timedelta(days=1)}},
+            extra_args=["--exceptions", ".github/exceptions.toml"],
+        )
+        self.assertEqual(status, 0, errors)
+
+        status, _, errors, _ = self.run_gate(
+            {"rustls": {"0.23.46": NOW - timedelta(days=1)}},
+            extra_args=["--exceptions", ".github/missing.toml"],
+        )
+        self.assertEqual(status, 2)
+        self.assertIn("minimum-publish-age error", errors)
 
     def test_malformed_security_exceptions_fail_closed(self) -> None:
         documents = {
@@ -263,6 +287,7 @@ class CooldownSecurityExceptionTests(unittest.TestCase):
     def test_other_sources_are_not_processed_as_security_exceptions(self) -> None:
         for source in [
             "registry+https://example.invalid/index",
+            "registry+ssh://git@example.invalid/org/index.git",
             "git+https://example.invalid/rustls",
         ]:
             with self.subTest(source=source):
@@ -284,6 +309,59 @@ class CooldownSecurityExceptionTests(unittest.TestCase):
         )
         self.assertEqual(status, 0, errors)
         self.assertEqual(lookups, ["another-crate"])
+
+    def test_rewritten_crates_io_sources_cannot_bypass_cooldown(self) -> None:
+        variants = [
+            "registry+https://github.com/rust-lang/crates.io-index.git",
+            "registry+https://github.com/rust-lang/crates.io-index/",
+            "registry+ssh://github.com/rust-lang/crates.io-index",
+            "registry+HTTPS://GitHub.COM:443/Rust-Lang/Crates.IO-Index",
+            "registry+https://github.com//rust-lang/foo/../crates.io-index",
+            "registry+https://github.com/rust-lang/%63rates.io-index",
+            r"registry+https://github.com\rust-lang\crates.io-index",
+            "sparse+https://index.crates.io/",
+        ]
+        for source in variants:
+            with self.subTest(source=source):
+                self.write_lock(("young-crate", "1.0.0", source))
+                status, _, errors, lookups = self.run_gate(
+                    {"young-crate": {"1.0.0": NOW - timedelta(days=1)}}
+                )
+                self.assertEqual(status, 1, errors)
+                self.assertIn("young-crate 1.0.0", errors)
+                self.assertEqual(lookups, ["young-crate"])
+
+    def test_baseline_and_proposed_sources_normalize_identically(self) -> None:
+        self.write_lock(("already-locked", "1.0.0", check.CRATES_IO_SOURCE))
+        self.commit()
+        self.write_lock(
+            ("already-locked", "1.0.0", "registry+https://github.com/rust-lang/crates.io-index.git")
+        )
+        status, _, errors, lookups = self.run_gate({})
+        self.assertEqual(status, 0, errors)
+        self.assertEqual(lookups, [])
+
+    def test_malformed_and_missing_sources_fail_closed(self) -> None:
+        cases = {
+            "checksum without source": 'checksum = "deadbeef"\n',
+            "non-string source": "source = 123\n",
+            "uppercase kind": 'source = "REGISTRY+https://github.com/rust-lang/crates.io-index"\n',
+            "schemeless host": 'source = "registry+https:github.com/rust-lang/crates.io-index"\n',
+            "non-ascii host": 'source = "registry+https://git\u00adhub.com/rust-lang/crates.io-index"\n',
+            "percent-encoded non-ascii host": (
+                'source = "registry+https://git%C2%ADhub.com/rust-lang/crates.io-index"\n'
+            ),
+        }
+        for description, extra_field in cases.items():
+            with self.subTest(description=description):
+                (self.repo / "Cargo.lock").write_text(
+                    'version = 3\n\n[[package]]\nname = "young-crate"\nversion = "1.0.0"\n'
+                    + extra_field
+                )
+                status, _, errors, lookups = self.run_gate({})
+                self.assertEqual(status, 2)
+                self.assertIn("minimum-publish-age error", errors)
+                self.assertEqual(lookups, [])
 
 
 if __name__ == "__main__":

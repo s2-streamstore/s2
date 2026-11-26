@@ -5,12 +5,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import posixpath
 import re
 import subprocess
 import sys
 import time
 import tomllib
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -21,6 +23,7 @@ REPO_ROOT = Path.cwd()
 CONFIG = REPO_ROOT / ".cargo" / "config.toml"
 ALLOWLIST = ACTION_ROOT / "first-party-crates.txt"
 SECURITY_EXCEPTIONS = ACTION_ROOT / "security-exceptions.toml"
+REPO_EXCEPTIONS_RELPATH = Path(".cargo/cooldown-exceptions.toml")
 CRATES_IO_SOURCE = "registry+https://github.com/rust-lang/crates.io-index"
 INDEX_BASE = "https://index.crates.io"
 USER_AGENT = "s2 minimum-publish-age check (github.com/s2-streamstore/s2)"
@@ -43,6 +46,7 @@ UNIT_SECONDS = {
 RELEVANT_PATHS = (
     ":(glob)**/Cargo.lock",
     ".cargo/config.toml",
+    ".cargo/cooldown-exceptions.toml",
     ".github/actions/rust-dependency-cooldown",
     ".github/workflows/rust-dependency-cooldown.yml",
 )
@@ -70,43 +74,142 @@ def allowed_crates() -> set[str]:
     }
 
 
-def security_exceptions() -> dict[tuple[str, str], dict[str, str]]:
-    with SECURITY_EXCEPTIONS.open("rb") as exceptions_file:
+def load_security_exceptions(path: Path) -> dict[tuple[str, str], dict[str, str]]:
+    with path.open("rb") as exceptions_file:
         document = tomllib.load(exceptions_file)
     if document.keys() - {"exception"}:
-        raise ValueError(f"unexpected fields in {SECURITY_EXCEPTIONS}")
+        raise ValueError(f"unexpected fields in {path}")
     entries = document.get("exception", [])
     if not isinstance(entries, list):
-        raise ValueError(f"expected [[exception]] entries in {SECURITY_EXCEPTIONS}")
+        raise ValueError(f"expected [[exception]] entries in {path}")
     required_fields = {"crate", "version", "advisory", "reason"}
     exceptions: dict[tuple[str, str], dict[str, str]] = {}
     for index, entry in enumerate(entries, start=1):
         if not isinstance(entry, dict) or entry.keys() != required_fields:
-            raise ValueError(f"security exception {index} must contain {sorted(required_fields)}")
+            raise ValueError(f"security exception {index} in {path} must contain {sorted(required_fields)}")
         for field, value in entry.items():
             if not isinstance(value, str) or not value or value != value.strip():
-                raise ValueError(f"security exception {index} has invalid {field}")
+                raise ValueError(f"security exception {index} in {path} has invalid {field}")
         if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", entry["crate"]) is None:
-            raise ValueError(f"security exception {index} requires an exact crate name")
+            raise ValueError(f"security exception {index} in {path} requires an exact crate name")
         if re.fullmatch(
             r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?",
             entry["version"],
         ) is None:
-            raise ValueError(f"security exception {index} requires an exact version")
+            raise ValueError(f"security exception {index} in {path} requires an exact version")
         key = (entry["crate"], entry["version"])
         if key in exceptions:
-            raise ValueError(f"duplicate security exception for {key[0]} {key[1]}")
+            raise ValueError(f"duplicate security exception for {key[0]} {key[1]} in {path}")
         exceptions[key] = entry
     return exceptions
 
 
+def security_exceptions(
+    repo_exceptions: Path | None = None,
+) -> dict[tuple[str, str], dict[str, str]]:
+    exceptions = load_security_exceptions(SECURITY_EXCEPTIONS)
+
+    repo_path: Path | None = None
+    if repo_exceptions is not None:
+        if not str(repo_exceptions).strip():
+            raise ValueError("exceptions path cannot be empty")
+        candidate = (
+            repo_exceptions if repo_exceptions.is_absolute() else REPO_ROOT / repo_exceptions
+        )
+        repo_path = candidate.resolve()
+    else:
+        default_path = REPO_ROOT / REPO_EXCEPTIONS_RELPATH
+        if default_path.exists() or default_path.is_symlink():
+            repo_path = default_path.resolve()
+
+    if repo_path is not None and repo_path != SECURITY_EXCEPTIONS.resolve():
+        exceptions.update(load_security_exceptions(repo_path))
+    return exceptions
+
+
+def is_crates_io_source(source: str) -> bool:
+    if (
+        not source
+        or not source.isascii()
+        or any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in source)
+    ):
+        raise ValueError(f"invalid package source {source!r}")
+
+    kind, separator, rest = source.partition("+")
+    if not separator or not kind or not rest:
+        raise ValueError(f"invalid package source {source!r}")
+
+    if kind in {"git", "path"}:
+        return False
+    if kind not in {"registry", "sparse"}:
+        raise ValueError(f"unsupported package source kind in {source!r}")
+
+    # Match WHATWG URL parsing (used by Cargo's `url` crate), where backslashes
+    # act as path separators for special schemes.
+    parsed = urllib.parse.urlsplit(rest.replace("\\", "/"))
+    if not parsed.scheme or not parsed.hostname:
+        raise ValueError(f"invalid registry source URL {source!r}")
+    # Access `port` to reject malformed or out-of-range ports.
+    _ = parsed.port
+
+    host = urllib.parse.unquote(parsed.hostname)
+    if (
+        not host
+        or not host.isascii()
+        or any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in host)
+    ):
+        raise ValueError(f"invalid registry host in {source!r}")
+    host = host.rstrip(".").lower()
+
+    raw_path = urllib.parse.unquote(parsed.path).replace("\\", "/")
+    collapsed_path = re.sub(r"/+", "/", raw_path)
+    if collapsed_path:
+        norm_path = posixpath.normpath(collapsed_path)
+        if not norm_path.startswith("/"):
+            norm_path = f"/{norm_path}"
+        norm_path = norm_path.rstrip("/").lower()
+    else:
+        norm_path = ""
+
+    if host == "github.com" and norm_path in {
+        "/rust-lang/crates.io-index",
+        "/rust-lang/crates.io-index.git",
+    }:
+        return True
+    if host == "index.crates.io" and norm_path == "":
+        return True
+    return False
+
+
 def crates_io_versions(lock_text: str) -> set[tuple[str, str]]:
-    packages = tomllib.loads(lock_text).get("package", [])
-    return {
-        (package["name"], package["version"])
-        for package in packages
-        if package.get("source") == CRATES_IO_SOURCE
-    }
+    document = tomllib.loads(lock_text)
+    packages = document.get("package", [])
+    if not isinstance(packages, list):
+        raise ValueError("Cargo.lock package field must be a list")
+
+    versions: set[tuple[str, str]] = set()
+    for index, package in enumerate(packages, start=1):
+        if not isinstance(package, dict):
+            raise ValueError(f"Cargo.lock package {index} must be a table")
+        name = package.get("name")
+        version = package.get("version")
+        if not isinstance(name, str) or not name or not isinstance(version, str) or not version:
+            raise ValueError(f"Cargo.lock package {index} is missing name or version")
+
+        if "source" not in package:
+            if "checksum" in package:
+                raise ValueError(
+                    f"Cargo.lock package {name} {version} has a checksum without a source"
+                )
+            continue
+
+        source = package["source"]
+        if not isinstance(source, str):
+            raise ValueError(f"Cargo.lock package {name} {version} has a non-string source")
+
+        if is_crates_io_source(source):
+            versions.add((name, version))
+    return versions
 
 
 def run_git(*args: str) -> subprocess.CompletedProcess[str]:
@@ -124,8 +227,9 @@ def lock_at(revision: str, path: str) -> str | None:
     return result.stdout if result.returncode == 0 else None
 
 
-def has_relevant_changes(base_ref: str) -> bool:
-    result = run_git("diff", "--quiet", base_ref, "HEAD", "--", *RELEVANT_PATHS)
+def has_relevant_changes(base_ref: str, extra_paths: tuple[str, ...] = ()) -> bool:
+    paths = (*RELEVANT_PATHS, *extra_paths)
+    result = run_git("diff", "--quiet", base_ref, "HEAD", "--", *paths)
     if result.returncode == 1:
         return True
     if result.returncode != 0:
@@ -133,7 +237,7 @@ def has_relevant_changes(base_ref: str) -> bool:
             f"cannot compare committed Rust dependency cooldown paths: {result.stderr.strip()}"
         )
 
-    result = run_git("diff", "--quiet", "HEAD", "--", *RELEVANT_PATHS)
+    result = run_git("diff", "--quiet", "HEAD", "--", *paths)
     if result.returncode == 1:
         return True
     if result.returncode != 0:
@@ -141,7 +245,7 @@ def has_relevant_changes(base_ref: str) -> bool:
             f"cannot compare working Rust dependency cooldown paths: {result.stderr.strip()}"
         )
 
-    result = run_git("ls-files", "--others", "--exclude-standard", "--", *RELEVANT_PATHS)
+    result = run_git("ls-files", "--others", "--exclude-standard", "--", *paths)
     if result.returncode:
         raise RuntimeError(
             f"cannot list untracked Rust dependency cooldown paths: {result.stderr.strip()}"
@@ -210,6 +314,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=Path, help="Cargo configuration to read")
     parser.add_argument("--allowlist", type=Path, help="exact first-party crate names")
     parser.add_argument(
+        "--exceptions",
+        type=Path,
+        help="repo-local TOML file of security exceptions (defaults to .cargo/cooldown-exceptions.toml if present)",
+    )
+    parser.add_argument(
         "base_ref",
         nargs="?",
         help="check only crates.io versions not present at this Git ref",
@@ -227,8 +336,17 @@ def main() -> int:
     try:
         if args.base_ref and run_git("rev-parse", "--verify", "--quiet", args.base_ref).returncode:
             raise ValueError(f"base ref {args.base_ref!r} is not available")
-        approved_exceptions = security_exceptions()
-        if args.base_ref and not has_relevant_changes(args.base_ref):
+        approved_exceptions = security_exceptions(args.exceptions)
+        extra_paths: tuple[str, ...] = ()
+        if args.exceptions is not None:
+            candidate = (
+                args.exceptions if args.exceptions.is_absolute() else REPO_ROOT / args.exceptions
+            )
+            try:
+                extra_paths = (candidate.resolve().relative_to(REPO_ROOT).as_posix(),)
+            except ValueError:
+                pass
+        if args.base_ref and not has_relevant_changes(args.base_ref, extra_paths):
             print("No Rust dependency cooldown files changed; check skipped.")
             return 0
 

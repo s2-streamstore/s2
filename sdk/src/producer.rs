@@ -6,7 +6,7 @@ use std::{
     collections::VecDeque,
     fmt,
     future::Future,
-    pin::Pin,
+    pin::{Pin, pin},
     sync::{
         Arc, Mutex as StdMutex,
         atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -16,7 +16,6 @@ use std::{
 };
 
 use futures_core::FusedFuture;
-use futures_util::{StreamExt, stream::FuturesOrdered};
 use tokio::sync::{Notify, mpsc, oneshot};
 use tracing::{Instrument, debug, debug_span};
 
@@ -747,7 +746,7 @@ struct ProducerTask {
     linger: Linger,
     cmd_rx: mpsc::UnboundedReceiver<Command>,
     partial_batch: PartialBatch,
-    pending_batch_acks: FuturesOrdered<PendingBatchAck>,
+    pending_batch_acks: VecDeque<PendingBatchAck>,
     pending_flushes: VecDeque<PendingFlush>,
 }
 
@@ -769,7 +768,7 @@ impl ProducerTask {
             linger: Linger::new(config.linger),
             cmd_rx,
             partial_batch,
-            pending_batch_acks: FuturesOrdered::new(),
+            pending_batch_acks: VecDeque::new(),
             pending_flushes: VecDeque::new(),
         }
     }
@@ -786,8 +785,8 @@ impl ProducerTask {
                 self.pending_batch_acks.push_back(PendingBatchAck {
                     ticket,
                     batch_max_id: max_id,
-                    ack_txs: Some(ack_txs),
-                    permit: Some(permit),
+                    ack_txs,
+                    permit,
                 });
                 Ok(())
             }
@@ -853,10 +852,14 @@ impl ProducerTask {
     }
 
     async fn drain_pending_batch_acks(&mut self) {
-        while let Some((batch_ack, batch_max_id, ack_txs, batch_permit)) =
-            self.pending_batch_acks.next().await
-        {
-            self.settle_batch_ack(batch_ack, batch_max_id, ack_txs, batch_permit);
+        while let Some(pending) = self.pending_batch_acks.pop_front() {
+            let batch_ack = pending.ticket.await;
+            self.settle_batch_ack(
+                batch_ack,
+                pending.batch_max_id,
+                pending.ack_txs,
+                pending.permit,
+            );
         }
     }
 
@@ -939,6 +942,11 @@ impl ProducerTask {
         );
         let mut closing = false;
         let abort = self.shared.abort.clone();
+        let mut abort_fut = pin!(abort.cancelled());
+        let session_lifecycle = self.session.lifecycle().clone();
+        let mut session_closing_fut = pin!(session_lifecycle.wait_closing_or_closed());
+        let shared_for_notify = self.shared.clone();
+        let mut flush_notified = pin!(shared_for_notify.flush_partial_notify.notified());
 
         loop {
             if closing && self.partial_batch.is_empty() && self.pending_batch_acks.is_empty() {
@@ -960,16 +968,39 @@ impl ProducerTask {
                 biased;
 
                 // Deliver completed batch outcomes strictly in submission order (A6d, A7).
-                Some((batch_ack, batch_max_id, ack_txs, batch_permit)) = self.pending_batch_acks.next() => {
+                // `AppendSession` settles batches FIFO, so polling only the front avoids the
+                // per-batch heap/queue overhead of `FuturesOrdered`.
+                batch_ack = async {
+                    (&mut self
+                        .pending_batch_acks
+                        .front_mut()
+                        .expect("guarded by !is_empty()")
+                        .ticket)
+                        .await
+                }, if !self.pending_batch_acks.is_empty() => {
+                    let pending = self
+                        .pending_batch_acks
+                        .pop_front()
+                        .expect("pending_batch_acks was non-empty");
                     if batch_ack.is_err() {
                         // Publish terminal error and close acceptance gate BEFORE dropping
                         // `batch_permit` and unblocking waiting `reserve()` callers (`A4c`, `A9`).
                         self.publish_closing_from_session(false);
-                        self.settle_batch_ack(batch_ack, batch_max_id, ack_txs, batch_permit);
+                        self.settle_batch_ack(
+                            batch_ack,
+                            pending.batch_max_id,
+                            pending.ack_txs,
+                            pending.permit,
+                        );
                         self.terminate(None).await;
                         return;
                     }
-                    self.settle_batch_ack(batch_ack, batch_max_id, ack_txs, batch_permit);
+                    self.settle_batch_ack(
+                        batch_ack,
+                        pending.batch_max_id,
+                        pending.ack_txs,
+                        pending.permit,
+                    );
                     if self.should_flush_for_backpressure() {
                         debug!("flushing partial batch early for backpressure waiter");
                         if let Err(unsubmitted) = self.try_cut_and_submit() {
@@ -979,7 +1010,7 @@ impl ProducerTask {
                     }
                 }
 
-                _ = abort.cancelled() => {
+                _ = abort_fut.as_mut() => {
                     let reason = self.shared.abort.reason();
                     self.abort(reason).await;
                     return;
@@ -988,7 +1019,7 @@ impl ProducerTask {
                 // A8b / A9: if the owned append session fails while no batch is in flight (for
                 // example, a record is lingering in `partial_batch`), wake and settle immediately
                 // rather than waiting out `linger`.
-                _ = self.session.lifecycle().wait_closing_or_closed(), if !closing => {
+                _ = session_closing_fut.as_mut(), if !closing => {
                     self.terminate(None).await;
                     return;
                 }
@@ -1086,7 +1117,8 @@ impl ProducerTask {
                 }
 
                 // Wake when a caller begins waiting on capacity (`A5a`).
-                _ = self.shared.flush_partial_notify.notified() => {
+                _ = flush_notified.as_mut() => {
+                    flush_notified.set(shared_for_notify.flush_partial_notify.notified());
                     if self.should_flush_for_backpressure() {
                         debug!("flushing partial batch early for backpressure waiter");
                         if let Err(unsubmitted) = self.try_cut_and_submit() {
@@ -1310,29 +1342,8 @@ struct PendingFlush {
 struct PendingBatchAck {
     ticket: BatchSubmitTicket,
     batch_max_id: u64,
-    ack_txs: Option<Vec<RecordAckTx>>,
-    permit: Option<AppendPermit>,
-}
-
-impl Future for PendingBatchAck {
-    type Output = (
-        Result<AppendAck, AppendSessionError>,
-        u64,
-        Vec<RecordAckTx>,
-        AppendPermit,
-    );
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match Pin::new(&mut self.ticket).poll(cx) {
-            Poll::Ready(batch_ack) => Poll::Ready((
-                batch_ack,
-                self.batch_max_id,
-                self.ack_txs.take().expect("ack_txs should not be None"),
-                self.permit.take().expect("permit should not be None"),
-            )),
-            Poll::Pending => Poll::Pending,
-        }
-    }
+    ack_txs: Vec<RecordAckTx>,
+    permit: AppendPermit,
 }
 
 fn dispatch_acks(batch_ack: Result<AppendAck, AppendSessionError>, ack_txs: Vec<RecordAckTx>) {

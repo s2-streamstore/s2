@@ -572,7 +572,7 @@ pub fn bench_read(
         stream,
         record_size,
         ReadInput::new().with_start(ReadStart::SeqNum(0)),
-        write_done_records,
+        Some(write_done_records),
         bench_start,
     )
 }
@@ -588,7 +588,7 @@ pub fn bench_read_catchup(
         ReadInput::new()
             .with_start(ReadStart::SeqNum(0))
             .with_wait_secs(0),
-        Arc::new(AtomicU64::new(WRITE_DONE_SENTINEL)),
+        None,
         bench_start,
     )
 }
@@ -597,7 +597,7 @@ fn bench_read_inner(
     stream: S2Stream,
     record_size: usize,
     read_input: ReadInput,
-    write_done_records: Arc<AtomicU64>,
+    write_done_records: Option<Arc<AtomicU64>>,
     bench_start: Instant,
 ) -> impl Stream<Item = Result<BenchReadSample, CliError>> + Send {
     async_stream::stream! {
@@ -605,6 +605,7 @@ fn bench_read_inner(
             .read_batch_session(read_input, ReadSessionConfig::default())
             .map_err(|e| CliError::op(OpKind::Bench, e))?;
 
+        let collect_latencies = write_done_records.is_some();
         let mut total_bytes: u64 = 0;
         let mut total_records: u64 = 0;
         let throughput_start = Instant::now();
@@ -612,10 +613,11 @@ fn bench_read_inner(
         let mut e2e_latencies: Vec<Duration> = Vec::new();
         let mut prev_hash: u64 = 0;
 
-        let mut poll_interval = tokio::time::interval(Duration::from_millis(250));
+        let mut poll_interval = collect_latencies
+            .then(|| tokio::time::interval(Duration::from_millis(250)));
 
         let done_records = || {
-            let value = write_done_records.load(Ordering::Acquire);
+            let value = write_done_records.as_ref()?.load(Ordering::Acquire);
             if value == WRITE_DONE_SENTINEL {
                 None
             } else {
@@ -624,93 +626,107 @@ fn bench_read_inner(
         };
 
         loop {
-            tokio::select! {
-                _ = poll_interval.tick() => {
-                    if let Some(expected) = done_records() &&  total_records >= expected {
+            let batch_result = match poll_interval.as_mut() {
+                Some(interval) => tokio::select! {
+                    _ = interval.tick() => {
+                        if let Some(expected) = done_records() && total_records >= expected {
+                            break;
+                        }
+                        continue;
+                    }
+                    batch_result = read_session.next() => batch_result,
+                },
+                None => read_session.next().await,
+            };
+
+            match batch_result {
+                Some(Ok(batch)) => {
+                    let now_micros = collect_latencies
+                        .then(|| bench_start.elapsed().as_micros() as u64);
+                    let batch_records = batch.records.len() as u64;
+                    let mut batch_bytes: u64 = 0;
+                    let expected_body_size = body_size(record_size);
+                    if collect_latencies {
+                        e2e_latencies.reserve(batch.records.len());
+                    }
+                    for record in &batch.records {
+                        if record.body.len() != expected_body_size {
+                            yield Err(CliError::BenchVerification(format!(
+                                "unexpected record body size at seq_num {}: expected {}, got {}",
+                                record.seq_num,
+                                expected_body_size,
+                                record.body.len()
+                            )));
+                            return;
+                        }
+
+                        let header_hash = match record_hash(record) {
+                            Ok(hash) => hash,
+                            Err(err) => {
+                                yield Err(CliError::BenchVerification(format!(
+                                    "invalid bench hash at seq_num {}: {err}",
+                                    record.seq_num
+                                )));
+                                return;
+                            }
+                        };
+
+                        if record.seq_num > 0 && header_hash == prev_hash {
+                            yield Err(CliError::BenchVerification(format!(
+                                "duplicate record hash at seq_num {}",
+                                record.seq_num
+                            )));
+                            return;
+                        }
+
+                        let computed_hash = chain_hash(prev_hash, record.body.as_ref());
+                        if computed_hash != header_hash {
+                            yield Err(CliError::BenchVerification(format!(
+                                "unexpected record hash at seq_num {}",
+                                record.seq_num
+                            )));
+                            return;
+                        }
+                        prev_hash = computed_hash;
+                        if let Some(now_micros) = now_micros {
+                            e2e_latencies.push(Duration::from_micros(
+                                now_micros.saturating_sub(record.timestamp),
+                            ));
+                        }
+                        batch_bytes += record_size as u64;
+                    }
+                    total_bytes += batch_bytes;
+                    total_records += batch_records;
+
+                    if last_yield.elapsed() >= Duration::from_millis(100) {
+                        last_yield = Instant::now();
+                        yield Ok(BenchReadSample {
+                            bytes: total_bytes,
+                            records: total_records,
+                            elapsed: throughput_start.elapsed(),
+                            e2e_latencies: if collect_latencies {
+                                std::mem::take(&mut e2e_latencies)
+                            } else {
+                                Vec::new()
+                            },
+                            chain_hash: None,
+                        });
+                    }
+
+                    if let Some(expected) = done_records() && total_records >= expected {
                         break;
                     }
                 }
-                batch_result = read_session.next() => {
-                    match batch_result {
-                        Some(Ok(batch)) => {
-                            let now_micros = bench_start.elapsed().as_micros() as u64;
-                            let batch_records = batch.records.len() as u64;
-                            let mut batch_bytes: u64 = 0;
-                            let expected_body_size = body_size(record_size);
-                            for record in &batch.records {
-                                if record.body.len() != expected_body_size {
-                                    yield Err(CliError::BenchVerification(format!(
-                                        "unexpected record body size at seq_num {}: expected {}, got {}",
-                                        record.seq_num,
-                                        expected_body_size,
-                                        record.body.len()
-                                    )));
-                                    return;
-                                }
-
-                                let header_hash = match record_hash(record) {
-                                    Ok(hash) => hash,
-                                    Err(err) => {
-                                        yield Err(CliError::BenchVerification(format!(
-                                            "invalid bench hash at seq_num {}: {err}",
-                                            record.seq_num
-                                        )));
-                                        return;
-                                    }
-                                };
-
-                                if record.seq_num > 0 && header_hash == prev_hash {
-                                    yield Err(CliError::BenchVerification(format!(
-                                        "duplicate record hash at seq_num {}",
-                                        record.seq_num
-                                    )));
-                                    return;
-                                }
-
-                                let computed_hash = chain_hash(prev_hash, record.body.as_ref());
-                                if computed_hash != header_hash {
-                                    yield Err(CliError::BenchVerification(format!(
-                                        "unexpected record hash at seq_num {}",
-                                        record.seq_num
-                                    )));
-                                    return;
-                                }
-                                prev_hash = computed_hash;
-                                e2e_latencies.push(Duration::from_micros(
-                                    now_micros.saturating_sub(record.timestamp),
-                                ));
-                                batch_bytes += record_size as u64;
-                            }
-                            total_bytes += batch_bytes;
-                            total_records += batch_records;
-
-                            if last_yield.elapsed() >= Duration::from_millis(100) {
-                                last_yield = Instant::now();
-                                yield Ok(BenchReadSample {
-                                    bytes: total_bytes,
-                                    records: total_records,
-                                    elapsed: throughput_start.elapsed(),
-                                    e2e_latencies: std::mem::take(&mut e2e_latencies),
-                                    chain_hash: None,
-                                });
-                            }
-
-                            if let Some(expected) = done_records() && total_records >= expected {
-                                break;
-                            }
-                        }
-                        Some(Err(s2_sdk::error::ReadSessionError::ReadUnwritten(_)))
-                            if total_records == 0 =>
-                        {
-                            break;
-                        }
-                        Some(Err(e)) => {
-                            yield Err(CliError::op(OpKind::Bench, e));
-                            return;
-                        }
-                        None => break,
-                    }
+                Some(Err(s2_sdk::error::ReadSessionError::ReadUnwritten(_)))
+                    if total_records == 0 =>
+                {
+                    break;
                 }
+                Some(Err(e)) => {
+                    yield Err(CliError::op(OpKind::Bench, e));
+                    return;
+                }
+                None => break,
             }
         }
 

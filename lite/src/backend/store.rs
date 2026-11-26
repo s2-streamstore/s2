@@ -51,6 +51,23 @@ pub(super) async fn db_snapshot_get_with<K: AsRef<[u8]> + Send, V>(
     Ok(snapshot.get_key_value(key).await?.map(deser).transpose()?)
 }
 
+/// Read a remotely durable row from a consistent snapshot.
+pub(super) async fn db_snapshot_get_durable<K: AsRef<[u8]> + Send, V>(
+    snapshot: &DbSnapshot,
+    key: K,
+    deser: impl FnOnce(Bytes) -> Result<V, kv::DeserializationError>,
+) -> Result<Option<V>, StorageError> {
+    let read_opts = ReadOptions {
+        durability_filter: DurabilityLevel::Remote,
+        ..Default::default()
+    };
+    Ok(snapshot
+        .get_key_value_with_options(key, &read_opts)
+        .await?
+        .map(|entry| deser(entry.value))
+        .transpose()?)
+}
+
 pub(super) async fn db_txn_get<K: AsRef<[u8]> + Send, V>(
     txn: &DbTransaction,
     key: K,

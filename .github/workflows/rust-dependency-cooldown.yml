@@ -2,6 +2,11 @@ name: Rust dependency cooldown gate
 
 on:
   workflow_call:
+    inputs:
+      exceptions:
+        description: Optional repo-relative path to a TOML file of security exceptions (defaults to .cargo/cooldown-exceptions.toml if present)
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -23,3 +28,4 @@ jobs:
         uses: $/.github/actions/rust-dependency-cooldown
         with:
           base-sha: HEAD^1
+          exceptions: ${{ inputs.exceptions }}

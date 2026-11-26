@@ -509,6 +509,7 @@ pub(crate) struct BatchAccumulator {
     max_batch_bytes: usize,
     fencing_token: Option<FencingToken>,
     records: Vec<AppendRecord>,
+    next_cap: usize,
     metered_bytes: usize,
     batch_match_seq: Option<u64>,
 }
@@ -525,6 +526,7 @@ impl BatchAccumulator {
             max_batch_bytes,
             fencing_token,
             records: Vec::with_capacity(cap),
+            next_cap: 0,
             metered_bytes: 0,
             batch_match_seq: None,
         }
@@ -554,6 +556,9 @@ impl BatchAccumulator {
         match_seq_num: Option<u64>,
     ) {
         if self.records.is_empty() {
+            if self.next_cap > 0 {
+                self.records.reserve_exact(self.next_cap);
+            }
             self.batch_match_seq = match_seq_num;
         }
         self.metered_bytes += record_bytes;
@@ -561,8 +566,8 @@ impl BatchAccumulator {
     }
 
     pub(crate) fn take(&mut self) -> AppendInput {
-        let next_cap = self.records.len().min(self.max_batch_records);
-        let records = std::mem::replace(&mut self.records, Vec::with_capacity(next_cap));
+        self.next_cap = self.records.len().min(self.max_batch_records);
+        let records = std::mem::take(&mut self.records);
         let metered_bytes = std::mem::take(&mut self.metered_bytes);
         let mut input = AppendInput::new(AppendRecordBatch::from_parts(records, metered_bytes));
         if let Some(seq) = self.batch_match_seq.take() {
@@ -576,6 +581,7 @@ impl BatchAccumulator {
 
     pub(crate) fn clear(&mut self) {
         self.records = Vec::new();
+        self.next_cap = 0;
         self.metered_bytes = 0;
         self.batch_match_seq = None;
     }

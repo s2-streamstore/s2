@@ -237,7 +237,7 @@ fn cli_env_hint(protocol: ServerProtocol, ip: IpAddr, port: u16, dashboard: bool
     ];
 
     if protocol.requires_ssl_no_verify() {
-        lines.push("export S2_SSL_NO_VERIFY=1".to_string());
+        lines.push("export S2_SSL_NO_VERIFY=true".to_string());
     }
 
     if dashboard {
@@ -476,56 +476,78 @@ async fn init_object_store(
     Ok(store)
 }
 
+fn is_http_endpoint(endpoint: &str) -> bool {
+    endpoint
+        .get(..7)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("http://"))
+}
+
 // Both buckets start with the same AWS configuration and credential chain.
 async fn s3_builder() -> object_store::aws::AmazonS3Builder {
-    let mut builder = object_store::aws::AmazonS3Builder::from_env();
+    let builder = object_store::aws::AmazonS3Builder::from_env();
+    let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
 
-    if let Some(endpoint) =
-        std::env::var_os("AWS_ENDPOINT_URL_S3").and_then(|s| s.into_string().ok())
-    {
-        if endpoint.starts_with("http://") {
-            builder = builder.with_allow_http(true);
-        }
-        builder = builder.with_endpoint(endpoint);
-    }
-
-    match (
+    let static_credentials = match (
         std::env::var_os("AWS_ACCESS_KEY_ID").and_then(|s| s.into_string().ok()),
         std::env::var_os("AWS_SECRET_ACCESS_KEY").and_then(|s| s.into_string().ok()),
     ) {
         (Some(key_id), Some(secret_key)) => {
-            info!(key_id, "using static credentials from env vars");
-
-            let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-            if let Some(region) = aws_config.region() {
-                info!(region = region.as_ref());
-                builder = builder.with_region(region.to_string());
-            }
-
             let token = std::env::var_os("AWS_SESSION_TOKEN").and_then(|s| s.into_string().ok());
-            builder = builder.with_credentials(Arc::new(
-                object_store::StaticCredentialProvider::new(object_store::aws::AwsCredential {
-                    key_id,
-                    secret_key,
-                    token,
-                }),
-            ));
+            Some(object_store::aws::AwsCredential {
+                key_id,
+                secret_key,
+                token,
+            })
         }
-        _ => {
-            let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-            if let Some(region) = aws_config.region() {
-                info!(region = region.as_ref());
-                builder = builder.with_region(region.to_string());
-            }
-            if let Some(credentials_provider) = aws_config.credentials_provider() {
-                info!("using aws-config credentials provider");
-                builder = builder.with_credentials(Arc::new(S3CredentialProvider {
-                    aws: credentials_provider.clone(),
-                    cache: tokio::sync::Mutex::new(None),
-                }));
-            }
-        }
+        _ => None,
+    };
+
+    apply_aws_config(builder, &aws_config, static_credentials)
+}
+
+fn apply_aws_config(
+    mut builder: object_store::aws::AmazonS3Builder,
+    aws_config: &aws_config::SdkConfig,
+    static_credentials: Option<object_store::aws::AwsCredential>,
+) -> object_store::aws::AmazonS3Builder {
+    // Respect `object_store`'s endpoint precedence (`AWS_ENDPOINT_URL_S3` >
+    // `AWS_ENDPOINT_URL` / `AWS_ENDPOINT`) and fall back to the endpoint from
+    // `aws-config` (e.g., `endpoint_url` in `~/.aws/config`).
+    let endpoint = if let Some(endpoint) = builder
+        .get_config_value(&object_store::aws::AmazonS3ConfigKey::S3Endpoint)
+        .or_else(|| builder.get_config_value(&object_store::aws::AmazonS3ConfigKey::Endpoint))
+    {
+        Some(endpoint)
+    } else if let Some(endpoint) = aws_config.endpoint_url() {
+        builder = builder.with_endpoint(endpoint);
+        Some(endpoint.to_owned())
+    } else {
+        None
+    };
+    if let Some(endpoint) = endpoint
+        && is_http_endpoint(&endpoint)
+    {
+        builder = builder.with_allow_http(true);
     }
+
+    if let Some(region) = aws_config.region() {
+        info!(region = region.as_ref());
+        builder = builder.with_region(region.to_string());
+    }
+
+    if let Some(credentials) = static_credentials {
+        info!(key_id = %credentials.key_id, "using static credentials from env vars");
+        builder = builder.with_credentials(Arc::new(object_store::StaticCredentialProvider::new(
+            credentials,
+        )));
+    } else if let Some(credentials_provider) = aws_config.credentials_provider() {
+        info!("using aws-config credentials provider");
+        builder = builder.with_credentials(Arc::new(S3CredentialProvider {
+            aws: credentials_provider.clone(),
+            cache: tokio::sync::Mutex::new(None),
+        }));
+    }
+
     builder
 }
 
@@ -576,7 +598,7 @@ impl WalS3Overrides {
         if let Some(endpoint) = &self.endpoint {
             // Override the S3-specific endpoint inherited from the main store.
             builder = builder
-                .with_allow_http(endpoint.starts_with("http://"))
+                .with_allow_http(is_http_endpoint(endpoint))
                 .with_config(object_store::aws::AmazonS3ConfigKey::S3Endpoint, endpoint);
         }
         if let Some(region) = self.region {
@@ -831,9 +853,14 @@ mod tests {
 
     use clap::Parser;
     use rstest::rstest;
+    use slatedb::object_store::{
+        ClientConfigKey,
+        aws::{AmazonS3Builder, AmazonS3ConfigKey},
+    };
 
     use super::{
-        BoundSocket, LiteArgs, ServerProtocol, WalS3Overrides, cli_endpoint, cli_env_hint,
+        BoundSocket, LiteArgs, ServerProtocol, WalS3Overrides, apply_aws_config, cli_endpoint,
+        cli_env_hint,
     };
 
     const ANY_V4: IpAddr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
@@ -987,6 +1014,62 @@ mod tests {
     }
 
     #[test]
+    fn apply_aws_config_resolves_profile_and_override_endpoints() {
+        let cfg = |b: &AmazonS3Builder, key| b.get_config_value(&key);
+        let allow_http =
+            |b: &AmazonS3Builder| cfg(b, AmazonS3ConfigKey::Client(ClientConfigKey::AllowHttp));
+
+        // HTTPS profile endpoint_url is applied without enabling allow_http.
+        let https_profile = aws_config::SdkConfig::builder()
+            .endpoint_url("https://account.r2.cloudflarestorage.com")
+            .build();
+        let builder = apply_aws_config(AmazonS3Builder::new(), &https_profile, None);
+        assert_eq!(
+            cfg(&builder, AmazonS3ConfigKey::Endpoint).as_deref(),
+            Some("https://account.r2.cloudflarestorage.com")
+        );
+        assert_eq!(allow_http(&builder).as_deref(), Some("false"));
+
+        // HTTP profile endpoint_url enables allow_http; WAL override replaces it and resets
+        // allow_http.
+        let http_profile = aws_config::SdkConfig::builder()
+            .endpoint_url("http://127.0.0.1:9000")
+            .build();
+        let builder = apply_aws_config(AmazonS3Builder::new(), &http_profile, None);
+        assert_eq!(
+            cfg(&builder, AmazonS3ConfigKey::Endpoint).as_deref(),
+            Some("http://127.0.0.1:9000")
+        );
+        assert_eq!(allow_http(&builder).as_deref(), Some("true"));
+
+        let wal_builder = wal_config(&[(
+            "S2LITE_WAL_AWS_ENDPOINT_URL_S3",
+            "https://wal-r2.example.com",
+        )])
+        .unwrap()
+        .apply(builder);
+        assert_eq!(
+            cfg(&wal_builder, AmazonS3ConfigKey::S3Endpoint).as_deref(),
+            Some("https://wal-r2.example.com")
+        );
+        assert_eq!(allow_http(&wal_builder).as_deref(), Some("false"));
+
+        // Env S3 endpoint beats an HTTP profile endpoint without leaking allow_http.
+        let env_override = apply_aws_config(
+            AmazonS3Builder::new()
+                .with_config(AmazonS3ConfigKey::S3Endpoint, "https://s3.override.example"),
+            &http_profile,
+            None,
+        );
+        assert_eq!(
+            cfg(&env_override, AmazonS3ConfigKey::S3Endpoint).as_deref(),
+            Some("https://s3.override.example")
+        );
+        assert_eq!(cfg(&env_override, AmazonS3ConfigKey::Endpoint), None);
+        assert_eq!(allow_http(&env_override).as_deref(), Some("false"));
+    }
+
+    #[test]
     fn cli_endpoint_uses_localhost_with_explicit_port() {
         assert_eq!(
             cli_endpoint(ServerProtocol::Http, ANY_V4, 80),
@@ -1027,7 +1110,7 @@ mod tests {
                 "export S2_ACCOUNT_ENDPOINT=https://localhost:8443\n",
                 "export S2_BASIN_ENDPOINT=https://localhost:8443\n",
                 "export S2_ACCESS_TOKEN=ignored\n",
-                "export S2_SSL_NO_VERIFY=1",
+                "export S2_SSL_NO_VERIFY=true",
             )
         );
     }
