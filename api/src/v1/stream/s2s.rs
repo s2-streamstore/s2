@@ -7,6 +7,7 @@ use std::{
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use flate2::{Compression, bufread::GzDecoder, write::GzEncoder};
 use futures_core::Stream;
+use s2_common::buf::{compressed_capacity_bound, shrink_if_excess_slack};
 use strum::FromRepr;
 
 /*
@@ -60,12 +61,6 @@ const FLAG_COMPRESSION_MASK: u8 = 0b0110_0000;
 const FLAG_COMPRESSION_SHIFT: u8 = 5;
 const FLAG_RECONNECT_ADVISED: u8 = 0b0001_0000;
 
-fn shrink_if_excess_slack(buf: &mut Vec<u8>, max_slack: usize) {
-    if buf.capacity().saturating_sub(buf.len()) > max_slack {
-        buf.shrink_to_fit();
-    }
-}
-
 fn validate_decompressed_len(len: usize) -> std::io::Result<()> {
     if len > MAX_DECOMPRESSED_PAYLOAD_BYTES {
         return Err(std::io::Error::new(
@@ -84,14 +79,6 @@ fn zstd_encode_into(raw: &[u8], out: Vec<u8>) -> std::io::Result<Vec<u8>> {
     encoder.set_pledged_src_size(Some(raw.len() as u64))?;
     encoder.write_all(raw)?;
     encoder.finish()
-}
-
-/// Upper bound on compressed output size for `raw_len` bytes of incompressible input.
-///
-/// Matches a branchless upper bound on libzstd's `ZSTD_COMPRESSBOUND` (and covers gzip's framing
-/// and stored-block overhead) so incompressible payloads do not overflow and reallocate mid-write.
-fn compressed_capacity_bound(raw_len: usize) -> usize {
-    raw_len.saturating_add(raw_len >> 8).saturating_add(64)
 }
 
 /// Compress `raw` by appending to `out`, enforcing `MAX_FRAME_PAYLOAD_BYTES` on the newly appended

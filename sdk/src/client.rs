@@ -28,6 +28,7 @@ use hyper::{
 };
 use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
 use hyper_util::{client::legacy::connect::HttpConnector, rt::TokioTimer};
+use s2_common::buf::{compressed_capacity_bound, shrink_if_excess_slack};
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::{
     sync::{Notify, watch},
@@ -986,20 +987,6 @@ fn with_origin_key<R>(uri: &Uri, f: impl FnOnce(&str) -> R) -> R {
         None => format!("{scheme}://{host}"),
     };
     f(&owned)
-}
-
-fn shrink_if_excess_slack(buf: &mut Vec<u8>, max_slack: usize) {
-    if buf.capacity().saturating_sub(buf.len()) > max_slack {
-        buf.shrink_to_fit();
-    }
-}
-
-/// Upper bound on compressed output size for `raw_len` bytes of incompressible input.
-///
-/// Matches a branchless upper bound on libzstd's `ZSTD_COMPRESSBOUND` (and covers gzip's framing
-/// and stored-block overhead) so incompressible payloads do not overflow and reallocate mid-write.
-fn compressed_capacity_bound(raw_len: usize) -> usize {
-    raw_len.saturating_add(raw_len >> 8).saturating_add(64)
 }
 
 fn compress_body(
@@ -3005,24 +2992,5 @@ mod tests {
         assert_eq!(with_q1, "https://example.com:8443/v1/streams?a=1");
         let with_q2 = uri_with_query(&with_q1, "b=2").unwrap();
         assert_eq!(with_q2, "https://example.com:8443/v1/streams?a=1&b=2");
-    }
-
-    #[test]
-    fn shrink_if_excess_slack_reduces_only_when_above_threshold() {
-        let mut oversized = Vec::with_capacity(64 * 1024);
-        oversized.extend_from_slice(&[0xAB; 512]);
-        assert!(oversized.capacity() >= 64 * 1024);
-        shrink_if_excess_slack(&mut oversized, 4096);
-        assert!(
-            oversized.capacity() < 4096,
-            "expected capacity to shrink, got {}",
-            oversized.capacity()
-        );
-
-        let mut within_budget = Vec::with_capacity(4096);
-        within_budget.extend_from_slice(&[0xCD; 2048]);
-        let before = within_budget.capacity();
-        shrink_if_excess_slack(&mut within_budget, 4096);
-        assert_eq!(within_budget.capacity(), before);
     }
 }
