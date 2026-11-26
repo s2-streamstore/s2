@@ -66,7 +66,7 @@ async fn spec_c8_redirects_are_never_followed() {
         assert!(!append_err.has_no_side_effects());
 
         let read_err = stream
-            .read(ReadInput::new())
+            .read(ReadInput::new(ReadStart::TAIL))
             .await
             .expect_err("redirect must fail read");
         let ReadError::Server(se) = &read_err else {
@@ -304,7 +304,10 @@ async fn spec_e2_typed_412_416_extra_fields_and_fallbacks() {
     assert!(err.has_no_side_effects());
 
     // 4. 416 with extra fields still produces ReadUnwrittenError
-    let err = stream.read(ReadInput::new()).await.unwrap_err();
+    let err = stream
+        .read(ReadInput::new(ReadStart::TAIL))
+        .await
+        .unwrap_err();
     let ReadError::ReadUnwritten(e) = &err else {
         panic!("expected ReadUnwritten, got {err:?}");
     };
@@ -313,7 +316,10 @@ async fn spec_e2_typed_412_416_extra_fields_and_fallbacks() {
     assert_eq!(e.server_error().status.as_u16(), 416);
 
     // 5. 416 malformed body falls back to plain ServerError, still definite on read
-    let err = stream.read(ReadInput::new()).await.unwrap_err();
+    let err = stream
+        .read(ReadInput::new(ReadStart::TAIL))
+        .await
+        .unwrap_err();
     let ReadError::Server(se) = &err else {
         panic!("expected plain ServerError on malformed 416, got {err:?}");
     };
@@ -322,7 +328,7 @@ async fn spec_e2_typed_412_416_extra_fields_and_fallbacks() {
     assert!(err.has_no_side_effects());
 }
 
-// spec: r1 E1, E5, E5a, E5b, E7
+// spec: r1 E1, E5, E5a, E5b, E5c, E7
 #[tokio::test]
 async fn spec_e5_e7_indefinite_append_wrapping_and_context() {
     let fast_retry_all = fast_retry_config(2).with_append_retry_policy(AppendRetryPolicy::All);
@@ -341,6 +347,17 @@ async fn spec_e5_e7_indefinite_append_wrapping_and_context() {
     assert!(
         err.server_error().is_none(),
         "E5a: wrapper hides ServerError"
+    );
+    assert!(
+        matches!(
+            err.root_cause(),
+            AppendError::SeqNumMismatch(e) if e.assignable_seq_num == 5
+        ),
+        "E5c: root_cause unwraps IndefiniteAppend"
+    );
+    assert_eq!(
+        err.root_cause().server_error().unwrap().status.as_u16(),
+        412
     );
     let display = err.to_string();
     assert!(display.contains("append"), "E7: {display}");
@@ -367,6 +384,13 @@ async fn spec_e5_e7_indefinite_append_wrapping_and_context() {
     assert!(base.server_error().is_none(), "E1/E5a: S2Error wrapper");
     assert!(!base.has_no_side_effects());
     assert!(!base.is_retryable());
+    assert!(
+        matches!(
+            base.root_cause(),
+            S2Error::SeqNumMismatch(e) if e.assignable_seq_num == 5
+        ),
+        "E5c: S2Error::root_cause unwraps IndefiniteAppend"
+    );
 
     // Case 2: indefinite attempt 1 + indefinite attempt 2 -> NOT wrapped
     let server = MockH2Server::from_responses([
@@ -421,7 +445,7 @@ async fn spec_e5_e7_indefinite_append_wrapping_and_context() {
     assert!(!display.contains("attempts"), "E7: {display}");
 }
 
-// spec: r1 E2, E2a, E2b, E5a, E5b, E6, T9
+// spec: r1 E2, E2a, E2b, E5a, E5b, E5c, E6, T9
 #[tokio::test]
 async fn spec_e2_e6_s2s_terminal_frames_end_to_end() {
     // 1. Append session receiving 412 seq_num_mismatch terminal frame.
@@ -471,6 +495,13 @@ async fn spec_e2_e6_s2s_terminal_frames_end_to_end() {
         closed.failure(),
         Some(AppendSessionError::SeqNumMismatch(inner)) if inner.assignable_seq_num == 12
     ));
+    assert!(
+        matches!(
+            closed_err.root_cause(),
+            AppendSessionError::SeqNumMismatch(inner) if inner.assignable_seq_num == 12
+        ),
+        "E5c: root_cause unwraps SessionClosed"
+    );
     let source = closed
         .source()
         .expect("E5b: SessionClosedError sets source");
@@ -494,7 +525,10 @@ async fn spec_e2_e6_s2s_terminal_frames_end_to_end() {
 
     let mut sess = read_server
         .stream(no_retry_config())
-        .read_session(ReadInput::new(), ReadSessionConfig::default())
+        .read_session(
+            ReadInput::new(ReadStart::TAIL),
+            ReadSessionConfig::default(),
+        )
         .expect("open read session");
     let read_err = sess
         .next()
@@ -571,7 +605,10 @@ async fn spec_c12_client_close_aborts_inflight_and_sessions_and_rejects_new_call
         .producer(ProducerConfig::new().with_linger(Duration::from_secs(60)))
         .expect("open producer");
     let mut read_session = stream
-        .read_session(ReadInput::new(), ReadSessionConfig::default())
+        .read_session(
+            ReadInput::new(ReadStart::TAIL),
+            ReadSessionConfig::default(),
+        )
         .expect("open read session");
     let caught_up = read_session.caught_up();
 
@@ -590,7 +627,7 @@ async fn spec_c12_client_close_aborts_inflight_and_sessions_and_rejects_new_call
     });
     let unary_read = tokio::spawn({
         let stream = stream.clone();
-        async move { stream.read(ReadInput::new()).await }
+        async move { stream.read(ReadInput::new(ReadStart::TAIL)).await }
     });
     let read_next = tokio::spawn(async move { read_session.next().await });
 
@@ -686,7 +723,7 @@ async fn spec_c12_client_close_aborts_inflight_and_sessions_and_rejects_new_call
         Err(RequestError::ClientClosed(_))
     ));
     assert!(matches!(
-        stream.read(ReadInput::new()).await,
+        stream.read(ReadInput::new(ReadStart::TAIL)).await,
         Err(ReadError::ClientClosed(_))
     ));
     assert!(matches!(
@@ -697,12 +734,18 @@ async fn spec_c12_client_close_aborts_inflight_and_sessions_and_rejects_new_call
     assert!(stream.producer(ProducerConfig::new()).is_err());
     assert!(
         stream
-            .read_session(ReadInput::new(), ReadSessionConfig::default())
+            .read_session(
+                ReadInput::new(ReadStart::TAIL),
+                ReadSessionConfig::default()
+            )
             .is_err()
     );
     assert!(
         stream
-            .read_batch_session(ReadInput::new(), ReadSessionConfig::default())
+            .read_batch_session(
+                ReadInput::new(ReadStart::TAIL),
+                ReadSessionConfig::default()
+            )
             .is_err()
     );
 
@@ -958,7 +1001,10 @@ async fn spec_t4_s2_attempt_header_unary_and_sessions() {
 
     let mut read_session = read_server
         .stream(fast_retry_3)
-        .read_session(ReadInput::new(), ReadSessionConfig::default())
+        .read_session(
+            ReadInput::new(ReadStart::TAIL),
+            ReadSessionConfig::default(),
+        )
         .expect("open read session");
     let first = tokio::time::timeout(Duration::from_secs(3), read_session.next())
         .await
@@ -1096,7 +1142,10 @@ async fn spec_t6_connection_retirement_on_server_draining_and_hot_server() {
 
     let mut read_session = session_server
         .stream(fast_retry_2)
-        .read_session(ReadInput::new(), ReadSessionConfig::default())
+        .read_session(
+            ReadInput::new(ReadStart::TAIL),
+            ReadSessionConfig::default(),
+        )
         .expect("open read session");
     let _ = read_session.next().await.unwrap().unwrap();
     let err = read_session
@@ -1260,7 +1309,7 @@ async fn spec_c5_c7_c10_c11_d1_a1_transport_user_agent_inputs_concurrency_and_bi
     assert_eq!(ack.tail.seq_num, 1);
 
     let read_batch = stream
-        .read(ReadInput::new().with_start(ReadStart::SeqNum(0)))
+        .read(ReadInput::new(ReadStart::SeqNum(0)))
         .await
         .unwrap();
     assert_eq!(read_batch.records.len(), 1);
@@ -1612,11 +1661,7 @@ async fn spec_t2_t7_t7b_m1_retry_safety_request_tokens_and_timeouts() {
 
     // Unary read with wait=1s succeeds when response arrives at 350ms > 150ms request_timeout.
     let batch = stream_t
-        .read(
-            ReadInput::new()
-                .with_start(ReadStart::SeqNum(0))
-                .with_wait_secs(1),
-        )
+        .read(ReadInput::new(ReadStart::SeqNum(0)).with_wait_secs(1))
         .await
         .expect("T7b: unary read timeout must be request_timeout + wait");
     assert_eq!(batch.records.len(), 1);
@@ -1627,7 +1672,10 @@ async fn spec_t2_t7_t7b_m1_retry_safety_request_tokens_and_timeouts() {
             cfg.with_request_timeout(Duration::from_millis(150))
                 .with_retry(no_retry_config())
         })
-        .read_session(ReadInput::new(), ReadSessionConfig::default())
+        .read_session(
+            ReadInput::new(ReadStart::TAIL),
+            ReadSessionConfig::default(),
+        )
         .unwrap();
     let err = sess.next().await.unwrap().unwrap_err();
     assert!(matches!(err, ReadSessionError::Timeout(_)), "{err:?}");
@@ -1787,7 +1835,10 @@ async fn spec_e4_e8_l1_l2_l3_logging_levels_secret_redaction_and_unobserved_erro
     assert!(close_err.is_retryable());
 
     let mut read_sess = stream
-        .read_session(ReadInput::new(), ReadSessionConfig::default())
+        .read_session(
+            ReadInput::new(ReadStart::TAIL),
+            ReadSessionConfig::default(),
+        )
         .unwrap();
     let unawaited_cu = read_sess.caught_up();
     drop(unawaited_cu);
@@ -2394,9 +2445,7 @@ async fn with_retry_overrides_pool_sharing_and_validation() {
     // 5. ReadSession inherits S2Stream::with_retry.
     let mut rs = all_stream
         .read_session(
-            ReadInput::new()
-                .with_start(ReadStart::SeqNum(0))
-                .with_count(1),
+            ReadInput::new(ReadStart::SeqNum(0)).with_count(1),
             ReadSessionConfig::default(),
         )
         .unwrap();
@@ -2413,7 +2462,7 @@ async fn with_retry_overrides_pool_sharing_and_validation() {
     // 7. Closing base_s2 immediately closes/aborts derived handles and their active sessions (C12).
     let mut live_rs = all_stream
         .read_session(
-            ReadInput::new().with_start(ReadStart::SeqNum(0)),
+            ReadInput::new(ReadStart::SeqNum(0)),
             ReadSessionConfig::default(),
         )
         .unwrap();

@@ -15,9 +15,7 @@ pub async fn workload() -> turmoil::Result {
     let ack = stream.append(batch).await?;
     info!(?ack, "appended records");
 
-    let batch = stream
-        .read(ReadInput::new().with_start(ReadStart::SeqNum(0)))
-        .await?;
+    let batch = stream.read(ReadInput::new(ReadStart::SeqNum(0))).await?;
     info!(?batch, "read records");
 
     Ok(())

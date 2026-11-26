@@ -2145,9 +2145,7 @@ mod tests {
     #[tokio::test]
     async fn clean_stop_final_record_catches_up_then_iteration_end_resets_is_caught_up() {
         let (mut session, tx, _state, _shutdown) = test_session_with_active_stream(
-            ReadInput::new()
-                .with_start(crate::types::ReadStart::SeqNum(0))
-                .with_count(2),
+            ReadInput::new(crate::types::ReadStart::SeqNum(0)).with_count(2),
         );
         let cu = session.caught_up();
 
@@ -2180,9 +2178,8 @@ mod tests {
 
     #[tokio::test]
     async fn heartbeat_after_trimmed_gap_advances_next_seq_num_on_pull() {
-        let (mut session, tx, _state, _shutdown) = test_session_with_active_stream(
-            ReadInput::new().with_start(crate::types::ReadStart::SeqNum(0)),
-        );
+        let (mut session, tx, _state, _shutdown) =
+            test_session_with_active_stream(ReadInput::new(crate::types::ReadStart::SeqNum(0)));
         let cu = session.caught_up();
 
         tx.send(Ok(S2sFrame {
@@ -2214,9 +2211,7 @@ mod tests {
     #[tokio::test]
     async fn clean_stop_after_heartbeat_preserves_progress_and_catch_up() {
         let (mut session, tx, _state, _shutdown) = test_session_with_active_stream(
-            ReadInput::new()
-                .with_start(crate::types::ReadStart::SeqNum(0))
-                .with_wait_secs(5),
+            ReadInput::new(crate::types::ReadStart::SeqNum(0)).with_wait_secs(5),
         );
         let cu = session.caught_up();
 
@@ -2240,9 +2235,8 @@ mod tests {
 
     #[tokio::test]
     async fn terminal_error_after_heartbeat_preserves_next_seq_num() {
-        let (mut session, tx, _state, _shutdown) = test_session_with_active_stream(
-            ReadInput::new().with_start(crate::types::ReadStart::SeqNum(0)),
-        );
+        let (mut session, tx, _state, _shutdown) =
+            test_session_with_active_stream(ReadInput::new(crate::types::ReadStart::SeqNum(0)));
         let cu = session.caught_up();
 
         tx.send(Ok(S2sFrame {
@@ -2273,8 +2267,9 @@ mod tests {
 
     #[tokio::test]
     async fn clean_end_without_catching_up_rejects_wait() {
-        let (mut session, tx, _state, _shutdown) =
-            test_session_with_active_stream(ReadInput::new().with_count(1));
+        let (mut session, tx, _state, _shutdown) = test_session_with_active_stream(
+            ReadInput::new(crate::types::ReadStart::TAIL).with_count(1),
+        );
         let cu = session.caught_up();
         drop(tx);
 
@@ -2287,9 +2282,8 @@ mod tests {
 
     #[tokio::test]
     async fn read_error_rejects_wait_and_preserves_prior_resolved_future() {
-        let (mut session, tx, _state, _shutdown) = test_session_with_active_stream(
-            ReadInput::new().with_start(crate::types::ReadStart::SeqNum(0)),
-        );
+        let (mut session, tx, _state, _shutdown) =
+            test_session_with_active_stream(ReadInput::new(crate::types::ReadStart::SeqNum(0)));
 
         tx.send(Ok(S2sFrame {
             msg: proto_batch(&[0], Some(1)),
@@ -2331,7 +2325,7 @@ mod tests {
     async fn dropping_session_rejects_wait() {
         let cu = {
             let (session, _tx, _state, _shutdown) =
-                test_session_with_active_stream(ReadInput::new());
+                test_session_with_active_stream(ReadInput::new(crate::types::ReadStart::TAIL));
             session.caught_up()
         };
 
@@ -2343,7 +2337,8 @@ mod tests {
 
     #[tokio::test]
     async fn client_shutdown_wakes_parked_caught_up_immediately_without_polling_session() {
-        let (mut session, _tx, state, shutdown) = test_session_with_active_stream(ReadInput::new());
+        let (mut session, _tx, state, shutdown) =
+            test_session_with_active_stream(ReadInput::new(crate::types::ReadStart::TAIL));
         let cu1 = state.caught_up();
         let cu2 = cu1.clone();
 
@@ -2402,9 +2397,7 @@ mod tests {
     async fn concurrent_abort_wins_over_clean_end_terminal_error_and_record_delivery() {
         // 1. Clean end cannot mask an Aborted close already committed by a concurrent CaughtUp.
         let (mut session, _tx, state, shutdown) = test_session_with_active_stream(
-            ReadInput::new()
-                .with_start(crate::types::ReadStart::SeqNum(0))
-                .with_count(2),
+            ReadInput::new(crate::types::ReadStart::SeqNum(0)).with_count(2),
         );
         shutdown.cancel();
         assert!(matches!(
@@ -2418,9 +2411,8 @@ mod tests {
         assert!(session.next().await.is_none());
 
         // 2. Terminal error cannot overwrite an Aborted close already committed concurrently.
-        let (mut session, _tx, state, shutdown) = test_session_with_active_stream(
-            ReadInput::new().with_start(crate::types::ReadStart::SeqNum(0)),
-        );
+        let (mut session, _tx, state, shutdown) =
+            test_session_with_active_stream(ReadInput::new(crate::types::ReadStart::SeqNum(0)));
         shutdown.cancel();
         assert!(matches!(
             state.caught_up().await,
@@ -2437,9 +2429,8 @@ mod tests {
         assert!(session.next().await.is_none());
 
         // 3. Record/batch delivery rejects and leaves next_seq_num untouched once aborted.
-        let (mut session, _tx, state, shutdown) = test_session_with_active_stream(
-            ReadInput::new().with_start(crate::types::ReadStart::SeqNum(0)),
-        );
+        let (mut session, _tx, state, shutdown) =
+            test_session_with_active_stream(ReadInput::new(crate::types::ReadStart::SeqNum(0)));
         shutdown.cancel();
         assert!(matches!(
             session.core.commit_record_delivered(0, AfterBatch::None),
@@ -2456,7 +2447,8 @@ mod tests {
 
     #[tokio::test]
     async fn dropping_session_after_client_shutdown_reports_aborted() {
-        let (session, _tx, state, shutdown) = test_session_with_active_stream(ReadInput::new());
+        let (session, _tx, state, shutdown) =
+            test_session_with_active_stream(ReadInput::new(crate::types::ReadStart::TAIL));
         let cu = session.caught_up();
         shutdown.cancel();
         drop(session);
@@ -2472,9 +2464,8 @@ mod tests {
     async fn caught_up_fused_and_repoll_after_resolution_does_not_panic() {
         use futures_core::FusedFuture as _;
 
-        let (mut session, tx, _state, _shutdown) = test_session_with_active_stream(
-            ReadInput::new().with_start(crate::types::ReadStart::SeqNum(0)),
-        );
+        let (mut session, tx, _state, _shutdown) =
+            test_session_with_active_stream(ReadInput::new(crate::types::ReadStart::SeqNum(0)));
         let mut cu = session.caught_up();
         assert!(!cu.is_terminated());
         assert!(poll!(Pin::new(&mut cu)).is_pending());
@@ -2574,9 +2565,8 @@ mod tests {
         }
 
         // 1. Catch-up transition wakes outside ReadSessionState lock.
-        let (mut session, tx, state, _shutdown) = test_session_with_active_stream(
-            ReadInput::new().with_start(crate::types::ReadStart::SeqNum(0)),
-        );
+        let (mut session, tx, state, _shutdown) =
+            test_session_with_active_stream(ReadInput::new(crate::types::ReadStart::SeqNum(0)));
         let mut cu = state.caught_up();
         let inspector = Arc::new(InspectingWaker {
             state: state.clone(),
@@ -2596,7 +2586,8 @@ mod tests {
         assert_eq!(cu.await.unwrap(), position(1));
 
         // 2. Drop transition wakes outside ReadSessionState lock.
-        let (session, _tx, state, _shutdown) = test_session_with_active_stream(ReadInput::new());
+        let (session, _tx, state, _shutdown) =
+            test_session_with_active_stream(ReadInput::new(crate::types::ReadStart::TAIL));
         let mut cu = state.caught_up();
         let inspector = Arc::new(InspectingWaker {
             state: state.clone(),
@@ -2616,9 +2607,8 @@ mod tests {
         // Record view rejects `[7, u64::MAX]` (with tail) atomically: delivers no records,
         // preserves `next_seq_num` and `last_observed_tail`, releases `client`, fails `caught_up`
         // and iteration once with `ProtocolError`, then yields `None`.
-        let (mut session, tx, state, _shutdown) = test_session_with_active_stream(
-            ReadInput::new().with_start(crate::types::ReadStart::SeqNum(7)),
-        );
+        let (mut session, tx, state, _shutdown) =
+            test_session_with_active_stream(ReadInput::new(crate::types::ReadStart::SeqNum(7)));
         let cu = state.caught_up();
         tx.send(Ok(S2sFrame {
             msg: proto_batch(&[7, u64::MAX], Some(u64::MAX)),
@@ -2639,9 +2629,8 @@ mod tests {
 
         // Record view also rejects an out-of-order batch `[7, 8, 5]` with a tail atomically
         // without delivering `[7, 8]` or recording the corrupt batch's tail.
-        let (mut session, tx, state, _shutdown) = test_session_with_active_stream(
-            ReadInput::new().with_start(crate::types::ReadStart::SeqNum(7)),
-        );
+        let (mut session, tx, state, _shutdown) =
+            test_session_with_active_stream(ReadInput::new(crate::types::ReadStart::SeqNum(7)));
         tx.send(Ok(S2sFrame {
             msg: proto_batch(&[7, 8, 5], Some(20)),
             reconnect_advised: false,
@@ -2657,9 +2646,9 @@ mod tests {
 
         // Batch view rejects `[7, u64::MAX]` with a tail identically (`R6`/`R6a`).
         let (mut batch_sess, batch_tx, batch_state, _shutdown) =
-            test_batch_session_with_active_stream(
-                ReadInput::new().with_start(crate::types::ReadStart::SeqNum(7)),
-            );
+            test_batch_session_with_active_stream(ReadInput::new(crate::types::ReadStart::SeqNum(
+                7,
+            )));
         batch_tx
             .send(Ok(S2sFrame {
                 msg: proto_batch(&[7, u64::MAX], Some(u64::MAX)),
@@ -2679,9 +2668,8 @@ mod tests {
         // last_record.seq_num` (such as `[0, 1, 2]` with `tail = 1` or `tail = 2`) without
         // mid-batch catch-up (`R6`).
         for bad_tail in [1, 2] {
-            let (mut session, tx, state, _shutdown) = test_session_with_active_stream(
-                ReadInput::new().with_start(crate::types::ReadStart::SeqNum(0)),
-            );
+            let (mut session, tx, state, _shutdown) =
+                test_session_with_active_stream(ReadInput::new(crate::types::ReadStart::SeqNum(0)));
             let cu = state.caught_up();
             tx.send(Ok(S2sFrame {
                 msg: proto_batch(&[0, 1, 2], Some(bad_tail)),
@@ -2699,9 +2687,9 @@ mod tests {
             assert!(session.next().await.is_none());
 
             let (mut batch_sess, batch_tx, batch_state, _shutdown) =
-                test_batch_session_with_active_stream(
-                    ReadInput::new().with_start(crate::types::ReadStart::SeqNum(0)),
-                );
+                test_batch_session_with_active_stream(ReadInput::new(
+                    crate::types::ReadStart::SeqNum(0),
+                ));
             batch_tx
                 .send(Ok(S2sFrame {
                     msg: proto_batch(&[0, 1, 2], Some(bad_tail)),
@@ -2721,9 +2709,8 @@ mod tests {
     // spec: r1 R7c, T5a
     #[tokio::test]
     async fn empty_frame_without_tail_clears_is_caught_up_without_losing_observed_tail() {
-        let (mut session, tx, state, _shutdown) = test_session_with_active_stream(
-            ReadInput::new().with_start(crate::types::ReadStart::SeqNum(0)),
-        );
+        let (mut session, tx, state, _shutdown) =
+            test_session_with_active_stream(ReadInput::new(crate::types::ReadStart::SeqNum(0)));
         tx.send(Ok(S2sFrame {
             msg: proto_batch(&[0], Some(1)),
             reconnect_advised: false,
@@ -2750,9 +2737,8 @@ mod tests {
     // spec: r1 R7a, R11b
     #[tokio::test]
     async fn regressing_heartbeat_does_not_rewind_resume_cursor_or_public_checkpoint() {
-        let (mut session, tx, state, _shutdown) = test_session_with_active_stream(
-            ReadInput::new().with_start(crate::types::ReadStart::TailOffset(0)),
-        );
+        let (mut session, tx, state, _shutdown) =
+            test_session_with_active_stream(ReadInput::new(crate::types::ReadStart::TailOffset(0)));
         tx.send(Ok(S2sFrame {
             msg: proto_batch(&[], Some(12)),
             reconnect_advised: false,
@@ -2795,7 +2781,7 @@ mod tests {
         use std::sync::atomic::Ordering;
 
         let (mut session, tx, chunks, _state, _shutdown) = test_session_with_retry(
-            ReadInput::new().with_start(crate::types::ReadStart::SeqNum(0)),
+            ReadInput::new(crate::types::ReadStart::SeqNum(0)),
             RetryConfig::new().with_max_attempts(2),
         );
         // Simulate one failed attempt already consumed so retry budget is on attempt 2.
@@ -2829,9 +2815,7 @@ mod tests {
     #[tokio::test]
     async fn initial_request_terminal_416_after_record_surfaces_read_unwritten_error() {
         let (mut session, tx, state, _shutdown) = test_session_with_active_stream(
-            ReadInput::new()
-                .with_start(crate::types::ReadStart::SeqNum(0))
-                .with_count(10),
+            ReadInput::new(crate::types::ReadStart::SeqNum(0)).with_count(10),
         );
 
         // Initial request delivers record 0 (setting has_received_response=true and advancing
@@ -2862,9 +2846,7 @@ mod tests {
         // 1. Uncaught-up count=1 (ReadSession): client released immediately upon returning record
         //    0.
         let (mut session, tx, state, _shutdown) = test_session_with_active_stream(
-            ReadInput::new()
-                .with_start(crate::types::ReadStart::SeqNum(0))
-                .with_count(1),
+            ReadInput::new(crate::types::ReadStart::SeqNum(0)).with_count(1),
         );
         tx.send(Ok(S2sFrame {
             msg: proto_batch(&[0], Some(5)),
@@ -2879,9 +2861,7 @@ mod tests {
         // 2. Caught-up count=1 (ReadSession): client released immediately, while `is_caught_up`
         //    stays true until trailing `None` (`R7c`).
         let (mut session, tx, state, _shutdown) = test_session_with_active_stream(
-            ReadInput::new()
-                .with_start(crate::types::ReadStart::SeqNum(0))
-                .with_count(1),
+            ReadInput::new(crate::types::ReadStart::SeqNum(0)).with_count(1),
         );
         tx.send(Ok(S2sFrame {
             msg: proto_batch(&[0], Some(1)),
@@ -2896,9 +2876,7 @@ mod tests {
 
         // 3. ReadBatchSession count=1: client released immediately on returning the final batch.
         let (mut batch_sess, batch_tx, _state, _shutdown) = test_batch_session_with_active_stream(
-            ReadInput::new()
-                .with_start(crate::types::ReadStart::SeqNum(0))
-                .with_count(1),
+            ReadInput::new(crate::types::ReadStart::SeqNum(0)).with_count(1),
         );
         batch_tx
             .send(Ok(S2sFrame {
@@ -2918,7 +2896,7 @@ mod tests {
 
         let make_session = || {
             let (session, tx, chunks, _state, _shutdown) = test_session_with_retry(
-                ReadInput::new().with_start(crate::types::ReadStart::SeqNum(0)),
+                ReadInput::new(crate::types::ReadStart::SeqNum(0)),
                 RetryConfig::new().with_max_attempts(1),
             );
             (session, tx, chunks)
@@ -3031,9 +3009,7 @@ mod tests {
         // immediately while keeping the clean outcome (`None` on iteration, SessionClosedError on
         // new caught_up(), prior resolved caught_up() retained).
         let (mut session, tx, state, shutdown) = test_session_with_active_stream(
-            ReadInput::new()
-                .with_start(crate::types::ReadStart::SeqNum(0))
-                .with_count(1),
+            ReadInput::new(crate::types::ReadStart::SeqNum(0)).with_count(1),
         );
         tx.send(Ok(S2sFrame {
             msg: proto_batch(&[0], Some(1)),
@@ -3057,9 +3033,9 @@ mod tests {
         // pending `caught_up()` uniformly across batch view and record view (regardless of batch
         // size), then transitions to `Connecting` so `is_caught_up()` is false.
         let (mut batch_sess, batch_tx, batch_state, _shutdown) =
-            test_batch_session_with_active_stream(
-                ReadInput::new().with_start(crate::types::ReadStart::SeqNum(0)),
-            );
+            test_batch_session_with_active_stream(ReadInput::new(crate::types::ReadStart::SeqNum(
+                0,
+            )));
         let pending_cu = batch_state.caught_up();
         batch_tx
             .send(Ok(S2sFrame {
@@ -3073,9 +3049,8 @@ mod tests {
 
         // Record view with a 2-record advised batch `[0, 1]` and tail `2`: record 0 does not yet
         // catch up; record 1 resolves pending `caught_up()` to `2` and then drops `is_caught_up`.
-        let (mut rec_sess, rec_tx, rec_state, _shutdown) = test_session_with_active_stream(
-            ReadInput::new().with_start(crate::types::ReadStart::SeqNum(0)),
-        );
+        let (mut rec_sess, rec_tx, rec_state, _shutdown) =
+            test_session_with_active_stream(ReadInput::new(crate::types::ReadStart::SeqNum(0)));
         let mut pending_cu = rec_state.caught_up();
         rec_tx
             .send(Ok(S2sFrame {
@@ -3098,9 +3073,8 @@ mod tests {
         assert!(poll!(Pin::new(&mut post_handover_cu)).is_pending());
 
         // Record view with a 1-record advised batch `[0]` and tail `1` behaves identically.
-        let (mut one_sess, one_tx, one_state, _shutdown) = test_session_with_active_stream(
-            ReadInput::new().with_start(crate::types::ReadStart::SeqNum(0)),
-        );
+        let (mut one_sess, one_tx, one_state, _shutdown) =
+            test_session_with_active_stream(ReadInput::new(crate::types::ReadStart::SeqNum(0)));
         let pending_cu = one_state.caught_up();
         one_tx
             .send(Ok(S2sFrame {
@@ -3118,7 +3092,7 @@ mod tests {
     async fn reusable_sleep_reuses_single_allocation_across_heartbeat_and_backoff_and_clears_on_close()
      {
         let (mut session, tx, _chunks, _state, _shutdown) = test_session_with_retry(
-            ReadInput::new().with_start(crate::types::ReadStart::SeqNum(0)),
+            ReadInput::new(crate::types::ReadStart::SeqNum(0)),
             RetryConfig::new()
                 .with_max_attempts(2)
                 .with_min_base_delay(Duration::from_millis(200))
@@ -3216,7 +3190,7 @@ mod tests {
         // Extreme retry backoff (`Duration::MAX`) must not panic when computing the deadline,
         // and still aborts cleanly on client close.
         let (mut max_session, max_tx, _chunks, _state, _shutdown) = test_session_with_retry(
-            ReadInput::new().with_start(crate::types::ReadStart::SeqNum(0)),
+            ReadInput::new(crate::types::ReadStart::SeqNum(0)),
             RetryConfig::new()
                 .with_max_attempts(2)
                 .with_min_base_delay(Duration::MAX)
@@ -3286,10 +3260,16 @@ mod tests {
             .basin("test-basin".parse().unwrap())
             .stream("test-stream".parse().unwrap());
         let _rs = stream
-            .read_session(ReadInput::new(), ReadSessionConfig::default())
+            .read_session(
+                ReadInput::new(crate::types::ReadStart::TAIL),
+                ReadSessionConfig::default(),
+            )
             .unwrap();
         let _rbs = stream
-            .read_batch_session(ReadInput::new(), ReadSessionConfig::default())
+            .read_batch_session(
+                ReadInput::new(crate::types::ReadStart::TAIL),
+                ReadSessionConfig::default(),
+            )
             .unwrap();
     }
 }

@@ -61,9 +61,7 @@ async fn append_record_shapes(stream: &S2Stream) -> Result<(), Box<dyn std::erro
     assert_eq!(ack.start.seq_num, 0);
     assert_eq!(ack.end.seq_num, 4);
 
-    let batch = stream
-        .read(ReadInput::new().with_start(ReadStart::SeqNum(0)))
-        .await?;
+    let batch = stream.read(ReadInput::new(ReadStart::SeqNum(0))).await?;
     assert_eq!(batch.records.len(), 4);
     assert!(batch.records[0].body.is_empty());
     assert!(batch.records[0].headers.is_empty());
@@ -345,27 +343,17 @@ async fn read_limits(stream: &S2Stream) -> Result<(), Box<dyn std::error::Error>
     assert_eq!(ack.end.seq_num, 4);
 
     // Unbounded read returns all 4 records.
-    let all = stream
-        .read(ReadInput::new().with_start(ReadStart::SeqNum(0)))
-        .await?;
+    let all = stream.read(ReadInput::new(ReadStart::SeqNum(0))).await?;
     assert_eq!(all.records.len(), 4);
 
     // Count limits: zero, partial from offset, exact, and exceeds.
     let zero_count = stream
-        .read(
-            ReadInput::new()
-                .with_start(ReadStart::SeqNum(0))
-                .with_count(0),
-        )
+        .read(ReadInput::new(ReadStart::SeqNum(0)).with_count(0))
         .await?;
     assert!(zero_count.records.is_empty());
 
     let partial_count = stream
-        .read(
-            ReadInput::new()
-                .with_start(ReadStart::SeqNum(1))
-                .with_count(2),
-        )
+        .read(ReadInput::new(ReadStart::SeqNum(1)).with_count(2))
         .await?;
     assert_eq!(partial_count.records.len(), 2);
     assert_eq!(partial_count.records[0].seq_num, 1);
@@ -374,69 +362,41 @@ async fn read_limits(stream: &S2Stream) -> Result<(), Box<dyn std::error::Error>
     assert_eq!(partial_count.records[1].body, "dolor");
 
     let exact_count = stream
-        .read(
-            ReadInput::new()
-                .with_start(ReadStart::SeqNum(0))
-                .with_count(4),
-        )
+        .read(ReadInput::new(ReadStart::SeqNum(0)).with_count(4))
         .await?;
     assert_eq!(exact_count.records.len(), 4);
 
     let exceeds_count = stream
-        .read(
-            ReadInput::new()
-                .with_start(ReadStart::SeqNum(0))
-                .with_count(10),
-        )
+        .read(ReadInput::new(ReadStart::SeqNum(0)).with_count(10))
         .await?;
     assert_eq!(exceeds_count.records.len(), 4);
 
     // Bytes limits: zero, exact single record, partial from offset, partial from start, exceeds.
     let zero_bytes = stream
-        .read(
-            ReadInput::new()
-                .with_start(ReadStart::SeqNum(0))
-                .with_bytes(0),
-        )
+        .read(ReadInput::new(ReadStart::SeqNum(0)).with_bytes(0))
         .await?;
     assert!(zero_bytes.records.is_empty());
 
     let exact_bytes = stream
-        .read(
-            ReadInput::new()
-                .with_start(ReadStart::SeqNum(0))
-                .with_bytes(r0_bytes),
-        )
+        .read(ReadInput::new(ReadStart::SeqNum(0)).with_bytes(r0_bytes))
         .await?;
     assert_eq!(exact_bytes.records.len(), 1);
     assert_eq!(exact_bytes.records[0].body, "lorem");
 
     let offset_bytes = stream
-        .read(
-            ReadInput::new()
-                .with_start(ReadStart::SeqNum(1))
-                .with_bytes(r12_bytes),
-        )
+        .read(ReadInput::new(ReadStart::SeqNum(1)).with_bytes(r12_bytes))
         .await?;
     assert_eq!(offset_bytes.records.len(), 2);
     assert_eq!(offset_bytes.records[0].seq_num, 1);
     assert_eq!(offset_bytes.records[1].seq_num, 2);
 
     let partial_bytes = stream
-        .read(
-            ReadInput::new()
-                .with_start(ReadStart::SeqNum(0))
-                .with_bytes(total_bytes - 5),
-        )
+        .read(ReadInput::new(ReadStart::SeqNum(0)).with_bytes(total_bytes - 5))
         .await?;
     assert_eq!(partial_bytes.records.len(), 3);
 
     let exceeds_bytes = stream
-        .read(
-            ReadInput::new()
-                .with_start(ReadStart::SeqNum(0))
-                .with_bytes(1000),
-        )
+        .read(ReadInput::new(ReadStart::SeqNum(0)).with_bytes(1000))
         .await?;
     assert_eq!(exceeds_bytes.records.len(), 4);
 
@@ -465,11 +425,7 @@ async fn read_with_count_over_max_clamps(
         .await?;
 
     let batch = stream
-        .read(
-            ReadInput::new()
-                .with_start(ReadStart::SeqNum(0))
-                .with_count(2000),
-        )
+        .read(ReadInput::new(ReadStart::SeqNum(0)).with_count(2000))
         .await?;
     assert_eq!(batch.records.len(), 1000);
 
@@ -486,11 +442,7 @@ async fn read_with_bytes_over_max_clamps(
     stream.append(AppendRecord::new(body)?).await?;
 
     let batch = stream
-        .read(
-            ReadInput::new()
-                .with_start(ReadStart::SeqNum(0))
-                .with_bytes(2 * 1024 * 1024),
-        )
+        .read(ReadInput::new(ReadStart::SeqNum(0)).with_bytes(2 * 1024 * 1024))
         .await?;
     let read_bytes: usize = batch.records.iter().map(|r| r.metered_bytes()).sum();
     assert!(read_bytes <= 1024 * 1024);
@@ -514,9 +466,7 @@ async fn read_from_tail_offset_variants(
         ])?))
         .await?;
 
-    let result = stream
-        .read(ReadInput::new().with_start(ReadStart::TailOffset(0)))
-        .await;
+    let result = stream.read(ReadInput::new(ReadStart::TailOffset(0))).await;
     assert_matches!(
         result,
         Err(ReadError::ReadUnwritten(ReadUnwrittenError {
@@ -526,13 +476,13 @@ async fn read_from_tail_offset_variants(
     );
 
     let batch = stream
-        .read(ReadInput::new().with_start(ReadStart::TailOffset(3)))
+        .read(ReadInput::new(ReadStart::TailOffset(3)))
         .await?;
     assert_eq!(batch.records.len(), 3);
     assert_eq!(batch.records[0].seq_num, 2);
 
     let batch = stream
-        .read(ReadInput::new().with_start(ReadStart::TailOffset(999)))
+        .read(ReadInput::new(ReadStart::TailOffset(999)))
         .await?;
     assert_eq!(batch.records[0].seq_num, 0);
 
@@ -559,7 +509,7 @@ async fn read_timestamp_bounds(stream: &S2Stream) -> Result<(), Box<dyn std::err
 
     // Start from timestamp.
     let batch = stream
-        .read(ReadInput::new().with_start(ReadStart::Timestamp(base + 1)))
+        .read(ReadInput::new(ReadStart::Timestamp(base + 1)))
         .await?;
     assert_eq!(batch.records.len(), 3);
     assert_eq!(batch.records[0].seq_num, 1);
@@ -569,33 +519,21 @@ async fn read_timestamp_bounds(stream: &S2Stream) -> Result<(), Box<dyn std::err
 
     // Timestamp + count limit.
     let by_count = stream
-        .read(
-            ReadInput::new()
-                .with_start(ReadStart::Timestamp(base + 2))
-                .with_count(1),
-        )
+        .read(ReadInput::new(ReadStart::Timestamp(base + 2)).with_count(1))
         .await?;
     assert_eq!(by_count.records.len(), 1);
     assert_eq!(by_count.records[0].seq_num, 2);
 
     // Timestamp + bytes limit.
     let by_bytes = stream
-        .read(
-            ReadInput::new()
-                .with_start(ReadStart::Timestamp(base + 1))
-                .with_bytes(bytes_for_one),
-        )
+        .read(ReadInput::new(ReadStart::Timestamp(base + 1)).with_bytes(bytes_for_one))
         .await?;
     assert_eq!(by_bytes.records.len(), 1);
     assert_eq!(by_bytes.records[0].seq_num, 1);
 
     // Exclusive `until` upper bound.
     let until = stream
-        .read(
-            ReadInput::new()
-                .with_start(ReadStart::SeqNum(0))
-                .with_until(base + 2),
-        )
+        .read(ReadInput::new(ReadStart::SeqNum(0)).with_until(base + 2))
         .await?;
     assert_eq!(until.records.len(), 2);
     assert_eq!(until.records[0].timestamp, base);
@@ -603,7 +541,7 @@ async fn read_timestamp_bounds(stream: &S2Stream) -> Result<(), Box<dyn std::err
 
     // Future start timestamp returns ReadUnwritten.
     let future = stream
-        .read(ReadInput::new().with_start(ReadStart::Timestamp(base + 100)))
+        .read(ReadInput::new(ReadStart::Timestamp(base + 100)))
         .await;
     assert_matches!(future, Err(ReadError::ReadUnwritten(ReadUnwrittenError { tail, .. })) => {
         assert_eq!(tail.seq_num, 4);
@@ -612,11 +550,7 @@ async fn read_timestamp_bounds(stream: &S2Stream) -> Result<(), Box<dyn std::err
 
     // start timestamp >= until returns server invalid error.
     let bad_bounds = stream
-        .read(
-            ReadInput::new()
-                .with_start(ReadStart::Timestamp(base + 2))
-                .with_until(base + 2),
-        )
+        .read(ReadInput::new(ReadStart::Timestamp(base + 2)).with_until(base + 2))
         .await;
     assert_matches!(
         bad_bounds,
@@ -635,7 +569,7 @@ async fn read_empty_and_beyond_tail_unary(
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Empty stream: without wait -> ReadUnwritten(0, 0); with wait -> empty batch.
     assert_matches!(
-        stream.read(ReadInput::new()).await,
+        stream.read(ReadInput::new(ReadStart::TAIL)).await,
         Err(ReadError::ReadUnwritten(ReadUnwrittenError {
             tail: StreamPosition {
                 seq_num: 0,
@@ -645,7 +579,9 @@ async fn read_empty_and_beyond_tail_unary(
             ..
         }))
     );
-    let waited_empty = stream.read(ReadInput::new().with_wait_secs(1)).await?;
+    let waited_empty = stream
+        .read(ReadInput::new(ReadStart::TAIL).with_wait_secs(1))
+        .await?;
     assert!(waited_empty.records.is_empty());
 
     // Beyond tail: without wait (with or without clamp) -> ReadUnwritten(1); with clamp + wait ->
@@ -655,11 +591,7 @@ async fn read_empty_and_beyond_tail_unary(
 
     for clamp in [false, true] {
         let res = stream
-            .read(
-                ReadInput::new()
-                    .with_start(ReadStart::SeqNum(10))
-                    .with_clamp(clamp),
-            )
+            .read(ReadInput::new(ReadStart::SeqNum(10)).with_clamp(clamp))
             .await;
         assert_matches!(
             res,
@@ -672,8 +604,7 @@ async fn read_empty_and_beyond_tail_unary(
 
     let clamped_wait = stream
         .read(
-            ReadInput::new()
-                .with_start(ReadStart::SeqNum(10))
+            ReadInput::new(ReadStart::SeqNum(10))
                 .with_clamp(true)
                 .with_wait_secs(1),
         )
@@ -693,7 +624,7 @@ async fn read_session_beyond_tail_and_clamp(
 
     // Without clamp -> ReadUnwritten(1).
     let mut unclamped = stream.read_session(
-        ReadInput::new().with_start(ReadStart::SeqNum(10)),
+        ReadInput::new(ReadStart::SeqNum(10)),
         ReadSessionConfig::default(),
     )?;
     let err = unclamped
@@ -711,9 +642,7 @@ async fn read_session_beyond_tail_and_clamp(
 
     // With clamp -> clamps to tail and stays open waiting for new records.
     let mut clamped = stream.read_session(
-        ReadInput::new()
-            .with_start(ReadStart::SeqNum(10))
-            .with_clamp(true),
+        ReadInput::new(ReadStart::SeqNum(10)).with_clamp(true),
         ReadSessionConfig::default(),
     )?;
     assert_eq!(clamped.next_seq_num(), None);
@@ -736,7 +665,7 @@ async fn read_session_reports_caught_up_after_tail_delivery(
         ])?))
         .await?;
     let mut session = stream.read_session(
-        ReadInput::new().with_start(ReadStart::TailOffset(2)),
+        ReadInput::new(ReadStart::TailOffset(2)),
         ReadSessionConfig::default(),
     )?;
     let mut caught_up = session.caught_up();
@@ -796,7 +725,7 @@ async fn nonexistent_stream_errors(
         }
     );
     assert_matches!(
-        stream.read(ReadInput::new()).await,
+        stream.read(ReadInput::new(ReadStart::TAIL)).await,
         Err(ReadError::Server(ServerError { code, .. })) => {
             assert_eq!(code.as_deref(), Some("stream_not_found"));
         }
@@ -896,9 +825,7 @@ async fn compression_roundtrip(basin: &SharedS2Basin) -> Result<(), Box<dyn std:
             .await?;
         assert_eq!((ack.start.seq_num, ack.end.seq_num), (0, 2));
 
-        let batch = stream
-            .read(ReadInput::new().with_start(ReadStart::SeqNum(0)))
-            .await?;
+        let batch = stream.read(ReadInput::new(ReadStart::SeqNum(0))).await?;
         assert_eq!(batch.records.len(), 2);
 
         // S2S session roundtrip with payload >= 1 KiB compression threshold.
@@ -911,7 +838,7 @@ async fn compression_roundtrip(basin: &SharedS2Basin) -> Result<(), Box<dyn std:
         assert_eq!((ack.start.seq_num, ack.end.seq_num), (2, 3));
 
         let mut records = stream.read_session(
-            ReadInput::new().with_start(ReadStart::SeqNum(2)),
+            ReadInput::new(ReadStart::SeqNum(2)),
             ReadSessionConfig::default(),
         )?;
         let record = records.next().await.expect("should have record")?;
@@ -1002,7 +929,7 @@ async fn basin_default_and_auto_create_stream_config() -> Result<(), Box<dyn std
     // 5. read_session with_stream_config applies override when auto-creating a stream.
     let read_stream = unique_stream_name();
     let mut session = basin.stream(read_stream.clone()).read_session(
-        ReadInput::new().with_stream_config(override_config),
+        ReadInput::new(ReadStart::TAIL).with_stream_config(override_config),
         ReadSessionConfig::default(),
     )?;
     let mut caught_up = session.caught_up();

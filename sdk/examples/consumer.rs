@@ -1,7 +1,7 @@
 use s2_sdk::{
     S2,
     read_session::ReadSessionConfig,
-    types::{BasinName, ReadInput, StreamName},
+    types::{BasinName, ReadInput, ReadStart, StreamName},
 };
 use tokio::select;
 
@@ -17,7 +17,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let s2 = S2::from_env()?;
     let stream = s2.basin(basin_name).stream(stream_name);
 
-    let input = ReadInput::new();
+    let input = ReadInput::new(ReadStart::SeqNum(0));
     let mut records = stream.read_session(input, ReadSessionConfig::new())?;
     loop {
         select! {
