@@ -28,6 +28,7 @@ use hyper::{
 };
 use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
 use hyper_util::{client::legacy::connect::HttpConnector, rt::TokioTimer};
+use s2_api::compression::{ZSTD_MAX_WINDOW_LOG, compressed_capacity_bound, shrink_if_excess_slack};
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::{
     sync::{Notify, watch},
@@ -55,6 +56,7 @@ const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(20);
 const KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_ERROR_RESPONSE_BYTES: usize = 1024 * 1024;
+const HTTP_BODY_MIN_SLACK_BYTES: usize = 4096;
 
 pub(crate) type BoxError = Box<dyn std::error::Error + Send + Sync>;
 type BoxBody = UnsyncBoxBody<Bytes, BoxError>;
@@ -614,8 +616,7 @@ where
 
         Ok(match buf {
             Some(mut buf) => {
-                let max_slack = (buf.len() / 8).max(4096);
-                shrink_if_excess_slack(&mut buf, max_slack);
+                shrink_if_excess_slack(&mut buf, HTTP_BODY_MIN_SLACK_BYTES);
                 Bytes::from(buf)
             }
             None => first.unwrap_or_default(),
@@ -988,12 +989,6 @@ fn with_origin_key<R>(uri: &Uri, f: impl FnOnce(&str) -> R) -> R {
     f(&owned)
 }
 
-fn shrink_if_excess_slack(buf: &mut Vec<u8>, max_slack: usize) {
-    if buf.capacity().saturating_sub(buf.len()) > max_slack {
-        buf.shrink_to_fit();
-    }
-}
-
 fn compress_body(
     body: Body,
     compression: Compression,
@@ -1006,8 +1001,8 @@ fn compress_body(
             "streaming request bodies cannot be compressed".into(),
         ));
     };
-    let initial_capacity = data.len() + (data.len() >> 8) + 64;
-    match compression {
+    let initial_capacity = compressed_capacity_bound(data.len());
+    let (mut compressed, encoding) = match compression {
         Compression::None => unreachable!(),
         Compression::Gzip => {
             let mut encoder = GzEncoder::new(
@@ -1017,28 +1012,20 @@ fn compress_body(
             encoder
                 .write_all(data)
                 .map_err(|e| HttpError::RequestCompression(e.to_string()))?;
-            let mut compressed = encoder
+            let compressed = encoder
                 .finish()
                 .map_err(|e| HttpError::RequestCompression(e.to_string()))?;
-            let max_slack = (compressed.len() / 8).max(4096);
-            shrink_if_excess_slack(&mut compressed, max_slack);
-            Ok((
-                Body::from(compressed),
-                Some(HeaderValue::from_static("gzip")),
-            ))
+            (compressed, HeaderValue::from_static("gzip"))
         }
         Compression::Zstd => {
             let mut compressed = Vec::with_capacity(initial_capacity);
             zstd::stream::copy_encode(data, &mut compressed, 1)
                 .map_err(|e| HttpError::RequestCompression(e.to_string()))?;
-            let max_slack = (compressed.len() / 8).max(4096);
-            shrink_if_excess_slack(&mut compressed, max_slack);
-            Ok((
-                Body::from(compressed),
-                Some(HeaderValue::from_static("zstd")),
-            ))
+            (compressed, HeaderValue::from_static("zstd"))
         }
-    }
+    };
+    shrink_if_excess_slack(&mut compressed, HTTP_BODY_MIN_SLACK_BYTES);
+    Ok((Body::from(compressed), Some(encoding)))
 }
 
 fn read_bounded(
@@ -1055,8 +1042,7 @@ fn read_bounded(
     if decompressed.len() > max_bytes {
         return Err(HttpError::ResponseTooLarge(max_bytes));
     }
-    let max_slack = (decompressed.len() / 8).max(4096);
-    shrink_if_excess_slack(&mut decompressed, max_slack);
+    shrink_if_excess_slack(&mut decompressed, HTTP_BODY_MIN_SLACK_BYTES);
     Ok(Bytes::from(decompressed))
 }
 
@@ -1072,10 +1058,8 @@ fn decompress_single(encoding: &str, bytes: Bytes, max_bytes: usize) -> Result<B
         "zstd" => {
             let mut decoder = zstd::stream::Decoder::with_buffer(bytes.as_ref())
                 .map_err(|e| HttpError::ResponseCompression(e.to_string()))?;
-            // 16 MiB max window covers standard streaming zstd encoders (e.g. 8 MiB default
-            // windowLog=23) while bounding decoder memory well below libzstd's 128 MiB default.
             decoder
-                .window_log_max(24)
+                .window_log_max(ZSTD_MAX_WINDOW_LOG)
                 .map_err(|e| HttpError::ResponseCompression(e.to_string()))?;
             read_bounded(decoder, initial_capacity, max_bytes)
         }
@@ -2997,24 +2981,5 @@ mod tests {
         assert_eq!(with_q1, "https://example.com:8443/v1/streams?a=1");
         let with_q2 = uri_with_query(&with_q1, "b=2").unwrap();
         assert_eq!(with_q2, "https://example.com:8443/v1/streams?a=1&b=2");
-    }
-
-    #[test]
-    fn shrink_if_excess_slack_reduces_only_when_above_threshold() {
-        let mut oversized = Vec::with_capacity(64 * 1024);
-        oversized.extend_from_slice(&[0xAB; 512]);
-        assert!(oversized.capacity() >= 64 * 1024);
-        shrink_if_excess_slack(&mut oversized, 4096);
-        assert!(
-            oversized.capacity() < 4096,
-            "expected capacity to shrink, got {}",
-            oversized.capacity()
-        );
-
-        let mut within_budget = Vec::with_capacity(4096);
-        within_budget.extend_from_slice(&[0xCD; 2048]);
-        let before = within_budget.capacity();
-        shrink_if_excess_slack(&mut within_budget, 4096);
-        assert_eq!(within_budget.capacity(), before);
     }
 }
