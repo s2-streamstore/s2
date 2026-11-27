@@ -307,12 +307,10 @@ impl Future for CaughtUp {
                 this.state
                     .update(|inner, wake| inner.abort_for_client_close(wake));
 
-                if let Some(result) = signal.get() {
-                    Self::finish_ready(waits, &mut this.done, result)
-                } else {
-                    waits.shutdown_wait = None;
-                    Poll::Pending
-                }
+                let result = signal
+                    .get()
+                    .expect("abort_for_client_close resolves every pending CaughtUpSignal");
+                Self::finish_ready(waits, &mut this.done, result)
             }
         }
     }
@@ -479,7 +477,7 @@ impl ReadStateInner {
             self.update_observed_tail(tail);
         }
         self.latest_message_tail_seq = tail.map(|t| t.seq_num);
-        self.next_seq_num = Some(delivered_last_seq.saturating_add(1));
+        self.next_seq_num = Some(delivered_last_seq + 1);
         self.recompute_caught_up(wake);
         if close_clean {
             self.close_with(TerminalClose::Clean, wake);
@@ -491,7 +489,7 @@ impl ReadStateInner {
         if self.closed.is_some() {
             return;
         }
-        self.next_seq_num = Some(seq_num.saturating_add(1));
+        self.next_seq_num = Some(seq_num + 1);
         self.recompute_caught_up(wake);
         if close_clean {
             self.close_with(TerminalClose::Clean, wake);
@@ -748,7 +746,8 @@ enum BatchStep {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StreamLifecycle {
     Active,
-    /// Terminal error already returned; next poll emits `None` and transitions to `Terminated`.
+    /// Terminal item already returned (error or limit-exhausting final record/batch); next poll
+    /// emits `None` and transitions to `Terminated`.
     PendingEof,
     /// `None` has been returned (`FusedStream::is_terminated() == true`).
     Terminated,
@@ -927,9 +926,11 @@ impl ReadSessionCore {
     ) -> Result<(), TerminalClose> {
         self.update_open_or_finish(f)?;
         if close_clean {
-            // Close reason is now locked in (`R9`), so no further request can open and dropping
-            // the last `BasinClient` cannot alter `ReadSessionState`.
+            // Close reason is now locked in (`R9`), so tear down transport timers/waiters and
+            // release `BasinClient` immediately; the next pull returns `None` directly.
+            self.transport_mut().reset_to_idle();
             self.client = None;
+            self.lifecycle = StreamLifecycle::PendingEof;
         }
         Ok(())
     }
@@ -1164,10 +1165,11 @@ impl ReadSessionCore {
         }
         let _entered = self.span.clone().entered();
         loop {
-            // Fast path: while `lifecycle == Active`, `inner.closed` can only be set by
-            // `close_clean` (which clears `self.client = None`) or `S2::close()`
-            // (`shutdown.is_cancelled()`), so steady-state polls avoid locking `state.inner`.
-            if (self.client.is_none() || self.state.shutdown.is_cancelled())
+            // Fast path: while `lifecycle == Active`, `self.client` is always present and
+            // `inner.closed` can only be set by `S2::close()` (`shutdown.is_cancelled()`), so
+            // steady-state polls avoid locking `state.inner`.
+            debug_assert!(self.client.is_some());
+            if self.state.shutdown.is_cancelled()
                 && let Some(closed) = self.take_closed_or_abort()
             {
                 return Poll::Ready(Err(closed));
@@ -1280,7 +1282,6 @@ impl ReadSessionCore {
                             match sleep.poll_until(deadline, cx) {
                                 Poll::Pending => return self.pending_or_abort(cx),
                                 Poll::Ready(()) => {
-                                    let made_progress = attempt.made_progress;
                                     attempt.stream.retire_connection();
                                     *phase = DriverPhase::Idle;
                                     *heartbeat_deadline = None;
@@ -1290,7 +1291,7 @@ impl ReadSessionCore {
                                             self.context.clone(),
                                         ));
                                     if let DriverStep::Done(closed) =
-                                        self.handle_stream_error(err, made_progress)
+                                        self.schedule_retry_or_fail(err)
                                     {
                                         return Poll::Ready(Err(closed));
                                     }
@@ -2200,6 +2201,47 @@ mod tests {
             Err(TerminalClose::Error(ReadSessionError::Aborted(_)))
         ));
         assert_eq!(state.next_seq_num(), Some(0));
+    }
+
+    #[tokio::test]
+    async fn exhausted_delivery_immediately_releases_transport_and_client() {
+        let (mut session, tx, _state, _shutdown) = test_session_with_active_stream(
+            ReadInput::new(crate::types::ReadStart::SeqNum(0)).with_count(1),
+        );
+
+        // First poll parks on the active stream, arming both the heartbeat timer and shutdown
+        // waiter on `PollTransport`.
+        assert!(futures_util::poll!(std::pin::pin!(session.next())).is_pending());
+        {
+            let transport = session.core.transport_mut();
+            assert!(transport.sleep.sleep.is_some());
+            assert!(transport.shutdown_wait.is_some());
+        }
+
+        tx.send(Ok(S2sFrame {
+            msg: proto_batch(&[0], Some(1)),
+            reconnect_advised: false,
+        }))
+        .unwrap();
+
+        let rec = session.next().await.unwrap().unwrap();
+        assert_eq!(rec.seq_num, 0);
+
+        // Immediately after delivering the count-exhausting record (before the trailing `next()`),
+        // client, transport phase, timer, and shutdown waiter must already be torn down, while
+        // `FusedStream::is_terminated()` stays `false` until `None` is yielded.
+        assert!(session.core.client.is_none());
+        assert!(!session.is_terminated());
+        {
+            let transport = session.core.transport_mut();
+            assert!(matches!(transport.phase, DriverPhase::Idle));
+            assert!(transport.heartbeat_deadline.is_none());
+            assert!(transport.sleep.sleep.is_none());
+            assert!(transport.shutdown_wait.is_none());
+        }
+
+        assert!(session.next().await.is_none());
+        assert!(session.is_terminated());
     }
 
     #[tokio::test]

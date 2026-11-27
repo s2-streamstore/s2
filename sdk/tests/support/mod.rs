@@ -295,6 +295,10 @@ impl S2sResponder {
         self.0.send_reset(reason);
     }
 
+    pub async fn wait_reset(&mut self) -> Result<h2::Reason, h2::Error> {
+        std::future::poll_fn(|cx| self.0.poll_reset(cx)).await
+    }
+
     /// Push `frame` chunks using HTTP/2 send flow control until the stream receive window is
     /// completely exhausted (`capacity() == 0` and `poll_capacity` returns `Poll::Pending`),
     /// proving the peer has buffered the full window without releasing credit. Returns the total

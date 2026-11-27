@@ -1668,26 +1668,47 @@ async fn spec_r2_r6_empty_frame_protocol_error_zero_limits_and_r9_close_boundary
     );
 }
 
-// spec: r1 R6, R7a, R9a, R10c
+// spec: r1 R6, R7a, R9a, R10c, T10
 #[tokio::test]
 async fn regression_read_session_stops_on_exhausted_count_and_rejects_u64_max_seq_num() {
-    // 1. R10c/R9a: When count=1 is exhausted on a server that keeps the stream open (sending a
-    //    heartbeat or extra batch), the session immediately enters clean stop after delivering the
-    //    requested record, preserving caught-up state and never yielding extra records.
-    let server = MockH2Server::start(|_conn_id, _req, respond| async move {
-        if let Some(mut s2s) = S2sResponder::open(respond) {
-            s2s.send_regular(&proto_read_batch_records(&[0], Some(1)), false, false);
-            // Keep the stream open and even send a heartbeat + an extra record past count=1.
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            s2s.send_regular(&proto_heartbeat(1), false, false);
-            s2s.send_regular(&proto_read_batch_records(&[1], Some(2)), false, false);
-            tokio::time::sleep(Duration::from_secs(5)).await;
+    // 1. R10c/R9a/T10: When count=1 is exhausted on a server that keeps the stream open, the
+    //    session immediately resets the active HTTP/2 stream upon receiving the exhausting batch
+    //    (even while parked before the trailing `next()`), preserves caught-up state, and ends
+    //    cleanly without yielding extra records.
+    let reset_seen = Arc::new(tokio::sync::Notify::new());
+    let reset_reason = Arc::new(Mutex::new(None));
+    let server = MockH2Server::start({
+        let reset_seen = reset_seen.clone();
+        let reset_reason = reset_reason.clone();
+        move |_conn_id, _req, respond| {
+            let reset_seen = reset_seen.clone();
+            let reset_reason = reset_reason.clone();
+            async move {
+                if let Some(mut s2s) = S2sResponder::open(respond) {
+                    s2s.send_regular(&proto_read_batch_records(&[0], Some(1)), false, false);
+                    // Wait for the client to cancel/reset the stream immediately per T10; only
+                    // if it fails to do so quickly, send extra frames so the trailing `next()`
+                    // assertion also catches over-reading.
+                    if let Ok(Ok(reason)) =
+                        tokio::time::timeout(Duration::from_secs(2), s2s.wait_reset()).await
+                    {
+                        *reset_reason.lock().unwrap() = Some(reason);
+                        reset_seen.notify_one();
+                    } else {
+                        s2s.send_regular(&proto_heartbeat(1), false, false);
+                        s2s.send_regular(&proto_read_batch_records(&[1], Some(2)), false, false);
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                    }
+                }
+            }
         }
     })
     .await;
 
-    let mut sess = server
-        .stream(no_retry_config())
+    // Keep `stream` alive so the HTTP/2 connection stays open in the pool while we assert that
+    // the exhausted read session immediately resets its HTTP/2 stream (`T10`).
+    let stream = server.stream(no_retry_config());
+    let mut sess = stream
         .read_session(
             ReadInput::new(ReadStart::SeqNum(0)).with_count(1),
             ReadSessionConfig::default(),
@@ -1697,6 +1718,10 @@ async fn regression_read_session_stops_on_exhausted_count_and_rejects_u64_max_se
     let rec = sess.next().await.unwrap().unwrap();
     assert_eq!(rec.seq_num, 0);
     assert_eq!(cu.await.unwrap().seq_num, 1);
+    tokio::time::timeout(Duration::from_secs(2), reset_seen.notified())
+        .await
+        .expect("T10: client must reset HTTP/2 stream immediately once count=1 is exhausted");
+    assert_eq!(*reset_reason.lock().unwrap(), Some(h2::Reason::CANCEL));
     let end = tokio::time::timeout(Duration::from_secs(2), sess.next())
         .await
         .expect("read session must close promptly once count=1 is exhausted");

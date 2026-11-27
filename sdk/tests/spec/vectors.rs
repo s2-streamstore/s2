@@ -1887,8 +1887,8 @@ async fn assert_read_state_expect(
         );
     } else if let Some(resolved) = cu_expect.get("resolved") {
         let expected_pos = parse_pos(resolved).unwrap();
-        if let Some(cu) = pending_cu.take() {
-            let actual = tokio::time::timeout(Duration::from_secs(1), cu.clone())
+        if let Some(mut cu) = pending_cu.take() {
+            let actual = tokio::time::timeout(Duration::from_secs(1), &mut cu)
                 .await
                 .unwrap_or_else(|_| panic!("{label}: retained pending caught_up did not resolve"))
                 .unwrap_or_else(|e| {
@@ -1901,8 +1901,8 @@ async fn assert_read_state_expect(
             );
             resolved_cus.push((cu, expected_pos));
         }
-        let fresh = state.caught_up();
-        let actual = tokio::time::timeout(Duration::from_secs(1), fresh.clone())
+        let mut fresh = state.caught_up();
+        let actual = tokio::time::timeout(Duration::from_secs(1), &mut fresh)
             .await
             .unwrap_or_else(|_| panic!("{label}: fresh caught_up did not resolve"))
             .unwrap_or_else(|e| panic!("{label}: fresh caught_up failed unexpectedly: {e:?}"));
@@ -2197,11 +2197,12 @@ async fn run_read_state_case(case: &ReadStateCase, batch_view: bool) {
             .expect("opened_rx not yet consumed")
     };
 
-    for (step_idx, step) in case.steps.iter().enumerate() {
-        let label = format!("{case_label} (step {step_idx})");
-        let op = step["op"].as_str().unwrap();
-        let raw_expect = step.get("expect");
-        let expect = raw_expect.map(|e| {
+    fn resolve_step_expect<'a>(
+        step: &'a serde_json::Value,
+        representable: bool,
+        label: &str,
+    ) -> Option<&'a serde_json::Value> {
+        step.get("expect").map(|e| {
             if let Some(rep) = e.get("if_representable") {
                 if representable {
                     rep
@@ -2212,8 +2213,22 @@ async fn run_read_state_case(case: &ReadStateCase, batch_view: bool) {
             } else {
                 e
             }
-        });
+        })
+    }
+
+    for (step_idx, step) in case.steps.iter().enumerate() {
+        let label = format!("{case_label} (step {step_idx})");
+        let op = step["op"].as_str().unwrap();
+        let expect = resolve_step_expect(step, representable, &label);
         let expect_request = step.get("expect_request");
+        let next_expects_protocol_error = case
+            .steps
+            .get(step_idx + 1)
+            .and_then(|next| resolve_step_expect(next, representable, &label))
+            .and_then(|e| e.get("iteration"))
+            .and_then(|i| i.get("error"))
+            .and_then(|v| v.as_str())
+            == Some("ProtocolError");
 
         match op {
             "check" => {
@@ -2270,7 +2285,8 @@ async fn run_read_state_case(case: &ReadStateCase, batch_view: bool) {
                         sent: None,
                     },
                 );
-                if reconnect_advised && !exhausted && !handover_used {
+                if reconnect_advised && !exhausted && !handover_used && !next_expects_protocol_error
+                {
                     handover_used = true;
                     target_attempt += 1;
                 }
@@ -2281,7 +2297,8 @@ async fn run_read_state_case(case: &ReadStateCase, batch_view: bool) {
                     .get("reconnect_advised")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
-                let triggers_handover = reconnect_advised && !handover_used;
+                let triggers_handover =
+                    reconnect_advised && !handover_used && !next_expects_protocol_error;
                 let has_sync = expect.is_some() || expect_request.is_some();
 
                 let (sent_tx, sent_rx) = if has_sync && !triggers_handover {

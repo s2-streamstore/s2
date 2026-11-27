@@ -99,7 +99,9 @@ impl CancellationToken {
 
     pub(crate) fn cancel(&self) {
         // Store `Release` before cancelling `inner` so any task woken by `cancelled()` /
-        // `cancelled_owned()` is guaranteed to observe `is_cancelled() == true`.
+        // `cancelled_owned()` is guaranteed to observe `is_cancelled() == true`. Note that this
+        // guarantee is one-way: a caller observing `is_cancelled() == true` may momentarily poll
+        // `cancelled()` as `Pending` until `inner.cancel()` finishes.
         self.flag.cancelled.store(true, Ordering::Release);
         self.inner.cancel();
     }
@@ -109,12 +111,22 @@ impl CancellationToken {
     }
 
     pub(crate) fn child_token(&self) -> Self {
-        Self {
-            inner: self.inner.child_token(),
-            flag: Arc::new(CancelFlag {
+        let flag = if self.is_cancelled() {
+            // Already cancelled: create a detached flag so child tokens do not retain parent
+            // chains or walk ancestors on `is_cancelled()`, matching `tokio_util`.
+            Arc::new(CancelFlag {
+                cancelled: AtomicBool::new(true),
+                parent: None,
+            })
+        } else {
+            Arc::new(CancelFlag {
                 cancelled: AtomicBool::new(false),
                 parent: Some(self.flag.clone()),
-            }),
+            })
+        };
+        Self {
+            inner: self.inner.child_token(),
+            flag,
         }
     }
 
@@ -3127,5 +3139,12 @@ mod tests {
         wait_sibling.await;
         assert!(root.is_cancelled());
         assert!(sibling.is_cancelled());
+
+        // Child tokens created from an already-cancelled token are immediately cancelled and
+        // detached from the parent flag chain.
+        let post_cancel_child = root.child_token();
+        assert!(post_cancel_child.is_cancelled());
+        assert!(post_cancel_child.flag.parent.is_none());
+        post_cancel_child.cancelled().await;
     }
 }

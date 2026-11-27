@@ -895,7 +895,7 @@ pub fn tail(
                 }
                 // Compatibility with older servers that still return an initial 416 instead of
                 // a tail heartbeat for non-follow tail when starting at the tail (e.g. an empty
-                // stream or `-n 0`).
+                // stream).
                 Err(sdk::error::ReadSessionError::ReadUnwritten(_)) if !follow && !seen_any => {
                     break;
                 }
