@@ -274,6 +274,9 @@ pub struct ReadEnd {
 }
 
 impl ReadEnd {
+    /// Returns `true` if a read may wait at the tail for new records:
+    /// when `wait` is explicitly positive, or when `wait` is omitted with no `count`, `bytes`, or
+    /// `until` bound.
     pub fn may_follow(&self) -> bool {
         match self.wait {
             Some(wait) => !wait.is_zero(),

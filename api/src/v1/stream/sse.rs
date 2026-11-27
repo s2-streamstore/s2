@@ -206,7 +206,8 @@ impl From<StandardError> for ErrorEventData {
     }
 }
 
-/// Heartbeat carrying the tail, emitted while waiting at the tail for new records and, when a streaming read ends at the tail with no remaining `wait`, before `[DONE]` so the client observes `tail` (may be omitted when the final batch already carries that `tail`). Sent only once all records before `tail` have been delivered.
+/// Heartbeat carrying the tail, sent only once all records before `tail` have been delivered.
+/// Emitted while waiting at the tail for new records, and before `[DONE]` when a streaming read ends at the tail with no remaining `wait` (unless the final batch already carried that `tail`).
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]

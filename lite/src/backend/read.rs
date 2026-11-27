@@ -197,62 +197,63 @@ async fn read_session(
                 state.start_seq_num = state.tail.seq_num;
             } else {
                 assert_eq!(state.start_seq_num, state.tail.seq_num);
-                if !end.may_follow() {
-                    yield StoredReadSessionOutput::Heartbeat(state.tail);
-                    break;
-                }
-                match client.follow(state.start_seq_num).await? {
-                    Ok(mut follow_rx) => {
-                        // Only a delivered batch should reset the absolute wait budget.
-                        state.arm_wait_deadline_if_unset();
-                        if state.wait_deadline_expired() {
-                            yield StoredReadSessionOutput::Heartbeat(state.tail);
-                            break;
+                let follow_rx = if !end.may_follow() {
+                    None
+                } else {
+                    match client.follow(state.start_seq_num).await? {
+                        Ok(follow_rx) => {
+                            // Only a delivered batch should reset the absolute wait budget.
+                            state.arm_wait_deadline_if_unset();
+                            (!state.wait_deadline_expired()).then_some(follow_rx)
                         }
-                        yield StoredReadSessionOutput::Heartbeat(state.tail);
-                        while let EvaluatedReadLimit::Remaining(limit) = state.limit {
-                            tokio::select! {
-                                biased;
-                                msg = follow_rx.recv() => {
-                                    match msg {
-                                        Ok(mut records) => {
-                                            let count = records.len();
-                                            let tail = super::streamer::next_pos(&records);
-                                            let allowed_count = count_allowed_records(limit, end.until, &records);
-                                            if allowed_count > 0 {
-                                                yield state.on_batch(StoredReadBatch {
-                                                    records: records.drain(..allowed_count).collect(),
-                                                    tail: Some(tail),
-                                                });
-                                            }
-                                            if allowed_count < count {
-                                                break 'session;
-                                            }
-                                            Ok(())
-                                        }
-                                        Err(broadcast::error::RecvError::Lagged(_)) => {
-                                            // Catch up using DB
-                                            continue 'session;
-                                        }
-                                        Err(broadcast::error::RecvError::Closed) => {
-                                            Err(StreamerMissingInActionError)
-                                        }
+                        Err(tail) => {
+                            assert!(state.tail.seq_num < tail.seq_num, "tail cannot regress");
+                            state.tail = tail;
+                            continue;
+                        }
+                    }
+                };
+                yield StoredReadSessionOutput::Heartbeat(state.tail);
+                let Some(mut follow_rx) = follow_rx else {
+                    break;
+                };
+                while let EvaluatedReadLimit::Remaining(limit) = state.limit {
+                    tokio::select! {
+                        biased;
+                        msg = follow_rx.recv() => {
+                            match msg {
+                                Ok(mut records) => {
+                                    let count = records.len();
+                                    let tail = super::streamer::next_pos(&records);
+                                    let allowed_count = count_allowed_records(limit, end.until, &records);
+                                    if allowed_count > 0 {
+                                        yield state.on_batch(StoredReadBatch {
+                                            records: records.drain(..allowed_count).collect(),
+                                            tail: Some(tail),
+                                        });
                                     }
-                                }
-                                _ = new_heartbeat_sleep() => {
-                                    yield StoredReadSessionOutput::Heartbeat(state.tail);
+                                    if allowed_count < count {
+                                        break 'session;
+                                    }
                                     Ok(())
                                 }
-                                _ = wait_sleep_until(state.wait_deadline) => {
-                                    break 'session;
+                                Err(broadcast::error::RecvError::Lagged(_)) => {
+                                    // Catch up using DB
+                                    continue 'session;
                                 }
-                            }?;
+                                Err(broadcast::error::RecvError::Closed) => {
+                                    Err(StreamerMissingInActionError)
+                                }
+                            }
                         }
-                    }
-                    Err(tail) => {
-                        assert!(state.tail.seq_num < tail.seq_num, "tail cannot regress");
-                        state.tail = tail;
-                    }
+                        _ = new_heartbeat_sleep() => {
+                            yield StoredReadSessionOutput::Heartbeat(state.tail);
+                            Ok(())
+                        }
+                        _ = wait_sleep_until(state.wait_deadline) => {
+                            break 'session;
+                        }
+                    }?;
                 }
             }
         }
@@ -417,6 +418,7 @@ mod tests {
 
     use bytesize::ByteSize;
     use futures::StreamExt;
+    use rstest::rstest;
     use s2_common::{
         basin::BasinName,
         config::{BasinConfig, OptionalStreamConfig},
@@ -438,6 +440,37 @@ mod tests {
         },
         stream_id::StreamId,
     };
+
+    async fn setup_stream() -> (Backend, BasinName, StreamName) {
+        let object_store = Arc::new(InMemory::new());
+        let db = Db::builder("/test", object_store).build().await.unwrap();
+        let backend = Backend::new(db, ByteSize::mib(10));
+
+        let basin: BasinName = "test-basin".parse().unwrap();
+        backend
+            .provision_basin(
+                basin.clone(),
+                BasinConfig::default(),
+                ProvisionMode::CreateOnly {
+                    request_token: None,
+                },
+            )
+            .await
+            .unwrap();
+        let stream: StreamName = "test-stream".parse().unwrap();
+        backend
+            .provision_stream(
+                basin.clone(),
+                stream.clone(),
+                OptionalStreamConfig::default(),
+                ProvisionMode::CreateOnly {
+                    request_token: None,
+                },
+            )
+            .await
+            .unwrap();
+        (backend, basin, stream)
+    }
 
     fn append_input(record: Record) -> AppendInput {
         let record: AppendRecord = AppendRecordParts {
@@ -544,118 +577,21 @@ mod tests {
         assert_eq!(result, None);
     }
 
+    #[rstest]
+    #[case::all_deleted(1, 0)]
+    #[case::trailing_gap(3, 1)]
     #[tokio::test]
-    async fn read_completes_when_all_records_deleted() {
-        let object_store = Arc::new(InMemory::new());
-        let db = Db::builder("/test", object_store).build().await.unwrap();
-        let backend = Backend::new(db, ByteSize::mib(10));
-
-        let basin: BasinName = "test-basin".parse().unwrap();
-        backend
-            .provision_basin(
-                basin.clone(),
-                BasinConfig::default(),
-                ProvisionMode::CreateOnly {
-                    request_token: None,
-                },
-            )
-            .await
-            .unwrap();
-        let stream: StreamName = "test-stream".parse().unwrap();
-        backend
-            .provision_stream(
-                basin.clone(),
-                stream.clone(),
-                OptionalStreamConfig::default(),
-                ProvisionMode::CreateOnly {
-                    request_token: None,
-                },
-            )
-            .await
-            .unwrap();
-
-        let input = append_input(Record::try_from_parts(vec![], bytes::Bytes::from("x")).unwrap());
-        let ack = backend
-            .open_for_append(&basin, &stream, None, OptionalStreamConfig::default())
-            .await
-            .unwrap()
-            .append(input)
-            .await
-            .unwrap();
-        assert!(ack.end.seq_num > 0);
-
-        let stream_id = StreamId::new(&basin, &stream);
-        let mut batch = WriteBatch::new();
-        batch.delete(kv::stream_record_data::ser_key(stream_id, ack.start));
-        backend.db.write(batch).assert_durable().await;
-
-        let start = ReadStart {
-            from: ReadFrom::SeqNum(0),
-            clamp: false,
-        };
-        let end = ReadEnd {
-            limit: ReadLimit::Count(10),
-            until: ReadUntil::Unbounded,
-            wait: None,
-        };
-        let session = backend
-            .open_for_read(&basin, &stream, None, OptionalStreamConfig::default())
-            .await
-            .unwrap()
-            .read(start, end)
-            .await
-            .unwrap();
-        let outputs: Vec<_> = tokio::time::timeout(
-            Duration::from_secs(2),
-            futures::StreamExt::collect::<Vec<_>>(session),
-        )
-        .await
-        .expect("read should not spin forever");
-        assert_eq!(
-            outputs.len(),
-            1,
-            "expected single tail heartbeat: {outputs:?}"
-        );
-        assert!(matches!(
-            outputs[0],
-            Ok(ReadSessionOutput::Heartbeat(tail)) if tail == ack.end
-        ));
-    }
-
-    #[tokio::test]
-    async fn read_emits_tail_heartbeat_after_trailing_deleted_gap() {
-        let object_store = Arc::new(InMemory::new());
-        let db = Db::builder("/test", object_store).build().await.unwrap();
-        let backend = Backend::new(db, ByteSize::mib(10));
-
-        let basin: BasinName = "test-basin".parse().unwrap();
-        backend
-            .provision_basin(
-                basin.clone(),
-                BasinConfig::default(),
-                ProvisionMode::CreateOnly {
-                    request_token: None,
-                },
-            )
-            .await
-            .unwrap();
-        let stream: StreamName = "test-stream".parse().unwrap();
-        backend
-            .provision_stream(
-                basin.clone(),
-                stream.clone(),
-                OptionalStreamConfig::default(),
-                ProvisionMode::CreateOnly {
-                    request_token: None,
-                },
-            )
-            .await
-            .unwrap();
+    async fn read_emits_tail_heartbeat_across_deleted_gap(
+        #[case] total_records: usize,
+        #[case] keep_prefix: usize,
+    ) {
+        let (backend, basin, stream) = setup_stream().await;
 
         let mut acks = Vec::new();
-        for body in ["r0", "r1", "r2"] {
-            let input =
-                append_input(Record::try_from_parts(vec![], bytes::Bytes::from(body)).unwrap());
+        for i in 0..total_records {
+            let input = append_input(
+                Record::try_from_parts(vec![], bytes::Bytes::from(format!("r{i}"))).unwrap(),
+            );
             let ack = backend
                 .open_for_append(&basin, &stream, None, OptionalStreamConfig::default())
                 .await
@@ -666,10 +602,9 @@ mod tests {
             acks.push(ack);
         }
 
-        // Delete records 1 and 2, leaving record 0 before a trailing gap up to tail=3.
         let stream_id = StreamId::new(&basin, &stream);
         let mut batch = WriteBatch::new();
-        for ack in &acks[1..] {
+        for ack in &acks[keep_prefix..] {
             batch.delete(kv::stream_record_data::ser_key(stream_id, ack.start));
         }
         backend.db.write(batch).assert_durable().await;
@@ -692,54 +627,43 @@ mod tests {
             )
             .await
             .unwrap();
-        let outputs: Vec<_> = session
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
+        let outputs: Vec<_> = tokio::time::timeout(
+            Duration::from_secs(2),
+            futures::StreamExt::collect::<Vec<_>>(session),
+        )
+        .await
+        .expect("read should not spin forever")
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
 
-        assert_eq!(outputs.len(), 2, "{outputs:?}");
-        let ReadSessionOutput::Batch(ref batch) = outputs[0] else {
-            panic!("expected batch first: {outputs:?}");
-        };
-        assert_eq!(batch.records.len(), 1);
-        assert_eq!(batch.records[0].position().seq_num, 0);
-        assert!(matches!(
-            outputs[1],
-            ReadSessionOutput::Heartbeat(tail) if tail == expected_tail
-        ));
+        if keep_prefix == 0 {
+            assert_eq!(
+                outputs.len(),
+                1,
+                "expected single tail heartbeat: {outputs:?}"
+            );
+            assert!(matches!(
+                outputs[0],
+                ReadSessionOutput::Heartbeat(tail) if tail == expected_tail
+            ));
+        } else {
+            assert_eq!(outputs.len(), 2, "{outputs:?}");
+            let ReadSessionOutput::Batch(ref batch) = outputs[0] else {
+                panic!("expected batch first: {outputs:?}");
+            };
+            assert_eq!(batch.records.len(), keep_prefix);
+            assert_eq!(batch.records[0].position().seq_num, 0);
+            assert!(matches!(
+                outputs[1],
+                ReadSessionOutput::Heartbeat(tail) if tail == expected_tail
+            ));
+        }
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn read_wait_is_not_extended_by_heartbeats() {
-        let object_store = Arc::new(InMemory::new());
-        let db = Db::builder("/test", object_store).build().await.unwrap();
-        let backend = Backend::new(db, ByteSize::mib(10));
-
-        let basin: BasinName = "test-basin".parse().unwrap();
-        backend
-            .provision_basin(
-                basin.clone(),
-                BasinConfig::default(),
-                ProvisionMode::CreateOnly {
-                    request_token: None,
-                },
-            )
-            .await
-            .unwrap();
-        let stream: StreamName = "test-stream".parse().unwrap();
-        backend
-            .provision_stream(
-                basin.clone(),
-                stream.clone(),
-                OptionalStreamConfig::default(),
-                ProvisionMode::CreateOnly {
-                    request_token: None,
-                },
-            )
-            .await
-            .unwrap();
+        let (backend, basin, stream) = setup_stream().await;
 
         let wait = Duration::from_millis(30);
         let start = ReadStart {
@@ -796,33 +720,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn read_wait_is_reset_by_delivered_follow_batch() {
-        let object_store = Arc::new(InMemory::new());
-        let db = Db::builder("/test", object_store).build().await.unwrap();
-        let backend = Backend::new(db, ByteSize::mib(10));
-
-        let basin: BasinName = "test-basin".parse().unwrap();
-        backend
-            .provision_basin(
-                basin.clone(),
-                BasinConfig::default(),
-                ProvisionMode::CreateOnly {
-                    request_token: None,
-                },
-            )
-            .await
-            .unwrap();
-        let stream: StreamName = "test-stream".parse().unwrap();
-        backend
-            .provision_stream(
-                basin.clone(),
-                stream.clone(),
-                OptionalStreamConfig::default(),
-                ProvisionMode::CreateOnly {
-                    request_token: None,
-                },
-            )
-            .await
-            .unwrap();
+        let (backend, basin, stream) = setup_stream().await;
 
         let initial_input =
             append_input(Record::try_from_parts(vec![], bytes::Bytes::from("initial")).unwrap());
@@ -953,33 +851,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn read_wait_is_not_reset_after_follow_lag_without_catchup_records() {
-        let object_store = Arc::new(InMemory::new());
-        let db = Db::builder("/test", object_store).build().await.unwrap();
-        let backend = Backend::new(db, ByteSize::mib(10));
-
-        let basin: BasinName = "test-basin".parse().unwrap();
-        backend
-            .provision_basin(
-                basin.clone(),
-                BasinConfig::default(),
-                ProvisionMode::CreateOnly {
-                    request_token: None,
-                },
-            )
-            .await
-            .unwrap();
-        let stream: StreamName = "test-stream".parse().unwrap();
-        backend
-            .provision_stream(
-                basin.clone(),
-                stream.clone(),
-                OptionalStreamConfig::default(),
-                ProvisionMode::CreateOnly {
-                    request_token: None,
-                },
-            )
-            .await
-            .unwrap();
+        let (backend, basin, stream) = setup_stream().await;
 
         let wait = Duration::from_secs(30);
         let start = ReadStart {
@@ -1096,33 +968,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn read_wait_elapsed_after_db_catchup_emits_tail_heartbeat() {
-        let object_store = Arc::new(InMemory::new());
-        let db = Db::builder("/test", object_store).build().await.unwrap();
-        let backend = Backend::new(db, ByteSize::mib(10));
-
-        let basin: BasinName = "test-basin".parse().unwrap();
-        backend
-            .provision_basin(
-                basin.clone(),
-                BasinConfig::default(),
-                ProvisionMode::CreateOnly {
-                    request_token: None,
-                },
-            )
-            .await
-            .unwrap();
-        let stream: StreamName = "test-stream".parse().unwrap();
-        backend
-            .provision_stream(
-                basin.clone(),
-                stream.clone(),
-                OptionalStreamConfig::default(),
-                ProvisionMode::CreateOnly {
-                    request_token: None,
-                },
-            )
-            .await
-            .unwrap();
+        let (backend, basin, stream) = setup_stream().await;
 
         let ack = backend
             .open_for_append(&basin, &stream, None, OptionalStreamConfig::default())
@@ -1190,33 +1036,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn read_wait_elapsed_after_live_tailing_batch_emits_no_redundant_heartbeat() {
-        let object_store = Arc::new(InMemory::new());
-        let db = Db::builder("/test", object_store).build().await.unwrap();
-        let backend = Backend::new(db, ByteSize::mib(10));
-
-        let basin: BasinName = "test-basin".parse().unwrap();
-        backend
-            .provision_basin(
-                basin.clone(),
-                BasinConfig::default(),
-                ProvisionMode::CreateOnly {
-                    request_token: None,
-                },
-            )
-            .await
-            .unwrap();
-        let stream: StreamName = "test-stream".parse().unwrap();
-        backend
-            .provision_stream(
-                basin.clone(),
-                stream.clone(),
-                OptionalStreamConfig::default(),
-                ProvisionMode::CreateOnly {
-                    request_token: None,
-                },
-            )
-            .await
-            .unwrap();
+        let (backend, basin, stream) = setup_stream().await;
 
         // Shorter than test heartbeat sleep (5..15ms) so `wait` expires before any periodic
         // heartbeat fires.
@@ -1279,33 +1099,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn unbounded_follow_survives_streamer_dormancy() {
-        let object_store = Arc::new(InMemory::new());
-        let db = Db::builder("/test", object_store).build().await.unwrap();
-        let backend = Backend::new(db, ByteSize::mib(10));
-
-        let basin: BasinName = "test-basin".parse().unwrap();
-        backend
-            .provision_basin(
-                basin.clone(),
-                BasinConfig::default(),
-                ProvisionMode::CreateOnly {
-                    request_token: None,
-                },
-            )
-            .await
-            .unwrap();
-        let stream: StreamName = "test-stream".parse().unwrap();
-        backend
-            .provision_stream(
-                basin.clone(),
-                stream.clone(),
-                OptionalStreamConfig::default(),
-                ProvisionMode::CreateOnly {
-                    request_token: None,
-                },
-            )
-            .await
-            .unwrap();
+        let (backend, basin, stream) = setup_stream().await;
 
         let initial_input =
             append_input(Record::try_from_parts(vec![], bytes::Bytes::from("initial")).unwrap());

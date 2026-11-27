@@ -359,7 +359,7 @@ async fn merge_read_session(
                 if !acc.records.is_empty() {
                     break;
                 }
-                if !wait.is_some_and(|d| d > Duration::ZERO) {
+                if wait.is_none_or(|d| d.is_zero()) {
                     return Err(ReadError::Unwritten(UnwrittenError(pos)).into());
                 }
                 wait_mode = true;
@@ -707,11 +707,7 @@ mod tests {
         query: &str,
         last_event_id: Option<LastEventId>,
     ) -> SseBatches {
-        let uri = if query.is_empty() {
-            format!("/v1/streams/{stream}/records")
-        } else {
-            format!("/v1/streams/{stream}/records?{query}")
-        };
+        let uri = records_uri(stream, query);
         let mut request =
             request_builder("GET", uri, basin).header(header::ACCEPT, "text/event-stream");
         if let Some(id) = last_event_id {
@@ -783,6 +779,14 @@ mod tests {
         batches
     }
 
+    fn records_uri(stream: &StreamName, query: &str) -> String {
+        if query.is_empty() {
+            format!("/v1/streams/{stream}/records")
+        } else {
+            format!("/v1/streams/{stream}/records?{query}")
+        }
+    }
+
     fn decode_all_frames(body: Bytes) -> Vec<SessionMessage> {
         let mut decoder = FrameDecoder;
         let mut buf = BytesMut::from(body.as_ref());
@@ -800,11 +804,7 @@ mod tests {
         stream: &StreamName,
         query: &str,
     ) -> Vec<proto::ReadBatch> {
-        let uri = if query.is_empty() {
-            format!("/v1/streams/{stream}/records")
-        } else {
-            format!("/v1/streams/{stream}/records?{query}")
-        };
+        let uri = records_uri(stream, query);
         let response = send(
             app,
             request_builder("GET", uri, basin)
@@ -1635,29 +1635,35 @@ mod tests {
         );
     }
 
-    async fn assert_streaming_unwritten_416(
+    #[derive(Clone, Copy)]
+    enum ReadTransport {
+        Unary,
+        S2s,
+        Sse,
+    }
+
+    async fn assert_unwritten_416(
         app: &axum::Router,
         basin: &BasinName,
         stream: &StreamName,
         query: &str,
         expected_tail: StreamPosition,
+        transports: &[ReadTransport],
     ) {
-        for (label, header_name, header_val) in [
-            ("S2S", header::CONTENT_TYPE, "s2s/proto"),
-            ("SSE", header::ACCEPT, "text/event-stream"),
-        ] {
-            let response = send(
-                app,
-                request_builder(
-                    "GET",
-                    format!("/v1/streams/{stream}/records?{query}"),
-                    basin,
-                )
-                .header(header_name, header_val)
-                .body(Body::empty())
-                .unwrap(),
-            )
-            .await;
+        for &transport in transports {
+            let mut request = request_builder("GET", records_uri(stream, query), basin);
+            let label = match transport {
+                ReadTransport::Unary => "unary",
+                ReadTransport::S2s => {
+                    request = request.header(header::CONTENT_TYPE, "s2s/proto");
+                    "S2S"
+                }
+                ReadTransport::Sse => {
+                    request = request.header(header::ACCEPT, "text/event-stream");
+                    "SSE"
+                }
+            };
+            let response = send(app, request.body(Body::empty()).unwrap()).await;
             assert_eq!(
                 response.status(),
                 StatusCode::RANGE_NOT_SATISFIABLE,
@@ -1749,6 +1755,136 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn streaming_no_wait_before_tail_returns_records_then_trailing_heartbeat() {
+        let (app, backend, basin, stream) = setup_app_with_config(
+            "stream-records-then-hb",
+            BasinConfig::default(),
+            client_timestamp_stream_config(),
+        )
+        .await;
+        let ack =
+            append_timestamped(&backend, &basin, &stream, &[(b"a", 1000), (b"b", 2000)]).await;
+
+        for query in [
+            "seq_num=0&count=10",
+            "seq_num=0&until=3000",
+            "seq_num=0&wait=0",
+        ] {
+            // S2S: non-empty record batch(es), then a single trailing tail heartbeat and clean EOF.
+            let s2s_batches = s2s_read_batches(&app, &basin, &stream, query).await;
+            let (last, record_batches) = s2s_batches
+                .split_last()
+                .expect("S2S catch-up read should emit records and trailing heartbeat");
+            assert!(
+                !record_batches.is_empty(),
+                "S2S query `{query}` should emit records before trailing heartbeat"
+            );
+            let mut s2s_seq_nums = Vec::new();
+            for batch in record_batches {
+                assert!(
+                    !batch.records.is_empty(),
+                    "S2S query `{query}` emitted unexpected intermediate heartbeat: {s2s_batches:?}"
+                );
+                s2s_seq_nums.extend(batch.records.iter().map(|r| r.seq_num));
+            }
+            assert_eq!(s2s_seq_nums, vec![0, 1], "S2S query `{query}`");
+            assert!(
+                last.records.is_empty(),
+                "S2S query `{query}` final frame should be trailing heartbeat: {s2s_batches:?}"
+            );
+            let tail = last
+                .tail
+                .as_ref()
+                .expect("S2S trailing heartbeat must carry tail");
+            assert_eq!(
+                (tail.seq_num, tail.timestamp),
+                (ack.end.seq_num, ack.end.timestamp),
+                "S2S query `{query}` tail mismatch"
+            );
+
+            // SSE: batch event(s) for [0, 1], then a single ping carrying tail before [DONE].
+            let sse = sse_read_query(&app, &basin, &stream, query, None).await;
+            assert_eq!(sse.seq_nums, vec![0, 1], "SSE query `{query}`");
+            assert_eq!(sse.pings, vec![ack.end], "SSE query `{query}`");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn streaming_positive_wait_expiring_at_tail_emits_heartbeat_and_ends_cleanly() {
+        let (app, backend, basin, stream) = setup_app_with_config(
+            "stream-wait-expiry",
+            BasinConfig::default(),
+            client_timestamp_stream_config(),
+        )
+        .await;
+        let ack =
+            append_timestamped(&backend, &basin, &stream, &[(b"a", 1000), (b"b", 2000)]).await;
+
+        // Starting at the tail with positive wait: emits tail heartbeat(s) and ends cleanly on
+        // expiry.
+        let s2s_at_tail = s2s_read_batches(&app, &basin, &stream, "seq_num=2&wait=1").await;
+        assert!(
+            !s2s_at_tail.is_empty(),
+            "S2S wait=1 at tail should emit heartbeat(s)"
+        );
+        for batch in &s2s_at_tail {
+            assert!(
+                batch.records.is_empty(),
+                "S2S wait=1 at tail should not emit records: {s2s_at_tail:?}"
+            );
+            let tail = batch.tail.as_ref().expect("S2S heartbeat must carry tail");
+            assert_eq!(
+                (tail.seq_num, tail.timestamp),
+                (ack.end.seq_num, ack.end.timestamp)
+            );
+        }
+
+        let sse_at_tail = sse_read_query(&app, &basin, &stream, "seq_num=2&wait=1", None).await;
+        assert!(sse_at_tail.seq_nums.is_empty());
+        assert!(
+            !sse_at_tail.pings.is_empty(),
+            "SSE wait=1 at tail should emit ping(s) before [DONE]"
+        );
+        assert!(sse_at_tail.pings.iter().all(|&tail| tail == ack.end));
+
+        // Starting before the tail with positive wait: delivers records, then tail heartbeat(s)
+        // before expiry.
+        let s2s_before_tail = s2s_read_batches(&app, &basin, &stream, "seq_num=0&wait=1").await;
+        let first_hb_idx = s2s_before_tail
+            .iter()
+            .position(|b| b.records.is_empty())
+            .expect("S2S wait=1 catch-up should emit trailing heartbeat(s)");
+        assert!(
+            first_hb_idx > 0,
+            "S2S wait=1 catch-up should deliver records before heartbeats"
+        );
+        let s2s_seq_nums: Vec<u64> = s2s_before_tail[..first_hb_idx]
+            .iter()
+            .flat_map(|b| b.records.iter().map(|r| r.seq_num))
+            .collect();
+        assert_eq!(s2s_seq_nums, vec![0, 1]);
+        for hb in &s2s_before_tail[first_hb_idx..] {
+            assert!(
+                hb.records.is_empty(),
+                "unexpected records after heartbeat: {s2s_before_tail:?}"
+            );
+            let tail = hb.tail.as_ref().expect("S2S heartbeat must carry tail");
+            assert_eq!(
+                (tail.seq_num, tail.timestamp),
+                (ack.end.seq_num, ack.end.timestamp)
+            );
+        }
+
+        let sse_before_tail = sse_read_query(&app, &basin, &stream, "seq_num=0&wait=1", None).await;
+        assert_eq!(sse_before_tail.seq_nums, vec![0, 1]);
+        assert!(
+            !sse_before_tail.pings.is_empty(),
+            "SSE wait=1 catch-up should emit ping(s) before [DONE]"
+        );
+        assert!(sse_before_tail.pings.iter().all(|&tail| tail == ack.end));
+    }
+
+    #[tokio::test]
     async fn streaming_no_wait_across_trimmed_gap_emits_heartbeat() {
         let (app, backend, basin, stream) = setup_app_with_config(
             "stream-trimmed-gap-hb",
@@ -1794,12 +1930,13 @@ mod tests {
             "timestamp=1&count=10",
             "timestamp=1",
         ] {
-            assert_streaming_unwritten_416(
+            assert_unwritten_416(
                 &empty_app,
                 &empty_basin,
                 &empty_stream,
                 query,
                 StreamPosition::MIN,
+                &[ReadTransport::S2s, ReadTransport::Sse],
             )
             .await;
         }
@@ -1821,7 +1958,15 @@ mod tests {
             "timestamp=2001&count=10",
             "timestamp=2001",
         ] {
-            assert_streaming_unwritten_416(&app, &basin, &stream, query, ack.end).await;
+            assert_unwritten_416(
+                &app,
+                &basin,
+                &stream,
+                query,
+                ack.end,
+                &[ReadTransport::S2s, ReadTransport::Sse],
+            )
+            .await;
         }
     }
 
@@ -1930,15 +2075,11 @@ mod tests {
         };
         let response = send(
             &app,
-            request_builder(
-                "GET",
-                format!("/v1/streams/{stream}/records?seq_num=0&count=10"),
-                &basin,
-            )
-            .header(header::ACCEPT, "text/event-stream")
-            .header("last-event-id", beyond_tail_id.to_string())
-            .body(Body::empty())
-            .unwrap(),
+            request_builder("GET", records_uri(&stream, "seq_num=0&count=10"), &basin)
+                .header(header::ACCEPT, "text/event-stream")
+                .header("last-event-id", beyond_tail_id.to_string())
+                .body(Body::empty())
+                .unwrap(),
         )
         .await;
         assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
@@ -1969,26 +2110,15 @@ mod tests {
             "seq_num=1",
             "timestamp=1",
         ] {
-            let uri = if query.is_empty() {
-                format!("/v1/streams/{empty_stream}/records")
-            } else {
-                format!("/v1/streams/{empty_stream}/records?{query}")
-            };
-            let response = send(
+            assert_unwritten_416(
                 &empty_app,
-                request_builder("GET", uri, &empty_basin)
-                    .body(Body::empty())
-                    .unwrap(),
+                &empty_basin,
+                &empty_stream,
+                query,
+                StreamPosition::MIN,
+                &[ReadTransport::Unary],
             )
             .await;
-            assert_eq!(
-                response.status(),
-                StatusCode::RANGE_NOT_SATISFIABLE,
-                "unary empty query `{query}` should return 416"
-            );
-            let body = response_json(response, "416 tail body").await;
-            assert_eq!(body["tail"]["seq_num"], 0);
-            assert_eq!(body["tail"]["timestamp"], 0);
         }
 
         let (app, backend, basin, stream) = setup_app_with_config(
@@ -1997,7 +2127,8 @@ mod tests {
             client_timestamp_stream_config(),
         )
         .await;
-        append_timestamped(&backend, &basin, &stream, &[(b"a", 1000), (b"b", 2000)]).await;
+        let ack =
+            append_timestamped(&backend, &basin, &stream, &[(b"a", 1000), (b"b", 2000)]).await;
 
         for query in [
             "seq_num=2",
@@ -2009,38 +2140,23 @@ mod tests {
             "seq_num=3",
             "timestamp=2001",
         ] {
-            let uri = if query.is_empty() {
-                format!("/v1/streams/{stream}/records")
-            } else {
-                format!("/v1/streams/{stream}/records?{query}")
-            };
-            let response = send(
+            assert_unwritten_416(
                 &app,
-                request_builder("GET", uri, &basin)
-                    .body(Body::empty())
-                    .unwrap(),
+                &basin,
+                &stream,
+                query,
+                ack.end,
+                &[ReadTransport::Unary],
             )
             .await;
-            assert_eq!(
-                response.status(),
-                StatusCode::RANGE_NOT_SATISFIABLE,
-                "unary non-empty query `{query}` should return 416"
-            );
-            let body = response_json(response, "416 tail body").await;
-            assert_eq!(body["tail"]["seq_num"], 2);
-            assert_eq!(body["tail"]["timestamp"], 2000);
         }
 
         // Unary `until` cutting off before first record still returns 200 OK with empty records.
         let response = send(
             &app,
-            request_builder(
-                "GET",
-                format!("/v1/streams/{stream}/records?seq_num=0&until=500"),
-                &basin,
-            )
-            .body(Body::empty())
-            .unwrap(),
+            request_builder("GET", records_uri(&stream, "seq_num=0&until=500"), &basin)
+                .body(Body::empty())
+                .unwrap(),
         )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
@@ -2051,13 +2167,9 @@ mod tests {
         // a count-bounded read stopping before the tail omits tail.
         let response = send(
             &app,
-            request_builder(
-                "GET",
-                format!("/v1/streams/{stream}/records?seq_num=0&wait=0"),
-                &basin,
-            )
-            .body(Body::empty())
-            .unwrap(),
+            request_builder("GET", records_uri(&stream, "seq_num=0&wait=0"), &basin)
+                .body(Body::empty())
+                .unwrap(),
         )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
@@ -2070,7 +2182,7 @@ mod tests {
             &app,
             request_builder(
                 "GET",
-                format!("/v1/streams/{stream}/records?seq_num=0&count=1&wait=0"),
+                records_uri(&stream, "seq_num=0&count=1&wait=0"),
                 &basin,
             )
             .body(Body::empty())
@@ -2096,7 +2208,7 @@ mod tests {
             &[(b"a", 1000), (b"b", 2000)],
         )
         .await;
-        append_trim(
+        let trim_ack = append_trim(
             &trimmed_backend,
             &trimmed_basin,
             &trimmed_stream,
@@ -2116,25 +2228,15 @@ mod tests {
             "timestamp=3000",
             "seq_num=10&clamp=true",
         ] {
-            let response = send(
+            assert_unwritten_416(
                 &trimmed_app,
-                request_builder(
-                    "GET",
-                    format!("/v1/streams/{trimmed_stream}/records?{query}"),
-                    &trimmed_basin,
-                )
-                .body(Body::empty())
-                .unwrap(),
+                &trimmed_basin,
+                &trimmed_stream,
+                query,
+                trim_ack.end,
+                &[ReadTransport::Unary],
             )
             .await;
-            assert_eq!(
-                response.status(),
-                StatusCode::RANGE_NOT_SATISFIABLE,
-                "unary trimmed query `{query}` should return 416"
-            );
-            let body = response_json(response, "416 trimmed tail body").await;
-            assert_eq!(body["tail"]["seq_num"], 3);
-            assert_eq!(body["tail"]["timestamp"], 3000);
         }
     }
 }

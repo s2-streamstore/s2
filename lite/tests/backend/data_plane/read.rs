@@ -27,11 +27,12 @@ enum TailStartCase {
 }
 
 #[derive(Clone, Copy, Debug)]
+#[allow(clippy::enum_variant_names)]
 enum TailEndCase {
     CountNoWait,
     CountZeroWait,
     UnboundedZeroWait,
-    TimestampMax,
+    UntilMaxNoWait,
 }
 
 fn tail_read_from(case: TailStartCase, tail: &StreamPosition) -> ReadFrom {
@@ -60,7 +61,7 @@ fn tail_read_end(case: TailEndCase) -> ReadEnd {
             until: ReadUntil::Unbounded,
             wait: Some(Duration::ZERO),
         },
-        TailEndCase::TimestampMax => ReadEnd {
+        TailEndCase::UntilMaxNoWait => ReadEnd {
             limit: ReadLimit::Unbounded,
             until: ReadUntil::Timestamp(u64::MAX),
             wait: None,
@@ -289,7 +290,7 @@ async fn test_read_unwritten_clamp_behavior() {
     TailEndCase::UnboundedZeroWait,
     false
 )]
-#[case::tail_seq_num_until(TailStartCase::SeqNumAtEnd, TailEndCase::TimestampMax, false)]
+#[case::tail_seq_num_until(TailStartCase::SeqNumAtEnd, TailEndCase::UntilMaxNoWait, false)]
 #[case::seq_num_after_end_with_clamp(TailStartCase::SeqNumAfterEnd, TailEndCase::CountNoWait, true)]
 #[case::timestamp_after_end_with_clamp(
     TailStartCase::TimestampAfterEnd,
@@ -344,7 +345,7 @@ async fn test_read_at_tail_without_follow_emits_heartbeat(
 
 #[rstest]
 #[case::seq_num_beyond_tail(TailStartCase::SeqNumAfterEnd, TailEndCase::CountNoWait)]
-#[case::timestamp_beyond_tail(TailStartCase::TimestampAfterEnd, TailEndCase::TimestampMax)]
+#[case::timestamp_beyond_tail(TailStartCase::TimestampAfterEnd, TailEndCase::UntilMaxNoWait)]
 #[tokio::test]
 async fn test_read_beyond_tail_without_clamp_returns_unwritten(
     #[case] start_case: TailStartCase,

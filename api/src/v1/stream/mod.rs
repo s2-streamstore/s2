@@ -151,8 +151,7 @@ pub struct ReadStart {
     #[cfg_attr(feature = "utoipa", param(value_type = u64, required = false))]
     pub tail_offset: Option<u64>,
     /// Start reading from the tail if the requested position is beyond it (`seq_num > tail.seq_num` or `timestamp > tail.timestamp`).
-    /// Otherwise, a `416 Range Not Satisfiable` response is returned.
-    /// On a unary read with `wait` of `0`, starting at the tail (including after clamping) still returns `416`; on a streaming read (SSE or S2S), it establishes `200 OK`, emits a heartbeat carrying the tail, and ends cleanly.
+    /// Without `clamp`, such a request returns `416 Range Not Satisfiable`.
     #[cfg_attr(feature = "utoipa", param(value_type = bool, required = false))]
     pub clamp: Option<bool>,
 }
@@ -197,6 +196,7 @@ pub struct ReadEnd {
     /// The default duration is 0 if there is a bound on `count`, `bytes`, or `until`, and otherwise infinite.
     /// Non-streaming reads are always bounded on `count` and `bytes`, so you can achieve long poll semantics by specifying a non-zero duration up to 60 seconds.
     /// In the context of an SSE or S2S streaming read, the duration will bound how much time can elapse between records throughout the lifetime of the session.
+    /// If the read reaches the tail with no `wait` remaining, a unary read with no records returns `416`, and a streaming read (SSE or S2S) ends cleanly after a message carrying the tail.
     #[cfg_attr(feature = "utoipa", param(value_type = u32, required = false))]
     pub wait: Option<u32>,
 }
