@@ -119,7 +119,6 @@ async fn read_session(
         wait: end.wait,
         wait_deadline: None,
         tail,
-        caught_up_tail_emitted: None,
     };
     let session = async_stream::try_stream! {
         'session: while let EvaluatedReadLimit::Remaining(limit) = state.limit {
@@ -199,9 +198,7 @@ async fn read_session(
             } else {
                 assert_eq!(state.start_seq_num, state.tail.seq_num);
                 if !end.may_follow() {
-                    if state.needs_tail_heartbeat() {
-                        yield state.on_heartbeat();
-                    }
+                    yield StoredReadSessionOutput::Heartbeat(state.tail);
                     break;
                 }
                 match client.follow(state.start_seq_num).await? {
@@ -209,14 +206,10 @@ async fn read_session(
                         // Only a delivered batch should reset the absolute wait budget.
                         state.arm_wait_deadline_if_unset();
                         if state.wait_deadline_expired() {
-                            if state.needs_tail_heartbeat() {
-                                yield state.on_heartbeat();
-                            }
+                            yield StoredReadSessionOutput::Heartbeat(state.tail);
                             break;
                         }
-                        if state.needs_tail_heartbeat() {
-                            yield state.on_heartbeat();
-                        }
+                        yield StoredReadSessionOutput::Heartbeat(state.tail);
                         while let EvaluatedReadLimit::Remaining(limit) = state.limit {
                             tokio::select! {
                                 biased;
@@ -247,13 +240,10 @@ async fn read_session(
                                     }
                                 }
                                 _ = new_heartbeat_sleep() => {
-                                    yield state.on_heartbeat();
+                                    yield StoredReadSessionOutput::Heartbeat(state.tail);
                                     Ok(())
                                 }
                                 _ = wait_sleep_until(state.wait_deadline) => {
-                                    if state.needs_tail_heartbeat() {
-                                        yield state.on_heartbeat();
-                                    }
                                     break 'session;
                                 }
                             }?;
@@ -343,9 +333,6 @@ struct ReadSessionState {
     wait: Option<Duration>,
     wait_deadline: Option<Instant>,
     tail: StreamPosition,
-    /// Tail position most recently observed as caught up by the client, either via a heartbeat or
-    /// via a batch whose `tail.seq_num == last_record.seq_num + 1`.
-    caught_up_tail_emitted: Option<StreamPosition>,
 }
 
 impl ReadSessionState {
@@ -364,15 +351,6 @@ impl ReadSessionState {
             .is_some_and(|deadline| deadline <= Instant::now())
     }
 
-    fn needs_tail_heartbeat(&self) -> bool {
-        self.caught_up_tail_emitted != Some(self.tail)
-    }
-
-    fn on_heartbeat(&mut self) -> StoredReadSessionOutput {
-        self.caught_up_tail_emitted = Some(self.tail);
-        StoredReadSessionOutput::Heartbeat(self.tail)
-    }
-
     fn on_batch(&mut self, batch: StoredReadBatch) -> StoredReadSessionOutput {
         if let Some(tail) = batch.tail {
             self.tail = tail;
@@ -388,7 +366,6 @@ impl ReadSessionState {
         assert!(self.until.allow(last_position.timestamp));
         self.start_seq_num = last_position.seq_num + 1;
         self.limit = limit.remaining(count, bytes);
-        self.caught_up_tail_emitted = batch.tail.filter(|tail| tail.seq_num == self.start_seq_num);
         self.reset_wait_deadline();
         StoredReadSessionOutput::Batch(batch)
     }
