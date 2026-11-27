@@ -196,7 +196,7 @@ pub struct ReadEnd {
     /// The default duration is 0 if there is a bound on `count`, `bytes`, or `until`, and otherwise infinite.
     /// Non-streaming reads are always bounded on `count` and `bytes`, so you can achieve long poll semantics by specifying a non-zero duration up to 60 seconds.
     /// In the context of an SSE or S2S streaming read, the duration will bound how much time can elapse between records throughout the lifetime of the session.
-    /// If the read reaches the tail with no `wait` remaining, a unary read with no records returns `416`, and a streaming read (SSE or S2S) ends cleanly after a message carrying the tail.
+    /// When `wait` is 0 (explicitly or by default), a unary read that reaches the tail with no records returns `416`. A streaming read that reaches the tail before `count`, `bytes`, or `until` stops it ends cleanly after a message carrying the tail, as it also does once `wait` elapses.
     #[cfg_attr(feature = "utoipa", param(value_type = u32, required = false))]
     pub wait: Option<u32>,
 }

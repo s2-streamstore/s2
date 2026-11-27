@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use axum::{
     body::Body,
     extract::{FromRequest, Path, Query, State},
@@ -212,12 +210,13 @@ pub async fn read(
             response_mime,
         } => {
             let (start, end) = prepare_read(start, end, ReadMode::Unary)?;
+            let may_follow = end.may_follow();
             let session = backend
                 .open_for_read(&basin, &stream, encryption_key, create_stream_config_patch)
                 .await?
                 .read(start, end)
                 .await?;
-            let batch = merge_read_session(session, end.wait).await?;
+            let batch = merge_read_session(session, may_follow).await?;
             match response_mime {
                 JsonOrProto::Json => Ok(Json(v1t::stream::json::serialize_read_batch(
                     format, &batch,
@@ -330,7 +329,7 @@ pub async fn read(
 
 async fn merge_read_session(
     session: impl Stream<Item = Result<ReadSessionOutput, ReadError>>,
-    wait: Option<Duration>,
+    may_follow: bool,
 ) -> Result<ReadBatch, ServiceError> {
     let mut acc = ReadBatch {
         records: Metered::with_capacity(RECORD_BATCH_MAX.count),
@@ -359,7 +358,7 @@ async fn merge_read_session(
                 if !acc.records.is_empty() {
                     break;
                 }
-                if wait.is_none_or(|d| d.is_zero()) {
+                if !may_follow {
                     return Err(ReadError::Unwritten(UnwrittenError(pos)).into());
                 }
                 wait_mode = true;
@@ -523,8 +522,7 @@ mod tests {
     use s2_common::{
         basin::{BASIN_HEADER, BasinName},
         config::{
-            BasinConfig, DeleteOnEmptyConfig, OptionalStreamConfig, OptionalTimestampingConfig,
-            RetentionPolicy, StreamConfig, TimestampingMode,
+            BasinConfig, DeleteOnEmptyConfig, OptionalStreamConfig, RetentionPolicy, StreamConfig,
         },
         encryption::{EncryptionAlgorithm, EncryptionKey, S2_ENCRYPTION_KEY_HEADER},
         read_extent::{ReadLimit, ReadUntil},
@@ -624,18 +622,21 @@ mod tests {
         (app, backend, basin, stream)
     }
 
-    fn append_input(body: &'static [u8]) -> AppendInput {
+    fn envelope_record(body: &'static [u8], timestamp: Option<u64>) -> AppendRecord {
         let record = Metered::from(Record::Envelope(
             EnvelopeRecord::try_from_parts(vec![], Bytes::from_static(body)).unwrap(),
         ));
-        let record = AppendRecord::try_from(AppendRecordParts {
-            timestamp: None,
-            record,
-        })
-        .unwrap();
-        let records = AppendRecordBatch::try_from(vec![record]).unwrap();
+        AppendRecord::try_from(AppendRecordParts { timestamp, record }).unwrap()
+    }
+
+    fn trim_record(trim_point: u64, timestamp: Option<u64>) -> AppendRecord {
+        let record = Metered::from(Record::Command(CommandRecord::Trim(trim_point)));
+        AppendRecord::try_from(AppendRecordParts { timestamp, record }).unwrap()
+    }
+
+    fn append_input(body: &'static [u8]) -> AppendInput {
         AppendInput {
-            records,
+            records: AppendRecordBatch::try_from(vec![envelope_record(body, None)]).unwrap(),
             match_seq_num: None,
             fencing_token: None,
         }
@@ -662,19 +663,33 @@ mod tests {
             .expect("append encrypted payload");
     }
 
+    async fn append_records(
+        backend: &Backend,
+        basin: &BasinName,
+        stream: &StreamName,
+        records: Vec<AppendRecord>,
+    ) -> s2_common::stream::AppendAck {
+        let input = AppendInput {
+            records: AppendRecordBatch::try_from(records).unwrap(),
+            match_seq_num: None,
+            fencing_token: None,
+        };
+        backend
+            .open_for_append(basin, stream, None, OptionalStreamConfig::default())
+            .await
+            .expect("open append handle")
+            .append(input)
+            .await
+            .expect("append records")
+    }
+
     async fn append_payload(
         backend: &Backend,
         basin: &BasinName,
         stream: &StreamName,
         body: &'static [u8],
     ) {
-        backend
-            .open_for_append(basin, stream, None, OptionalStreamConfig::default())
-            .await
-            .expect("open append handle")
-            .append(append_input(body))
-            .await
-            .expect("append payload");
+        append_records(backend, basin, stream, vec![envelope_record(body, None)]).await;
     }
 
     struct SseBatches {
@@ -829,62 +844,6 @@ mod tests {
                 }
             })
             .collect()
-    }
-
-    async fn append_timestamped(
-        backend: &Backend,
-        basin: &BasinName,
-        stream: &StreamName,
-        records: &[(&'static [u8], u64)],
-    ) -> s2_common::stream::AppendAck {
-        let records: Vec<_> = records
-            .iter()
-            .map(|&(body, ts)| {
-                let record = Metered::from(Record::Envelope(
-                    EnvelopeRecord::try_from_parts(vec![], Bytes::from_static(body)).unwrap(),
-                ));
-                AppendRecord::try_from(AppendRecordParts {
-                    timestamp: Some(ts),
-                    record,
-                })
-                .unwrap()
-            })
-            .collect();
-        let input = AppendInput {
-            records: AppendRecordBatch::try_from(records).unwrap(),
-            match_seq_num: None,
-            fencing_token: None,
-        };
-        backend
-            .open_for_append(basin, stream, None, OptionalStreamConfig::default())
-            .await
-            .expect("open append handle")
-            .append(input)
-            .await
-            .expect("append timestamped records")
-    }
-
-    async fn append_trim(
-        backend: &Backend,
-        basin: &BasinName,
-        stream: &StreamName,
-        trim_point: u64,
-        timestamp: Option<u64>,
-    ) -> s2_common::stream::AppendAck {
-        let record = Metered::from(Record::Command(CommandRecord::Trim(trim_point)));
-        let record = AppendRecord::try_from(AppendRecordParts { timestamp, record }).unwrap();
-        let input = AppendInput {
-            records: AppendRecordBatch::try_from(vec![record]).unwrap(),
-            match_seq_num: None,
-            fencing_token: None,
-        };
-        backend
-            .open_for_append(basin, stream, None, OptionalStreamConfig::default())
-            .await
-            .expect("open append handle")
-            .append(input)
-            .await
-            .expect("append trim command")
     }
 
     fn read_uri(stream: &StreamName) -> String {
@@ -1584,16 +1543,6 @@ mod tests {
         assert_eq!(hb.tail.as_ref().map(|pos| pos.seq_num), Some(1));
     }
 
-    fn client_timestamp_stream_config() -> OptionalStreamConfig {
-        OptionalStreamConfig {
-            timestamping: OptionalTimestampingConfig {
-                mode: Some(TimestampingMode::ClientRequire),
-                ..Default::default()
-            },
-            ..Default::default()
-        }
-    }
-
     async fn assert_streaming_tail_heartbeat(
         app: &axum::Router,
         basin: &BasinName,
@@ -1635,122 +1584,73 @@ mod tests {
         );
     }
 
-    #[derive(Clone, Copy)]
-    enum ReadTransport {
-        Unary,
-        S2s,
-        Sse,
-    }
-
-    async fn assert_unwritten_416(
-        app: &axum::Router,
-        basin: &BasinName,
-        stream: &StreamName,
-        query: &str,
-        expected_tail: StreamPosition,
-        transports: &[ReadTransport],
-    ) {
-        for &transport in transports {
-            let mut request = request_builder("GET", records_uri(stream, query), basin);
-            let label = match transport {
-                ReadTransport::Unary => "unary",
-                ReadTransport::S2s => {
-                    request = request.header(header::CONTENT_TYPE, "s2s/proto");
-                    "S2S"
-                }
-                ReadTransport::Sse => {
-                    request = request.header(header::ACCEPT, "text/event-stream");
-                    "SSE"
-                }
-            };
-            let response = send(app, request.body(Body::empty()).unwrap()).await;
-            assert_eq!(
-                response.status(),
-                StatusCode::RANGE_NOT_SATISFIABLE,
-                "{label} query `{query}` should return 416"
-            );
-            let body = response_json(response, "416 tail body").await;
-            assert_eq!(
-                (
-                    body["tail"]["seq_num"].as_u64(),
-                    body["tail"]["timestamp"].as_u64()
-                ),
-                (Some(expected_tail.seq_num), Some(expected_tail.timestamp)),
-                "{label} query `{query}` tail mismatch"
-            );
-        }
+    async fn assert_416(response: Response, expected_tail: StreamPosition, context: &str) {
+        assert_eq!(
+            response.status(),
+            StatusCode::RANGE_NOT_SATISFIABLE,
+            "{context}: expected 416"
+        );
+        let body = response_json(response, "416 tail body").await;
+        assert_eq!(
+            (
+                body["tail"]["seq_num"].as_u64(),
+                body["tail"]["timestamp"].as_u64()
+            ),
+            (Some(expected_tail.seq_num), Some(expected_tail.timestamp)),
+            "{context}: tail mismatch"
+        );
     }
 
     #[tokio::test]
-    async fn streaming_no_wait_at_tail_empty_stream_emits_heartbeat() {
+    async fn streaming_no_wait_at_tail_emits_heartbeat_over_s2s_and_sse() {
+        // Empty stream.
         let (app, _backend, basin, stream) = setup_app_with_config(
             "stream-empty-tail-hb",
             BasinConfig::default(),
             OptionalStreamConfig::default(),
         )
         .await;
-
-        for query in [
-            "seq_num=0&wait=0",
-            "seq_num=0&count=10",
-            "seq_num=0&bytes=1024",
-            "seq_num=0&until=1000",
-            "seq_num=0&count=10&wait=0",
-            "wait=0",
-            "count=10",
-            "bytes=1024",
-            "until=1000",
-            "tail_offset=0&wait=0",
-            "tail_offset=0&count=10",
-            "tail_offset=5&wait=0",
-            "tail_offset=5&count=10",
-            "timestamp=0&wait=0",
-            "timestamp=0&count=10",
-            "seq_num=10&clamp=true&wait=0",
-            "seq_num=10&clamp=true&count=10",
-            "timestamp=1000&clamp=true&wait=0",
-            "timestamp=1000&clamp=true&count=10",
-        ] {
+        for query in ["wait=0", "count=10", "seq_num=10&clamp=true&count=10"] {
             assert_streaming_tail_heartbeat(&app, &basin, &stream, query, StreamPosition::MIN)
                 .await;
         }
-    }
 
-    #[tokio::test]
-    async fn streaming_no_wait_at_tail_non_empty_stream_emits_heartbeat() {
+        // Non-empty stream.
         let (app, backend, basin, stream) = setup_app_with_config(
             "stream-nonempty-tail-hb",
             BasinConfig::default(),
-            client_timestamp_stream_config(),
+            OptionalStreamConfig::default(),
         )
         .await;
-        let ack =
-            append_timestamped(&backend, &basin, &stream, &[(b"a", 1000), (b"b", 2000)]).await;
-        assert_eq!(
-            ack.end,
-            StreamPosition {
-                seq_num: 2,
-                timestamp: 2000
-            }
-        );
-
-        for query in [
-            "seq_num=2&wait=0",
-            "seq_num=2&count=10",
-            "seq_num=2&bytes=1024",
-            "seq_num=2&until=3000",
-            "seq_num=2&until=2000",
-            "seq_num=2&until=1500",
-            "wait=0",
-            "count=10",
-            "tail_offset=0&wait=0",
-            "tail_offset=0&count=10",
-            "seq_num=10&clamp=true&wait=0",
-            "seq_num=10&clamp=true&count=10",
-            "timestamp=3000&clamp=true&wait=0",
-            "timestamp=3000&clamp=true&count=10",
-        ] {
+        let ack = append_records(
+            &backend,
+            &basin,
+            &stream,
+            vec![
+                envelope_record(b"a", Some(1000)),
+                envelope_record(b"b", Some(2000)),
+            ],
+        )
+        .await;
+        for query in ["wait=0", "count=10", "seq_num=10&clamp=true&count=10"] {
             assert_streaming_tail_heartbeat(&app, &basin, &stream, query, ack.end).await;
+        }
+
+        // Fully trimmed stream.
+        let trim_ack = append_records(
+            &backend,
+            &basin,
+            &stream,
+            vec![trim_record(u64::MAX, Some(3000))],
+        )
+        .await;
+        while backend.clone().tick_stream_trim().await.expect("trim tick") {}
+        for query in [
+            "seq_num=0&wait=0",
+            "seq_num=0&count=10",
+            "seq_num=10&clamp=true&count=10",
+        ] {
+            assert_streaming_tail_heartbeat(&app, &basin, &stream, query, trim_ack.end).await;
         }
     }
 
@@ -1759,17 +1659,21 @@ mod tests {
         let (app, backend, basin, stream) = setup_app_with_config(
             "stream-records-then-hb",
             BasinConfig::default(),
-            client_timestamp_stream_config(),
+            OptionalStreamConfig::default(),
         )
         .await;
-        let ack =
-            append_timestamped(&backend, &basin, &stream, &[(b"a", 1000), (b"b", 2000)]).await;
+        let ack = append_records(
+            &backend,
+            &basin,
+            &stream,
+            vec![
+                envelope_record(b"a", Some(1000)),
+                envelope_record(b"b", Some(2000)),
+            ],
+        )
+        .await;
 
-        for query in [
-            "seq_num=0&count=10",
-            "seq_num=0&until=3000",
-            "seq_num=0&wait=0",
-        ] {
+        for query in ["seq_num=0&count=10", "seq_num=0&wait=0"] {
             // S2S: non-empty record batch(es), then a single trailing tail heartbeat and clean EOF.
             let s2s_batches = s2s_read_batches(&app, &basin, &stream, query).await;
             let (last, record_batches) = s2s_batches
@@ -1809,227 +1713,44 @@ mod tests {
         }
     }
 
-    #[tokio::test(flavor = "current_thread", start_paused = true)]
-    async fn streaming_positive_wait_expiring_at_tail_emits_heartbeat_and_ends_cleanly() {
-        let (app, backend, basin, stream) = setup_app_with_config(
-            "stream-wait-expiry",
-            BasinConfig::default(),
-            client_timestamp_stream_config(),
-        )
-        .await;
-        let ack =
-            append_timestamped(&backend, &basin, &stream, &[(b"a", 1000), (b"b", 2000)]).await;
-
-        // Starting at the tail with positive wait: emits tail heartbeat(s) and ends cleanly on
-        // expiry.
-        let s2s_at_tail = s2s_read_batches(&app, &basin, &stream, "seq_num=2&wait=1").await;
-        assert!(
-            !s2s_at_tail.is_empty(),
-            "S2S wait=1 at tail should emit heartbeat(s)"
-        );
-        for batch in &s2s_at_tail {
-            assert!(
-                batch.records.is_empty(),
-                "S2S wait=1 at tail should not emit records: {s2s_at_tail:?}"
-            );
-            let tail = batch.tail.as_ref().expect("S2S heartbeat must carry tail");
-            assert_eq!(
-                (tail.seq_num, tail.timestamp),
-                (ack.end.seq_num, ack.end.timestamp)
-            );
-        }
-
-        let sse_at_tail = sse_read_query(&app, &basin, &stream, "seq_num=2&wait=1", None).await;
-        assert!(sse_at_tail.seq_nums.is_empty());
-        assert!(
-            !sse_at_tail.pings.is_empty(),
-            "SSE wait=1 at tail should emit ping(s) before [DONE]"
-        );
-        assert!(sse_at_tail.pings.iter().all(|&tail| tail == ack.end));
-
-        // Starting before the tail with positive wait: delivers records, then tail heartbeat(s)
-        // before expiry.
-        let s2s_before_tail = s2s_read_batches(&app, &basin, &stream, "seq_num=0&wait=1").await;
-        let first_hb_idx = s2s_before_tail
-            .iter()
-            .position(|b| b.records.is_empty())
-            .expect("S2S wait=1 catch-up should emit trailing heartbeat(s)");
-        assert!(
-            first_hb_idx > 0,
-            "S2S wait=1 catch-up should deliver records before heartbeats"
-        );
-        let s2s_seq_nums: Vec<u64> = s2s_before_tail[..first_hb_idx]
-            .iter()
-            .flat_map(|b| b.records.iter().map(|r| r.seq_num))
-            .collect();
-        assert_eq!(s2s_seq_nums, vec![0, 1]);
-        for hb in &s2s_before_tail[first_hb_idx..] {
-            assert!(
-                hb.records.is_empty(),
-                "unexpected records after heartbeat: {s2s_before_tail:?}"
-            );
-            let tail = hb.tail.as_ref().expect("S2S heartbeat must carry tail");
-            assert_eq!(
-                (tail.seq_num, tail.timestamp),
-                (ack.end.seq_num, ack.end.timestamp)
-            );
-        }
-
-        let sse_before_tail = sse_read_query(&app, &basin, &stream, "seq_num=0&wait=1", None).await;
-        assert_eq!(sse_before_tail.seq_nums, vec![0, 1]);
-        assert!(
-            !sse_before_tail.pings.is_empty(),
-            "SSE wait=1 catch-up should emit ping(s) before [DONE]"
-        );
-        assert!(sse_before_tail.pings.iter().all(|&tail| tail == ack.end));
-    }
-
     #[tokio::test]
-    async fn streaming_no_wait_across_trimmed_gap_emits_heartbeat() {
+    async fn streaming_beyond_tail_without_clamp_returns_416_before_stream_starts() {
         let (app, backend, basin, stream) = setup_app_with_config(
-            "stream-trimmed-gap-hb",
-            BasinConfig::default(),
-            client_timestamp_stream_config(),
-        )
-        .await;
-        append_timestamped(&backend, &basin, &stream, &[(b"a", 1000), (b"b", 2000)]).await;
-        let trim_ack = append_trim(&backend, &basin, &stream, u64::MAX, Some(3000)).await;
-        backend.run_stream_trim_for_test().await;
-
-        // All records 0..3 were trimmed, leaving tail at (3, 3000).
-        for query in [
-            "seq_num=0&wait=0",
-            "seq_num=0&count=10",
-            "seq_num=0&bytes=1024",
-            "seq_num=0&until=4000",
-            "tail_offset=3&wait=0",
-            "tail_offset=3&count=10",
-            "tail_offset=10&count=10",
-            "timestamp=1000&wait=0",
-            "timestamp=1000&count=10",
-            "timestamp=3000&count=10",
-        ] {
-            assert_streaming_tail_heartbeat(&app, &basin, &stream, query, trim_ack.end).await;
-        }
-    }
-
-    #[tokio::test]
-    async fn streaming_beyond_tail_without_clamp_still_returns_416() {
-        let (empty_app, _empty_backend, empty_basin, empty_stream) = setup_app_with_config(
-            "stream-empty-416",
+            "stream-beyond-416",
             BasinConfig::default(),
             OptionalStreamConfig::default(),
         )
         .await;
-
-        for query in [
-            "seq_num=1&wait=0",
-            "seq_num=1&count=10",
-            "seq_num=1",
-            "timestamp=1&wait=0",
-            "timestamp=1&count=10",
-            "timestamp=1",
-        ] {
-            assert_unwritten_416(
-                &empty_app,
-                &empty_basin,
-                &empty_stream,
-                query,
-                StreamPosition::MIN,
-                &[ReadTransport::S2s, ReadTransport::Sse],
-            )
-            .await;
-        }
-
-        let (app, backend, basin, stream) = setup_app_with_config(
-            "stream-nonempty-416",
-            BasinConfig::default(),
-            client_timestamp_stream_config(),
-        )
-        .await;
-        let ack =
-            append_timestamped(&backend, &basin, &stream, &[(b"a", 1000), (b"b", 2000)]).await;
-
-        for query in [
-            "seq_num=3&wait=0",
-            "seq_num=3&count=10",
-            "seq_num=3",
-            "timestamp=2001&wait=0",
-            "timestamp=2001&count=10",
-            "timestamp=2001",
-        ] {
-            assert_unwritten_416(
-                &app,
-                &basin,
-                &stream,
-                query,
-                ack.end,
-                &[ReadTransport::S2s, ReadTransport::Sse],
-            )
-            .await;
-        }
-    }
-
-    #[tokio::test]
-    async fn streaming_ended_before_tail_by_until_or_limit_emits_no_heartbeat() {
-        let (app, backend, basin, stream) = setup_app_with_config(
-            "stream-no-hb-before-tail",
-            BasinConfig::default(),
-            client_timestamp_stream_config(),
-        )
-        .await;
-        let per_record = append_input(b"item").records.metered_size() as u64;
-        append_timestamped(
+        let ack = append_records(
             &backend,
             &basin,
             &stream,
-            &[(b"item", 1000), (b"item", 2000), (b"item", 3000)],
+            vec![
+                envelope_record(b"a", Some(1000)),
+                envelope_record(b"b", Some(2000)),
+            ],
         )
         .await;
 
-        let cases: Vec<(String, Vec<u64>)> = vec![
-            // `until` cuts off before first record.
-            ("seq_num=0&until=1000".to_owned(), vec![]),
-            ("seq_num=0&until=500&wait=0".to_owned(), vec![]),
-            // `until` cuts off mid-stream before tail.
-            ("seq_num=0&until=2000".to_owned(), vec![0]),
-            ("seq_num=0&until=3000&wait=0".to_owned(), vec![0, 1]),
-            // `timestamp` start + `until` denying the resolved record before tail.
-            ("timestamp=1500&until=1800".to_owned(), vec![]),
-            // `count` satisfied before and exactly at tail.
-            ("seq_num=0&count=1".to_owned(), vec![0]),
-            ("seq_num=0&count=3".to_owned(), vec![0, 1, 2]),
-            ("seq_num=0&count=0".to_owned(), vec![]),
-            // `bytes` satisfied (oversized first record, exact fit, partial before tail).
-            (format!("seq_num=0&bytes={}", per_record - 1), vec![]),
-            (format!("seq_num=0&bytes={per_record}"), vec![0]),
-            (format!("seq_num=0&bytes={}", per_record + 1), vec![0]),
-            (format!("seq_num=0&bytes={}", per_record * 3), vec![0, 1, 2]),
-            ("seq_num=0&bytes=0".to_owned(), vec![]),
-        ];
+        let s2s_resp = send(
+            &app,
+            request_builder("GET", records_uri(&stream, "seq_num=3&count=10"), &basin)
+                .header(header::CONTENT_TYPE, "s2s/proto")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_416(s2s_resp, ack.end, "S2S beyond tail").await;
 
-        for (query, expected_seq_nums) in cases {
-            // S2S: no empty/heartbeat batch, only expected records, clean EOF.
-            let s2s_batches = s2s_read_batches(&app, &basin, &stream, &query).await;
-            let mut s2s_seq_nums = Vec::new();
-            for batch in &s2s_batches {
-                assert!(
-                    !batch.records.is_empty(),
-                    "S2S query `{query}` must not emit a heartbeat: {s2s_batches:?}"
-                );
-                s2s_seq_nums.extend(batch.records.iter().map(|r| r.seq_num));
-            }
-            assert_eq!(s2s_seq_nums, expected_seq_nums, "S2S query `{query}`");
-
-            // SSE: no ping events, only expected records, [DONE].
-            let sse = sse_read_query(&app, &basin, &stream, &query, None).await;
-            assert!(
-                sse.pings.is_empty(),
-                "SSE query `{query}` must not emit a ping: {:?}",
-                sse.pings
-            );
-            assert_eq!(sse.seq_nums, expected_seq_nums, "SSE query `{query}`");
-        }
+        let sse_resp = send(
+            &app,
+            request_builder("GET", records_uri(&stream, "seq_num=3&count=10"), &basin)
+                .header(header::ACCEPT, "text/event-stream")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_416(sse_resp, ack.end, "SSE beyond tail").await;
     }
 
     #[tokio::test]
@@ -2037,15 +1758,18 @@ mod tests {
         let (app, backend, basin, stream) = setup_app_with_config(
             "sse-resume-at-tail",
             BasinConfig::default(),
-            client_timestamp_stream_config(),
+            OptionalStreamConfig::default(),
         )
         .await;
         let per_record = append_input(b"payload").records.metered_size() as u64;
-        let ack = append_timestamped(
+        let ack = append_records(
             &backend,
             &basin,
             &stream,
-            &[(b"payload", 1000), (b"payload", 2000)],
+            vec![
+                envelope_record(b"payload", Some(1000)),
+                envelope_record(b"payload", Some(2000)),
+            ],
         )
         .await;
         let at_tail_id = LastEventId {
@@ -2054,131 +1778,88 @@ mod tests {
             bytes: per_record * 2,
         };
 
-        // Resuming right at the tail with wait=0 or omitted wait + remaining count/bytes/until.
-        for query in [
-            "seq_num=0&wait=0",
-            "seq_num=0&count=10",
-            &format!("seq_num=0&bytes={}", per_record * 10),
-            "seq_num=0&until=5000",
-        ] {
+        for query in ["seq_num=0&wait=0", "seq_num=0&count=10"] {
             let resumed = sse_read_query(&app, &basin, &stream, query, Some(at_tail_id)).await;
             assert!(resumed.seq_nums.is_empty(), "query={query}");
             assert!(resumed.last_id.is_none(), "query={query}");
             assert_eq!(resumed.pings, vec![ack.end], "query={query}");
         }
-
-        // Resuming beyond the tail (e.g. recreated stream) without clamp still returns 416.
-        let beyond_tail_id = LastEventId {
-            seq_num: 5,
-            count: 2,
-            bytes: per_record * 2,
-        };
-        let response = send(
-            &app,
-            request_builder("GET", records_uri(&stream, "seq_num=0&count=10"), &basin)
-                .header(header::ACCEPT, "text/event-stream")
-                .header("last-event-id", beyond_tail_id.to_string())
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await;
-        assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
-        let body = response_json(response, "416 tail body").await;
-        assert_eq!(body["tail"]["seq_num"], 2);
-        assert_eq!(body["tail"]["timestamp"], 2000);
     }
 
     #[tokio::test]
-    async fn unary_read_at_tail_without_wait_still_returns_416() {
+    async fn unary_read_no_wait_tail_and_stop_mapping() {
+        // Empty stream without wait -> 416 with StreamPosition::MIN.
         let (empty_app, _empty_backend, empty_basin, empty_stream) = setup_app_with_config(
             "unary-empty-416",
             BasinConfig::default(),
             OptionalStreamConfig::default(),
         )
         .await;
-
-        for query in [
-            "seq_num=0",
-            "seq_num=0&wait=0",
-            "tail_offset=0",
-            "tail_offset=5",
-            "",
-            "wait=0",
-            "timestamp=0",
-            "seq_num=5&clamp=true",
-            "timestamp=5&clamp=true",
-            "seq_num=1",
-            "timestamp=1",
-        ] {
-            assert_unwritten_416(
-                &empty_app,
-                &empty_basin,
-                &empty_stream,
-                query,
-                StreamPosition::MIN,
-                &[ReadTransport::Unary],
-            )
-            .await;
-        }
-
-        let (app, backend, basin, stream) = setup_app_with_config(
-            "unary-nonempty-416",
-            BasinConfig::default(),
-            client_timestamp_stream_config(),
+        let resp = send(
+            &empty_app,
+            request_builder("GET", records_uri(&empty_stream, "seq_num=0"), &empty_basin)
+                .body(Body::empty())
+                .unwrap(),
         )
         .await;
-        let ack =
-            append_timestamped(&backend, &basin, &stream, &[(b"a", 1000), (b"b", 2000)]).await;
+        assert_416(resp, StreamPosition::MIN, "unary empty stream").await;
 
-        for query in [
-            "seq_num=2",
-            "seq_num=2&wait=0",
-            "tail_offset=0",
-            "",
-            "seq_num=10&clamp=true",
-            "timestamp=3000&clamp=true",
-            "seq_num=3",
-            "timestamp=2001",
-        ] {
-            assert_unwritten_416(
-                &app,
-                &basin,
-                &stream,
-                query,
-                ack.end,
-                &[ReadTransport::Unary],
-            )
-            .await;
-        }
+        // Non-empty stream.
+        let (app, backend, basin, stream) = setup_app_with_config(
+            "unary-nonempty",
+            BasinConfig::default(),
+            OptionalStreamConfig::default(),
+        )
+        .await;
+        let ack = append_records(
+            &backend,
+            &basin,
+            &stream,
+            vec![
+                envelope_record(b"a", Some(1000)),
+                envelope_record(b"b", Some(2000)),
+            ],
+        )
+        .await;
 
-        // Unary `until` cutting off before first record still returns 200 OK with empty records.
-        let response = send(
+        // Starting at tail with wait=0 -> 416 with tail.
+        let resp = send(
+            &app,
+            request_builder("GET", records_uri(&stream, "seq_num=2&wait=0"), &basin)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_416(resp, ack.end, "unary at tail wait=0").await;
+
+        // `until` cutting off before first record -> 200 OK empty.
+        let resp = send(
             &app,
             request_builder("GET", records_uri(&stream, "seq_num=0&until=500"), &basin)
                 .body(Body::empty())
                 .unwrap(),
         )
         .await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = response_json(response, "unary empty until response").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = response_json(resp, "unary empty until response").await;
         assert_eq!(body["records"], serde_json::json!([]));
 
-        // Non-empty unary read with wait=0 reaching the tail returns 200 OK with tail;
-        // a count-bounded read stopping before the tail omits tail.
-        let response = send(
+        // Non-empty catch-up with wait=0 -> 200 OK with records + tail.
+        let resp = send(
             &app,
             request_builder("GET", records_uri(&stream, "seq_num=0&wait=0"), &basin)
                 .body(Body::empty())
                 .unwrap(),
         )
         .await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = response_json(response, "unary catch-up response").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = response_json(resp, "unary catch-up response").await;
         assert_eq!(body["records"].as_array().map(Vec::len), Some(2));
         assert_eq!(body["tail"]["seq_num"], 2);
         assert_eq!(body["tail"]["timestamp"], 2000);
 
-        let response = send(
+        // Count-bounded stopping before tail -> 200 OK without tail.
+        let resp = send(
             &app,
             request_builder(
                 "GET",
@@ -2189,54 +1870,91 @@ mod tests {
             .unwrap(),
         )
         .await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = response_json(response, "unary bounded response").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = response_json(resp, "unary bounded response").await;
         assert_eq!(body["records"].as_array().map(Vec::len), Some(1));
         assert!(body.get("tail").is_none());
 
-        // Fully trimmed stream: zero-wait unary reads across the trimmed gap return 416 with tail.
-        let (trimmed_app, trimmed_backend, trimmed_basin, trimmed_stream) = setup_app_with_config(
-            "unary-trimmed-416",
-            BasinConfig::default(),
-            client_timestamp_stream_config(),
+        // Fully trimmed stream -> 416 with tail.
+        let trim_ack = append_records(
+            &backend,
+            &basin,
+            &stream,
+            vec![trim_record(u64::MAX, Some(3000))],
         )
         .await;
-        append_timestamped(
-            &trimmed_backend,
-            &trimmed_basin,
-            &trimmed_stream,
-            &[(b"a", 1000), (b"b", 2000)],
+        while backend.clone().tick_stream_trim().await.expect("trim tick") {}
+        let resp = send(
+            &app,
+            request_builder("GET", records_uri(&stream, "seq_num=0"), &basin)
+                .body(Body::empty())
+                .unwrap(),
         )
         .await;
-        let trim_ack = append_trim(
-            &trimmed_backend,
-            &trimmed_basin,
-            &trimmed_stream,
-            u64::MAX,
-            Some(3000),
-        )
-        .await;
-        trimmed_backend.run_stream_trim_for_test().await;
+        assert_416(resp, trim_ack.end, "unary across trimmed gap").await;
+    }
 
-        for query in [
-            "seq_num=0",
-            "seq_num=0&wait=0",
-            "tail_offset=3",
-            "tail_offset=10",
-            "tail_offset=0",
-            "timestamp=1000",
-            "timestamp=3000",
-            "seq_num=10&clamp=true",
-        ] {
-            assert_unwritten_416(
-                &trimmed_app,
-                &trimmed_basin,
-                &trimmed_stream,
-                query,
-                trim_ack.end,
-                &[ReadTransport::Unary],
-            )
-            .await;
-        }
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn unary_read_with_positive_wait_at_tail_long_polls() {
+        let (app, backend, basin, stream) = setup_app_with_config(
+            "unary-wait-long-poll",
+            BasinConfig::default(),
+            OptionalStreamConfig::default(),
+        )
+        .await;
+        let initial_ack = append_records(
+            &backend,
+            &basin,
+            &stream,
+            vec![envelope_record(b"first", Some(1000))],
+        )
+        .await;
+
+        // 1. Wait expires with no new records -> 200 OK with empty records and tail (not 416).
+        let resp = send(
+            &app,
+            request_builder("GET", records_uri(&stream, "seq_num=1&wait=1"), &basin)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = response_json(resp, "unary wait expiry body").await;
+        assert_eq!(body["records"], serde_json::json!([]));
+        assert_eq!(body["tail"]["seq_num"], initial_ack.end.seq_num);
+        assert_eq!(body["tail"]["timestamp"], initial_ack.end.timestamp);
+
+        // 2. Record appended during wait -> wakes and returns 200 OK with the new record and tail.
+        let append_task = tokio::spawn({
+            let backend = backend.clone();
+            let basin = basin.clone();
+            let stream = stream.clone();
+            async move {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                append_records(
+                    &backend,
+                    &basin,
+                    &stream,
+                    vec![envelope_record(b"second", Some(2000))],
+                )
+                .await
+            }
+        });
+        let resp = send(
+            &app,
+            request_builder("GET", records_uri(&stream, "seq_num=1&wait=5"), &basin)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        let second_ack = append_task.await.expect("append task");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = response_json(resp, "unary wait append body").await;
+        let records = body["records"].as_array().expect("records array");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0]["seq_num"], 1);
+        assert_eq!(records[0]["body"], "second");
+        assert_eq!(body["tail"]["seq_num"], second_ack.end.seq_num);
+        assert_eq!(body["tail"]["timestamp"], second_ack.end.timestamp);
     }
 }

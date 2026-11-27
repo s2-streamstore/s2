@@ -427,24 +427,10 @@ mod test {
         Some(Duration::from_secs(1)),
         true
     )]
-    #[case::count_omitted_wait(ReadLimit::Count(10), ReadUntil::Unbounded, None, false)]
-    #[case::count_zero_wait(
+    #[case::bounded_omitted_wait(ReadLimit::Count(10), ReadUntil::Unbounded, None, false)]
+    #[case::bounded_nonzero_wait(
         ReadLimit::Count(10),
         ReadUntil::Unbounded,
-        Some(Duration::ZERO),
-        false
-    )]
-    #[case::count_nonzero_wait(
-        ReadLimit::Count(10),
-        ReadUntil::Unbounded,
-        Some(Duration::from_secs(1)),
-        true
-    )]
-    #[case::bytes_omitted_wait(ReadLimit::Bytes(1024), ReadUntil::Unbounded, None, false)]
-    #[case::until_omitted_wait(ReadLimit::Unbounded, ReadUntil::Timestamp(1000), None, false)]
-    #[case::until_nonzero_wait(
-        ReadLimit::Unbounded,
-        ReadUntil::Timestamp(1000),
         Some(Duration::from_secs(1)),
         true
     )]

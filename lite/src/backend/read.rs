@@ -146,7 +146,7 @@ async fn read_session(
                 let mut records = Metered::with_capacity(
                     limit.into_allowance(caps::RECORD_BATCH_MAX).count as usize,
                 );
-                let mut stopped = false;
+                let mut stopped_before_tail = false;
 
                 while let EvaluatedReadLimit::Remaining(limit) = state.limit {
                     let Some(kv) = it.next().await? else {
@@ -163,7 +163,7 @@ async fn read_session(
                             records.metered_size() as u64 + record.metered_size() as u64,
                         )
                     {
-                        stopped = true;
+                        stopped_before_tail = true;
                         break;
                     }
 
@@ -191,15 +191,13 @@ async fn read_session(
                         tail: None,
                     });
                 }
-                if stopped {
+                if stopped_before_tail {
                     break 'session;
                 }
                 state.start_seq_num = state.tail.seq_num;
             } else {
                 assert_eq!(state.start_seq_num, state.tail.seq_num);
-                let follow_rx = if !end.may_follow() {
-                    None
-                } else {
+                let follow_rx = if end.may_follow() {
                     match client.follow(state.start_seq_num).await? {
                         Ok(follow_rx) => {
                             // Only a delivered batch should reset the absolute wait budget.
@@ -209,13 +207,15 @@ async fn read_session(
                         Err(tail) => {
                             assert!(state.tail.seq_num < tail.seq_num, "tail cannot regress");
                             state.tail = tail;
-                            continue;
+                            continue 'session;
                         }
                     }
+                } else {
+                    None
                 };
                 yield StoredReadSessionOutput::Heartbeat(state.tail);
                 let Some(mut follow_rx) = follow_rx else {
-                    break;
+                    break 'session;
                 };
                 while let EvaluatedReadLimit::Remaining(limit) = state.limit {
                     tokio::select! {
@@ -637,28 +637,25 @@ mod tests {
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
 
-        if keep_prefix == 0 {
-            assert_eq!(
-                outputs.len(),
-                1,
-                "expected single tail heartbeat: {outputs:?}"
-            );
-            assert!(matches!(
-                outputs[0],
-                ReadSessionOutput::Heartbeat(tail) if tail == expected_tail
-            ));
-        } else {
-            assert_eq!(outputs.len(), 2, "{outputs:?}");
-            let ReadSessionOutput::Batch(ref batch) = outputs[0] else {
-                panic!("expected batch first: {outputs:?}");
-            };
-            assert_eq!(batch.records.len(), keep_prefix);
-            assert_eq!(batch.records[0].position().seq_num, 0);
-            assert!(matches!(
-                outputs[1],
-                ReadSessionOutput::Heartbeat(tail) if tail == expected_tail
-            ));
-        }
+        let (last, prefix) = outputs
+            .split_last()
+            .expect("expected trailing tail heartbeat");
+        assert!(
+            matches!(last, ReadSessionOutput::Heartbeat(tail) if *tail == expected_tail),
+            "expected trailing Heartbeat({expected_tail:?}), got {outputs:?}"
+        );
+        let delivered: Vec<u64> = prefix
+            .iter()
+            .flat_map(|output| match output {
+                ReadSessionOutput::Batch(batch) => batch
+                    .records
+                    .iter()
+                    .map(|r| r.position().seq_num)
+                    .collect::<Vec<_>>(),
+                other => panic!("unexpected non-batch output before trailing heartbeat: {other:?}"),
+            })
+            .collect();
+        assert_eq!(delivered, (0..keep_prefix as u64).collect::<Vec<_>>());
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
@@ -927,7 +924,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_start_seq_num_clamps_resolve_timestamp_race_past_tail() {
+    async fn read_start_seq_num_caps_timestamp_resolution_at_snapshot_tail() {
         let object_store = Arc::new(InMemory::new());
         let db = Db::builder("/test", object_store).build().await.unwrap();
         let backend = Backend::new(db, ByteSize::mib(10));
