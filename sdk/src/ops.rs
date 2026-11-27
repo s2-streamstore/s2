@@ -1098,6 +1098,10 @@ impl S2Stream {
     /// Reading is on-demand (no session-level read-ahead): opening sends no request, and the first
     /// request initiates on the first pull. Request errors surface through iteration.
     ///
+    /// Decoded record `body` and header `Bytes` slices may share the backing allocation of their
+    /// decoded S2S frame (up to ~2.5 MiB) or incoming transport chunk; copy them (e.g. `.to_vec()`)
+    /// if retaining small records long-term independently of their batch.
+    ///
     /// # Errors
     ///
     /// Returns [`ReadSessionError::ClientClosed`] if [`S2::close`] has already been called.
@@ -1123,6 +1127,10 @@ impl S2Stream {
     /// Accepts a [`ReadInput`] or a [`ReadStart`](crate::types::ReadStart).
     /// Reading is on-demand (no session-level read-ahead): opening sends no request, and the first
     /// request initiates on the first pull. Request errors surface through iteration.
+    ///
+    /// Decoded record `body` and header `Bytes` slices may share the backing allocation of their
+    /// decoded S2S frame (up to ~2.5 MiB) or incoming transport chunk; copy them (e.g. `.to_vec()`)
+    /// if retaining small records long-term independently of their batch.
     ///
     /// # Errors
     ///

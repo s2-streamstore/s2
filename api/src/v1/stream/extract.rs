@@ -2,13 +2,13 @@ use axum::{
     extract::{FromRequest, FromRequestParts, Request},
     response::{IntoResponse, Response},
 };
+use bytes::Bytes;
 use futures_util::StreamExt as _;
 use http::{StatusCode, request::Parts};
 use s2_common::{
     encryption::EncryptionKey,
     http::{ParseableHeader, extract::HeaderRejection},
 };
-use tokio_util::{codec::FramedRead, io::StreamReader};
 
 use super::{AppendInput, AppendInputStreamError, AppendRequest, ReadRequest, proto, s2s};
 use crate::{
@@ -62,32 +62,47 @@ where
             let response_compression =
                 s2s::CompressionAlgorithm::from_accept_encoding(req.headers());
 
-            let body_reader = StreamReader::new(
-                req.into_body()
-                    .into_data_stream()
-                    .map(|result| result.map_err(std::io::Error::other)),
+            let body_stream = req.into_body().into_data_stream();
+
+            let inputs = futures_util::stream::try_unfold(
+                (body_stream, s2s::ChunkFrameDecoder::new(), Bytes::new()),
+                |(mut body_stream, mut decoder, mut current_chunk)| async move {
+                    loop {
+                        if let Some(msg) = decoder.decode_next(&mut current_chunk)? {
+                            return match msg {
+                                s2s::SessionMessage::Regular(data) => {
+                                    let input = data.try_into_proto::<proto::AppendInput>()?;
+                                    let input = s2_common::stream::AppendInput::try_from(input)?;
+                                    Ok(Some((input, (body_stream, decoder, current_chunk))))
+                                }
+                                s2s::SessionMessage::Terminal(_) => {
+                                    Err(AppendInputStreamError::FrameDecode(std::io::Error::new(
+                                        std::io::ErrorKind::InvalidData,
+                                        "Unexpected terminal frame as input",
+                                    )))
+                                }
+                            };
+                        }
+                        match body_stream.next().await {
+                            Some(Ok(chunk)) => {
+                                current_chunk = chunk;
+                            }
+                            Some(Err(err)) => {
+                                // Wrap with `io::Error::other` to preserve the underlying
+                                // `axum::Error` / `hyper::Error` source chain for callers that
+                                // classify transport body read disconnects.
+                                return Err(AppendInputStreamError::FrameDecode(
+                                    std::io::Error::other(err),
+                                ));
+                            }
+                            None => {
+                                decoder.finish()?;
+                                return Ok(None);
+                            }
+                        }
+                    }
+                },
             );
-
-            let framed = FramedRead::new(body_reader, s2s::FrameDecoder);
-
-            let inputs = futures_util::stream::try_unfold(framed, |mut framed| async move {
-                let Some(msg) = framed.next().await else {
-                    return Ok(None);
-                };
-                match msg? {
-                    s2s::SessionMessage::Regular(data) => {
-                        let input = data.try_into_proto::<proto::AppendInput>()?;
-                        let input = s2_common::stream::AppendInput::try_from(input)?;
-                        Ok(Some((input, framed)))
-                    }
-                    s2s::SessionMessage::Terminal(_) => {
-                        Err(AppendInputStreamError::FrameDecode(std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            "Unexpected terminal frame as input",
-                        )))
-                    }
-                }
-            });
 
             return Ok(Self::S2s {
                 encryption_key,
@@ -188,5 +203,128 @@ where
         Ok(value) => Ok(Some(value)),
         Err(HeaderRejection::MissingHeader(_)) => Ok(None),
         Err(e) => Err(e)?,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::body::Body;
+    use futures_util::stream;
+
+    use super::*;
+
+    fn make_append_frame(body: &[u8]) -> Bytes {
+        let input = proto::AppendInput {
+            records: vec![proto::AppendRecord {
+                timestamp: None,
+                headers: vec![],
+                body: Bytes::copy_from_slice(body),
+            }],
+            match_seq_num: None,
+            fencing_token: None,
+        };
+        s2s::SessionMessage::regular(s2s::CompressionAlgorithm::None, &input)
+            .unwrap()
+            .encode()
+    }
+
+    async fn extract_s2s_inputs(
+        chunks: Vec<Result<Bytes, std::io::Error>>,
+    ) -> Vec<Result<Vec<u8>, AppendInputStreamError>> {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/streams/test/records")
+            .header(http::header::CONTENT_TYPE, "s2s/proto")
+            .body(Body::from_stream(stream::iter(chunks)))
+            .unwrap();
+        let AppendRequest::S2s { mut inputs, .. } =
+            AppendRequest::from_request(req, &()).await.unwrap()
+        else {
+            panic!("expected s2s append request");
+        };
+        let mut out = Vec::new();
+        while let Some(item) = inputs.next().await {
+            out.push(item.map(|input| {
+                let record = input.records.into_iter().next().unwrap();
+                let (_, body) = record.into_parts().record.into_inner().into_parts();
+                body.to_vec()
+            }));
+        }
+        out
+    }
+
+    #[test]
+    fn s2s_append_extractor_handles_straddled_multi_frame_and_eof_truncation() {
+        futures::executor::block_on(async {
+            let f0 = make_append_frame(b"first");
+            let f1 = make_append_frame(b"second");
+            let f2 = make_append_frame(b"third");
+
+            // Split 3-byte prefix of f0, empty chunk, combined rest of f0 + full f1 + prefix of f2,
+            // then rest of f2.
+            let mut combined = Vec::new();
+            combined.extend_from_slice(&f0[2..]);
+            combined.extend_from_slice(&f1);
+            combined.extend_from_slice(&f2[..2]);
+            let results = extract_s2s_inputs(vec![
+                Ok(Bytes::copy_from_slice(&f0[..1])),
+                Ok(Bytes::copy_from_slice(&f0[1..2])),
+                Ok(Bytes::new()),
+                Ok(Bytes::from(combined)),
+                Ok(Bytes::copy_from_slice(&f2[2..])),
+            ])
+            .await;
+            assert_eq!(results.len(), 3);
+            assert_eq!(results[0].as_ref().unwrap(), b"first");
+            assert_eq!(results[1].as_ref().unwrap(), b"second");
+            assert_eq!(results[2].as_ref().unwrap(), b"third");
+
+            // Truncated trailing bytes at EOF must return FrameDecode(UnexpectedEof).
+            let truncated = extract_s2s_inputs(vec![
+                Ok(f0.clone()),
+                Ok(Bytes::copy_from_slice(&f1[..f1.len() - 2])),
+            ])
+            .await;
+            assert_eq!(truncated.len(), 2);
+            assert_eq!(truncated[0].as_ref().unwrap(), b"first");
+            assert!(matches!(
+                truncated[1],
+                Err(AppendInputStreamError::FrameDecode(ref e))
+                    if e.kind() == std::io::ErrorKind::UnexpectedEof
+            ));
+
+            // Terminal frame on input stream must be rejected as FrameDecode(InvalidData).
+            let terminal = s2s::SessionMessage::Terminal(s2s::TerminalMessage {
+                status: 400,
+                body: Bytes::from_static(b"{}"),
+            })
+            .encode();
+            let term_res = extract_s2s_inputs(vec![Ok(terminal)]).await;
+            assert_eq!(term_res.len(), 1);
+            assert!(matches!(
+                term_res[0],
+                Err(AppendInputStreamError::FrameDecode(ref e))
+                    if e.kind() == std::io::ErrorKind::InvalidData
+            ));
+
+            // Underlying body transport error must preserve `ErrorKind::Other` wrapping
+            // `axum::Error` so callers can classify transport body disconnects.
+            let err_res = extract_s2s_inputs(vec![Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "peer reset",
+            ))])
+            .await;
+            assert_eq!(err_res.len(), 1);
+            let Err(AppendInputStreamError::FrameDecode(ref err)) = err_res[0] else {
+                panic!("expected FrameDecode");
+            };
+            assert_eq!(err.kind(), std::io::ErrorKind::Other);
+            assert!(
+                err.get_ref()
+                    .and_then(|e| e.downcast_ref::<axum::Error>())
+                    .is_some(),
+                "expected FrameDecode error to wrap axum::Error"
+            );
+        });
     }
 }
