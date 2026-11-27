@@ -1570,7 +1570,7 @@ async fn spec_f2_f3_open_enums_tagged_unions_and_closed_request_enums() {
 }
 
 // ---------------------------------------------------------------------------
-// D4, R1, R6, R7, R8, R9, R10a, R10b, R10c, T6b: read_state.json
+// D4, R1, R6, R7, R8, R9, R10a, R10b, R10c, T6a, T6b: read_state.json
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
@@ -1894,7 +1894,7 @@ fn assert_expect_request(
 }
 
 // spec: r1 D4, R1, R6, R7, R7a, R7b, R7c, R8, R8a, R8c, R8d, R9, R9a, R9b, R9c, R9d, R10a, R10b,
-// R10c, T6b
+// R10c, T6a, T6b
 #[tokio::test]
 async fn spec_vectors_read_state() {
     let file: ReadStateFile = read_json("sdk/vectors/read_state.json");
@@ -2150,8 +2150,9 @@ async fn spec_vectors_read_state() {
                         .and_then(|v| v.as_bool())
                         .unwrap_or(false);
                     let triggers_handover = reconnect_advised && !handover_used;
+                    let has_sync = expect.is_some() || expect_request.is_some();
 
-                    let (sent_tx, sent_rx) = if expect.is_some() && !triggers_handover {
+                    let (sent_tx, sent_rx) = if has_sync && !triggers_handover {
                         let (tx, rx) = tokio::sync::oneshot::channel();
                         (Some(tx), Some(rx))
                     } else {
@@ -2179,7 +2180,7 @@ async fn spec_vectors_read_state() {
                         target_attempt += 1;
                     }
 
-                    if let Some(exp) = expect {
+                    if has_sync {
                         slot.ensure_pulling();
                         if triggers_handover {
                             let params = tokio::time::timeout(
@@ -2195,6 +2196,9 @@ async fn spec_vectors_read_state() {
                                 assert_expect_request(&label, &params, req_exp);
                             }
                         } else {
+                            let exp = expect.expect(
+                                "non-handover receive_heartbeat with sync must carry expect",
+                            );
                             if let Some(rx) = sent_rx {
                                 let _ = tokio::time::timeout(Duration::from_secs(3), rx)
                                     .await
@@ -2207,44 +2211,41 @@ async fn spec_vectors_read_state() {
                                 parse_pos(&exp["last_observed_tail"]),
                                 exp["is_caught_up"].as_bool().unwrap(),
                             );
-                            if state_before == target_state {
-                                // State is expected to remain unchanged (e.g. lower-timestamp
-                                // equal-seq_num heartbeat); give the active pull time to decode it.
-                                tokio::time::sleep(Duration::from_millis(25)).await;
-                            } else {
-                                tokio::time::timeout(Duration::from_secs(3), async {
-                                    let mut tick = tokio::time::interval(Duration::from_millis(2));
-                                    loop {
-                                        let cur = (
-                                            state.next_seq_num(),
-                                            state.last_observed_tail().map(pos_tuple),
-                                            state.is_caught_up(),
-                                        );
-                                        if cur == target_state
-                                            || slot
-                                                .pending
-                                                .as_ref()
-                                                .is_some_and(|h| h.is_finished())
-                                        {
-                                            break;
-                                        }
-                                        tick.tick().await;
+                            assert_ne!(
+                                state_before, target_state,
+                                "{label}: non-handover receive_heartbeat with expect must change observable state"
+                            );
+                            tokio::time::timeout(Duration::from_secs(3), async {
+                                let mut tick = tokio::time::interval(Duration::from_millis(2));
+                                loop {
+                                    let cur = (
+                                        state.next_seq_num(),
+                                        state.last_observed_tail().map(pos_tuple),
+                                        state.is_caught_up(),
+                                    );
+                                    if cur == target_state
+                                        || slot.pending.as_ref().is_some_and(|h| h.is_finished())
+                                    {
+                                        break;
                                     }
-                                })
-                                .await
-                                .unwrap_or_else(|_| {
-                                    panic!("{label}: timed out waiting for heartbeat state update")
-                                });
-                            }
+                                    tick.tick().await;
+                                }
+                            })
+                            .await
+                            .unwrap_or_else(|_| {
+                                panic!("{label}: timed out waiting for heartbeat state update")
+                            });
                         }
-                        assert_read_state_expect(
-                            &label,
-                            &state,
-                            exp,
-                            &mut pending_cu,
-                            &mut resolved_cus,
-                        )
-                        .await;
+                        if let Some(exp) = expect {
+                            assert_read_state_expect(
+                                &label,
+                                &state,
+                                exp,
+                                &mut pending_cu,
+                                &mut resolved_cus,
+                            )
+                            .await;
+                        }
                     }
                 }
                 "receive_clean_end" => {
@@ -2258,8 +2259,7 @@ async fn spec_vectors_read_state() {
                         .and_then(|v| v.as_str())
                         .map(str::to_owned);
                     let tail = step.get("tail").and_then(parse_pos);
-                    let is_retryable_step =
-                        status == 503 || expect.is_some() || expect_request.is_some();
+                    let is_retryable_step = expect.is_some() || expect_request.is_some();
 
                     push_action(
                         target_attempt,

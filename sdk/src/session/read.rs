@@ -798,7 +798,6 @@ struct ReadSessionCore {
     retry_backoff: RetryBackoff,
     advised_reconnects: AdvisedReconnects,
     idle_since: Option<Instant>,
-    last_fetched_seq: Option<u64>,
     transport: SyncCell<PollTransport>,
     lifecycle: StreamLifecycle,
 }
@@ -847,7 +846,6 @@ impl ReadSessionCore {
             retry_backoff,
             advised_reconnects: AdvisedReconnects::default(),
             idle_since: None,
-            last_fetched_seq: None,
             transport: SyncCell::new(PollTransport::new()),
             lifecycle: StreamLifecycle::Active,
         }
@@ -1036,17 +1034,15 @@ impl ReadSessionCore {
         // updating session state.
         let attempts = self.retry_backoff.attempt_number();
         let (known_next_seq_num, last_observed_tail_seq) = self.state.validation_bounds();
-        self.last_fetched_seq = match validate_read_batch(
+        if let Err(err) = validate_read_batch(
             &batch,
-            self.last_fetched_seq,
             known_next_seq_num,
             last_observed_tail_seq,
             &self.context,
             attempts,
         ) {
-            Ok(last_seq) => last_seq,
-            Err(err) => return BatchStep::Done(self.finish_terminal_error(err)),
-        };
+            return BatchStep::Done(self.finish_terminal_error(err));
+        }
 
         // T5a: every valid message is a non-empty batch or a heartbeat carrying a tail, so it
         // counts as progress and resets the retry budget.
@@ -1064,11 +1060,11 @@ impl ReadSessionCore {
         self.retry_backoff.reset();
 
         // R10d: restart idle clock only when a record is fetched; if no record has been fetched
-        // yet, start the clock the first time we learn we are at the tail. Heartbeats never
-        // restart this clock.
+        // yet, start the clock on the first received heartbeat. Heartbeats never restart this
+        // clock.
         if has_records {
             self.idle_since = Some(Instant::now());
-        } else if self.last_fetched_seq.is_none() {
+        } else {
             self.idle_since.get_or_insert_with(Instant::now);
         }
 
@@ -1598,12 +1594,11 @@ impl FusedStream for ReadBatchSession {
 
 fn validate_read_batch(
     batch: &ReadBatch,
-    last_fetched_seq: Option<u64>,
     known_next_seq_num: Option<u64>,
     last_observed_tail_seq: Option<u64>,
     context: &ErrorContext,
     attempts: u32,
-) -> Result<Option<u64>, ReadSessionError> {
+) -> Result<(), ReadSessionError> {
     let proto_err = |msg: String| {
         ReadSessionError::Protocol(ProtocolError::new_with_context(
             msg,
@@ -1634,19 +1629,21 @@ fn validate_read_batch(
                 tail.seq_num, next_seq
             )));
         }
-        return Ok(last_fetched_seq);
+        return Ok(());
     }
 
-    let mut prev = last_fetched_seq;
+    let first = &batch.records[0];
+    if let Some(next_seq) = known_next_seq_num
+        && first.seq_num < next_seq
+    {
+        return Err(proto_err(format!(
+            "read batch contained seq_num {} below resolved cursor {}",
+            first.seq_num, next_seq
+        )));
+    }
+
+    let mut prev: Option<u64> = None;
     for record in &batch.records {
-        if let Some(next_seq) = known_next_seq_num
-            && record.seq_num < next_seq
-        {
-            return Err(proto_err(format!(
-                "read batch contained seq_num {} below resolved cursor {}",
-                record.seq_num, next_seq
-            )));
-        }
         if let Some(prev_seq) = prev
             && record.seq_num <= prev_seq
         {
@@ -1670,7 +1667,7 @@ fn validate_read_batch(
             tail.seq_num, last_record.seq_num
         )));
     }
-    Ok(prev)
+    Ok(())
 }
 
 /// Advance the absolute start used when reconnecting the read session (`R10b`).
@@ -2274,42 +2271,47 @@ mod tests {
     fn validate_read_batch_rejects_invalid_batches_and_heartbeats() {
         let ctx = ErrorContext::stream("read_session", "b", "s", true);
         let b1 = batch(vec![record(0), record(2)], None);
-        let last = validate_read_batch(&b1, None, None, None, &ctx, 1).unwrap();
-        assert_eq!(last, Some(2));
+        validate_read_batch(&b1, None, None, &ctx, 1).unwrap();
 
         let dup = batch(vec![record(2)], None);
         assert!(matches!(
-            validate_read_batch(&dup, last, Some(3), None, &ctx, 1),
+            validate_read_batch(&dup, Some(3), None, &ctx, 1),
             Err(ReadSessionError::Protocol(_))
         ));
 
         let backward_within = batch(vec![record(5), record(4)], None);
         assert!(matches!(
-            validate_read_batch(&backward_within, last, Some(3), None, &ctx, 2),
+            validate_read_batch(&backward_within, Some(3), None, &ctx, 2),
             Err(ReadSessionError::Protocol(err)) if err.to_string().contains("after 2 attempts")
         ));
 
         let empty_no_tail = batch(vec![], None);
         assert!(matches!(
-            validate_read_batch(&empty_no_tail, None, Some(0), None, &ctx, 1),
+            validate_read_batch(&empty_no_tail, Some(0), None, &ctx, 1),
             Err(ReadSessionError::Protocol(_))
         ));
 
         let regressing_batch_tail = batch(vec![record(3)], Some(position(4)));
         assert!(matches!(
-            validate_read_batch(&regressing_batch_tail, last, Some(3), Some(5), &ctx, 1),
+            validate_read_batch(&regressing_batch_tail, Some(3), Some(5), &ctx, 1),
             Err(ReadSessionError::Protocol(_))
         ));
 
         let hb_below_next = batch(vec![], Some(position(2)));
         assert!(matches!(
-            validate_read_batch(&hb_below_next, last, Some(3), None, &ctx, 1),
+            validate_read_batch(&hb_below_next, Some(3), None, &ctx, 1),
             Err(ReadSessionError::Protocol(_))
         ));
 
         let hb_below_tail = batch(vec![], Some(position(4)));
         assert!(matches!(
-            validate_read_batch(&hb_below_tail, last, Some(3), Some(5), &ctx, 1),
+            validate_read_batch(&hb_below_tail, Some(3), Some(5), &ctx, 1),
+            Err(ReadSessionError::Protocol(_))
+        ));
+
+        let hb_between_tail_and_next = batch(vec![], Some(position(6)));
+        assert!(matches!(
+            validate_read_batch(&hb_between_tail_and_next, Some(7), Some(5), &ctx, 1),
             Err(ReadSessionError::Protocol(_))
         ));
     }
