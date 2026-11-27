@@ -268,6 +268,18 @@ pub async fn expect_heartbeat_advanced<S>(
     );
 }
 
+pub async fn collect_outputs<S>(session: S) -> Vec<ReadSessionOutput>
+where
+    S: futures::Stream<Item = Result<ReadSessionOutput, ReadError>>,
+{
+    tokio::time::timeout(Duration::from_secs(5), session.collect::<Vec<_>>())
+        .await
+        .expect("read session should complete without hanging")
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("read session should complete without error")
+}
+
 pub async fn collect_outputs_until_closed_advanced<S>(
     session: &mut Pin<Box<S>>,
     timeout: Duration,

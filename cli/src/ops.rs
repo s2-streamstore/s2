@@ -881,8 +881,9 @@ pub fn tail(
                     seen_any = true;
                     yield Ok(record);
                 }
-                // Non-follow tail on an empty or fully-trimmed stream returns initial 416;
-                // treat that as clean 0-record EOF.
+                // Compatibility with older servers that still return an initial 416 instead of
+                // a tail heartbeat for non-follow tail when starting at the tail (e.g. an empty
+                // stream or `-n 0`).
                 Err(sdk::error::ReadSessionError::ReadUnwritten(_)) if !follow && !seen_any => {
                     break;
                 }

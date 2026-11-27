@@ -715,6 +715,8 @@ fn bench_read_inner(
                         break;
                     }
                 }
+                // Compatibility with older servers that still return an initial 416 instead of
+                // a tail heartbeat for no-wait reads at the tail.
                 Some(Err(s2_sdk::error::ReadSessionError::ReadUnwritten(_)))
                     if total_records == 0 =>
                 {

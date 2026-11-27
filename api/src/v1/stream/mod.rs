@@ -150,8 +150,8 @@ pub struct ReadStart {
     /// Start from number of records before the next sequence number.
     #[cfg_attr(feature = "utoipa", param(value_type = u64, required = false))]
     pub tail_offset: Option<u64>,
-    /// Start reading from the tail if the requested position is beyond it.
-    /// Otherwise, a `416 Range Not Satisfiable` response is returned.
+    /// Start reading from the tail if the requested position is beyond it (`seq_num > tail.seq_num` or `timestamp > tail.timestamp`).
+    /// Without `clamp`, such a request returns `416 Range Not Satisfiable`.
     #[cfg_attr(feature = "utoipa", param(value_type = bool, required = false))]
     pub clamp: Option<bool>,
 }
@@ -196,6 +196,7 @@ pub struct ReadEnd {
     /// The default duration is 0 if there is a bound on `count`, `bytes`, or `until`, and otherwise infinite.
     /// Non-streaming reads are always bounded on `count` and `bytes`, so you can achieve long poll semantics by specifying a non-zero duration up to 60 seconds.
     /// In the context of an SSE or S2S streaming read, the duration will bound how much time can elapse between records throughout the lifetime of the session.
+    /// When `wait` is 0 (explicitly or by default), a unary read that reaches the tail with no records returns `416`. A streaming read that reaches the tail before `count`, `bytes`, or `until` stops it ends cleanly after a message carrying the tail, as it also does once `wait` elapses.
     #[cfg_attr(feature = "utoipa", param(value_type = u32, required = false))]
     pub wait: Option<u32>,
 }
@@ -469,7 +470,7 @@ pub struct ReadBatch {
     /// This can only be empty in response to a unary read (i.e. not SSE), if the request cannot be satisfied without violating an explicit bound (`count`, `bytes`, `until`, or `wait`).
     pub records: Vec<SequencedRecord>,
     /// Sequence number that will be assigned to the next record on the stream, and timestamp of the last record.
-    /// This will only be present when reading recent records.
+    /// Present only when reading recent records. On a streaming read that reaches the tail without exhausting `count` or `bytes`, `tail` is reported on the final `batch` or a trailing `ping` event.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tail: Option<StreamPosition>,
 }

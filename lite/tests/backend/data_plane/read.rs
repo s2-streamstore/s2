@@ -27,9 +27,10 @@ enum TailStartCase {
 
 #[derive(Clone, Copy, Debug)]
 enum TailEndCase {
-    CountNoWait,
-    CountZeroWait,
-    TimestampMax,
+    Count,
+    CountWaitZero,
+    WaitZero,
+    UntilMax,
 }
 
 fn tail_read_from(case: TailStartCase, tail: &StreamPosition) -> ReadFrom {
@@ -42,17 +43,22 @@ fn tail_read_from(case: TailStartCase, tail: &StreamPosition) -> ReadFrom {
 
 fn tail_read_end(case: TailEndCase) -> ReadEnd {
     match case {
-        TailEndCase::CountNoWait => ReadEnd {
+        TailEndCase::Count => ReadEnd {
             limit: ReadLimit::Count(10),
             until: ReadUntil::Unbounded,
             wait: None,
         },
-        TailEndCase::CountZeroWait => ReadEnd {
+        TailEndCase::CountWaitZero => ReadEnd {
             limit: ReadLimit::Count(10),
             until: ReadUntil::Unbounded,
             wait: Some(Duration::ZERO),
         },
-        TailEndCase::TimestampMax => ReadEnd {
+        TailEndCase::WaitZero => ReadEnd {
+            limit: ReadLimit::Unbounded,
+            until: ReadUntil::Unbounded,
+            wait: Some(Duration::ZERO),
+        },
+        TailEndCase::UntilMax => ReadEnd {
             limit: ReadLimit::Unbounded,
             until: ReadUntil::Timestamp(u64::MAX),
             wait: None,
@@ -242,9 +248,9 @@ async fn test_read_unwritten_clamp_behavior() {
     )
     .await;
 
-    append_payloads(&backend, &basin_name, &stream_name, &[b"record"]).await;
+    let ack = append_payloads(&backend, &basin_name, &stream_name, &[b"record"]).await;
 
-    // Without clamp: returns Unwritten error
+    // Without clamp: returns Unwritten error carrying the current tail.
     let start = ReadStart {
         from: ReadFrom::SeqNum(100),
         clamp: false,
@@ -257,9 +263,12 @@ async fn test_read_unwritten_clamp_behavior() {
         ReadEnd::default(),
     )
     .await;
-    assert!(matches!(result, Err(ReadError::Unwritten(_))));
+    assert!(matches!(
+        result,
+        Err(ReadError::Unwritten(UnwrittenError(tail))) if tail == ack.end
+    ));
 
-    // With clamp: succeeds with empty result
+    // With clamp: emits a single tail heartbeat and ends cleanly.
     let start = ReadStart {
         from: ReadFrom::SeqNum(100),
         clamp: true,
@@ -269,21 +278,25 @@ async fn test_read_unwritten_clamp_behavior() {
         until: ReadUntil::Unbounded,
         wait: Some(Duration::ZERO),
     };
-    let records = read_records(&backend, &basin_name, &stream_name, start, end).await;
-    assert!(records.is_empty());
+    let session = open_read_session(&backend, &basin_name, &stream_name, start, end).await;
+    let outputs = collect_outputs(session).await;
+    assert_eq!(outputs.len(), 1, "{outputs:?}");
+    assert!(
+        matches!(outputs[0], ReadSessionOutput::Heartbeat(tail) if tail == ack.end),
+        "Expected Heartbeat({:?}), got {:?}",
+        ack.end,
+        outputs[0]
+    );
 }
 
 #[rstest]
-#[case::tail_offset_no_wait(TailStartCase::TailOffset, TailEndCase::CountNoWait, false)]
-#[case::tail_seq_num_zero_wait(TailStartCase::SeqNumAtEnd, TailEndCase::CountZeroWait, false)]
-#[case::tail_timestamp_max(TailStartCase::TimestampAfterEnd, TailEndCase::TimestampMax, false)]
-#[case::timestamp_after_end_with_clamp(
-    TailStartCase::TimestampAfterEnd,
-    TailEndCase::CountNoWait,
-    true
-)]
+#[case::tail_offset_no_wait(TailStartCase::TailOffset, TailEndCase::Count, false)]
+#[case::tail_seq_num_zero_wait(TailStartCase::SeqNumAtEnd, TailEndCase::CountWaitZero, false)]
+#[case::tail_seq_num_unbounded_zero_wait(TailStartCase::SeqNumAtEnd, TailEndCase::WaitZero, false)]
+#[case::tail_seq_num_until(TailStartCase::SeqNumAtEnd, TailEndCase::UntilMax, false)]
+#[case::timestamp_after_end_with_clamp(TailStartCase::TimestampAfterEnd, TailEndCase::Count, true)]
 #[tokio::test]
-async fn test_read_at_tail_without_follow_returns_unwritten(
+async fn test_read_at_tail_without_follow_emits_heartbeat(
     #[case] start_case: TailStartCase,
     #[case] end_case: TailEndCase,
     #[case] clamp: bool,
@@ -311,26 +324,61 @@ async fn test_read_at_tail_without_follow_returns_unwritten(
         clamp,
     };
     let end = tail_read_end(end_case);
+    let session = open_read_session(&backend, &basin_name, &stream_name, start, end).await;
+    let outputs = collect_outputs(session).await;
+
+    assert_eq!(outputs.len(), 1, "{outputs:?}");
+    assert!(
+        matches!(outputs[0], ReadSessionOutput::Heartbeat(tail) if tail == ack.end),
+        "Expected Heartbeat({:?}), got {:?}",
+        ack.end,
+        outputs[0]
+    );
+}
+
+#[tokio::test]
+async fn test_read_timestamp_beyond_tail_without_clamp_returns_unwritten() {
+    let (backend, basin_name, stream_name) = setup_backend_with_stream(
+        "read-beyond-tail",
+        "stream",
+        OptionalStreamConfig::default(),
+    )
+    .await;
+
+    let ack = append_timestamped_payloads(
+        &backend,
+        &basin_name,
+        &stream_name,
+        vec![
+            (Bytes::from_static(b"record 1"), 1000),
+            (Bytes::from_static(b"record 2"), 2000),
+        ],
+    )
+    .await;
+
+    let start = ReadStart {
+        from: tail_read_from(TailStartCase::TimestampAfterEnd, &ack.end),
+        clamp: false,
+    };
+    let end = tail_read_end(TailEndCase::UntilMax);
     let result = try_open_read_session(&backend, &basin_name, &stream_name, start, end).await;
 
     match result {
         Err(ReadError::Unwritten(UnwrittenError(tail))) => {
             assert_eq!(tail, ack.end);
         }
-        Ok(_) => panic!(
-            "Expected Unwritten error for {start_case:?} / clamp={clamp} / {end_case:?}, got Ok"
-        ),
-        Err(e) => panic!(
-            "Expected Unwritten error for {start_case:?} / clamp={clamp} / {end_case:?}, got: {e:?}"
-        ),
+        Ok(_) => panic!("Expected Unwritten error for timestamp beyond tail, got Ok"),
+        Err(e) => panic!("Expected Unwritten error for timestamp beyond tail, got: {e:?}"),
     }
 }
 
 #[rstest]
 #[case::seq_num(ReadFrom::SeqNum(0))]
 #[case::timestamp(ReadFrom::Timestamp(0))]
+#[case::tail_offset_zero(ReadFrom::TailOffset(0))]
+#[case::tail_offset_nonzero(ReadFrom::TailOffset(5))]
 #[tokio::test]
-async fn test_read_at_tail_of_empty_stream_returns_unwritten(#[case] from: ReadFrom) {
+async fn test_read_at_tail_of_empty_stream_emits_heartbeat(#[case] from: ReadFrom) {
     let (backend, basin_name, stream_name) = setup_backend_with_stream(
         "read-empty-at-tail",
         "stream",
@@ -339,7 +387,33 @@ async fn test_read_at_tail_of_empty_stream_returns_unwritten(#[case] from: ReadF
     .await;
 
     let start = ReadStart { from, clamp: false };
-    let end = tail_read_end(TailEndCase::CountNoWait);
+    let end = tail_read_end(TailEndCase::Count);
+    let session = open_read_session(&backend, &basin_name, &stream_name, start, end).await;
+    let outputs = collect_outputs(session).await;
+
+    assert_eq!(outputs.len(), 1, "{outputs:?}");
+    assert!(
+        matches!(outputs[0], ReadSessionOutput::Heartbeat(tail) if tail == StreamPosition::MIN),
+        "Expected Heartbeat({:?}), got {:?}",
+        StreamPosition::MIN,
+        outputs[0]
+    );
+}
+
+#[rstest]
+#[case::seq_num(ReadFrom::SeqNum(1))]
+#[case::timestamp(ReadFrom::Timestamp(1))]
+#[tokio::test]
+async fn test_read_beyond_tail_of_empty_stream_returns_unwritten(#[case] from: ReadFrom) {
+    let (backend, basin_name, stream_name) = setup_backend_with_stream(
+        "read-empty-beyond-tail",
+        "stream",
+        OptionalStreamConfig::default(),
+    )
+    .await;
+
+    let start = ReadStart { from, clamp: false };
+    let end = tail_read_end(TailEndCase::Count);
     let result = try_open_read_session(&backend, &basin_name, &stream_name, start, end).await;
 
     match result {
@@ -348,6 +422,85 @@ async fn test_read_at_tail_of_empty_stream_returns_unwritten(#[case] from: ReadF
         }
         Ok(_) => panic!("Expected Unwritten error for {from:?} on an empty stream, got Ok"),
         Err(e) => panic!("Expected Unwritten error for {from:?} on an empty stream, got: {e:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_read_stopped_by_limit_or_until_emits_no_heartbeat() {
+    let (backend, basin_name, stream_name) = seed_timestamped_stream(
+        "read-stop-no-hb",
+        "stream",
+        OptionalStreamConfig::default(),
+        &[(b"item", 1000), (b"item", 2000), (b"item", 3000)],
+    )
+    .await;
+    let per_record =
+        create_test_record_batch(vec![Bytes::from_static(b"item")])[0].metered_size() as u64;
+
+    let cases = [
+        (
+            "until before first record",
+            ReadEnd {
+                limit: ReadLimit::Unbounded,
+                until: ReadUntil::Timestamp(1000),
+                wait: None,
+            },
+            vec![],
+        ),
+        (
+            "until mid-stream",
+            ReadEnd {
+                limit: ReadLimit::Unbounded,
+                until: ReadUntil::Timestamp(2000),
+                wait: None,
+            },
+            vec![0],
+        ),
+        (
+            "count exact at tail",
+            ReadEnd {
+                limit: ReadLimit::Count(3),
+                until: ReadUntil::Unbounded,
+                wait: None,
+            },
+            vec![0, 1, 2],
+        ),
+        (
+            "bytes exact at tail",
+            ReadEnd {
+                limit: ReadLimit::Bytes(per_record * 3),
+                until: ReadUntil::Unbounded,
+                wait: None,
+            },
+            vec![0, 1, 2],
+        ),
+    ];
+
+    for (label, end, expected_seq_nums) in cases {
+        let session = open_read_session(
+            &backend,
+            &basin_name,
+            &stream_name,
+            ReadStart {
+                from: ReadFrom::SeqNum(0),
+                clamp: false,
+            },
+            end,
+        )
+        .await;
+        let outputs = collect_outputs(session).await;
+        let mut seq_nums = Vec::new();
+        for output in outputs {
+            match output {
+                ReadSessionOutput::Batch(batch) => {
+                    seq_nums.extend(batch.records.iter().map(|r| r.position().seq_num));
+                }
+                ReadSessionOutput::Heartbeat(tail) => {
+                    panic!("{label}: unexpected Heartbeat({tail:?})");
+                }
+            }
+        }
+        assert_eq!(seq_nums, expected_seq_nums, "{label}");
     }
 }
 

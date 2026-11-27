@@ -113,7 +113,7 @@ async fn read_session(
     let stream_id = client.stream_id();
     let tail = client.check_tail().await?;
     let mut state = ReadSessionState {
-        start_seq_num: read_start_seq_num(&db, stream_id, start, end, tail).await?,
+        start_seq_num: read_start_seq_num(&db, stream_id, start, tail).await?,
         limit: EvaluatedReadLimit::Remaining(end.limit),
         until: end.until,
         wait: end.wait,
@@ -146,6 +146,7 @@ async fn read_session(
                 let mut records = Metered::with_capacity(
                     limit.into_allowance(caps::RECORD_BATCH_MAX).count as usize,
                 );
+                let mut stopped_before_tail = false;
 
                 while let EvaluatedReadLimit::Remaining(limit) = state.limit {
                     let Some(kv) = it.next().await? else {
@@ -162,11 +163,8 @@ async fn read_session(
                             records.metered_size() as u64 + record.metered_size() as u64,
                         )
                     {
-                        if records.is_empty() {
-                            break 'session;
-                        } else {
-                            break;
-                        }
+                        stopped_before_tail = true;
+                        break;
                     }
 
                     if records.len() == caps::RECORD_BATCH_MAX.count
@@ -192,65 +190,70 @@ async fn read_session(
                         records,
                         tail: None,
                     });
-                } else {
-                    state.start_seq_num = state.tail.seq_num;
                 }
+                if stopped_before_tail {
+                    break 'session;
+                }
+                state.start_seq_num = state.tail.seq_num;
             } else {
                 assert_eq!(state.start_seq_num, state.tail.seq_num);
-                if !end.may_follow() {
-                    break;
-                }
-                match client.follow(state.start_seq_num).await? {
-                    Ok(mut follow_rx) => {
-                        // Only a delivered batch should reset the absolute wait budget.
-                        state.arm_wait_deadline_if_unset();
-                        if state.wait_deadline_expired() {
-                            break;
+                let follow_rx = if end.may_follow() {
+                    match client.follow(state.start_seq_num).await? {
+                        Ok(follow_rx) => {
+                            // Only a delivered batch should reset the absolute wait budget.
+                            state.arm_wait_deadline_if_unset();
+                            (!state.wait_deadline_expired()).then_some(follow_rx)
                         }
-                        yield StoredReadSessionOutput::Heartbeat(state.tail);
-                        while let EvaluatedReadLimit::Remaining(limit) = state.limit {
-                            tokio::select! {
-                                biased;
-                                msg = follow_rx.recv() => {
-                                    match msg {
-                                        Ok(mut records) => {
-                                            let count = records.len();
-                                            let tail = super::streamer::next_pos(&records);
-                                            let allowed_count = count_allowed_records(limit, end.until, &records);
-                                            if allowed_count > 0 {
-                                                yield state.on_batch(StoredReadBatch {
-                                                    records: records.drain(..allowed_count).collect(),
-                                                    tail: Some(tail),
-                                                });
-                                            }
-                                            if allowed_count < count {
-                                                break 'session;
-                                            }
-                                            Ok(())
-                                        }
-                                        Err(broadcast::error::RecvError::Lagged(_)) => {
-                                            // Catch up using DB
-                                            continue 'session;
-                                        }
-                                        Err(broadcast::error::RecvError::Closed) => {
-                                            Err(StreamerMissingInActionError)
-                                        }
+                        Err(tail) => {
+                            assert!(state.tail.seq_num < tail.seq_num, "tail cannot regress");
+                            state.tail = tail;
+                            continue 'session;
+                        }
+                    }
+                } else {
+                    None
+                };
+                yield StoredReadSessionOutput::Heartbeat(state.tail);
+                let Some(mut follow_rx) = follow_rx else {
+                    break 'session;
+                };
+                while let EvaluatedReadLimit::Remaining(limit) = state.limit {
+                    tokio::select! {
+                        biased;
+                        msg = follow_rx.recv() => {
+                            match msg {
+                                Ok(mut records) => {
+                                    let count = records.len();
+                                    let tail = super::streamer::next_pos(&records);
+                                    let allowed_count = count_allowed_records(limit, end.until, &records);
+                                    if allowed_count > 0 {
+                                        yield state.on_batch(StoredReadBatch {
+                                            records: records.drain(..allowed_count).collect(),
+                                            tail: Some(tail),
+                                        });
                                     }
-                                }
-                                _ = new_heartbeat_sleep() => {
-                                    yield StoredReadSessionOutput::Heartbeat(state.tail);
+                                    if allowed_count < count {
+                                        break 'session;
+                                    }
                                     Ok(())
                                 }
-                                _ = wait_sleep_until(state.wait_deadline) => {
-                                    break 'session;
+                                Err(broadcast::error::RecvError::Lagged(_)) => {
+                                    // Catch up using DB
+                                    continue 'session;
                                 }
-                            }?;
+                                Err(broadcast::error::RecvError::Closed) => {
+                                    Err(StreamerMissingInActionError)
+                                }
+                            }
                         }
-                    }
-                    Err(tail) => {
-                        assert!(state.tail.seq_num < tail.seq_num, "tail cannot regress");
-                        state.tail = tail;
-                    }
+                        _ = new_heartbeat_sleep() => {
+                            yield StoredReadSessionOutput::Heartbeat(state.tail);
+                            Ok(())
+                        }
+                        _ = wait_sleep_until(state.wait_deadline) => {
+                            break 'session;
+                        }
+                    }?;
                 }
             }
         }
@@ -262,7 +265,6 @@ async fn read_start_seq_num(
     db: &slatedb::Db,
     stream_id: StreamId,
     start: ReadStart,
-    end: ReadEnd,
     tail: StreamPosition,
 ) -> Result<SeqNum, ReadError> {
     let mut read_pos = match start.from {
@@ -282,20 +284,14 @@ async fn read_start_seq_num(
             return Err(UnwrittenError(tail).into());
         }
     }
-    // Resolve to a sequence number before deciding whether the read starts at the tail, so a
-    // timestamp start that resolves to the tail is treated like a sequence number start there.
     let start_seq_num = match read_pos {
         ReadPosition::SeqNum(start_seq_num) => start_seq_num,
         ReadPosition::Timestamp(start_timestamp) => {
             resolve_timestamp(db, stream_id, start_timestamp)
                 .await?
-                .unwrap_or(tail)
-                .seq_num
+                .map_or(tail.seq_num, |pos| pos.seq_num.min(tail.seq_num))
         }
     };
-    if start_seq_num == tail.seq_num && !end.may_follow() {
-        return Err(UnwrittenError(tail).into());
-    }
     Ok(start_seq_num)
 }
 
@@ -422,6 +418,7 @@ mod tests {
 
     use bytesize::ByteSize;
     use futures::StreamExt;
+    use rstest::rstest;
     use s2_common::{
         basin::BasinName,
         config::{BasinConfig, OptionalStreamConfig},
@@ -443,6 +440,37 @@ mod tests {
         },
         stream_id::StreamId,
     };
+
+    async fn setup_stream() -> (Backend, BasinName, StreamName) {
+        let object_store = Arc::new(InMemory::new());
+        let db = Db::builder("/test", object_store).build().await.unwrap();
+        let backend = Backend::new(db, ByteSize::mib(10));
+
+        let basin: BasinName = "test-basin".parse().unwrap();
+        backend
+            .provision_basin(
+                basin.clone(),
+                BasinConfig::default(),
+                ProvisionMode::CreateOnly {
+                    request_token: None,
+                },
+            )
+            .await
+            .unwrap();
+        let stream: StreamName = "test-stream".parse().unwrap();
+        backend
+            .provision_stream(
+                basin.clone(),
+                stream.clone(),
+                OptionalStreamConfig::default(),
+                ProvisionMode::CreateOnly {
+                    request_token: None,
+                },
+            )
+            .await
+            .unwrap();
+        (backend, basin, stream)
+    }
 
     fn append_input(record: Record) -> AppendInput {
         let record: AppendRecord = AppendRecordParts {
@@ -549,105 +577,90 @@ mod tests {
         assert_eq!(result, None);
     }
 
+    #[rstest]
+    #[case::all_deleted(1, 0)]
+    #[case::trailing_gap(3, 1)]
     #[tokio::test]
-    async fn read_completes_when_all_records_deleted() {
-        let object_store = Arc::new(InMemory::new());
-        let db = Db::builder("/test", object_store).build().await.unwrap();
-        let backend = Backend::new(db, ByteSize::mib(10));
+    async fn read_emits_tail_heartbeat_across_deleted_gap(
+        #[case] total_records: usize,
+        #[case] keep_prefix: usize,
+    ) {
+        let (backend, basin, stream) = setup_stream().await;
 
-        let basin: BasinName = "test-basin".parse().unwrap();
-        backend
-            .provision_basin(
-                basin.clone(),
-                BasinConfig::default(),
-                ProvisionMode::CreateOnly {
-                    request_token: None,
-                },
-            )
-            .await
-            .unwrap();
-        let stream: StreamName = "test-stream".parse().unwrap();
-        backend
-            .provision_stream(
-                basin.clone(),
-                stream.clone(),
-                OptionalStreamConfig::default(),
-                ProvisionMode::CreateOnly {
-                    request_token: None,
-                },
-            )
-            .await
-            .unwrap();
-
-        let input = append_input(Record::try_from_parts(vec![], bytes::Bytes::from("x")).unwrap());
-        let ack = backend
-            .open_for_append(&basin, &stream, None, OptionalStreamConfig::default())
-            .await
-            .unwrap()
-            .append(input)
-            .await
-            .unwrap();
-        assert!(ack.end.seq_num > 0);
+        let mut acks = Vec::new();
+        for i in 0..total_records {
+            let input = append_input(
+                Record::try_from_parts(vec![], bytes::Bytes::from(format!("r{i}"))).unwrap(),
+            );
+            let ack = backend
+                .open_for_append(&basin, &stream, None, OptionalStreamConfig::default())
+                .await
+                .unwrap()
+                .append(input)
+                .await
+                .unwrap();
+            acks.push(ack);
+        }
 
         let stream_id = StreamId::new(&basin, &stream);
         let mut batch = WriteBatch::new();
-        batch.delete(kv::stream_record_data::ser_key(stream_id, ack.start));
+        for ack in &acks[keep_prefix..] {
+            batch.delete(kv::stream_record_data::ser_key(stream_id, ack.start));
+        }
         backend.db.write(batch).assert_durable().await;
 
-        let start = ReadStart {
-            from: ReadFrom::SeqNum(0),
-            clamp: false,
-        };
-        let end = ReadEnd {
-            limit: ReadLimit::Count(10),
-            until: ReadUntil::Unbounded,
-            wait: None,
-        };
+        let expected_tail = acks.last().unwrap().end;
         let session = backend
             .open_for_read(&basin, &stream, None, OptionalStreamConfig::default())
             .await
             .unwrap()
-            .read(start, end)
+            .read(
+                ReadStart {
+                    from: ReadFrom::SeqNum(0),
+                    clamp: false,
+                },
+                ReadEnd {
+                    limit: ReadLimit::Count(10),
+                    until: ReadUntil::Unbounded,
+                    wait: None,
+                },
+            )
             .await
             .unwrap();
-        let records: Vec<_> = tokio::time::timeout(
+        let outputs: Vec<_> = tokio::time::timeout(
             Duration::from_secs(2),
             futures::StreamExt::collect::<Vec<_>>(session),
         )
         .await
-        .expect("read should not spin forever");
-        assert!(records.into_iter().all(|r| r.is_ok()));
+        .expect("read should not spin forever")
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+        let (last, prefix) = outputs
+            .split_last()
+            .expect("expected trailing tail heartbeat");
+        assert!(
+            matches!(last, ReadSessionOutput::Heartbeat(tail) if *tail == expected_tail),
+            "expected trailing Heartbeat({expected_tail:?}), got {outputs:?}"
+        );
+        let delivered: Vec<u64> = prefix
+            .iter()
+            .flat_map(|output| match output {
+                ReadSessionOutput::Batch(batch) => batch
+                    .records
+                    .iter()
+                    .map(|r| r.position().seq_num)
+                    .collect::<Vec<_>>(),
+                other => panic!("unexpected non-batch output before trailing heartbeat: {other:?}"),
+            })
+            .collect();
+        assert_eq!(delivered, (0..keep_prefix as u64).collect::<Vec<_>>());
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn read_wait_is_not_extended_by_heartbeats() {
-        let object_store = Arc::new(InMemory::new());
-        let db = Db::builder("/test", object_store).build().await.unwrap();
-        let backend = Backend::new(db, ByteSize::mib(10));
-
-        let basin: BasinName = "test-basin".parse().unwrap();
-        backend
-            .provision_basin(
-                basin.clone(),
-                BasinConfig::default(),
-                ProvisionMode::CreateOnly {
-                    request_token: None,
-                },
-            )
-            .await
-            .unwrap();
-        let stream: StreamName = "test-stream".parse().unwrap();
-        backend
-            .provision_stream(
-                basin.clone(),
-                stream.clone(),
-                OptionalStreamConfig::default(),
-                ProvisionMode::CreateOnly {
-                    request_token: None,
-                },
-            )
-            .await
-            .unwrap();
+        let (backend, basin, stream) = setup_stream().await;
 
         let wait = Duration::from_millis(30);
         let start = ReadStart {
@@ -704,33 +717,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn read_wait_is_reset_by_delivered_follow_batch() {
-        let object_store = Arc::new(InMemory::new());
-        let db = Db::builder("/test", object_store).build().await.unwrap();
-        let backend = Backend::new(db, ByteSize::mib(10));
-
-        let basin: BasinName = "test-basin".parse().unwrap();
-        backend
-            .provision_basin(
-                basin.clone(),
-                BasinConfig::default(),
-                ProvisionMode::CreateOnly {
-                    request_token: None,
-                },
-            )
-            .await
-            .unwrap();
-        let stream: StreamName = "test-stream".parse().unwrap();
-        backend
-            .provision_stream(
-                basin.clone(),
-                stream.clone(),
-                OptionalStreamConfig::default(),
-                ProvisionMode::CreateOnly {
-                    request_token: None,
-                },
-            )
-            .await
-            .unwrap();
+        let (backend, basin, stream) = setup_stream().await;
 
         let initial_input =
             append_input(Record::try_from_parts(vec![], bytes::Bytes::from("initial")).unwrap());
@@ -861,33 +848,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn read_wait_is_not_reset_after_follow_lag_without_catchup_records() {
-        let object_store = Arc::new(InMemory::new());
-        let db = Db::builder("/test", object_store).build().await.unwrap();
-        let backend = Backend::new(db, ByteSize::mib(10));
-
-        let basin: BasinName = "test-basin".parse().unwrap();
-        backend
-            .provision_basin(
-                basin.clone(),
-                BasinConfig::default(),
-                ProvisionMode::CreateOnly {
-                    request_token: None,
-                },
-            )
-            .await
-            .unwrap();
-        let stream: StreamName = "test-stream".parse().unwrap();
-        backend
-            .provision_stream(
-                basin.clone(),
-                stream.clone(),
-                OptionalStreamConfig::default(),
-                ProvisionMode::CreateOnly {
-                    request_token: None,
-                },
-            )
-            .await
-            .unwrap();
+        let (backend, basin, stream) = setup_stream().await;
 
         let wait = Duration::from_secs(30);
         let start = ReadStart {
@@ -939,42 +900,203 @@ mod tests {
         tokio::time::advance(wait + Duration::from_secs(1)).await;
         tokio::task::yield_now().await;
 
-        let next = session.as_mut().next().await;
+        let expired_at = Instant::now();
+        let next = session
+            .as_mut()
+            .next()
+            .await
+            .expect("session should emit trailing tail heartbeat across deleted lag gap")
+            .expect("session should not error");
         assert!(
-            next.is_none(),
+            matches!(next, ReadSessionOutput::Heartbeat(tail) if tail.seq_num == lagged_appends as u64),
+            "expected trailing heartbeat at seq_num={lagged_appends}, got {next:?}"
+        );
+        let closed = session.as_mut().next().await;
+        assert!(
+            closed.is_none(),
             "session should close immediately once the original wait budget has elapsed"
+        );
+        assert_eq!(
+            Instant::now(),
+            expired_at,
+            "trailing heartbeat and close must not reset the wait budget"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_start_seq_num_caps_timestamp_resolution_at_snapshot_tail() {
+        let object_store = Arc::new(InMemory::new());
+        let db = Db::builder("/test", object_store).build().await.unwrap();
+        let backend = Backend::new(db, ByteSize::mib(10));
+        let stream_id: StreamId = [9u8; 32].into();
+
+        // Simulate a concurrent append at seq_num=5 becoming durable after check_tail() observed
+        // tail=(2, 1500) while earlier records < 2 were trimmed/deleted.
+        let concurrent_pos = StreamPosition {
+            seq_num: 5,
+            timestamp: 2000,
+        };
+        backend
+            .db
+            .put(
+                kv::stream_record_timestamp::ser_key(stream_id, concurrent_pos),
+                kv::stream_record_timestamp::ser_value(),
+            )
+            .assert_durable()
+            .await;
+
+        let snapshot_tail = StreamPosition {
+            seq_num: 2,
+            timestamp: 1500,
+        };
+        let resolved = read_start_seq_num(
+            &backend.db,
+            stream_id,
+            ReadStart {
+                from: ReadFrom::Timestamp(1000),
+                clamp: false,
+            },
+            snapshot_tail,
+        )
+        .await
+        .expect("timestamp within snapshot tail must resolve without error");
+        assert_eq!(resolved, snapshot_tail.seq_num);
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn read_wait_elapsed_after_db_catchup_emits_tail_heartbeat() {
+        let (backend, basin, stream) = setup_stream().await;
+
+        let ack = backend
+            .open_for_append(&basin, &stream, None, OptionalStreamConfig::default())
+            .await
+            .unwrap()
+            .append(append_input(
+                Record::try_from_parts(vec![], bytes::Bytes::from("initial")).unwrap(),
+            ))
+            .await
+            .unwrap();
+
+        let wait = Duration::from_millis(30);
+        let session = backend
+            .open_for_read(&basin, &stream, None, OptionalStreamConfig::default())
+            .await
+            .unwrap()
+            .read(
+                ReadStart {
+                    from: ReadFrom::SeqNum(0),
+                    clamp: false,
+                },
+                ReadEnd {
+                    limit: ReadLimit::Unbounded,
+                    until: ReadUntil::Unbounded,
+                    wait: Some(wait),
+                },
+            )
+            .await
+            .unwrap();
+        let mut session = Box::pin(session);
+
+        // First pull delivers the non-tailing DB catch-up batch and arms the wait deadline.
+        let first = session
+            .as_mut()
+            .next()
+            .await
+            .expect("session should yield DB catch-up batch")
+            .expect("session should not error");
+        assert!(matches!(first, ReadSessionOutput::Batch(ref b) if b.tail.is_none()));
+
+        // Reader stays parked past `wait` before polling again.
+        tokio::time::advance(wait + Duration::from_millis(10)).await;
+        tokio::task::yield_now().await;
+        let resumed_at = Instant::now();
+
+        let second = session
+            .as_mut()
+            .next()
+            .await
+            .expect("parked reader whose wait elapsed must observe trailing tail heartbeat")
+            .expect("session should not error");
+        assert!(
+            matches!(second, ReadSessionOutput::Heartbeat(tail) if tail == ack.end),
+            "expected Heartbeat({:?}), got {second:?}",
+            ack.end
+        );
+
+        let third = session.as_mut().next().await;
+        assert!(
+            third.is_none(),
+            "session should end cleanly after heartbeat"
+        );
+        assert_eq!(Instant::now(), resumed_at);
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn read_wait_elapsed_after_live_tailing_batch_emits_no_redundant_heartbeat() {
+        let (backend, basin, stream) = setup_stream().await;
+
+        // Shorter than test heartbeat sleep (5..15ms) so `wait` expires before any periodic
+        // heartbeat fires.
+        let wait = Duration::from_millis(2);
+        let session = backend
+            .open_for_read(&basin, &stream, None, OptionalStreamConfig::default())
+            .await
+            .unwrap()
+            .read(
+                ReadStart {
+                    from: ReadFrom::SeqNum(0),
+                    clamp: false,
+                },
+                ReadEnd {
+                    limit: ReadLimit::Unbounded,
+                    until: ReadUntil::Unbounded,
+                    wait: Some(wait),
+                },
+            )
+            .await
+            .unwrap();
+        let mut session = Box::pin(session);
+
+        let first = session
+            .as_mut()
+            .next()
+            .await
+            .expect("session should enter follow mode")
+            .expect("session should not error");
+        assert!(matches!(first, ReadSessionOutput::Heartbeat(tail) if tail == StreamPosition::MIN));
+
+        let ack = backend
+            .open_for_append(&basin, &stream, None, OptionalStreamConfig::default())
+            .await
+            .unwrap()
+            .append(append_input(
+                Record::try_from_parts(vec![], bytes::Bytes::from("live")).unwrap(),
+            ))
+            .await
+            .unwrap();
+
+        let second = session
+            .as_mut()
+            .next()
+            .await
+            .expect("session should yield live batch")
+            .expect("session should not error");
+        assert!(
+            matches!(second, ReadSessionOutput::Batch(ref b) if b.tail == Some(ack.end)),
+            "live batch should already carry catching-up tail {:?}, got {second:?}",
+            ack.end
+        );
+
+        let next = poll_next_after_advance(&mut session, wait + Duration::from_millis(1)).await;
+        assert!(
+            matches!(next, Poll::Ready(None)),
+            "expected clean EOF without redundant trailing heartbeat, got {next:?}"
         );
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn unbounded_follow_survives_streamer_dormancy() {
-        let object_store = Arc::new(InMemory::new());
-        let db = Db::builder("/test", object_store).build().await.unwrap();
-        let backend = Backend::new(db, ByteSize::mib(10));
-
-        let basin: BasinName = "test-basin".parse().unwrap();
-        backend
-            .provision_basin(
-                basin.clone(),
-                BasinConfig::default(),
-                ProvisionMode::CreateOnly {
-                    request_token: None,
-                },
-            )
-            .await
-            .unwrap();
-        let stream: StreamName = "test-stream".parse().unwrap();
-        backend
-            .provision_stream(
-                basin.clone(),
-                stream.clone(),
-                OptionalStreamConfig::default(),
-                ProvisionMode::CreateOnly {
-                    request_token: None,
-                },
-            )
-            .await
-            .unwrap();
+        let (backend, basin, stream) = setup_stream().await;
 
         let initial_input =
             append_input(Record::try_from_parts(vec![], bytes::Bytes::from("initial")).unwrap());

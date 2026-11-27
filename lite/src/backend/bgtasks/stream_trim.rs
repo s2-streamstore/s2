@@ -32,7 +32,7 @@ struct PendingTrim {
 }
 
 impl Backend {
-    pub(super) async fn tick_stream_trim(self) -> Result<bool, StorageError> {
+    pub(crate) async fn tick_stream_trim(self) -> Result<bool, StorageError> {
         let page = self.list_stream_trim_pending().await?;
         if page.values.is_empty() {
             return Ok(page.has_more);
