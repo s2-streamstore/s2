@@ -871,6 +871,10 @@ impl ReadInput {
     /// Set the limit on number of records.
     ///
     /// Defaults to `1000` for non-streaming [`read`](crate::S2Stream::read).
+    ///
+    /// For [`read_session`](crate::S2Stream::read_session) and
+    /// [`read_batch_session`](crate::S2Stream::read_batch_session), `count` must be at least `1`
+    /// when set (`0` fails with [`ValidationError`] when the session is opened).
     pub fn with_count(self, count: u64) -> Self {
         Self {
             count: Some(count),
@@ -881,6 +885,10 @@ impl ReadInput {
     /// Set the limit on total metered bytes of records.
     ///
     /// Defaults to `1 MiB` for non-streaming [`read`](crate::S2Stream::read).
+    ///
+    /// For [`read_session`](crate::S2Stream::read_session) and
+    /// [`read_batch_session`](crate::S2Stream::read_batch_session), `bytes` must be at least `1`
+    /// when set (`0` fails with [`ValidationError`] when the session is opened).
     pub fn with_bytes(self, bytes: u64) -> Self {
         Self {
             bytes: Some(bytes),
@@ -926,6 +934,20 @@ impl ReadInput {
             stream_config: Some(stream_config),
             ..self
         }
+    }
+
+    pub(crate) fn validate_for_session(&self) -> Result<(), ValidationError> {
+        if self.count == Some(0) {
+            return Err(ValidationError(
+                "read session count must be at least 1".to_owned(),
+            ));
+        }
+        if self.bytes == Some(0) {
+            return Err(ValidationError(
+                "read session bytes must be at least 1".to_owned(),
+            ));
+        }
+        Ok(())
     }
 
     pub(crate) fn into_api_parts(

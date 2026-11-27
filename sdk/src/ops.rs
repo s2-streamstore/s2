@@ -1095,19 +1095,26 @@ impl S2Stream {
     /// [`SequencedRecord`](crate::types::SequencedRecord)s.
     ///
     /// Accepts a [`ReadInput`] or a [`ReadStart`](crate::types::ReadStart).
-    /// Reading is on-demand (no session-level read-ahead): opening sends no request, and the first
-    /// request initiates on the first pull. Request errors surface through iteration.
+    /// Reading is on-demand (no session-level read-ahead): opening validates options and sends no
+    /// request, and the first request initiates on the first pull. Request errors surface through
+    /// iteration.
     ///
     /// # Errors
     ///
-    /// Returns [`ReadSessionError::ClientClosed`] if [`S2::close`] has already been called.
+    /// Returns [`ReadSessionError::Validation`] if `input.count() == Some(0)` or
+    /// `input.bytes() == Some(0)`, or [`ReadSessionError::ClientClosed`] if [`S2::close`] has
+    /// already been called.
     pub fn read_session(
         &self,
         input: impl Into<ReadInput>,
         config: ReadSessionConfig,
     ) -> Result<ReadSession, ReadSessionError> {
-        self.ensure_open("read_session", true)?;
+        let scope = self.client.stream_scope("read_session", &self.name, true);
         let input = input.into();
+        input
+            .validate_for_session()
+            .map_err(|e| scope.context(1).format_validation(e))?;
+        self.ensure_open("read_session", true)?;
         let headers = self.headers(input.stream_config());
         Ok(ReadSession::open(
             self.client.clone(),
@@ -1121,19 +1128,28 @@ impl S2Stream {
     /// Create a continuous read session yielding whole non-empty [`ReadBatch`]es.
     ///
     /// Accepts a [`ReadInput`] or a [`ReadStart`](crate::types::ReadStart).
-    /// Reading is on-demand (no session-level read-ahead): opening sends no request, and the first
-    /// request initiates on the first pull. Request errors surface through iteration.
+    /// Reading is on-demand (no session-level read-ahead): opening validates options and sends no
+    /// request, and the first request initiates on the first pull. Request errors surface through
+    /// iteration.
     ///
     /// # Errors
     ///
-    /// Returns [`ReadSessionError::ClientClosed`] if [`S2::close`] has already been called.
+    /// Returns [`ReadSessionError::Validation`] if `input.count() == Some(0)` or
+    /// `input.bytes() == Some(0)`, or [`ReadSessionError::ClientClosed`] if [`S2::close`] has
+    /// already been called.
     pub fn read_batch_session(
         &self,
         input: impl Into<ReadInput>,
         config: ReadSessionConfig,
     ) -> Result<ReadBatchSession, ReadSessionError> {
-        self.ensure_open("read_batch_session", true)?;
+        let scope = self
+            .client
+            .stream_scope("read_batch_session", &self.name, true);
         let input = input.into();
+        input
+            .validate_for_session()
+            .map_err(|e| scope.context(1).format_validation(e))?;
+        self.ensure_open("read_batch_session", true)?;
         let headers = self.headers(input.stream_config());
         Ok(ReadBatchSession::open(
             self.client.clone(),

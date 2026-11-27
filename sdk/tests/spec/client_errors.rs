@@ -2504,7 +2504,10 @@ async fn with_retry_overrides_pool_sharing_and_validation() {
         "derived with_retry handles must share the underlying HTTP/2 connection pool"
     );
 
-    // 7. Closing base_s2 immediately closes/aborts derived handles and their active sessions (C12).
+    // 7. Closing base_s2 immediately aborts derived handles and their active sessions (C12/R9d).
+    //    Per R7/R8, an already-caught-up session preserves `is_caught_up == true` and resolved
+    //    `caught_up()` while iteration still fails with `AbortedError`; an open, non-caught-up
+    //    session fails its pending `caught_up()` immediately with `AbortedError`.
     let mut live_rs = all_stream
         .read_session(
             ReadInput::new(ReadStart::SeqNum(0)),
@@ -2512,7 +2515,7 @@ async fn with_retry_overrides_pool_sharing_and_validation() {
         )
         .unwrap();
     let mut live_cu = live_rs.caught_up();
-    tokio::time::timeout(Duration::from_secs(2), async {
+    let caught_tail = tokio::time::timeout(Duration::from_secs(2), async {
         tokio::select! {
             res = &mut live_cu => res.unwrap(),
             item = live_rs.next() => panic!("unexpected record/end before catchup: {item:?}"),
@@ -2522,13 +2525,24 @@ async fn with_retry_overrides_pool_sharing_and_validation() {
     .expect("read session must catch up while iterating");
     assert!(live_rs.is_caught_up());
     let live_state = live_rs.state();
+
+    let mut pending_rs = all_stream
+        .read_session(
+            ReadInput::new(ReadStart::SeqNum(0)),
+            ReadSessionConfig::default(),
+        )
+        .unwrap();
+    let pending_cu = pending_rs.caught_up();
+    assert!(!pending_rs.is_caught_up());
+
     base_s2.close();
     assert!(
-        !live_state.is_caught_up(),
-        "C12/R9d: is_caught_up must clear immediately on S2::close() even while parked"
+        live_state.is_caught_up(),
+        "R7c/R9d: aborting an already-caught-up session preserves is_caught_up"
     );
+    assert_eq!(live_state.caught_up().await.unwrap(), caught_tail);
     assert!(matches!(
-        live_state.caught_up().await,
+        pending_cu.await,
         Err(ReadSessionError::Aborted(_))
     ));
     let abort_err = live_rs.next().await.unwrap().unwrap_err();
@@ -2536,6 +2550,10 @@ async fn with_retry_overrides_pool_sharing_and_validation() {
         matches!(abort_err, ReadSessionError::Aborted(_)),
         "expected AbortedError on derived session after base S2::close(), got {abort_err:?}"
     );
+    assert!(matches!(
+        pending_rs.next().await,
+        Some(Err(ReadSessionError::Aborted(_)))
+    ));
     assert!(matches!(
         all_stream.check_tail().await,
         Err(ReadError::ClientClosed(_))

@@ -696,6 +696,11 @@ fn tail_stream() {
         .success()
         .stdout(predicate::str::contains("record 5"));
 
+    s2().args(["tail", &uri, "-n", "0", "--format", "text"])
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty());
+
     cleanup_stream(&basin, &stream);
 }
 

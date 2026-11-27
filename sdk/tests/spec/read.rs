@@ -161,7 +161,9 @@ async fn spec_r5_r6_r7_r8_read_session_records_batches_readahead_state_and_caugh
                     s2s.reset(h2::Reason::INTERNAL_ERROR);
                 } else {
                     allow_reconnect_hb.notified().await;
-                    s2s.send_regular(&proto_heartbeat(7), false, false);
+                    // Non-tailing batch [7, 8] (clears is_caught_up), then heartbeat tail=9.
+                    s2s.send_regular(&proto_read_batch_records(&[7, 8], None), false, false);
+                    s2s.send_regular(&proto_heartbeat(9), false, false);
                     std::future::pending::<()>().await;
                 }
             }
@@ -273,8 +275,9 @@ async fn spec_r5_r6_r7_r8_read_session_records_batches_readahead_state_and_caugh
     assert_eq!(state.next_seq_num(), Some(7));
     assert!(state.is_caught_up());
 
-    // Steps 7–8: active request breaks -> observed while pulling (is_caught_up=false),
-    // caught_up() stays pending across retry (R8c), and resolves to 7 on reconnect heartbeat!
+    // Steps 7–9: active request breaks -> observed while pulling, preserving `is_caught_up = true`
+    // (`R7c`); then Attempt 2 sends non-tailing `[7, 8]` (clearing `is_caught_up`), and heartbeat
+    // `tail = 9` catches up again (`R7c`/`R8`).
     break_conn.notify_one();
     // While parked, the session does NOT reconnect or mutate state (`R6b`, `R7`).
     tokio::time::sleep(Duration::from_millis(40)).await;
@@ -285,43 +288,86 @@ async fn spec_r5_r6_r7_r8_read_session_records_batches_readahead_state_and_caugh
     );
     assert!(state.is_caught_up());
 
-    // Drive iteration in the background while observing disconnect and R8c reconnect catchup.
-    let mut cu_across_retry = None;
-    let disconnect_and_reconnect = tokio::time::timeout(Duration::from_secs(3), async {
-        let mut pull = Box::pin(session.next());
+    // Drive iteration so the session observes the reset, opens Attempt 2, and preserves
+    // `is_caught_up = true` across disconnect & retry (`R7c`).
+    let mut r7_pull = Box::pin(session.next());
+    tokio::time::timeout(Duration::from_secs(3), async {
         let mut tick = tokio::time::interval(Duration::from_millis(5));
-        // Phase 1: wait for pull to observe disconnect and clear is_caught_up.
         loop {
             tokio::select! {
-                res = &mut pull => panic!("unexpected terminal result during retry: {res:?}"),
+                res = &mut r7_pull => panic!("unexpected result before Attempt 2 responds: {res:?}"),
                 _ = tick.tick() => {
-                    if !state.is_caught_up() {
-                        assert_eq!(state.next_seq_num(), Some(7));
-                        assert_eq!(state.last_observed_tail().unwrap().seq_num, 7);
-                        cu_across_retry = Some(state.caught_up());
-                        allow_reconnect_hb.notify_one();
+                    if attempt_num.load(Ordering::SeqCst) >= 2 {
                         break;
                     }
                 }
             }
         }
-        // Phase 2: keep driving `pull` while awaiting `cu_across_retry` (`R8b`, `R8c`).
-        let mut cu = cu_across_retry.take().unwrap();
+    })
+    .await
+    .expect("session must reconnect onto Attempt 2 after reset");
+    assert_eq!(state.next_seq_num(), Some(7));
+    assert_eq!(state.last_observed_tail().unwrap().seq_num, 7);
+    assert!(
+        state.is_caught_up(),
+        "R7c: disconnect and retry must preserve is_caught_up"
+    );
+    assert_eq!(state.caught_up().await.unwrap().seq_num, 7);
+
+    // Release Attempt 2's non-tailing batch `[7, 8]` (clears `is_caught_up`) and heartbeat `9`.
+    allow_reconnect_hb.notify_one();
+    let r7 = tokio::time::timeout(Duration::from_secs(3), r7_pull)
+        .await
+        .expect("Attempt 2 must deliver record 7")
+        .unwrap()
+        .unwrap();
+    assert_eq!(r7.seq_num, 7);
+    assert_eq!(state.next_seq_num(), Some(8));
+    assert_eq!(state.last_observed_tail().unwrap().seq_num, 7);
+    assert!(!state.is_caught_up());
+
+    let r8 = session.next().await.unwrap().unwrap();
+    assert_eq!(r8.seq_num, 8);
+    assert_eq!(state.next_seq_num(), Some(9));
+    assert_eq!(state.last_observed_tail().unwrap().seq_num, 7);
+    assert!(!state.is_caught_up());
+
+    // A pending `caught_up()` resolves to 9 once pulling decodes Attempt 2's heartbeat `9` (`R8b`).
+    let mut cu_after_non_tailing = state.caught_up();
+    let hb9 = tokio::time::timeout(Duration::from_secs(3), async {
         tokio::select! {
-            tail = &mut cu => tail.unwrap(),
-            res = &mut pull => panic!("unexpected record/error before reconnect heartbeat: {res:?}"),
+            tail = &mut cu_after_non_tailing => tail.unwrap(),
+            res = session.next() => panic!("unexpected record/error before heartbeat 9: {res:?}"),
         }
     })
     .await
-    .expect("R8c: caught_up must resolve after reconnect while iterating");
-    assert_eq!(disconnect_and_reconnect.seq_num, 7);
+    .expect("caught_up must resolve on heartbeat 9 while iterating");
+    assert_eq!(hb9.seq_num, 9);
     assert!(state.is_caught_up());
 
-    // Dropping session rejects new caught_up with SessionClosedError (R8d)
+    // Dropping an already-caught-up session preserves `is_caught_up` and `caught_up()`
+    // (`R7c`/`R8`).
     drop(session);
-    assert!(!state.is_caught_up());
+    assert!(state.is_caught_up());
+    assert_eq!(state.caught_up().await.unwrap().seq_num, 9);
+
+    // Dropping a non-caught-up session fails `caught_up()` with `SessionClosedError` (`R8d`).
+    let un_caught = stream
+        .read_session(
+            ReadInput::new(ReadStart::SeqNum(0)),
+            ReadSessionConfig::default(),
+        )
+        .unwrap();
+    let un_caught_state = un_caught.state();
+    let un_caught_cu = un_caught_state.caught_up();
+    drop(un_caught);
+    assert!(!un_caught_state.is_caught_up());
     assert!(matches!(
-        state.caught_up().await,
+        un_caught_cu.await,
+        Err(ReadSessionError::SessionClosed(e)) if e.failure().is_none()
+    ));
+    assert!(matches!(
+        un_caught_state.caught_up().await,
         Err(ReadSessionError::SessionClosed(e)) if e.failure().is_none()
     ));
 
@@ -348,7 +394,8 @@ async fn spec_r5_r6_r7_r8_read_session_records_batches_readahead_state_and_caugh
     assert_eq!(batch_session.next_seq_num(), Some(2));
     assert!(batch_session.is_caught_up());
     assert!(batch_session.next().await.is_none());
-    assert!(!batch_session.is_caught_up());
+    assert!(batch_session.is_caught_up());
+    assert_eq!(batch_session.caught_up().await.unwrap().seq_num, 2);
 
     // 3. R6b: Zero decoded batches ahead + deterministic synchronous draining (`now_or_never`) of
     //    already-buffered frames! All 4 small S2S frames are coalesced into a single HTTP/2 DATA
@@ -469,9 +516,9 @@ async fn spec_r5_r6_r7_r8_read_session_records_batches_readahead_state_and_caugh
     );
 }
 
-// spec: r1 R9, R9a, R9b, R9c, R9d, R10
+// spec: r1 R9, R9a, R9b, R9c, R9d
 #[tokio::test]
-async fn spec_r9_r10_read_session_closing_buffered_delivery_and_abort() {
+async fn spec_r9_read_session_closing_buffered_delivery_and_abort() {
     let (basin_name, stream_name) = test_basin_and_stream();
     let fast_retry_2 = fast_retry_config(2);
 
@@ -520,7 +567,7 @@ async fn spec_r9_r10_read_session_closing_buffered_delivery_and_abort() {
         .unwrap();
     assert!(with_stop.next().await.is_none());
 
-    // 2. R9c + R10: Terminal failure delivers all already-fetched records FIRST, then yields the
+    // 2. R9c: Terminal failure delivers all already-fetched records FIRST, then yields the
     //    unwrapped failure once, then None!
     let fail_server = MockH2Server::start(|_conn_id, _req, respond| async move {
         let Some(mut s2s) = S2sResponder::open(respond) else {
@@ -543,7 +590,7 @@ async fn spec_r9_r10_read_session_closing_buffered_delivery_and_abort() {
     let err = fail_sess.next().await.unwrap().unwrap_err();
     assert!(
         matches!(err, ReadSessionError::Server(ref s) if s.code.as_deref() == Some("stream_not_found")),
-        "R9c/R10: expected unwrapped ServerError after buffered records, got {err:?}"
+        "R9c: expected unwrapped ServerError after buffered records, got {err:?}"
     );
     assert!(err.has_no_side_effects());
     assert!(fail_sess.next().await.is_none());
@@ -683,20 +730,21 @@ async fn spec_t7d_read_session_heartbeat_timeout_and_backpressure_pause() {
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
 }
 
-// spec: r1 R11, R11a, R11b, R11c, R11d, T5, T5b
+// spec: r1 R10, R10a, R10b, R10c, R10d, T5, T5b, T9
 #[tokio::test]
-async fn spec_r11_t5_t5b_read_session_resume_clamp_wait_416_and_unbounded() {
+async fn spec_r10_t5_t5b_read_session_resume_clamp_wait_416_and_unbounded() {
     let fast_retry_2 = fast_retry_config(2);
 
-    // 1. R11 + R11a + R11b + R11c + R11d: Start with TailOffset(2), clamp=true, count=5, wait=10s:
+    // 1. R10 + R10a + R10b + R10c + R10d: Start with TailOffset(2), clamp=true, count=5, wait=10s:
     //    - Attempt 1: sends heartbeat tail=10 -> resolves start to 10 & starts wait clock (t=0). At
     //      t=3s: sends 2nd heartbeat tail=10 (MUST NOT restart wait clock!). At t=5.1s: breaks
     //      connection!
     //    - Attempt 2: MUST send seq_num=10, NO tail_offset, NO clamp, count=5, wait=5 (ceil(4.9))!
     //      Sends records [10, 11] (restarts wait clock at t=5.1s, decrements count to 3!). At
     //      t=16.5s (11.4s elapsed since records): breaks connection!
-    //    - Attempt 3: MUST send seq_num=12, count=3, wait=0 (R11c reached 0; SDK does not close
-    //      locally)! Server replies 416 (tail=12) -> R11d closes cleanly (None), NOT an error!
+    //    - Attempt 3: MUST send seq_num=12, count=3, wait=0 (R10d reached 0; SDK does not close
+    //      locally)! Server sends tail heartbeat (12) + clean EOF -> ends cleanly while staying
+    //      caught up (`R7c`/`R9a`).
     let seen_queries = Arc::new(Mutex::new(Vec::<BTreeMap<String, String>>::new()));
     let attempt_ctr = Arc::new(AtomicUsize::new(0));
     let send_hb2 = Arc::new(tokio::sync::Notify::new());
@@ -721,10 +769,6 @@ async fn spec_r11_t5_t5b_read_session_resume_clamp_wait_416_and_unbounded() {
             async move {
                 let idx = attempt_ctr.fetch_add(1, Ordering::SeqCst) + 1;
                 seen_queries.lock().unwrap().push(query_pairs(req.uri()));
-                if idx == 3 {
-                    send_tail_json(respond, 416, 12, 1200);
-                    return;
-                }
                 let Some(mut s2s) = S2sResponder::open(respond) else {
                     return;
                 };
@@ -735,10 +779,12 @@ async fn spec_r11_t5_t5b_read_session_resume_clamp_wait_416_and_unbounded() {
                     s2s.send_regular(&proto_heartbeat_at(10, 2000), false, false);
                     break_a1.notified().await;
                     s2s.reset(h2::Reason::INTERNAL_ERROR);
-                } else {
+                } else if idx == 2 {
                     s2s.send_regular(&proto_read_batch_records(&[10, 11], Some(12)), false, false);
                     break_a2.notified().await;
                     s2s.reset(h2::Reason::INTERNAL_ERROR);
+                } else {
+                    s2s.send_regular(&proto_heartbeat_at(12, 1200), false, true);
                 }
             }
         }
@@ -800,16 +846,20 @@ async fn spec_r11_t5_t5b_read_session_resume_clamp_wait_416_and_unbounded() {
     assert_eq!(session.next().await.unwrap().unwrap().seq_num, 10);
     assert_eq!(session.next().await.unwrap().unwrap().seq_num, 11);
 
-    // Wait 11.4s (> 10s wait) -> break attempt 2 -> Attempt 3 sends wait=0, gets 416 -> clean end!
+    // Wait 11.4s (> 10s wait) -> break attempt 2 -> Attempt 3 sends wait=0, gets heartbeat + clean
+    // EOF.
     advance_virtual_time(Duration::from_millis(11_400)).await;
     break_a2.notify_one();
     assert!(
         tokio::time::timeout(Duration::from_secs(3), session.next())
             .await
-            .expect("R11d must terminate promptly")
+            .expect("clean EOF on Attempt 3 must terminate promptly")
             .is_none(),
-        "R11d: 416 on resumed request with 0 remaining wait must end cleanly"
+        "Attempt 3 heartbeat + clean EOF must end cleanly"
     );
+    assert!(state.is_caught_up());
+    assert_eq!(state.last_observed_tail().unwrap().seq_num, 12);
+    assert_eq!(state.caught_up().await.unwrap().seq_num, 12);
 
     let qs = seen_queries.lock().unwrap().clone();
     assert_eq!(qs.len(), 3, "{qs:?}");
@@ -818,62 +868,68 @@ async fn spec_r11_t5_t5b_read_session_resume_clamp_wait_416_and_unbounded() {
     assert_eq!(qs[0].get("clamp").map(String::as_str), Some("true"));
     assert_eq!(qs[0].get("count").map(String::as_str), Some("5"));
     assert_eq!(qs[0].get("wait").map(String::as_str), Some("10"));
-    // Attempt 2: R11b resolved seq_num=10, clamp OMITTED, R11c wait=ceil(4.9)=5
+    // Attempt 2: R10b resolved seq_num=10, clamp OMITTED, R10d wait=ceil(4.9)=5
     assert_eq!(qs[1].get("seq_num").map(String::as_str), Some("10"));
-    assert!(!qs[1].contains_key("tail_offset"), "R11b: {:?}", qs[1]);
+    assert!(!qs[1].contains_key("tail_offset"), "R10b: {:?}", qs[1]);
     assert!(
         !qs[1].contains_key("clamp"),
-        "R11b: clamp must be cleared: {:?}",
+        "R10b: clamp must be cleared: {:?}",
         qs[1]
     );
     assert_eq!(qs[1].get("count").map(String::as_str), Some("5"));
     assert_eq!(qs[1].get("wait").map(String::as_str), Some("5"));
-    // Attempt 3: R11a seq_num=12, R11c count=3, wait=0
+    // Attempt 3: R10a seq_num=12, R10c count=3, R10d wait=0
     assert_eq!(qs[2].get("seq_num").map(String::as_str), Some("12"));
     assert_eq!(qs[2].get("count").map(String::as_str), Some("3"));
     assert_eq!(qs[2].get("wait").map(String::as_str), Some("0"));
 
-    // 2. R11d negative check: 416 on resumed request while wait > 0 (with tail == resume_seq) STILL
-    //    fails with ReadUnwritten!
-    let r11d_neg_attempts = Arc::new(AtomicUsize::new(0));
-    let r11d_break = Arc::new(tokio::sync::Notify::new());
-    let r11d_neg_server = MockH2Server::start({
-        let r11d_neg_attempts = r11d_neg_attempts.clone();
-        let r11d_break = r11d_break.clone();
-        move |_conn_id, _req, respond| {
-            let r11d_neg_attempts = r11d_neg_attempts.clone();
-            let r11d_break = r11d_break.clone();
-            async move {
-                let idx = r11d_neg_attempts.fetch_add(1, Ordering::SeqCst) + 1;
-                if idx == 1 {
-                    if let Some(mut s2s) = S2sResponder::open(respond) {
-                        s2s.send_regular(&proto_read_batch_records(&[0], Some(1)), false, false);
-                        r11d_break.notified().await;
-                        s2s.reset(h2::Reason::INTERNAL_ERROR);
+    // 2. T9: 416 on a resumed request ALWAYS surfaces ReadUnwrittenError regardless of stop options
+    //    (whether wait > 0, wait = 0, or bounded count with omitted wait).
+    for input in [
+        ReadInput::new(ReadStart::SeqNum(0)).with_wait_secs(30),
+        ReadInput::new(ReadStart::SeqNum(0)).with_wait_secs(0),
+        ReadInput::new(ReadStart::SeqNum(0)).with_count(10),
+    ] {
+        let neg_attempts = Arc::new(AtomicUsize::new(0));
+        let neg_break = Arc::new(tokio::sync::Notify::new());
+        let neg_server = MockH2Server::start({
+            let neg_attempts = neg_attempts.clone();
+            let neg_break = neg_break.clone();
+            move |_conn_id, _req, respond| {
+                let neg_attempts = neg_attempts.clone();
+                let neg_break = neg_break.clone();
+                async move {
+                    let idx = neg_attempts.fetch_add(1, Ordering::SeqCst) + 1;
+                    if idx == 1 {
+                        if let Some(mut s2s) = S2sResponder::open(respond) {
+                            s2s.send_regular(
+                                &proto_read_batch_records(&[0], Some(1)),
+                                false,
+                                false,
+                            );
+                            neg_break.notified().await;
+                            s2s.reset(h2::Reason::INTERNAL_ERROR);
+                        }
+                    } else {
+                        send_tail_json(respond, 416, 1, 100);
                     }
-                } else {
-                    // tail.seq_num == resume_seq_num (1) so only the wait > 0 check rejects it.
-                    send_tail_json(respond, 416, 1, 100);
                 }
             }
-        }
-    })
-    .await;
+        })
+        .await;
 
-    let mut neg_sess = r11d_neg_server
-        .stream(fast_retry_2)
-        .read_session(
-            ReadInput::new(ReadStart::SeqNum(0)).with_wait_secs(30),
-            ReadSessionConfig::default(),
-        )
-        .unwrap();
-    assert_eq!(neg_sess.next().await.unwrap().unwrap().seq_num, 0);
-    r11d_break.notify_one();
-    let err = neg_sess.next().await.unwrap().unwrap_err();
-    assert!(
-        matches!(err, ReadSessionError::ReadUnwritten(ref e) if e.tail.seq_num == 1),
-        "R11d: 416 while wait > 0 must still fail with ReadUnwrittenError, got {err:?}"
-    );
+        let mut neg_sess = neg_server
+            .stream(fast_retry_2)
+            .read_session(input, ReadSessionConfig::default())
+            .unwrap();
+        assert_eq!(neg_sess.next().await.unwrap().unwrap().seq_num, 0);
+        neg_break.notify_one();
+        let err = neg_sess.next().await.unwrap().unwrap_err();
+        assert!(
+            matches!(err, ReadSessionError::ReadUnwritten(ref e) if e.tail.seq_num == 1),
+            "T9: resumed 416 must always surface ReadUnwrittenError, got {err:?}"
+        );
+    }
 
     // 3. T5 + T5b: ReadSessionRetryPolicy::Unbounded retries past max_attempts (2) and succeeds!
     let unbounded_attempts = Arc::new(AtomicUsize::new(0));
@@ -924,8 +980,9 @@ async fn spec_t6a_read_session_reconnect_advice_cooldown() {
                 };
                 if n == 0 {
                     // Multi-record batch `[0, 1]` with `tail = 2` and reconnect-advised bit ->
-                    // catches up on final record 1 (`T6a`/`R7c`), drops `is_caught_up`, and opens
-                    // the replacement request lazily on the next pull on a different connection.
+                    // catches up on final record 1 (`T6a`/`R7c`), preserves `is_caught_up = true`,
+                    // and opens the replacement request lazily on the next pull on a different
+                    // connection.
                     s2s.send_regular(&proto_read_batch_records(&[0, 1], Some(2)), true, false);
                     std::future::pending::<()>().await;
                 } else {
@@ -970,9 +1027,10 @@ async fn spec_t6a_read_session_reconnect_advice_cooldown() {
         std::task::Poll::Ready(Ok(tail)) if tail.seq_num == 2
     ));
     assert!(
-        !session.is_caught_up(),
-        "T6a/R7c: is_caught_up must be false once final advised record is returned"
+        session.is_caught_up(),
+        "T6a/R7c: is_caught_up must stay true across advised handover"
     );
+    assert_eq!(session.caught_up().await.unwrap().seq_num, 2);
     assert_eq!(
         server.request_count(),
         1,
@@ -996,11 +1054,11 @@ async fn spec_t6a_read_session_reconnect_advice_cooldown() {
     );
 }
 
-// spec: r1 R11c
-// Regression: ReadSession R11c reduced-wait after fetching a new record must reconnect with
+// spec: r1 R10d
+// Regression: ReadSession R10d reduced-wait after fetching a new record must reconnect with
 // refreshed remaining wait instead of prematurely terminating on the server's shorter timer.
 #[tokio::test]
-async fn regression_read_session_r11c_reduced_wait_refreshes_after_record() {
+async fn regression_read_session_r10d_reduced_wait_refreshes_after_record() {
     // Baseline wait = 4s.
     // - Attempt 1 sends heartbeat (starts idle clock), waits for virtual time advance (1.2s), then
     //   resets connection.
@@ -1010,7 +1068,7 @@ async fn regression_read_session_r11c_reduced_wait_refreshes_after_record() {
     let observed_waits = Arc::new(Mutex::new(Vec::<Option<u32>>::new()));
     let attempt_idx = Arc::new(AtomicUsize::new(0));
     let trigger_reset = Arc::new(tokio::sync::Notify::new());
-    let r11c_server = MockH2Server::start({
+    let r10d_server = MockH2Server::start({
         let observed_waits = observed_waits.clone();
         let attempt_idx = attempt_idx.clone();
         let trigger_reset = trigger_reset.clone();
@@ -1047,7 +1105,7 @@ async fn regression_read_session_r11c_reduced_wait_refreshes_after_record() {
     })
     .await;
 
-    let mut sess = r11c_server
+    let mut sess = r10d_server
         .stream(fast_retry_config(3))
         .read_session(
             ReadInput::new(ReadStart::SeqNum(0))
@@ -1093,43 +1151,42 @@ async fn regression_read_session_r11c_reduced_wait_refreshes_after_record() {
     );
 }
 
-// spec: r1 R11d
-// Regression: R11d resumed 416 (both omitted-wait with a stop limit and zero-wait) resolves
-// caught_up() across a trimmed gap, rejects tail regression (recreated stream), and stops cleanly
-// when count is exhausted instead of sending count=0.
+// spec: r1 R7, R9a, R10c, T9
+// Regression: resumed bounded read session reaching tail receives heartbeat + clean EOF (resolving
+// caught_up across a trimmed gap), resumed 416 surfaces ReadUnwrittenError without mutating R7
+// state, and count exhaustion stops cleanly without sending count=0.
 #[tokio::test]
-async fn regression_read_session_r11d_caught_up_and_count_exhausted() {
-    // 1. R11d (omitted wait + stop option): resumed 416 resolves caught_up() and advances
-    //    next_seq_num across trimmed gap (record 0 has tail=3, then attempt 2 gets 416 {tail:5}).
-    let r11d_attempt = Arc::new(AtomicUsize::new(0));
-    let r11d_reset_gate = Arc::new(tokio::sync::Notify::new());
-    let r11d_server = MockH2Server::start({
-        let r11d_attempt = r11d_attempt.clone();
-        let r11d_reset_gate = r11d_reset_gate.clone();
+async fn regression_read_session_resumed_tail_heartbeat_416_and_count_exhausted() {
+    // 1. Resumed bounded count session reaching tail receives heartbeat across trimmed gap + clean
+    //    EOF -> resolves caught_up() and advances next_seq_num to 5, keeping is_caught_up = true.
+    let resume_attempt = Arc::new(AtomicUsize::new(0));
+    let resume_reset_gate = Arc::new(tokio::sync::Notify::new());
+    let resume_server = MockH2Server::start({
+        let resume_attempt = resume_attempt.clone();
+        let resume_reset_gate = resume_reset_gate.clone();
         move |_conn_id, _req, respond| {
-            let r11d_attempt = r11d_attempt.clone();
-            let r11d_reset_gate = r11d_reset_gate.clone();
+            let resume_attempt = resume_attempt.clone();
+            let resume_reset_gate = resume_reset_gate.clone();
             async move {
-                let n = r11d_attempt.fetch_add(1, Ordering::SeqCst);
+                let n = resume_attempt.fetch_add(1, Ordering::SeqCst);
+                let Some(mut s2s) = S2sResponder::open(respond) else {
+                    return;
+                };
                 if n == 0 {
-                    if let Some(mut s2s) = S2sResponder::open(respond) {
-                        // Record 0 with tail=3 so session is still behind tail after delivering 0.
-                        s2s.send_regular(&proto_read_batch(0, 3), false, false);
-                        // Wait until client receives record 0 before resetting so h2 does not
-                        // drop the buffered DATA frame on RST_STREAM.
-                        r11d_reset_gate.notified().await;
-                        s2s.reset(h2::Reason::INTERNAL_ERROR);
-                    }
+                    // Record 0 with tail=3 so session is still behind tail after delivering 0.
+                    s2s.send_regular(&proto_read_batch(0, 3), false, false);
+                    resume_reset_gate.notified().await;
+                    s2s.reset(h2::Reason::INTERNAL_ERROR);
                 } else {
-                    // Resumed with omitted wait + count -> 416 with tail jumped to seq 5.
-                    send_tail_json(respond, 416, 5, 5000);
+                    // Resumed bounded read at tail sends heartbeat (5, 5000) then clean EOF.
+                    s2s.send_regular(&proto_heartbeat_at(5, 5000), false, true);
                 }
             }
         }
     })
     .await;
 
-    let mut r11d_sess = r11d_server
+    let mut resume_sess = resume_server
         .stream(fast_retry_config(2))
         .read_session(
             ReadInput::new(ReadStart::SeqNum(0)).with_count(10),
@@ -1137,69 +1194,78 @@ async fn regression_read_session_r11d_caught_up_and_count_exhausted() {
         )
         .unwrap();
 
-    let cu = r11d_sess.caught_up();
-    assert_eq!(r11d_sess.next().await.unwrap().unwrap().seq_num, 0);
-    assert!(!r11d_sess.is_caught_up());
-    r11d_reset_gate.notify_one();
-    assert!(r11d_sess.next().await.is_none());
-    assert_eq!(r11d_sess.next_seq_num(), Some(5));
-    assert_eq!(r11d_sess.last_observed_tail().unwrap().seq_num, 5);
+    let cu = resume_sess.caught_up();
+    assert_eq!(resume_sess.next().await.unwrap().unwrap().seq_num, 0);
+    assert!(!resume_sess.is_caught_up());
+    resume_reset_gate.notify_one();
+    assert!(resume_sess.next().await.is_none());
+    assert_eq!(resume_sess.next_seq_num(), Some(5));
+    assert_eq!(resume_sess.last_observed_tail().unwrap().seq_num, 5);
+    assert!(resume_sess.is_caught_up());
     assert_eq!(cu.await.unwrap().seq_num, 5);
+    assert_eq!(resume_sess.caught_up().await.unwrap().seq_num, 5);
 
-    // 2. R11d recreated-stream guard: resumed zero-wait 416 whose tail.seq_num < resume_seq_num
-    //    MUST surface ReadUnwrittenError (not silently stop cleanly!).
-    let recreated_attempt = Arc::new(AtomicUsize::new(0));
-    let recreated_reset_gate = Arc::new(tokio::sync::Notify::new());
-    let recreated_server = MockH2Server::start({
-        let recreated_attempt = recreated_attempt.clone();
-        let recreated_reset_gate = recreated_reset_gate.clone();
-        move |_conn_id, _req, respond| {
+    // 2. T9 + R7: resumed 416 (even with tail >= resume_seq_num or < resume_seq_num) surfaces
+    //    ReadUnwrittenError without mutating R7 state (`last_observed_tail`, `is_caught_up`).
+    for (tail_416, expected_last_tail) in [(1u64, 5u64), (8u64, 5u64)] {
+        let recreated_attempt = Arc::new(AtomicUsize::new(0));
+        let recreated_reset_gate = Arc::new(tokio::sync::Notify::new());
+        let recreated_server = MockH2Server::start({
             let recreated_attempt = recreated_attempt.clone();
             let recreated_reset_gate = recreated_reset_gate.clone();
-            async move {
-                let n = recreated_attempt.fetch_add(1, Ordering::SeqCst);
-                if n == 0 {
-                    if let Some(mut s2s) = S2sResponder::open(respond) {
-                        s2s.send_regular(
-                            &proto_read_batch_records(&[0, 1, 2, 3, 4], Some(5)),
-                            false,
-                            false,
-                        );
-                        recreated_reset_gate.notified().await;
-                        s2s.reset(h2::Reason::INTERNAL_ERROR);
+            move |_conn_id, _req, respond| {
+                let recreated_attempt = recreated_attempt.clone();
+                let recreated_reset_gate = recreated_reset_gate.clone();
+                async move {
+                    let n = recreated_attempt.fetch_add(1, Ordering::SeqCst);
+                    if n == 0 {
+                        if let Some(mut s2s) = S2sResponder::open(respond) {
+                            s2s.send_regular(
+                                &proto_read_batch_records(&[0, 1, 2, 3, 4], Some(5)),
+                                false,
+                                false,
+                            );
+                            recreated_reset_gate.notified().await;
+                            s2s.reset(h2::Reason::INTERNAL_ERROR);
+                        }
+                    } else {
+                        send_tail_json(respond, 416, tail_416, tail_416 * 100);
                     }
-                } else {
-                    // Stream was deleted & recreated with tail.seq_num = 1 (< resume_seq_num = 5).
-                    send_tail_json(respond, 416, 1, 100);
                 }
             }
-        }
-    })
-    .await;
+        })
+        .await;
 
-    let mut recreated_sess = recreated_server
-        .stream(fast_retry_config(2))
-        .read_session(
-            ReadInput::new(ReadStart::SeqNum(0)).with_wait_secs(0),
-            ReadSessionConfig::default(),
-        )
-        .unwrap();
-    for expected in 0..5 {
-        assert_eq!(
-            recreated_sess.next().await.unwrap().unwrap().seq_num,
-            expected
+        let mut recreated_sess = recreated_server
+            .stream(fast_retry_config(2))
+            .read_session(
+                ReadInput::new(ReadStart::SeqNum(0)).with_wait_secs(0),
+                ReadSessionConfig::default(),
+            )
+            .unwrap();
+        for expected in 0..5 {
+            assert_eq!(
+                recreated_sess.next().await.unwrap().unwrap().seq_num,
+                expected
+            );
+        }
+        recreated_reset_gate.notify_one();
+        let recreated_err = recreated_sess
+            .next()
+            .await
+            .expect("T9: resumed 416 must yield error")
+            .expect_err("must be ReadUnwritten");
+        assert!(
+            matches!(recreated_err, ReadSessionError::ReadUnwritten(ref e) if e.tail.seq_num == tail_416),
+            "T9: resumed 416 must surface ReadUnwrittenError, got {recreated_err:?}"
         );
+        assert_eq!(
+            recreated_sess.last_observed_tail().unwrap().seq_num,
+            expected_last_tail,
+            "R7: 416 tail must not mutate last_observed_tail"
+        );
+        assert!(recreated_sess.is_caught_up());
     }
-    recreated_reset_gate.notify_one();
-    let recreated_err = recreated_sess
-        .next()
-        .await
-        .expect("R11d: tail < resume_seq_num must yield error")
-        .expect_err("must be ReadUnwritten");
-    assert!(
-        matches!(recreated_err, ReadSessionError::ReadUnwritten(ref e) if e.tail.seq_num == 1),
-        "R11d: recreated stream 416 must surface ReadUnwrittenError, got {recreated_err:?}"
-    );
 
     // 3. Count exhausted + transport reset ends cleanly without retrying with count=0.
     let count_reqs = Arc::new(AtomicUsize::new(0));
@@ -1240,14 +1306,9 @@ async fn regression_read_session_r11d_caught_up_and_count_exhausted() {
     );
 }
 
-// spec: r1 R11d
+// spec: r1 T9
 #[tokio::test]
-async fn spec_r11d_416_after_retry_before_any_response_is_read_unwritten() {
-    // R11d applies only after the session has decoded at least one record batch or heartbeat.
-    // Starting at an unclamped unwritten seq_num with no wait remaining (either omitted wait with
-    // `count` set or explicit `wait = 0`) that retries a transient 503 on attempt 1 and gets 416
-    // (`tail.seq_num == sent_seq_num`) on attempt 2 must still fail with ReadUnwrittenError rather
-    // than closing cleanly.
+async fn spec_t9_416_after_retry_before_any_response_is_read_unwritten() {
     for input in [
         ReadInput::new(ReadStart::SeqNum(5)).with_count(10),
         ReadInput::new(ReadStart::SeqNum(5)).with_wait_secs(0),
@@ -1277,164 +1338,86 @@ async fn spec_r11d_416_after_retry_before_any_response_is_read_unwritten() {
         let err = session
             .next()
             .await
-            .expect("R11d: 416 before any decoded response must yield an error, not clean end")
+            .expect("T9: 416 must yield ReadUnwrittenError")
             .expect_err("expected ReadUnwrittenError");
         assert!(
             matches!(err, ReadSessionError::ReadUnwritten(ref e) if e.tail.seq_num == 5),
-            "R11d: expected ReadUnwrittenError with tail=5, got {err:?}"
+            "T9: expected ReadUnwrittenError with tail=5, got {err:?}"
         );
         assert_eq!(server.request_count(), 2);
         assert!(session.next().await.is_none());
     }
 }
 
-// spec: r1 T5a, R9, R9a, R9c, R9d, R10
+// spec: r1 R2, R5, R6, R9, R9a, R9c, R9d
 #[tokio::test]
-async fn spec_t5a_empty_frame_does_not_reset_budget_and_r9_close_boundary() {
-    // 1. T5a: an empty ReadBatch frame with no records and no tail is NOT a heartbeat and must NOT
-    //    reset retry budget (so a budgeted session still gives up after max_attempts).
-    let attempts = Arc::new(AtomicUsize::new(0));
-    let empty_server = MockH2Server::start({
-        let attempts = attempts.clone();
-        move |_conn_id, _req, respond| {
+async fn spec_r2_r6_empty_frame_protocol_error_zero_limits_and_r9_close_boundary() {
+    // 1. R6: an empty ReadBatch frame with no records and no tail is invalid and rejected
+    //    immediately as ProtocolError without retrying or handing over (even when reconnect_advised
+    //    is set).
+    for reconnect_advised in [false, true] {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let empty_server = MockH2Server::start({
             let attempts = attempts.clone();
-            async move {
-                attempts.fetch_add(1, Ordering::SeqCst);
-                if let Some(mut s2s) = S2sResponder::open(respond) {
-                    // Empty frame: records=[], tail=None.
-                    s2s.send_regular(&proto_read_batch_records(&[], None), false, false);
-                    s2s.send_terminal(
-                        503,
-                        r#"{"code":"unavailable","message":"transient"}"#.as_bytes(),
-                    );
+            move |_conn_id, _req, respond| {
+                let attempts = attempts.clone();
+                async move {
+                    attempts.fetch_add(1, Ordering::SeqCst);
+                    if let Some(mut s2s) = S2sResponder::open(respond) {
+                        s2s.send_regular(
+                            &proto_read_batch_records(&[], None),
+                            reconnect_advised,
+                            false,
+                        );
+                        std::future::pending::<()>().await;
+                    }
                 }
             }
+        })
+        .await;
+
+        let mut empty_sess = empty_server
+            .stream(fast_retry_config(2))
+            .read_session(
+                ReadInput::new(ReadStart::SeqNum(0)),
+                ReadSessionConfig::default(),
+            )
+            .unwrap();
+        let err = tokio::time::timeout(Duration::from_secs(2), empty_sess.next())
+            .await
+            .expect("R6: empty tail-less frame must fail immediately")
+            .expect("must yield ProtocolError")
+            .unwrap_err();
+        assert!(
+            matches!(err, ReadSessionError::Protocol(_)),
+            "R6: expected ProtocolError for empty tail-less frame (advised={reconnect_advised}), got {err:?}"
+        );
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            1,
+            "R6: invalid empty tail-less frame must fail on first attempt without retry/handover"
+        );
+        assert!(empty_sess.next().await.is_none());
+
+        // 1b. R2 + R5: count = 0 and bytes = 0 fail immediately with ValidationError when opening
+        //     ReadSession or ReadBatchSession, sending zero requests.
+        let before = empty_server.request_count();
+        let stream = empty_server.stream(no_retry_config());
+        for bad_input in [
+            ReadInput::new(ReadStart::SeqNum(0)).with_count(0),
+            ReadInput::new(ReadStart::SeqNum(0)).with_bytes(0),
+        ] {
+            assert!(matches!(
+                stream.read_session(bad_input.clone(), ReadSessionConfig::default()),
+                Err(ReadSessionError::Validation(_))
+            ));
+            assert!(matches!(
+                stream.read_batch_session(bad_input, ReadSessionConfig::default()),
+                Err(ReadSessionError::Validation(_))
+            ));
         }
-    })
-    .await;
-
-    let mut empty_sess = empty_server
-        .stream(fast_retry_config(2))
-        .read_session(
-            ReadInput::new(ReadStart::SeqNum(0)),
-            ReadSessionConfig::default(),
-        )
-        .unwrap();
-    let err = empty_sess
-        .next()
-        .await
-        .expect("must fail after budget exhausted")
-        .unwrap_err();
-    assert!(
-        matches!(err, ReadSessionError::Server(ref e) if e.status == 503),
-        "T5a: expected 503 after max_attempts=2, got {err:?}"
-    );
-    assert_eq!(
-        attempts.load(Ordering::SeqCst),
-        2,
-        "T5a: empty non-heartbeat frame must not reset retry budget"
-    );
-
-    // 1b. T6 / T6a + T5a: an empty frame with reconnect_advised=true still triggers handover
-    //     (free after prior progress; counted as a retry and not resetting retry budget when no
-    //     progress was made yet).
-    let advised_empty_after_progress_conns = Arc::new(Mutex::new(Vec::<usize>::new()));
-    let advised_empty_after_progress_reqs = Arc::new(AtomicUsize::new(0));
-    let advised_empty_after_progress_server = MockH2Server::start({
-        let seen_conns = advised_empty_after_progress_conns.clone();
-        let reqs = advised_empty_after_progress_reqs.clone();
-        move |conn_id, _req, respond| {
-            let seen_conns = seen_conns.clone();
-            let reqs = reqs.clone();
-            async move {
-                let n = reqs.fetch_add(1, Ordering::SeqCst);
-                seen_conns.lock().unwrap().push(conn_id);
-                let Some(mut s2s) = S2sResponder::open(respond) else {
-                    return;
-                };
-                if n == 0 {
-                    // Deliver record 0 (progress!), then send an empty frame with reconnect advice
-                    // and keep the stream open so the client must actively end the request.
-                    s2s.send_regular(&proto_read_batch(0, 1), false, false);
-                    s2s.send_regular(&proto_read_batch_records(&[], None), true, false);
-                    std::future::pending::<()>().await;
-                } else {
-                    s2s.send_regular(&proto_read_batch(1, 2), false, true);
-                }
-            }
-        }
-    })
-    .await;
-
-    let mut advised_after_sess = advised_empty_after_progress_server
-        .stream(no_retry_config())
-        .read_session(
-            ReadInput::new(ReadStart::SeqNum(0)).with_count(2),
-            ReadSessionConfig::default(),
-        )
-        .unwrap();
-    assert_eq!(advised_after_sess.next().await.unwrap().unwrap().seq_num, 0);
-    let rec1 = tokio::time::timeout(Duration::from_secs(2), advised_after_sess.next())
-        .await
-        .expect("T6: empty frame with reconnect_advised after progress must trigger handover")
-        .unwrap()
-        .unwrap();
-    assert_eq!(rec1.seq_num, 1);
-    assert!(advised_after_sess.next().await.is_none());
-    let conns = advised_empty_after_progress_conns.lock().unwrap().clone();
-    assert_eq!(conns.len(), 2);
-    assert_ne!(
-        conns[0], conns[1],
-        "T6: empty frame handover must move to a fresh connection"
-    );
-
-    let advised_empty_before_progress_reqs = Arc::new(AtomicUsize::new(0));
-    let advised_empty_before_progress_server = MockH2Server::start({
-        let reqs = advised_empty_before_progress_reqs.clone();
-        move |_conn_id, _req, respond| {
-            let reqs = reqs.clone();
-            async move {
-                let n = reqs.fetch_add(1, Ordering::SeqCst);
-                let Some(mut s2s) = S2sResponder::open(respond) else {
-                    return;
-                };
-                if n == 0 {
-                    // Empty frame with reconnect advice BEFORE any progress -> must consume retry
-                    // budget (T6 / T5a) instead of resetting budget or hanging forever.
-                    s2s.send_regular(&proto_read_batch_records(&[], None), true, false);
-                    std::future::pending::<()>().await;
-                } else {
-                    s2s.send_terminal(
-                        503,
-                        r#"{"code":"unavailable","message":"transient"}"#.as_bytes(),
-                    );
-                }
-            }
-        }
-    })
-    .await;
-
-    let mut advised_before_sess = advised_empty_before_progress_server
-        .stream(fast_retry_config(2))
-        .read_session(
-            ReadInput::new(ReadStart::SeqNum(0)),
-            ReadSessionConfig::default(),
-        )
-        .unwrap();
-    let err = tokio::time::timeout(Duration::from_secs(2), advised_before_sess.next())
-        .await
-        .expect("T6: empty frame with reconnect_advised before progress must retry and finish")
-        .expect("must fail after retry budget exhausted")
-        .unwrap_err();
-    assert!(
-        matches!(err, ReadSessionError::Server(ref e) if e.status == 503),
-        "T6/T5a: expected 503 on second attempt after empty-frame handover consumed attempt 1, got {err:?}"
-    );
-    assert_eq!(
-        advised_empty_before_progress_reqs.load(Ordering::SeqCst),
-        2,
-        "T6/T5a: empty-frame handover before progress must count as a retry without resetting budget"
-    );
+        assert_eq!(empty_server.request_count(), before);
+    }
 
     // 2. R9c with zero buffered records: iterating observes the terminal 404 and closes immediately
     //    (failing caught_up() with 404); a subsequent client.close() has no effect.
@@ -1607,10 +1590,10 @@ async fn spec_t5a_empty_frame_does_not_reset_budget_and_r9_close_boundary() {
     );
 }
 
-// spec: r1 R7a, R9a, R11c
+// spec: r1 R6, R7a, R9a, R10c
 #[tokio::test]
 async fn regression_read_session_stops_on_exhausted_count_and_rejects_u64_max_seq_num() {
-    // 1. R11c/R9a: When count=1 is exhausted on a server that keeps the stream open (sending a
+    // 1. R10c/R9a: When count=1 is exhausted on a server that keeps the stream open (sending a
     //    heartbeat or extra batch), the session immediately enters clean stop after delivering the
     //    requested record, preserving caught-up state and never yielding extra records.
     let server = MockH2Server::start(|_conn_id, _req, respond| async move {
