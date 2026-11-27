@@ -40,6 +40,12 @@ pub struct ListArgs {
         (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
         (status = StatusCode::FORBIDDEN, body = v1t::error::ErrorInfo),
         (status = StatusCode::REQUEST_TIMEOUT, body = v1t::error::ErrorInfo),
+        (
+            status = StatusCode::TOO_MANY_REQUESTS,
+            description = "Rate limit exceeded (`rate_limited`).",
+            body = v1t::error::ErrorInfo,
+            headers(("retry-after-ms" = u64, description = "Milliseconds to wait before retrying.")),
+        ),
     ),
     params(v1t::network_policy::ListNetworkPoliciesRequest),
 ))]
@@ -68,6 +74,12 @@ pub struct CreateArgs {
         (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
         (status = StatusCode::FORBIDDEN, body = v1t::error::ErrorInfo),
         (status = StatusCode::REQUEST_TIMEOUT, body = v1t::error::ErrorInfo),
+        (
+            status = StatusCode::TOO_MANY_REQUESTS,
+            description = "Rate limit exceeded (`rate_limited`).",
+            body = v1t::error::ErrorInfo,
+            headers(("retry-after-ms" = u64, description = "Milliseconds to wait before retrying.")),
+        ),
         (status = StatusCode::CONFLICT, body = v1t::error::ErrorInfo),
     ),
 ))]
@@ -96,6 +108,12 @@ pub struct GetArgs {
         (status = StatusCode::FORBIDDEN, body = v1t::error::ErrorInfo),
         (status = StatusCode::NOT_FOUND, body = v1t::error::ErrorInfo),
         (status = StatusCode::REQUEST_TIMEOUT, body = v1t::error::ErrorInfo),
+        (
+            status = StatusCode::TOO_MANY_REQUESTS,
+            description = "Rate limit exceeded (`rate_limited`).",
+            body = v1t::error::ErrorInfo,
+            headers(("retry-after-ms" = u64, description = "Milliseconds to wait before retrying.")),
+        ),
     ),
     params(v1t::network_policy::NetworkPolicySelectorPathSegment),
 ))]
@@ -124,6 +142,12 @@ pub struct DeleteArgs {
         (status = StatusCode::FORBIDDEN, body = v1t::error::ErrorInfo),
         (status = StatusCode::NOT_FOUND, body = v1t::error::ErrorInfo),
         (status = StatusCode::REQUEST_TIMEOUT, body = v1t::error::ErrorInfo),
+        (
+            status = StatusCode::TOO_MANY_REQUESTS,
+            description = "Rate limit exceeded (`rate_limited`).",
+            body = v1t::error::ErrorInfo,
+            headers(("retry-after-ms" = u64, description = "Milliseconds to wait before retrying.")),
+        ),
         (status = StatusCode::CONFLICT, body = v1t::error::ErrorInfo),
     ),
     params(v1t::network_policy::NetworkPolicySelectorPathSegment),

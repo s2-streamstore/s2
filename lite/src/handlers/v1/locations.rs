@@ -21,6 +21,12 @@ pub fn router() -> axum::Router<Backend> {
         (status = 400, body = v1t::error::ErrorInfo),
         (status = 403, body = v1t::error::ErrorInfo),
         (status = 408, body = v1t::error::ErrorInfo),
+        (
+            status = 429,
+            description = "Rate limit exceeded (`rate_limited`).",
+            body = v1t::error::ErrorInfo,
+            headers(("retry-after-ms" = u64, description = "Milliseconds to wait before retrying.")),
+        ),
     ),
 ))]
 pub async fn list_locations(
@@ -38,6 +44,12 @@ pub async fn list_locations(
         (status = 200, body = v1t::location::GetDefaultLocationResponse),
         (status = 403, body = v1t::error::ErrorInfo),
         (status = 408, body = v1t::error::ErrorInfo),
+        (
+            status = 429,
+            description = "Rate limit exceeded (`rate_limited`).",
+            body = v1t::error::ErrorInfo,
+            headers(("retry-after-ms" = u64, description = "Milliseconds to wait before retrying.")),
+        ),
     ),
 ))]
 pub async fn get_default_location(
@@ -64,6 +76,12 @@ pub struct SetDefaultArgs {
         (status = 400, body = v1t::error::ErrorInfo),
         (status = 403, body = v1t::error::ErrorInfo),
         (status = 408, body = v1t::error::ErrorInfo),
+        (
+            status = 429,
+            description = "Rate limit exceeded (`rate_limited`).",
+            body = v1t::error::ErrorInfo,
+            headers(("retry-after-ms" = u64, description = "Milliseconds to wait before retrying.")),
+        ),
     ),
 ))]
 pub async fn set_default_location(

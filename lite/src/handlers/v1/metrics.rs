@@ -29,6 +29,12 @@ pub struct AccountArgs {
         (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
         (status = StatusCode::FORBIDDEN, body = v1t::error::ErrorInfo),
         (status = StatusCode::REQUEST_TIMEOUT, body = v1t::error::ErrorInfo),
+        (
+            status = StatusCode::TOO_MANY_REQUESTS,
+            description = "Rate limit exceeded (`rate_limited`).",
+            body = v1t::error::ErrorInfo,
+            headers(("retry-after-ms" = u64, description = "Milliseconds to wait before retrying.")),
+        ),
     ),
     params(v1t::metrics::AccountMetricSetRequest)
 ))]
@@ -58,6 +64,12 @@ pub struct BasinArgs {
         (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
         (status = StatusCode::FORBIDDEN, body = v1t::error::ErrorInfo),
         (status = StatusCode::REQUEST_TIMEOUT, body = v1t::error::ErrorInfo),
+        (
+            status = StatusCode::TOO_MANY_REQUESTS,
+            description = "Rate limit exceeded (`rate_limited`).",
+            body = v1t::error::ErrorInfo,
+            headers(("retry-after-ms" = u64, description = "Milliseconds to wait before retrying.")),
+        ),
     ),
     params(v1t::metrics::BasinMetricSetRequest, v1t::BasinNamePathSegment),
 ))]
@@ -87,6 +99,12 @@ pub struct StreamArgs {
         (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
         (status = StatusCode::FORBIDDEN, body = v1t::error::ErrorInfo),
         (status = StatusCode::REQUEST_TIMEOUT, body = v1t::error::ErrorInfo),
+        (
+            status = StatusCode::TOO_MANY_REQUESTS,
+            description = "Rate limit exceeded (`rate_limited`).",
+            body = v1t::error::ErrorInfo,
+            headers(("retry-after-ms" = u64, description = "Milliseconds to wait before retrying.")),
+        ),
     ),
     params(v1t::metrics::StreamMetricSetRequest, v1t::BasinNamePathSegment, v1t::StreamNamePathSegment),
 ))]
