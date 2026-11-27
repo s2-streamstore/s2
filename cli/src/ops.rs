@@ -882,7 +882,8 @@ pub fn tail(
                     yield Ok(record);
                 }
                 // Compatibility with older servers that still return an initial 416 instead of
-                // a tail heartbeat for non-follow tail on an empty or fully-trimmed stream.
+                // a tail heartbeat for non-follow tail when starting at the tail (e.g. an empty
+                // stream or `-n 0`).
                 Err(sdk::error::ReadSessionError::ReadUnwritten(_)) if !follow && !seen_any => {
                     break;
                 }

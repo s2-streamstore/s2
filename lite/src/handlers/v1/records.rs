@@ -1673,7 +1673,11 @@ mod tests {
         )
         .await;
 
-        for query in ["seq_num=0&count=10", "seq_num=0&wait=0"] {
+        for query in [
+            "seq_num=0&count=10",
+            "seq_num=0&wait=0",
+            "seq_num=0&until=5000",
+        ] {
             // S2S: non-empty record batch(es), then a single trailing tail heartbeat and clean EOF.
             let s2s_batches = s2s_read_batches(&app, &basin, &stream, query).await;
             let (last, record_batches) = s2s_batches

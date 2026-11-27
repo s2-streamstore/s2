@@ -272,9 +272,9 @@ pub async fn collect_outputs<S>(session: S) -> Vec<ReadSessionOutput>
 where
     S: futures::Stream<Item = Result<ReadSessionOutput, ReadError>>,
 {
-    session
-        .collect::<Vec<_>>()
+    tokio::time::timeout(Duration::from_secs(5), session.collect::<Vec<_>>())
         .await
+        .expect("read session should complete without hanging")
         .into_iter()
         .collect::<Result<Vec<_>, _>>()
         .expect("read session should complete without error")
