@@ -150,8 +150,9 @@ pub struct ReadStart {
     /// Start from number of records before the next sequence number.
     #[cfg_attr(feature = "utoipa", param(value_type = u64, required = false))]
     pub tail_offset: Option<u64>,
-    /// Start reading from the tail if the requested position is beyond it.
+    /// Start reading from the tail if the requested position is beyond it (`seq_num > tail.seq_num` or `timestamp > tail.timestamp`).
     /// Otherwise, a `416 Range Not Satisfiable` response is returned.
+    /// On a unary read with `wait` of `0`, starting at the tail (including after clamping) still returns `416`; on a streaming read (SSE or S2S), it establishes `200 OK`, emits a heartbeat carrying the tail, and ends cleanly.
     #[cfg_attr(feature = "utoipa", param(value_type = bool, required = false))]
     pub clamp: Option<bool>,
 }

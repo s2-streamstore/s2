@@ -119,6 +119,7 @@ async fn read_session(
         wait: end.wait,
         wait_deadline: None,
         tail,
+        caught_up_tail_emitted: None,
     };
     let session = async_stream::try_stream! {
         'session: while let EvaluatedReadLimit::Remaining(limit) = state.limit {
@@ -198,7 +199,9 @@ async fn read_session(
             } else {
                 assert_eq!(state.start_seq_num, state.tail.seq_num);
                 if !end.may_follow() {
-                    yield StoredReadSessionOutput::Heartbeat(state.tail);
+                    if state.needs_tail_heartbeat() {
+                        yield state.on_heartbeat();
+                    }
                     break;
                 }
                 match client.follow(state.start_seq_num).await? {
@@ -206,9 +209,14 @@ async fn read_session(
                         // Only a delivered batch should reset the absolute wait budget.
                         state.arm_wait_deadline_if_unset();
                         if state.wait_deadline_expired() {
+                            if state.needs_tail_heartbeat() {
+                                yield state.on_heartbeat();
+                            }
                             break;
                         }
-                        yield StoredReadSessionOutput::Heartbeat(state.tail);
+                        if state.needs_tail_heartbeat() {
+                            yield state.on_heartbeat();
+                        }
                         while let EvaluatedReadLimit::Remaining(limit) = state.limit {
                             tokio::select! {
                                 biased;
@@ -239,10 +247,13 @@ async fn read_session(
                                     }
                                 }
                                 _ = new_heartbeat_sleep() => {
-                                    yield StoredReadSessionOutput::Heartbeat(state.tail);
+                                    yield state.on_heartbeat();
                                     Ok(())
                                 }
                                 _ = wait_sleep_until(state.wait_deadline) => {
+                                    if state.needs_tail_heartbeat() {
+                                        yield state.on_heartbeat();
+                                    }
                                     break 'session;
                                 }
                             }?;
@@ -332,6 +343,9 @@ struct ReadSessionState {
     wait: Option<Duration>,
     wait_deadline: Option<Instant>,
     tail: StreamPosition,
+    /// Tail position most recently observed as caught up by the client, either via a heartbeat or
+    /// via a batch whose `tail.seq_num == last_record.seq_num + 1`.
+    caught_up_tail_emitted: Option<StreamPosition>,
 }
 
 impl ReadSessionState {
@@ -350,6 +364,15 @@ impl ReadSessionState {
             .is_some_and(|deadline| deadline <= Instant::now())
     }
 
+    fn needs_tail_heartbeat(&self) -> bool {
+        self.caught_up_tail_emitted != Some(self.tail)
+    }
+
+    fn on_heartbeat(&mut self) -> StoredReadSessionOutput {
+        self.caught_up_tail_emitted = Some(self.tail);
+        StoredReadSessionOutput::Heartbeat(self.tail)
+    }
+
     fn on_batch(&mut self, batch: StoredReadBatch) -> StoredReadSessionOutput {
         if let Some(tail) = batch.tail {
             self.tail = tail;
@@ -365,6 +388,7 @@ impl ReadSessionState {
         assert!(self.until.allow(last_position.timestamp));
         self.start_seq_num = last_position.seq_num + 1;
         self.limit = limit.remaining(count, bytes);
+        self.caught_up_tail_emitted = batch.tail.filter(|tail| tail.seq_num == self.start_seq_num);
         self.reset_wait_deadline();
         StoredReadSessionOutput::Batch(batch)
     }
@@ -1030,10 +1054,249 @@ mod tests {
         tokio::time::advance(wait + Duration::from_secs(1)).await;
         tokio::task::yield_now().await;
 
-        let next = session.as_mut().next().await;
+        let expired_at = Instant::now();
+        let next = session
+            .as_mut()
+            .next()
+            .await
+            .expect("session should emit trailing tail heartbeat across deleted lag gap")
+            .expect("session should not error");
         assert!(
-            next.is_none(),
+            matches!(next, ReadSessionOutput::Heartbeat(tail) if tail.seq_num == lagged_appends as u64),
+            "expected trailing heartbeat at seq_num={lagged_appends}, got {next:?}"
+        );
+        let closed = session.as_mut().next().await;
+        assert!(
+            closed.is_none(),
             "session should close immediately once the original wait budget has elapsed"
+        );
+        assert_eq!(
+            Instant::now(),
+            expired_at,
+            "trailing heartbeat and close must not reset the wait budget"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_start_seq_num_clamps_resolve_timestamp_race_past_tail() {
+        let object_store = Arc::new(InMemory::new());
+        let db = Db::builder("/test", object_store).build().await.unwrap();
+        let backend = Backend::new(db, ByteSize::mib(10));
+        let stream_id: StreamId = [9u8; 32].into();
+
+        // Simulate a concurrent append at seq_num=5 becoming durable after check_tail() observed
+        // tail=(2, 1500) while earlier records < 2 were trimmed/deleted.
+        let concurrent_pos = StreamPosition {
+            seq_num: 5,
+            timestamp: 2000,
+        };
+        backend
+            .db
+            .put(
+                kv::stream_record_timestamp::ser_key(stream_id, concurrent_pos),
+                kv::stream_record_timestamp::ser_value(),
+            )
+            .assert_durable()
+            .await;
+
+        let snapshot_tail = StreamPosition {
+            seq_num: 2,
+            timestamp: 1500,
+        };
+        let resolved = read_start_seq_num(
+            &backend.db,
+            stream_id,
+            ReadStart {
+                from: ReadFrom::Timestamp(1000),
+                clamp: false,
+            },
+            snapshot_tail,
+        )
+        .await
+        .expect("timestamp within snapshot tail must resolve without error");
+        assert_eq!(resolved, snapshot_tail.seq_num);
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn read_wait_elapsed_after_db_catchup_emits_tail_heartbeat() {
+        let object_store = Arc::new(InMemory::new());
+        let db = Db::builder("/test", object_store).build().await.unwrap();
+        let backend = Backend::new(db, ByteSize::mib(10));
+
+        let basin: BasinName = "test-basin".parse().unwrap();
+        backend
+            .provision_basin(
+                basin.clone(),
+                BasinConfig::default(),
+                ProvisionMode::CreateOnly {
+                    request_token: None,
+                },
+            )
+            .await
+            .unwrap();
+        let stream: StreamName = "test-stream".parse().unwrap();
+        backend
+            .provision_stream(
+                basin.clone(),
+                stream.clone(),
+                OptionalStreamConfig::default(),
+                ProvisionMode::CreateOnly {
+                    request_token: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let ack = backend
+            .open_for_append(&basin, &stream, None, OptionalStreamConfig::default())
+            .await
+            .unwrap()
+            .append(append_input(
+                Record::try_from_parts(vec![], bytes::Bytes::from("initial")).unwrap(),
+            ))
+            .await
+            .unwrap();
+
+        let wait = Duration::from_millis(30);
+        let session = backend
+            .open_for_read(&basin, &stream, None, OptionalStreamConfig::default())
+            .await
+            .unwrap()
+            .read(
+                ReadStart {
+                    from: ReadFrom::SeqNum(0),
+                    clamp: false,
+                },
+                ReadEnd {
+                    limit: ReadLimit::Unbounded,
+                    until: ReadUntil::Unbounded,
+                    wait: Some(wait),
+                },
+            )
+            .await
+            .unwrap();
+        let mut session = Box::pin(session);
+
+        // First pull delivers the non-tailing DB catch-up batch and arms the wait deadline.
+        let first = session
+            .as_mut()
+            .next()
+            .await
+            .expect("session should yield DB catch-up batch")
+            .expect("session should not error");
+        assert!(matches!(first, ReadSessionOutput::Batch(ref b) if b.tail.is_none()));
+
+        // Reader stays parked past `wait` before polling again.
+        tokio::time::advance(wait + Duration::from_millis(10)).await;
+        tokio::task::yield_now().await;
+        let resumed_at = Instant::now();
+
+        let second = session
+            .as_mut()
+            .next()
+            .await
+            .expect("parked reader whose wait elapsed must observe trailing tail heartbeat")
+            .expect("session should not error");
+        assert!(
+            matches!(second, ReadSessionOutput::Heartbeat(tail) if tail == ack.end),
+            "expected Heartbeat({:?}), got {second:?}",
+            ack.end
+        );
+
+        let third = session.as_mut().next().await;
+        assert!(
+            third.is_none(),
+            "session should end cleanly after heartbeat"
+        );
+        assert_eq!(Instant::now(), resumed_at);
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn read_wait_elapsed_after_live_tailing_batch_emits_no_redundant_heartbeat() {
+        let object_store = Arc::new(InMemory::new());
+        let db = Db::builder("/test", object_store).build().await.unwrap();
+        let backend = Backend::new(db, ByteSize::mib(10));
+
+        let basin: BasinName = "test-basin".parse().unwrap();
+        backend
+            .provision_basin(
+                basin.clone(),
+                BasinConfig::default(),
+                ProvisionMode::CreateOnly {
+                    request_token: None,
+                },
+            )
+            .await
+            .unwrap();
+        let stream: StreamName = "test-stream".parse().unwrap();
+        backend
+            .provision_stream(
+                basin.clone(),
+                stream.clone(),
+                OptionalStreamConfig::default(),
+                ProvisionMode::CreateOnly {
+                    request_token: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        // Shorter than test heartbeat sleep (5..15ms) so `wait` expires before any periodic
+        // heartbeat fires.
+        let wait = Duration::from_millis(2);
+        let session = backend
+            .open_for_read(&basin, &stream, None, OptionalStreamConfig::default())
+            .await
+            .unwrap()
+            .read(
+                ReadStart {
+                    from: ReadFrom::SeqNum(0),
+                    clamp: false,
+                },
+                ReadEnd {
+                    limit: ReadLimit::Unbounded,
+                    until: ReadUntil::Unbounded,
+                    wait: Some(wait),
+                },
+            )
+            .await
+            .unwrap();
+        let mut session = Box::pin(session);
+
+        let first = session
+            .as_mut()
+            .next()
+            .await
+            .expect("session should enter follow mode")
+            .expect("session should not error");
+        assert!(matches!(first, ReadSessionOutput::Heartbeat(tail) if tail == StreamPosition::MIN));
+
+        let ack = backend
+            .open_for_append(&basin, &stream, None, OptionalStreamConfig::default())
+            .await
+            .unwrap()
+            .append(append_input(
+                Record::try_from_parts(vec![], bytes::Bytes::from("live")).unwrap(),
+            ))
+            .await
+            .unwrap();
+
+        let second = session
+            .as_mut()
+            .next()
+            .await
+            .expect("session should yield live batch")
+            .expect("session should not error");
+        assert!(
+            matches!(second, ReadSessionOutput::Batch(ref b) if b.tail == Some(ack.end)),
+            "live batch should already carry catching-up tail {:?}, got {second:?}",
+            ack.end
+        );
+
+        let next = poll_next_after_advance(&mut session, wait + Duration::from_millis(1)).await;
+        assert!(
+            matches!(next, Poll::Ready(None)),
+            "expected clean EOF without redundant trailing heartbeat, got {next:?}"
         );
     }
 

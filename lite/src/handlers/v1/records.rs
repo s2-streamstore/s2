@@ -166,7 +166,11 @@ pub struct ReadArgs {
             (v1t::stream::ReadBatch = "application/json"),
             (v1t::stream::sse::ReadEvent = "text/event-stream"),
         )),
-        (status = StatusCode::RANGE_NOT_SATISFIABLE, body = v1t::stream::TailResponse),
+        (
+            status = StatusCode::RANGE_NOT_SATISFIABLE,
+            description = "Requested starting position is beyond the tail without `clamp` (`seq_num > tail.seq_num` or `timestamp > tail.timestamp`), or a unary read with `wait` of `0` reached the tail with no records to return.",
+            body = v1t::stream::TailResponse,
+        ),
         (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
         (status = StatusCode::FORBIDDEN, body = v1t::error::ErrorInfo),
         (status = StatusCode::CONFLICT, body = v1t::error::ErrorInfo),
@@ -2042,5 +2046,95 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response, "unary empty until response").await;
         assert_eq!(body["records"], serde_json::json!([]));
+
+        // Non-empty unary read with wait=0 reaching the tail returns 200 OK with tail;
+        // a count-bounded read stopping before the tail omits tail.
+        let response = send(
+            &app,
+            request_builder(
+                "GET",
+                format!("/v1/streams/{stream}/records?seq_num=0&wait=0"),
+                &basin,
+            )
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response, "unary catch-up response").await;
+        assert_eq!(body["records"].as_array().map(Vec::len), Some(2));
+        assert_eq!(body["tail"]["seq_num"], 2);
+        assert_eq!(body["tail"]["timestamp"], 2000);
+
+        let response = send(
+            &app,
+            request_builder(
+                "GET",
+                format!("/v1/streams/{stream}/records?seq_num=0&count=1&wait=0"),
+                &basin,
+            )
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response, "unary bounded response").await;
+        assert_eq!(body["records"].as_array().map(Vec::len), Some(1));
+        assert!(body.get("tail").is_none());
+
+        // Fully trimmed stream: zero-wait unary reads across the trimmed gap return 416 with tail.
+        let (trimmed_app, trimmed_backend, trimmed_basin, trimmed_stream) = setup_app_with_config(
+            "unary-trimmed-416",
+            BasinConfig::default(),
+            client_timestamp_stream_config(),
+        )
+        .await;
+        append_timestamped(
+            &trimmed_backend,
+            &trimmed_basin,
+            &trimmed_stream,
+            &[(b"a", 1000), (b"b", 2000)],
+        )
+        .await;
+        append_trim(
+            &trimmed_backend,
+            &trimmed_basin,
+            &trimmed_stream,
+            u64::MAX,
+            Some(3000),
+        )
+        .await;
+        trimmed_backend.run_stream_trim_for_test().await;
+
+        for query in [
+            "seq_num=0",
+            "seq_num=0&wait=0",
+            "tail_offset=3",
+            "tail_offset=10",
+            "tail_offset=0",
+            "timestamp=1000",
+            "timestamp=3000",
+            "seq_num=10&clamp=true",
+        ] {
+            let response = send(
+                &trimmed_app,
+                request_builder(
+                    "GET",
+                    format!("/v1/streams/{trimmed_stream}/records?{query}"),
+                    &trimmed_basin,
+                )
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await;
+            assert_eq!(
+                response.status(),
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                "unary trimmed query `{query}` should return 416"
+            );
+            let body = response_json(response, "416 trimmed tail body").await;
+            assert_eq!(body["tail"]["seq_num"], 3);
+            assert_eq!(body["tail"]["timestamp"], 3000);
+        }
     }
 }
