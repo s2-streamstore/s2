@@ -859,11 +859,10 @@ pub fn tail(
     args: &TailArgs,
     encryption_key: Option<&EncryptionKey>,
 ) -> Result<impl Stream<Item = Result<SequencedRecord, CliError>> + Send + Unpin, CliError> {
-    let mut records = if !args.follow && args.lines == 0 {
+    let stream = stream_with_encryption(s2, args.uri.clone(), encryption_key);
+    let records = if !args.follow && args.lines == 0 {
         None
     } else {
-        let stream = stream_with_encryption(s2, args.uri.clone(), encryption_key);
-
         // Use clamp to handle empty streams gracefully - if we ask for
         // TailOffset(10) but there are fewer records, clamp to the actual start.
         let mut input = ReadInput::new(ReadStart::TailOffset(args.lines)).with_clamp(true);
@@ -880,7 +879,11 @@ pub fn tail(
 
     let follow = args.follow;
     Ok(Box::pin(async_stream::stream! {
-        let Some(records) = records.as_mut() else {
+        let Some(mut records) = records else {
+            // Still verify auth and stream existence (matching GNU `tail -n 0`).
+            if let Err(e) = stream.check_tail().await {
+                yield Err(CliError::op(OpKind::Tail, e));
+            }
             return;
         };
         let mut seen_any = false;

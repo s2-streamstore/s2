@@ -1159,11 +1159,11 @@ pub struct ReadArgs {
     pub tail_offset: Option<u64>,
 
     /// Limit the number of records returned.
-    #[arg(short = 'n', long)]
+    #[arg(short = 'n', long, value_parser = clap::value_parser!(u64).range(1..))]
     pub count: Option<u64>,
 
     /// Limit the number of bytes returned.
-    #[arg(short = 'b', long)]
+    #[arg(short = 'b', long, value_parser = clap::value_parser!(u64).range(1..))]
     pub bytes: Option<u64>,
 
     /// Clamp the start position at the tail position.

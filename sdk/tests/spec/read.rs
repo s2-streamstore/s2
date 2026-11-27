@@ -1149,6 +1149,84 @@ async fn regression_read_session_r10d_reduced_wait_refreshes_after_record() {
         Some(4),
         "attempt 3 should refresh wait after new record: {waits:?}"
     );
+
+    // 2. R10d: if the reduced-wait attempt fetched a record WITHOUT catching up (for example, a
+    //    pre-tail `until` or partial-`bytes` cutoff with `is_caught_up == false`) and ended
+    //    cleanly, the session finishes immediately without opening an unnecessary 3rd attempt.
+    let pretail_waits = Arc::new(Mutex::new(Vec::<Option<u32>>::new()));
+    let pretail_attempt = Arc::new(AtomicUsize::new(0));
+    let pretail_reset = Arc::new(tokio::sync::Notify::new());
+    let pretail_server = MockH2Server::start({
+        let pretail_waits = pretail_waits.clone();
+        let pretail_attempt = pretail_attempt.clone();
+        let pretail_reset = pretail_reset.clone();
+        move |_conn_id, req, respond| {
+            let pretail_waits = pretail_waits.clone();
+            let pretail_attempt = pretail_attempt.clone();
+            let pretail_reset = pretail_reset.clone();
+            async move {
+                let wait_param = query_pairs(req.uri())
+                    .get("wait")
+                    .and_then(|v| v.parse::<u32>().ok());
+                pretail_waits.lock().unwrap().push(wait_param);
+                let n = pretail_attempt.fetch_add(1, Ordering::SeqCst);
+                let Some(mut s2s) = S2sResponder::open(respond) else {
+                    return;
+                };
+                match n {
+                    0 => {
+                        s2s.send_regular(&proto_heartbeat(0), false, false);
+                        pretail_reset.notified().await;
+                        s2s.reset(h2::Reason::INTERNAL_ERROR);
+                    }
+                    _ => {
+                        // Record 0 with tail 5 (`is_caught_up == false`) followed by clean EOF
+                        // (e.g. `until` cutoff before tail).
+                        s2s.send_regular(&proto_read_batch(0, 5), false, true);
+                    }
+                }
+            }
+        }
+    })
+    .await;
+
+    let mut pretail_sess = pretail_server
+        .stream(fast_retry_config(3))
+        .read_session(
+            ReadInput::new(ReadStart::SeqNum(0))
+                .with_wait_secs(4)
+                .with_until(1000),
+            ReadSessionConfig::default(),
+        )
+        .unwrap();
+    let mut pretail_cu = pretail_sess.caught_up();
+    let caught = tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::select! {
+            res = &mut pretail_cu => res.unwrap(),
+            item = pretail_sess.next() => panic!("unexpected item before heartbeat: {item:?}"),
+        }
+    })
+    .await
+    .expect("heartbeat must resolve caught_up while iterating");
+    assert_eq!(caught.seq_num, 0);
+
+    advance_virtual_time(Duration::from_millis(1200)).await;
+    pretail_reset.notify_one();
+
+    let mut pretail_seqs = Vec::new();
+    while let Some(res) = pretail_sess.next().await {
+        pretail_seqs.push(res.unwrap().seq_num);
+    }
+    assert_eq!(pretail_seqs, vec![0]);
+    assert!(!pretail_sess.is_caught_up());
+    let pretail_waits = pretail_waits.lock().unwrap().clone();
+    assert_eq!(
+        pretail_waits.len(),
+        2,
+        "R10d: pre-tail clean stop (is_caught_up == false) must not open a 3rd attempt: {pretail_waits:?}"
+    );
+    assert_eq!(pretail_waits[0], Some(4));
+    assert!(pretail_waits[1].unwrap() < 4);
 }
 
 // spec: r1 R7, R9a, R10c, T9

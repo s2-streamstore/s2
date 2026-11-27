@@ -702,6 +702,10 @@ fn tail_stream() {
         .stdout(predicate::str::is_empty());
 
     cleanup_stream(&basin, &stream);
+
+    s2().args(["tail", &uri, "-n", "0", "--format", "text"])
+        .assert()
+        .failure();
 }
 
 #[test]

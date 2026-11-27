@@ -874,7 +874,9 @@ impl ReadInput {
     ///
     /// For [`read_session`](crate::S2Stream::read_session) and
     /// [`read_batch_session`](crate::S2Stream::read_batch_session), `count` must be at least `1`
-    /// when set (`0` fails with [`ValidationError`] when the session is opened).
+    /// when set (`0` fails with
+    /// [`ReadSessionError::Validation`](crate::error::ReadSessionError::Validation) when the
+    /// session is opened).
     pub fn with_count(self, count: u64) -> Self {
         Self {
             count: Some(count),
@@ -888,7 +890,9 @@ impl ReadInput {
     ///
     /// For [`read_session`](crate::S2Stream::read_session) and
     /// [`read_batch_session`](crate::S2Stream::read_batch_session), `bytes` must be at least `1`
-    /// when set (`0` fails with [`ValidationError`] when the session is opened).
+    /// when set (`0` fails with
+    /// [`ReadSessionError::Validation`](crate::error::ReadSessionError::Validation) when the
+    /// session is opened).
     pub fn with_bytes(self, bytes: u64) -> Self {
         Self {
             bytes: Some(bytes),

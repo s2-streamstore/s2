@@ -329,8 +329,8 @@ enum CatchUpSlot {
     /// `caught_up()` call while pending so sessions that never await `caught_up()` avoid
     /// allocating `CaughtUpSignal`/`Notify` on init or tailing batches.
     Pending(Option<Arc<CaughtUpSignal>>),
-    /// Caught up to `last_observed_tail` (retained even after the session closes).
-    CaughtUp(StreamPosition),
+    /// Caught up to `ReadStateInner::last_observed_tail` (retained even after the session closes).
+    CaughtUp,
     /// Session closed while not caught up; future `caught_up()` calls fail with this error.
     ClosedNotCaughtUp(ReadSessionError),
 }
@@ -341,16 +341,18 @@ impl CatchUpSlot {
     }
 
     fn is_caught_up(&self) -> bool {
-        matches!(self, Self::CaughtUp(_))
+        matches!(self, Self::CaughtUp)
     }
 
-    fn future(&mut self) -> CaughtUpFuture {
+    fn future(&mut self, last_observed_tail: Option<StreamPosition>) -> CaughtUpFuture {
         match self {
             Self::Pending(slot) => {
                 let signal = slot.get_or_insert_with(|| Arc::new(CaughtUpSignal::new()));
                 CaughtUpFuture::Pending(signal.clone())
             }
-            Self::CaughtUp(tail) => CaughtUpFuture::Ready(Ok(*tail)),
+            Self::CaughtUp => CaughtUpFuture::Ready(Ok(
+                last_observed_tail.expect("caught up implies last_observed_tail is set")
+            )),
             Self::ClosedNotCaughtUp(err) => CaughtUpFuture::Ready(Err(err.clone())),
         }
     }
@@ -376,9 +378,9 @@ impl TerminalClose {
 struct ReadStateInner {
     next_seq_num: Option<u64>,
     last_observed_tail: Option<StreamPosition>,
-    /// `tail` carried by the latest valid received batch or heartbeat (`None` initially or when
-    /// the latest valid batch omitted `tail`).
-    latest_message_tail: Option<StreamPosition>,
+    /// `tail.seq_num` carried by the latest valid received batch or heartbeat (`None` initially or
+    /// when the latest valid batch omitted `tail`).
+    latest_message_tail_seq: Option<u64>,
     catch_up: CatchUpSlot,
     /// Locked-in session close reason (`R9`). Once set, later closes or aborts have no effect.
     closed: Option<TerminalClose>,
@@ -393,7 +395,7 @@ impl ReadStateInner {
         Self {
             next_seq_num: initial_next_seq_num,
             last_observed_tail: None,
-            latest_message_tail: None,
+            latest_message_tail_seq: None,
             catch_up: CatchUpSlot::pending(),
             closed: None,
             context,
@@ -406,17 +408,16 @@ impl ReadStateInner {
     }
 
     fn compute_caught_up_tail(&self) -> Option<StreamPosition> {
-        let tail = self.latest_message_tail?;
-        (self.next_seq_num == Some(tail.seq_num))
-            .then_some(self.last_observed_tail)
-            .flatten()
+        let tail_seq = self.latest_message_tail_seq?;
+        self.last_observed_tail
+            .filter(|_| self.next_seq_num == Some(tail_seq))
     }
 
     fn recompute_caught_up(&mut self, wake: &mut PendingWake) {
         debug_assert!(self.closed.is_none());
         match self.compute_caught_up_tail() {
             Some(tail) => {
-                let prev = std::mem::replace(&mut self.catch_up, CatchUpSlot::CaughtUp(tail));
+                let prev = std::mem::replace(&mut self.catch_up, CatchUpSlot::CaughtUp);
                 if let CatchUpSlot::Pending(Some(signal)) = prev {
                     wake.set(signal.set_result(Ok(tail)));
                 }
@@ -477,7 +478,7 @@ impl ReadStateInner {
         if let Some(tail) = tail {
             self.update_observed_tail(tail);
         }
-        self.latest_message_tail = tail;
+        self.latest_message_tail_seq = tail.map(|t| t.seq_num);
         self.next_seq_num = Some(delivered_last_seq.saturating_add(1));
         self.recompute_caught_up(wake);
         if close_clean {
@@ -506,7 +507,7 @@ impl ReadStateInner {
         self.attempts = 1;
         self.update_observed_tail(tail);
         self.next_seq_num = Some(tail.seq_num);
-        self.latest_message_tail = Some(tail);
+        self.latest_message_tail_seq = Some(tail.seq_num);
         self.recompute_caught_up(wake);
     }
 
@@ -621,7 +622,7 @@ impl ReadSessionState {
             if self.shutdown.is_cancelled() {
                 inner.abort_for_client_close(wake);
             }
-            inner.catch_up.future()
+            inner.catch_up.future(inner.last_observed_tail)
         });
         CaughtUp {
             inner: future,
@@ -788,7 +789,6 @@ struct ReadSessionCore {
     start: ReadStart,
     end: ReadEnd,
     baseline_wait: Option<u32>,
-    has_stop_option: bool,
     retry_policy: ReadSessionRetryPolicy,
     refreshes_tokens: bool,
     op_name: &'static str,
@@ -817,9 +817,8 @@ impl ReadSessionCore {
         let retry_backoff = RetryBackoff::from_config(&client.base().retry_config());
         let refreshes_tokens = client.base().refreshes_tokens();
         let (start, end, _) = input.into_api_parts();
+        debug_assert!(!read_limits_exhausted(&end));
         let baseline_wait = end.wait;
-        let has_stop_option =
-            end.count.is_some() || end.bytes.is_some() || end.until.is_some() || end.wait.is_some();
         let initial_next_seq_num = if start.clamp == Some(true) {
             None
         } else {
@@ -836,7 +835,6 @@ impl ReadSessionCore {
             start,
             end,
             baseline_wait,
-            has_stop_option,
             retry_policy: config.retry_policy,
             refreshes_tokens,
             op_name,
@@ -849,6 +847,13 @@ impl ReadSessionCore {
             transport: SyncCell::new(PollTransport::new()),
             lifecycle: StreamLifecycle::Active,
         }
+    }
+
+    fn has_stop_option(&self) -> bool {
+        self.end.count.is_some()
+            || self.end.bytes.is_some()
+            || self.end.until.is_some()
+            || self.baseline_wait.is_some()
     }
 
     fn transport_mut(&mut self) -> &mut PollTransport {
@@ -915,14 +920,12 @@ impl ReadSessionCore {
         }
     }
 
-    fn commit_record_delivered(
+    fn commit_delivered(
         &mut self,
-        seq_num: u64,
         close_clean: bool,
+        f: impl FnOnce(&mut ReadStateInner, &mut PendingWake),
     ) -> Result<(), TerminalClose> {
-        self.update_open_or_finish(|inner, wake| {
-            inner.on_record_delivered(seq_num, close_clean, wake);
-        })?;
+        self.update_open_or_finish(f)?;
         if close_clean {
             // Close reason is now locked in (`R9`), so no further request can open and dropping
             // the last `BasinClient` cannot alter `ReadSessionState`.
@@ -931,19 +934,25 @@ impl ReadSessionCore {
         Ok(())
     }
 
+    fn commit_record_delivered(
+        &mut self,
+        seq_num: u64,
+        close_clean: bool,
+    ) -> Result<(), TerminalClose> {
+        self.commit_delivered(close_clean, |inner, wake| {
+            inner.on_record_delivered(seq_num, close_clean, wake);
+        })
+    }
+
     fn commit_batch_delivered(
         &mut self,
         tail: Option<StreamPosition>,
         delivered_last_seq: u64,
         close_clean: bool,
     ) -> Result<(), TerminalClose> {
-        self.update_open_or_finish(|inner, wake| {
+        self.commit_delivered(close_clean, |inner, wake| {
             inner.on_batch_decoded_and_delivered(tail, delivered_last_seq, close_clean, wake);
-        })?;
-        if close_clean {
-            self.client = None;
-        }
-        Ok(())
+        })
     }
 
     /// If the session has already closed (`R9`) or client shutdown (`C12`/`R9d`) is active,
@@ -1003,14 +1012,6 @@ impl ReadSessionCore {
             DriverPhase::Opening(AbortOnDropHandle::new(tokio::spawn(fut)));
     }
 
-    fn finish_clean_end_now(&mut self) -> TerminalClose {
-        self.finish_session(TerminalClose::Clean)
-    }
-
-    fn finish_terminal_error(&mut self, err: ReadSessionError) -> TerminalClose {
-        self.finish_session(TerminalClose::Error(err))
-    }
-
     /// Schedule retry backoff on `err`, or lock in and return the terminal poll result.
     fn schedule_retry_or_fail(&mut self, err: ReadSessionError) -> DriverStep {
         let attempts = self.retry_backoff.attempt_number();
@@ -1025,7 +1026,7 @@ impl ReadSessionCore {
             self.transport_mut().phase = DriverPhase::Backoff(deadline_after(backoff));
             DriverStep::Continue
         } else {
-            DriverStep::Done(self.finish_terminal_error(err))
+            DriverStep::Done(self.finish_session(TerminalClose::Error(err)))
         }
     }
 
@@ -1041,7 +1042,7 @@ impl ReadSessionCore {
             &self.context,
             attempts,
         ) {
-            return BatchStep::Done(self.finish_terminal_error(err));
+            return BatchStep::Done(self.finish_session(TerminalClose::Error(err)));
         }
 
         // T5a: every valid message is a non-empty batch or a heartbeat carrying a tail, so it
@@ -1116,12 +1117,15 @@ impl ReadSessionCore {
     fn handle_eof(&mut self, fetched_record: bool) -> DriverStep {
         // T9 / R9a: clean EOF ends iteration cleanly ONLY when a stop option was set; otherwise it
         // is a ConnectionLostError and retried per retry_policy.
-        if self.has_stop_option {
-            // R10d: if this attempt ran with a reduced `wait` budget and fetched new records
-            // (restarting the idle clock), continue with the refreshed wait rather than stopping
-            // prematurely when the server's shorter timer expires.
+        if self.has_stop_option() {
+            debug_assert!(!read_limits_exhausted(&self.end));
+            // R10d: if this attempt ran with a reduced `wait` budget, fetched new records
+            // (restarting the idle clock), and ended cleanly while caught up (`is_caught_up`),
+            // continue with the refreshed wait rather than stopping prematurely when the server's
+            // shorter timer expires. Requiring `is_caught_up` avoids an unnecessary follow-up
+            // request on pre-tail `until` or partial-`bytes` cutoffs.
             if fetched_record
-                && !read_limits_exhausted(&self.end)
+                && self.state.is_caught_up()
                 && let (Some(base_w), Some(sent_w)) = (self.baseline_wait, self.end.wait)
                 && sent_w < base_w
                 && remaining_wait(self.baseline_wait, self.idle_since).is_some_and(|w| w > 0)
@@ -1129,7 +1133,7 @@ impl ReadSessionCore {
                 return DriverStep::Continue;
             }
             debug!("read session ended cleanly on stop condition");
-            return DriverStep::Done(self.finish_clean_end_now());
+            return DriverStep::Done(self.finish_session(TerminalClose::Clean));
         }
         let err = ReadSessionError::ConnectionLost(ConnectionLostError::new_with_context(
             "read stream ended cleanly without a stop condition",
@@ -1303,11 +1307,12 @@ impl ReadSessionCore {
 impl Drop for ReadSessionCore {
     fn drop(&mut self) {
         self.state.update(|inner, wake| {
-            if inner.closed.is_none() && self.state.shutdown.is_cancelled() {
-                inner.abort_for_client_close(wake);
-                return;
+            if inner
+                .lock_in_abort_if_cancelled(&self.state.shutdown, wake)
+                .is_none()
+            {
+                inner.close_with(TerminalClose::Clean, wake);
             }
-            inner.close_with(TerminalClose::Clean, wake);
         });
     }
 }
@@ -2155,7 +2160,7 @@ mod tests {
             Err(ReadSessionError::Aborted(_))
         ));
         assert!(matches!(
-            session.core.finish_clean_end_now(),
+            session.core.finish_session(TerminalClose::Clean),
             TerminalClose::Error(ReadSessionError::Aborted(_))
         ));
         assert!(session.next().await.is_none());
@@ -2173,7 +2178,9 @@ mod tests {
             ErrorContext::default().into_read_only(),
         ));
         assert!(matches!(
-            session.core.finish_terminal_error(timeout_err),
+            session
+                .core
+                .finish_session(TerminalClose::Error(timeout_err)),
             TerminalClose::Error(ReadSessionError::Aborted(_))
         ));
         assert!(session.next().await.is_none());
