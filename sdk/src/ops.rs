@@ -1042,8 +1042,8 @@ impl S2Stream {
     ///
     /// # Errors
     ///
-    /// Returns [`AppendSessionError::Validation`] if `config` is invalid, or
-    /// [`AppendSessionError::ClientClosed`] if [`S2::close`] has already been called.
+    /// Returns [`AppendSessionError::ClientClosed`] if [`S2::close`] has already been called, or
+    /// [`AppendSessionError::Validation`] if `config` is invalid.
     ///
     /// # Panics
     ///
@@ -1052,13 +1052,13 @@ impl S2Stream {
         &self,
         config: AppendSessionConfig,
     ) -> Result<AppendSession, AppendSessionError> {
+        self.ensure_open("append_session", false)?;
         let scope = self
             .client
             .stream_scope("append_session", &self.name, false);
         config
             .validate()
             .map_err(|e| scope.context(1).format_validation(e))?;
-        self.ensure_open("append_session", false)?;
         Ok(AppendSession::new(
             self.client.clone(),
             self.name.clone(),
@@ -1071,18 +1071,18 @@ impl S2Stream {
     ///
     /// # Errors
     ///
-    /// Returns [`AppendSessionError::Validation`] if `config` is invalid, or
-    /// [`AppendSessionError::ClientClosed`] if [`S2::close`] has already been called.
+    /// Returns [`AppendSessionError::ClientClosed`] if [`S2::close`] has already been called, or
+    /// [`AppendSessionError::Validation`] if `config` is invalid.
     ///
     /// # Panics
     ///
     /// Panics if called outside the context of a Tokio runtime.
     pub fn producer(&self, config: ProducerConfig) -> Result<Producer, AppendSessionError> {
+        self.ensure_open("producer", false)?;
         let scope = self.client.stream_scope("producer", &self.name, false);
         config
             .validate()
             .map_err(|e| scope.context(1).format_validation(e))?;
-        self.ensure_open("producer", false)?;
         Ok(Producer::new(
             self.client.clone(),
             self.name.clone(),
@@ -1101,20 +1101,20 @@ impl S2Stream {
     ///
     /// # Errors
     ///
-    /// Returns [`ReadSessionError::Validation`] if `input.count() == Some(0)` or
-    /// `input.bytes() == Some(0)`, or [`ReadSessionError::ClientClosed`] if [`S2::close`] has
-    /// already been called.
+    /// Returns [`ReadSessionError::ClientClosed`] if [`S2::close`] has already been called, or
+    /// [`ReadSessionError::Validation`] if `input.count() == Some(0)` or
+    /// `input.bytes() == Some(0)`.
     pub fn read_session(
         &self,
         input: impl Into<ReadInput>,
         config: ReadSessionConfig,
     ) -> Result<ReadSession, ReadSessionError> {
+        self.ensure_open("read_session", true)?;
         let scope = self.client.stream_scope("read_session", &self.name, true);
         let input = input.into();
         input
             .validate_for_session()
             .map_err(|e| scope.context(1).format_validation(e))?;
-        self.ensure_open("read_session", true)?;
         let headers = self.headers(input.stream_config());
         Ok(ReadSession::open(
             self.client.clone(),
@@ -1134,14 +1134,15 @@ impl S2Stream {
     ///
     /// # Errors
     ///
-    /// Returns [`ReadSessionError::Validation`] if `input.count() == Some(0)` or
-    /// `input.bytes() == Some(0)`, or [`ReadSessionError::ClientClosed`] if [`S2::close`] has
-    /// already been called.
+    /// Returns [`ReadSessionError::ClientClosed`] if [`S2::close`] has already been called, or
+    /// [`ReadSessionError::Validation`] if `input.count() == Some(0)` or
+    /// `input.bytes() == Some(0)`.
     pub fn read_batch_session(
         &self,
         input: impl Into<ReadInput>,
         config: ReadSessionConfig,
     ) -> Result<ReadBatchSession, ReadSessionError> {
+        self.ensure_open("read_batch_session", true)?;
         let scope = self
             .client
             .stream_scope("read_batch_session", &self.name, true);
@@ -1149,7 +1150,6 @@ impl S2Stream {
         input
             .validate_for_session()
             .map_err(|e| scope.context(1).format_validation(e))?;
-        self.ensure_open("read_batch_session", true)?;
         let headers = self.headers(input.stream_config());
         Ok(ReadBatchSession::open(
             self.client.clone(),

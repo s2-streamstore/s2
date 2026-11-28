@@ -880,9 +880,13 @@ pub fn tail(
     let follow = args.follow;
     Ok(Box::pin(async_stream::stream! {
         let Some(mut records) = records else {
-            // Still verify auth and stream existence (matching GNU `tail -n 0`).
-            if let Err(e) = stream.check_tail().await {
-                yield Err(CliError::op(OpKind::Tail, e));
+            // Use a unary `count = 0` read rather than `check_tail()` so `-n 0` requires the
+            // same `read` permission and validates encryption keys and stream existence
+            // (matching GNU `tail -n 0`).
+            let input = ReadInput::new(ReadStart::TAIL).with_count(0);
+            match stream.read(input).await {
+                Ok(_) | Err(sdk::error::ReadError::ReadUnwritten(_)) => {}
+                Err(e) => yield Err(CliError::op(OpKind::Tail, e)),
             }
             return;
         };

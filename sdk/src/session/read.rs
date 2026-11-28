@@ -353,7 +353,7 @@ impl ReadStateInner {
         self.closed.as_ref().map(|close| match close {
             TerminalClose::Error(err) => Err(err.clone()),
             TerminalClose::Clean => Err(ReadSessionError::SessionClosed(
-                SessionClosedError::new_with_context(None, self.context.clone()),
+                SessionClosedError::new_with_context(None, self.current_context()),
             )),
         })
     }
@@ -578,10 +578,9 @@ enum DriverPhase {
 ///
 /// Boxing keeps [`ReadSession`] and [`ReadBatchSession`] `Unpin` (since `Sleep` is `!Unpin`),
 /// while reusing a single allocation via [`Sleep::reset`] avoids per-wait heap churn and avoids
-/// taking Tokio's timer-driver lock on every batch or chunk arrival. Trade-off: clearing
-/// `heartbeat_deadline` on progress leaves the prior timer entry in Tokio's wheel until it is
-/// next extended, dropped on close/drop, or expires once (at most one harmless stray wake if the
-/// session parks immediately after receiving a frame).
+/// taking Tokio's timer-driver lock on every batch or chunk arrival. Ending an attempt on handover
+/// or limit exhaustion drops the `Sleep` immediately (`T10`) so buffered record delivery never
+/// retains a stale timer; steady-state message progress keeps it warm for the next wait.
 #[derive(Default)]
 struct ReusableSleep {
     sleep: Option<(tokio::runtime::Id, Pin<Box<Sleep>>)>,
@@ -891,10 +890,12 @@ impl ReadSessionCore {
 
     fn maybe_handover(&mut self, reconnect_advised: bool) {
         if reconnect_advised && self.advised_reconnects.should_reconnect() {
-            // T6a / T10: end the advised attempt immediately (releasing the retiring server) and
-            // open the replacement request on the next transport pull (immediately for a
-            // heartbeat, since iteration keeps pulling).
-            self.transport_mut().phase = DriverPhase::Idle;
+            // T6a / T10: end the advised attempt immediately (releasing the retiring server and
+            // stopping any armed heartbeat timer) and open the replacement request on the next
+            // transport pull (immediately for a heartbeat, since iteration keeps pulling).
+            let transport = self.transport_mut();
+            transport.phase = DriverPhase::Idle;
+            transport.sleep = ReusableSleep::default();
             self.advised_reconnects.record();
             debug!(
                 next_seq_num = ?self.start.seq_num,
@@ -958,10 +959,13 @@ impl ReadSessionCore {
                 }
                 let close_clean = read_limits_exhausted(&self.end);
                 if close_clean {
-                    // R10c / T10: stop condition met; end the underlying request immediately
-                    // without waiting for trailing EOF or opening another request.
+                    // R10c / T10: stop condition met; end the underlying request and stop any
+                    // armed heartbeat timer immediately without waiting for trailing EOF or
+                    // opening another request.
                     debug!("read session count/bytes limit exhausted");
-                    self.transport_mut().phase = DriverPhase::Idle;
+                    let transport = self.transport_mut();
+                    transport.phase = DriverPhase::Idle;
+                    transport.sleep = ReusableSleep::default();
                 } else {
                     self.maybe_handover(reconnect_advised);
                 }
@@ -2923,5 +2927,62 @@ mod tests {
                 ReadSessionConfig::default(),
             )
             .unwrap();
+    }
+
+    // spec: r1 E7, R8d, T10
+    #[tokio::test(start_paused = true)]
+    async fn clean_close_caught_up_error_preserves_attempt_count_and_handover_stops_timer() {
+        // 1. E7: clean close on attempt 2 (and drop on attempt 2) preserves attempt count in
+        //    `caught_up()`'s `SessionClosedError`.
+        let (mut session, tx, state, _shutdown) = test_session_with_active_stream(
+            ReadInput::new(crate::types::ReadStart::SeqNum(0)).with_wait_secs(5),
+        );
+        state.set_attempt(2);
+        let cu = state.caught_up();
+        drop(tx);
+        assert!(session.next().await.is_none());
+        let err = cu.await.unwrap_err();
+        assert!(matches!(err, ReadSessionError::SessionClosed(_)), "{err:?}");
+        assert!(
+            err.to_string().contains("after 2 attempts"),
+            "expected E7 attempt count in clean-close caught_up error: {err}"
+        );
+
+        let (session, _tx, state, _shutdown) =
+            test_session_with_active_stream(ReadInput::new(crate::types::ReadStart::SeqNum(0)));
+        state.set_attempt(2);
+        let cu = state.caught_up();
+        drop(session);
+        let err = cu.await.unwrap_err();
+        assert!(matches!(err, ReadSessionError::SessionClosed(_)), "{err:?}");
+        assert!(
+            err.to_string().contains("after 2 attempts"),
+            "expected E7 attempt count in dropped-session caught_up error: {err}"
+        );
+
+        // 2. T10: armed heartbeat timer is stopped immediately when a multi-record batch triggers
+        //    handover or exhausts count/bytes while buffered records remain.
+        for (input, advised) in [
+            (
+                ReadInput::new(crate::types::ReadStart::SeqNum(0)).with_count(2),
+                false,
+            ),
+            (ReadInput::new(crate::types::ReadStart::SeqNum(0)), true),
+        ] {
+            let (mut session, tx, _state, _shutdown) = test_session_with_active_stream(input);
+            assert!(poll!(std::pin::pin!(session.next())).is_pending());
+            assert!(session.core.transport_mut().sleep.sleep.is_some());
+
+            tx.send(Ok(S2sFrame {
+                msg: proto_batch(&[0, 1], Some(2)),
+                reconnect_advised: advised,
+            }))
+            .unwrap();
+            assert_eq!(session.next().await.unwrap().unwrap().seq_num, 0);
+            assert!(
+                session.core.transport_mut().sleep.sleep.is_none(),
+                "T10: ended attempt's heartbeat timer must be stopped immediately (advised={advised})"
+            );
+        }
     }
 }

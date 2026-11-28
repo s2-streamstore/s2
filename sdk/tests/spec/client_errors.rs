@@ -752,6 +752,29 @@ async fn spec_c12_client_close_aborts_inflight_and_sessions_and_rejects_new_call
         ),
         Err(ReadSessionError::ClientClosed(_))
     ));
+    // C12: closed-client check takes precedence over option validation on session constructors.
+    assert!(matches!(
+        stream.read_session(
+            ReadInput::new(ReadStart::TAIL).with_count(0),
+            ReadSessionConfig::default()
+        ),
+        Err(ReadSessionError::ClientClosed(_))
+    ));
+    assert!(matches!(
+        stream.read_batch_session(
+            ReadInput::new(ReadStart::TAIL).with_bytes(0),
+            ReadSessionConfig::default()
+        ),
+        Err(ReadSessionError::ClientClosed(_))
+    ));
+    assert!(matches!(
+        stream.append_session(AppendSessionConfig::new().with_max_unacked_bytes(0)),
+        Err(AppendSessionError::ClientClosed(_))
+    ));
+    assert!(matches!(
+        stream.producer(ProducerConfig::new().with_max_batch_records(0)),
+        Err(AppendSessionError::ClientClosed(_))
+    ));
 
     // Dropping S2 without calling close() keeps sessions alive.
     let ack_server = MockH2Server::start(|_conn_id, req, respond| async move {

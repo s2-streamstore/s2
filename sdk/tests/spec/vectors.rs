@@ -1914,10 +1914,34 @@ fn case_is_representable(case: &ReadStateCase) -> bool {
 }
 
 fn case_supports_batch_view(case: &ReadStateCase) -> bool {
-    case.steps.iter().all(|step| match step {
-        ReadStateStep::ReceiveBatch { records, .. } => records.len() <= 1,
-        _ => true,
-    })
+    let mut pending_multi = false;
+    for step in &case.steps {
+        match step {
+            ReadStateStep::ReceiveBatch { records, .. } if records.len() > 1 => {
+                pending_multi = true;
+            }
+            ReadStateStep::Pull { expect } if pending_multi => {
+                let is_error = match expect {
+                    StepExpect::Direct(e) => {
+                        matches!(e.iteration, Some(IterationExpect::Error(_)))
+                    }
+                    StepExpect::Conditional {
+                        if_representable,
+                        otherwise,
+                    } => {
+                        matches!(if_representable.iteration, Some(IterationExpect::Error(_)))
+                            && matches!(otherwise.iteration, Some(IterationExpect::Error(_)))
+                    }
+                };
+                if !is_error {
+                    return false;
+                }
+                pending_multi = false;
+            }
+            _ => {}
+        }
+    }
+    !pending_multi
 }
 
 fn pos_tuple(pos: s2_sdk::types::StreamPosition) -> (u64, u64) {
@@ -1986,6 +2010,7 @@ struct ReadStateHarness {
     attempts: Arc<Mutex<Vec<AttemptChannel>>>,
     server_attempt: Arc<AtomicUsize>,
     unexpected_requests: Arc<AtomicUsize>,
+    expects_initial_request: bool,
     pending_cu: Option<CaughtUp>,
     resolved_cus: Vec<(CaughtUp, (u64, u64))>,
     target_attempt: usize,
@@ -1998,11 +2023,15 @@ impl ReadStateHarness {
             0,
             "{label}: SDK opened unexpected extra request(s)"
         );
+        let expected_max = if self.expects_initial_request {
+            self.target_attempt + 1
+        } else {
+            0
+        };
         let opened = self.server_attempt.load(Ordering::SeqCst);
         assert!(
-            opened <= self.target_attempt + 1,
-            "{label}: SDK opened {opened} request(s), expected at most {}",
-            self.target_attempt + 1
+            opened <= expected_max,
+            "{label}: SDK opened {opened} request(s), expected at most {expected_max}"
         );
     }
 
@@ -2117,15 +2146,23 @@ impl ReadStateHarness {
         }
 
         // R8a: every previously resolved CaughtUp future retains its original resolved tail
-        // forever.
-        for (cu, expected_pos) in &self.resolved_cus {
-            let actual = cu.clone().await.unwrap_or_else(|e| {
-                panic!("{label}: previously resolved caught_up changed to {e:?}")
+        // forever (verify both direct re-poll of the original and polling a clone).
+        for (cu, expected_pos) in &mut self.resolved_cus {
+            let direct = Pin::new(&mut *cu).await.unwrap_or_else(|e| {
+                panic!("{label}: previously resolved caught_up changed on re-poll to {e:?}")
             });
             assert_eq!(
-                pos_tuple(actual),
+                pos_tuple(direct),
                 *expected_pos,
-                "{label}: previously resolved caught_up tail mutated (R8a)"
+                "{label}: previously resolved caught_up tail mutated on re-poll (R8a)"
+            );
+            let cloned = cu.clone().await.unwrap_or_else(|e| {
+                panic!("{label}: previously resolved caught_up clone changed to {e:?}")
+            });
+            assert_eq!(
+                pos_tuple(cloned),
+                *expected_pos,
+                "{label}: previously resolved caught_up clone tail mutated (R8a)"
             );
         }
     }
@@ -2159,11 +2196,26 @@ async fn run_read_state_case(case: &ReadStateCase, batch_view: bool) {
     let attempts: Arc<Mutex<Vec<AttemptChannel>>> = Arc::new(Mutex::new(Vec::new()));
     let server_attempt = Arc::new(AtomicUsize::new(0));
     let unexpected_requests = Arc::new(AtomicUsize::new(0));
-    let max_allowed_attempts = 1 + case
-        .steps
-        .iter()
-        .filter(|s| matches!(s, ReadStateStep::NextRequest { .. }))
-        .count();
+    let expects_initial_request = case.steps.iter().any(|s| {
+        matches!(
+            s,
+            ReadStateStep::ReceiveBatch { .. }
+                | ReadStateStep::ReceiveHeartbeat { .. }
+                | ReadStateStep::ReceiveCleanEnd
+                | ReadStateStep::ReceiveError { .. }
+                | ReadStateStep::Disconnect
+                | ReadStateStep::NextRequest { .. }
+        )
+    });
+    let max_allowed_attempts = if expects_initial_request {
+        1 + case
+            .steps
+            .iter()
+            .filter(|s| matches!(s, ReadStateStep::NextRequest { .. }))
+            .count()
+    } else {
+        0
+    };
 
     let server = MockH2Server::start({
         let attempts = attempts.clone();
@@ -2338,6 +2390,7 @@ async fn run_read_state_case(case: &ReadStateCase, batch_view: bool) {
         attempts,
         server_attempt,
         unexpected_requests,
+        expects_initial_request,
         pending_cu,
         resolved_cus: Vec::new(),
         target_attempt: 0,
