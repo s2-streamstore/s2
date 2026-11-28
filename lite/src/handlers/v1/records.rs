@@ -15,7 +15,7 @@ use s2_common::{
     basin::BasinName,
     caps::RECORD_BATCH_MAX,
     http::extract::Header,
-    read_extent::ReadLimit,
+    read_extent::{ReadLimit, ReadUntil},
     record::{Metered, MeteredSize as _},
     stream::{ReadBatch, ReadEnd, ReadFrom, ReadSessionOutput, ReadStart, StreamName},
 };
@@ -211,12 +211,13 @@ pub async fn read(
         } => {
             let (start, end) = prepare_read(start, end, ReadMode::Unary)?;
             let may_follow = end.may_follow();
+            let until = end.until;
             let session = backend
                 .open_for_read(&basin, &stream, encryption_key, create_stream_config_patch)
                 .await?
                 .read(start, end)
                 .await?;
-            let batch = merge_read_session(session, may_follow).await?;
+            let batch = merge_read_session(session, may_follow, until).await?;
             match response_mime {
                 JsonOrProto::Json => Ok(Json(v1t::stream::json::serialize_read_batch(
                     format, &batch,
@@ -330,6 +331,7 @@ pub async fn read(
 async fn merge_read_session(
     session: impl Stream<Item = Result<ReadSessionOutput, ReadError>>,
     may_follow: bool,
+    until: ReadUntil,
 ) -> Result<ReadBatch, ServiceError> {
     let mut acc = ReadBatch {
         records: Metered::with_capacity(RECORD_BATCH_MAX.count),
@@ -355,7 +357,7 @@ async fn merge_read_session(
             }
             ReadSessionOutput::Heartbeat(pos) => {
                 acc.tail = Some(pos);
-                if !acc.records.is_empty() {
+                if !acc.records.is_empty() || until.deny(pos.timestamp) {
                     break;
                 }
                 if !may_follow {
@@ -1964,15 +1966,16 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn read_at_tail_until_at_or_before_tail_timestamp_stops_cleanly_across_modes() {
-        async fn assert_empty_clean_stop(
+        async fn assert_at_tail_until_stop(
             app: &axum::Router,
             basin: &BasinName,
             stream: &StreamName,
             query: &str,
+            expected_tail: StreamPosition,
         ) {
             let started = tokio::time::Instant::now();
 
-            // Unary: 200 OK with empty records and no tail (not 416).
+            // Unary: 200 OK with empty records and `tail` (not 416).
             let resp = send(
                 app,
                 request_builder("GET", records_uri(stream, query), basin)
@@ -1987,19 +1990,17 @@ mod tests {
                 serde_json::json!([]),
                 "unary query `{query}`"
             );
-            assert!(body.get("tail").is_none(), "unary query `{query}`");
-
-            // S2S: 200 OK with zero frames and clean EOF.
-            let s2s_batches = s2s_read_batches(app, basin, stream, query).await;
-            assert!(
-                s2s_batches.is_empty(),
-                "S2S query `{query}` should emit no frames, got {s2s_batches:?}"
+            assert_eq!(
+                body["tail"]["seq_num"], expected_tail.seq_num,
+                "unary query `{query}`"
+            );
+            assert_eq!(
+                body["tail"]["timestamp"], expected_tail.timestamp,
+                "unary query `{query}`"
             );
 
-            // SSE: 200 OK with zero batches, zero pings, followed by [DONE].
-            let sse = sse_read_query(app, basin, stream, query, None).await;
-            assert!(sse.seq_nums.is_empty(), "SSE query `{query}`");
-            assert!(sse.pings.is_empty(), "SSE query `{query}`");
+            // S2S + SSE: catching-up tail heartbeat / ping before clean EOF / [DONE].
+            assert_streaming_tail_heartbeat(app, basin, stream, query, expected_tail).await;
 
             assert_eq!(
                 tokio::time::Instant::now(),
@@ -2043,7 +2044,14 @@ mod tests {
             "seq_num=0&until=0&wait=30",
             "seq_num=5&clamp=true&until=0&wait=30",
         ] {
-            assert_empty_clean_stop(&empty_app, &empty_basin, &empty_stream, query).await;
+            assert_at_tail_until_stop(
+                &empty_app,
+                &empty_basin,
+                &empty_stream,
+                query,
+                StreamPosition::MIN,
+            )
+            .await;
         }
 
         // Empty stream with future-reachable until=1 -> unary 416, streaming tail heartbeat.
@@ -2102,8 +2110,21 @@ mod tests {
             "seq_num=2&until=1500&wait=30",
             "seq_num=10&clamp=true&until=2000&wait=30",
         ] {
-            assert_empty_clean_stop(&app, &basin, &stream, query).await;
+            assert_at_tail_until_stop(&app, &basin, &stream, query, ack.end).await;
         }
+
+        // Mid-stream until=2000 starting at seq_num=0 stops before record 1 with no tail heartbeat.
+        let started = tokio::time::Instant::now();
+        let s2s_batches =
+            s2s_read_batches(&app, &basin, &stream, "seq_num=0&until=2000&wait=30").await;
+        assert_eq!(s2s_batches.len(), 1);
+        assert_eq!(s2s_batches[0].records.len(), 1);
+        assert_eq!(s2s_batches[0].records[0].seq_num, 0);
+        assert!(s2s_batches[0].tail.is_none());
+        let sse = sse_read_query(&app, &basin, &stream, "seq_num=0&until=2000&wait=30", None).await;
+        assert_eq!(sse.seq_nums, vec![0]);
+        assert!(sse.pings.is_empty());
+        assert_eq!(tokio::time::Instant::now(), started);
 
         // Future-reachable until=2001 at tail -> unary 416, streaming tail heartbeat.
         let resp = send(
