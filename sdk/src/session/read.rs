@@ -447,8 +447,8 @@ impl ReadSessionState {
     ///
     /// Because reading is on-demand, this does not reflect newer appends while the session is
     /// parked; use [`S2Stream::check_tail`](crate::S2Stream::check_tail) for a fresh stream tail.
-    /// Monotonically non-decreasing by `(seq_num, timestamp)`, persists across attempts, and is
-    /// retained after the session closes.
+    /// Monotonically non-decreasing in both `seq_num` and `timestamp`, persists across attempts,
+    /// and is retained after the session closes.
     #[must_use]
     pub fn last_observed_tail(&self) -> Option<StreamPosition> {
         self.inner.lock().unwrap().last_observed_tail
@@ -1433,7 +1433,7 @@ fn validate_read_batch(
     }
 
     if let (Some(tail), Some(prev_tail)) = (batch.tail, last_observed_tail)
-        && (tail.seq_num, tail.timestamp) < (prev_tail.seq_num, prev_tail.timestamp)
+        && (tail.seq_num < prev_tail.seq_num || tail.timestamp < prev_tail.timestamp)
     {
         return Err(format!(
             "read batch tail ({}, {}) regressed below last observed tail ({}, {})",
@@ -2127,14 +2127,14 @@ mod tests {
             ),
             Ok(ValidatedMessage::Heartbeat(pos)) if pos == position(5)
         ));
-        // Higher seq_num with lower timestamp advances lexicographically (`R6`/`R7b`).
-        let higher_seq_lower_ts = StreamPosition {
+        // Higher seq_num with equal timestamp advances componentwise (`R6`/`R7b`).
+        let higher_seq_equal_ts = StreamPosition {
             seq_num: 6,
-            timestamp: 400,
+            timestamp: 500,
         };
         assert!(matches!(
             validate_read_batch(
-                batch(vec![record(5)], Some(higher_seq_lower_ts)),
+                batch(vec![record(5)], Some(higher_seq_equal_ts)),
                 Some(5),
                 Some(StreamPosition {
                     seq_num: 5,
@@ -2169,24 +2169,29 @@ mod tests {
             validate_read_batch(batch(vec![], Some(position(6))), Some(7), Some(position(5)))
                 .is_err()
         );
-        // Equal seq_num with lower timestamp regresses lexicographically (`R6`).
-        assert!(
-            validate_read_batch(
-                batch(
-                    vec![],
+        // Timestamp regression fails componentwise at both equal and higher seq_num (`R6`).
+        for bad_tail in [
+            StreamPosition {
+                seq_num: 5,
+                timestamp: 400,
+            },
+            StreamPosition {
+                seq_num: 6,
+                timestamp: 400,
+            },
+        ] {
+            assert!(
+                validate_read_batch(
+                    batch(vec![], Some(bad_tail)),
+                    Some(5),
                     Some(StreamPosition {
                         seq_num: 5,
-                        timestamp: 400
-                    })
-                ),
-                Some(5),
-                Some(StreamPosition {
-                    seq_num: 5,
-                    timestamp: 500
-                }),
-            )
-            .is_err()
-        );
+                        timestamp: 500
+                    }),
+                )
+                .is_err()
+            );
+        }
     }
 
     #[tokio::test]

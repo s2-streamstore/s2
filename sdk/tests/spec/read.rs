@@ -152,8 +152,9 @@ async fn spec_r5_r6_r7_r8_read_session_records_batches_readahead_state_and_caugh
                         false,
                     );
                     send_step4_hb.notified().await;
-                    // Distinct timestamp lets the test verify step 4's heartbeat was decoded.
-                    s2s.send_regular(&proto_heartbeat_at(5, 2000), false, false);
+                    // Distinct monotonic timestamp lets the test verify step 4's heartbeat was
+                    // decoded without regressing later batch timestamps (`R6`).
+                    s2s.send_regular(&proto_heartbeat_at(5, 1006), false, false);
                     send_step5_rec5_6.notified().await;
                     s2s.send_regular(&proto_read_batch_records(&[5, 6], Some(7)), false, false);
                     break_conn.notified().await;
@@ -229,13 +230,13 @@ async fn spec_r5_r6_r7_r8_read_session_records_batches_readahead_state_and_caugh
     let pinned_cu = state.caught_up();
     assert_eq!(pinned_cu.clone().await.unwrap().seq_num, 5);
 
-    // Step 4: heartbeat tail=5 (ts=2000) is NOT decoded while parked, and IS decoded while
+    // Step 4: heartbeat tail=5 (ts=1006) is NOT decoded while parked, and IS decoded while
     // pulling at the tail (keeping is_caught_up=true).
     send_step4_hb.notify_one();
     tokio::time::sleep(Duration::from_millis(30)).await;
     assert_ne!(
         state.last_observed_tail().map(|t| t.timestamp),
-        Some(2000),
+        Some(1006),
         "R6b: parked session must not decode heartbeats before pulling"
     );
     let hb_observed = tokio::time::timeout(Duration::from_secs(2), async {
@@ -247,7 +248,7 @@ async fn spec_r5_r6_r7_r8_read_session_records_batches_readahead_state_and_caugh
                 _ = tick.tick() => {
                     if state
                         .last_observed_tail()
-                        .is_some_and(|t| t.seq_num == 5 && t.timestamp == 2000)
+                        .is_some_and(|t| t.seq_num == 5 && t.timestamp == 1006)
                     {
                         break;
                     }
@@ -776,7 +777,7 @@ async fn spec_r10_t5_t5b_read_session_resume_clamp_wait_416_and_unbounded() {
                     s2s.send_regular(&proto_heartbeat(10), false, false);
                     a1_hb1_sent.notify_one();
                     send_hb2.notified().await;
-                    s2s.send_regular(&proto_heartbeat_at(10, 2000), false, false);
+                    s2s.send_regular(&proto_heartbeat_at(10, 1011), false, false);
                     break_a1.notified().await;
                     s2s.reset(h2::Reason::INTERNAL_ERROR);
                 } else if idx == 2 {
@@ -829,7 +830,7 @@ async fn spec_r10_t5_t5b_read_session_resume_clamp_wait_416_and_unbounded() {
                 _ = tick.tick() => {
                     if state
                         .last_observed_tail()
-                        .is_some_and(|t| t.seq_num == 10 && t.timestamp == 2000)
+                        .is_some_and(|t| t.seq_num == 10 && t.timestamp == 1011)
                     {
                         break;
                     }

@@ -495,13 +495,13 @@ pub fn proto_read_batch(seq_num: u64, tail_seq: u64) -> Vec<u8> {
     ProtoReadBatch {
         records: vec![ProtoSequencedRecord {
             seq_num,
-            timestamp: 1000,
+            timestamp: 1000u64.saturating_add(seq_num),
             headers: vec![],
             body: Bytes::from_static(b"rec"),
         }],
         tail: Some(ProtoStreamPosition {
             seq_num: tail_seq,
-            timestamp: 1000,
+            timestamp: 1000u64.saturating_add(tail_seq),
         }),
     }
     .encode_to_vec()
