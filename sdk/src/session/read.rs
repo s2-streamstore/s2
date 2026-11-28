@@ -664,6 +664,10 @@ struct ReadSessionCore {
     retry_backoff: RetryBackoff,
     advised_reconnects: AdvisedReconnects,
     idle_since: Option<Instant>,
+    /// Timestamp of the latest valid received record or heartbeat `tail`, used for `R6`
+    /// non-decreasing timestamp validation across messages (distinct from
+    /// `last_observed_tail.timestamp`, since behind-tail reads validly deliver earlier records).
+    cursor_timestamp: Option<u64>,
     lifecycle: StreamLifecycle,
 }
 
@@ -708,6 +712,7 @@ impl ReadSessionCore {
             retry_backoff,
             advised_reconnects: AdvisedReconnects::default(),
             idle_since: None,
+            cursor_timestamp: None,
             lifecycle: StreamLifecycle::Active(Box::new(ActiveTransport {
                 client,
                 transport: SyncCell::new(PollTransport::new()),
@@ -916,7 +921,12 @@ impl ReadSessionCore {
         // updating session state.
         let attempts = self.retry_backoff.attempt_number();
         let (known_next_seq_num, last_observed_tail) = self.state.validation_bounds();
-        let validated = match validate_read_batch(batch, known_next_seq_num, last_observed_tail) {
+        let validated = match validate_read_batch(
+            batch,
+            known_next_seq_num,
+            self.cursor_timestamp,
+            last_observed_tail,
+        ) {
             Ok(msg) => msg,
             Err(msg) => {
                 let err = ReadSessionError::Protocol(ProtocolError::new_with_context(
@@ -941,6 +951,7 @@ impl ReadSessionCore {
             ValidatedMessage::Heartbeat(tail) => {
                 // R10d: start idle clock on the first heartbeat if unset, but never restart it.
                 self.idle_since.get_or_insert_with(Instant::now);
+                self.cursor_timestamp = Some(tail.timestamp);
                 set_resume_seq_num(&mut self.start, tail.seq_num);
                 self.maybe_handover(reconnect_advised);
                 self.transact(|inner| inner.on_message(Some(tail), tail.seq_num))?;
@@ -949,9 +960,11 @@ impl ReadSessionCore {
             ValidatedMessage::Records {
                 batch,
                 last_seq_num,
+                last_timestamp,
             } => {
                 // R10d: fetching records restarts the idle clock.
                 self.idle_since = Some(Instant::now());
+                self.cursor_timestamp = Some(last_timestamp);
                 set_resume_seq_num(&mut self.start, last_seq_num + 1);
                 if let Some(count) = self.end.count.as_mut() {
                     *count = count.saturating_sub(batch.records.len() as u64);
@@ -1420,12 +1433,17 @@ impl FusedStream for ReadBatchSession {
 
 enum ValidatedMessage {
     Heartbeat(StreamPosition),
-    Records { batch: ReadBatch, last_seq_num: u64 },
+    Records {
+        batch: ReadBatch,
+        last_seq_num: u64,
+        last_timestamp: u64,
+    },
 }
 
 fn validate_read_batch(
     batch: ReadBatch,
     known_next_seq_num: Option<u64>,
+    cursor_timestamp: Option<u64>,
     last_observed_tail: Option<StreamPosition>,
 ) -> Result<ValidatedMessage, String> {
     if batch.records.is_empty() && batch.tail.is_none() {
@@ -1451,6 +1469,14 @@ fn validate_read_batch(
                 tail.seq_num, next_seq
             ));
         }
+        if let Some(prev_ts) = cursor_timestamp
+            && tail.timestamp < prev_ts
+        {
+            return Err(format!(
+                "read heartbeat tail timestamp {} is below cursor timestamp {}",
+                tail.timestamp, prev_ts
+            ));
+        }
         return Ok(ValidatedMessage::Heartbeat(tail));
     };
 
@@ -1462,6 +1488,14 @@ fn validate_read_batch(
             first.seq_num, next_seq
         ));
     }
+    if let Some(prev_ts) = cursor_timestamp
+        && first.timestamp < prev_ts
+    {
+        return Err(format!(
+            "read batch contained timestamp {} below cursor timestamp {}",
+            first.timestamp, prev_ts
+        ));
+    }
 
     for pair in batch.records.windows(2) {
         if pair[1].seq_num <= pair[0].seq_num {
@@ -1470,23 +1504,32 @@ fn validate_read_batch(
                 pair[1].seq_num, pair[0].seq_num
             ));
         }
+        if pair[1].timestamp < pair[0].timestamp {
+            return Err(format!(
+                "read batch contained decreasing timestamp {} after {}",
+                pair[1].timestamp, pair[0].timestamp
+            ));
+        }
     }
 
-    let last_seq_num = batch.records.last().expect("non-empty batch").seq_num;
+    let last = batch.records.last().expect("non-empty batch");
+    let last_seq_num = last.seq_num;
+    let last_timestamp = last.timestamp;
     if last_seq_num == u64::MAX {
         return Err("read batch record seq_num u64::MAX has no representable successor".to_owned());
     }
     if let Some(tail) = batch.tail
-        && tail.seq_num <= last_seq_num
+        && (tail.seq_num <= last_seq_num || tail.timestamp < last_timestamp)
     {
         return Err(format!(
-            "read batch tail seq_num {} is not greater than last record seq_num {}",
-            tail.seq_num, last_seq_num
+            "read batch tail ({}, {}) is not at or past last record ({}, {})",
+            tail.seq_num, tail.timestamp, last_seq_num, last_timestamp
         ));
     }
     Ok(ValidatedMessage::Records {
         batch,
         last_seq_num,
+        last_timestamp,
     })
 }
 
@@ -2112,16 +2155,25 @@ mod tests {
 
     #[test]
     fn validate_read_batch_rejects_invalid_batches_and_heartbeats() {
+        let record_at = |seq_num, timestamp| SequencedRecord {
+            seq_num,
+            timestamp,
+            body: Bytes::new(),
+            headers: Vec::new(),
+        };
+
         assert!(matches!(
-            validate_read_batch(batch(vec![record(0), record(2)], None), None, None),
+            validate_read_batch(batch(vec![record(0), record(2)], None), None, None, None),
             Ok(ValidatedMessage::Records {
                 last_seq_num: 2,
+                last_timestamp: 2,
                 ..
             })
         ));
         assert!(matches!(
             validate_read_batch(
                 batch(vec![], Some(position(5))),
+                Some(5),
                 Some(5),
                 Some(position(5))
             ),
@@ -2134,8 +2186,9 @@ mod tests {
         };
         assert!(matches!(
             validate_read_batch(
-                batch(vec![record(5)], Some(higher_seq_equal_ts)),
+                batch(vec![record_at(5, 500)], Some(higher_seq_equal_ts)),
                 Some(5),
+                Some(500),
                 Some(StreamPosition {
                     seq_num: 5,
                     timestamp: 500
@@ -2143,31 +2196,69 @@ mod tests {
             ),
             Ok(ValidatedMessage::Records {
                 last_seq_num: 5,
+                last_timestamp: 500,
+                ..
+            })
+        ));
+        // Behind-tail record below last_observed_tail.timestamp succeeds when >= cursor_timestamp.
+        assert!(matches!(
+            validate_read_batch(
+                batch(
+                    vec![record_at(1, 200)],
+                    Some(StreamPosition {
+                        seq_num: 5,
+                        timestamp: 500
+                    })
+                ),
+                Some(1),
+                Some(100),
+                Some(StreamPosition {
+                    seq_num: 5,
+                    timestamp: 500
+                }),
+            ),
+            Ok(ValidatedMessage::Records {
+                last_seq_num: 1,
+                last_timestamp: 200,
                 ..
             })
         ));
 
-        assert!(validate_read_batch(batch(vec![record(2)], None), Some(3), None).is_err());
+        assert!(validate_read_batch(batch(vec![record(2)], None), Some(3), None, None).is_err());
         assert!(
-            validate_read_batch(batch(vec![record(5), record(4)], None), Some(3), None).is_err()
+            validate_read_batch(batch(vec![record(5), record(4)], None), Some(3), None, None)
+                .is_err()
         );
-        assert!(validate_read_batch(batch(vec![], None), Some(0), None).is_err());
+        assert!(validate_read_batch(batch(vec![], None), Some(0), None, None).is_err());
         assert!(
             validate_read_batch(
                 batch(vec![record(3)], Some(position(4))),
                 Some(3),
+                None,
                 Some(position(5))
             )
             .is_err()
         );
-        assert!(validate_read_batch(batch(vec![], Some(position(2))), Some(3), None).is_err());
         assert!(
-            validate_read_batch(batch(vec![], Some(position(4))), Some(3), Some(position(5)))
-                .is_err()
+            validate_read_batch(batch(vec![], Some(position(2))), Some(3), None, None).is_err()
         );
         assert!(
-            validate_read_batch(batch(vec![], Some(position(6))), Some(7), Some(position(5)))
-                .is_err()
+            validate_read_batch(
+                batch(vec![], Some(position(4))),
+                Some(3),
+                None,
+                Some(position(5))
+            )
+            .is_err()
+        );
+        assert!(
+            validate_read_batch(
+                batch(vec![], Some(position(6))),
+                Some(7),
+                None,
+                Some(position(5))
+            )
+            .is_err()
         );
         // Timestamp regression fails componentwise at both equal and higher seq_num (`R6`).
         for bad_tail in [
@@ -2184,6 +2275,7 @@ mod tests {
                 validate_read_batch(
                     batch(vec![], Some(bad_tail)),
                     Some(5),
+                    Some(500),
                     Some(StreamPosition {
                         seq_num: 5,
                         timestamp: 500
@@ -2192,6 +2284,56 @@ mod tests {
                 .is_err()
             );
         }
+        // Record/cursor timestamp regressions (`R6`): intra-batch, cross-batch, tail < last
+        // record, and heartbeat < cursor_timestamp.
+        assert!(
+            validate_read_batch(
+                batch(vec![record_at(0, 200), record_at(1, 199)], None),
+                Some(0),
+                None,
+                None
+            )
+            .is_err()
+        );
+        assert!(
+            validate_read_batch(
+                batch(vec![record_at(1, 199)], None),
+                Some(1),
+                Some(200),
+                None
+            )
+            .is_err()
+        );
+        assert!(
+            validate_read_batch(
+                batch(
+                    vec![record_at(0, 200)],
+                    Some(StreamPosition {
+                        seq_num: 1,
+                        timestamp: 199
+                    })
+                ),
+                Some(0),
+                None,
+                None
+            )
+            .is_err()
+        );
+        assert!(
+            validate_read_batch(
+                batch(
+                    vec![],
+                    Some(StreamPosition {
+                        seq_num: 5,
+                        timestamp: 199
+                    })
+                ),
+                Some(1),
+                Some(200),
+                None
+            )
+            .is_err()
+        );
     }
 
     #[tokio::test]

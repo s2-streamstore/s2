@@ -507,23 +507,31 @@ pub fn proto_read_batch(seq_num: u64, tail_seq: u64) -> Vec<u8> {
     .encode_to_vec()
 }
 
-pub fn proto_read_batch_records(seq_nums: &[u64], tail_seq: Option<u64>) -> Vec<u8> {
+pub fn proto_read_batch_records_base(
+    seq_nums: &[u64],
+    tail_seq: Option<u64>,
+    base_ts: u64,
+) -> Vec<u8> {
     ProtoReadBatch {
         records: seq_nums
             .iter()
             .map(|&seq_num| ProtoSequencedRecord {
                 seq_num,
-                timestamp: 1000u64.saturating_add(seq_num),
+                timestamp: base_ts.saturating_add(seq_num),
                 headers: vec![],
                 body: Bytes::from(format!("rec-{seq_num}")),
             })
             .collect(),
         tail: tail_seq.map(|seq_num| ProtoStreamPosition {
             seq_num,
-            timestamp: 1000u64.saturating_add(seq_num),
+            timestamp: base_ts.saturating_add(seq_num),
         }),
     }
     .encode_to_vec()
+}
+
+pub fn proto_read_batch_records(seq_nums: &[u64], tail_seq: Option<u64>) -> Vec<u8> {
+    proto_read_batch_records_base(seq_nums, tail_seq, 1000)
 }
 
 pub fn proto_heartbeat(tail_seq: u64) -> Vec<u8> {
