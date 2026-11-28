@@ -358,14 +358,6 @@ impl ReadStateInner {
         })
     }
 
-    fn update_observed_tail(&mut self, candidate: StreamPosition) {
-        if self.last_observed_tail.is_none_or(|prev| {
-            (candidate.seq_num, candidate.timestamp) >= (prev.seq_num, prev.timestamp)
-        }) {
-            self.last_observed_tail = Some(candidate);
-        }
-    }
-
     /// Lock in the session's close reason (`R9`), returning the winning reason. Preserves `R7`
     /// state and any caught-up status; `ReadSessionState::update` settles any pending waiter.
     fn close_with(&mut self, close: TerminalClose) -> TerminalClose {
@@ -377,7 +369,7 @@ impl ReadStateInner {
     fn on_message(&mut self, tail: Option<StreamPosition>, next_seq_num: u64) {
         self.attempts = 1;
         if let Some(tail) = tail {
-            self.update_observed_tail(tail);
+            self.last_observed_tail = Some(tail);
         }
         self.latest_message_tail_seq = tail.map(|t| t.seq_num);
         self.next_seq_num = Some(next_seq_num);
@@ -448,13 +440,13 @@ impl ReadSessionState {
         self.inner.lock().unwrap().next_seq_num
     }
 
-    /// Return the highest stream tail observed from a valid received server message as of the last
-    /// pull.
+    /// Return the tail reported by the latest valid received server message that carried one (as
+    /// of the last pull).
     ///
     /// Because reading is on-demand, this does not reflect newer appends while the session is
     /// parked; use [`S2Stream::check_tail`](crate::S2Stream::check_tail) for a fresh stream tail.
-    /// Ordered by `(seq_num, timestamp)`, persists across attempts, and is retained after the
-    /// session closes.
+    /// Monotonically non-decreasing by `(seq_num, timestamp)`, persists across attempts, and is
+    /// retained after the session closes.
     #[must_use]
     pub fn last_observed_tail(&self) -> Option<StreamPosition> {
         self.inner.lock().unwrap().last_observed_tail
@@ -528,12 +520,9 @@ impl ReadSessionState {
         self.inner.lock().unwrap().attempts = attempts;
     }
 
-    fn validation_bounds(&self) -> (Option<u64>, Option<u64>) {
+    fn validation_bounds(&self) -> (Option<u64>, Option<StreamPosition>) {
         let inner = self.inner.lock().unwrap();
-        (
-            inner.next_seq_num,
-            inner.last_observed_tail.map(|t| t.seq_num),
-        )
+        (inner.next_seq_num, inner.last_observed_tail)
     }
 }
 
@@ -923,9 +912,8 @@ impl ReadSessionCore {
         // R6 / R7a / R7b / E7: reject invalid batches atomically without delivering records or
         // updating session state.
         let attempts = self.retry_backoff.attempt_number();
-        let (known_next_seq_num, last_observed_tail_seq) = self.state.validation_bounds();
-        let validated = match validate_read_batch(batch, known_next_seq_num, last_observed_tail_seq)
-        {
+        let (known_next_seq_num, last_observed_tail) = self.state.validation_bounds();
+        let validated = match validate_read_batch(batch, known_next_seq_num, last_observed_tail) {
             Ok(msg) => msg,
             Err(msg) => {
                 let err = ReadSessionError::Protocol(ProtocolError::new_with_context(
@@ -1230,8 +1218,8 @@ impl ReadSession {
         self.core.state.next_seq_num()
     }
 
-    /// Return the highest stream tail observed from a valid received server message as of the last
-    /// pull.
+    /// Return the tail reported by the latest valid received server message that carried one (as
+    /// of the last pull).
     #[must_use]
     pub fn last_observed_tail(&self) -> Option<StreamPosition> {
         self.core.state.last_observed_tail()
@@ -1369,8 +1357,8 @@ impl ReadBatchSession {
         self.core.state.next_seq_num()
     }
 
-    /// Return the highest stream tail observed from a valid received server message as of the last
-    /// pull.
+    /// Return the tail reported by the latest valid received server message that carried one (as
+    /// of the last pull).
     #[must_use]
     pub fn last_observed_tail(&self) -> Option<StreamPosition> {
         self.core.state.last_observed_tail()
@@ -1432,18 +1420,18 @@ enum ValidatedMessage {
 fn validate_read_batch(
     batch: ReadBatch,
     known_next_seq_num: Option<u64>,
-    last_observed_tail_seq: Option<u64>,
+    last_observed_tail: Option<StreamPosition>,
 ) -> Result<ValidatedMessage, String> {
     if batch.records.is_empty() && batch.tail.is_none() {
         return Err("read batch was empty with no tail".to_owned());
     }
 
-    if let (Some(tail), Some(prev_tail_seq)) = (batch.tail, last_observed_tail_seq)
-        && tail.seq_num < prev_tail_seq
+    if let (Some(tail), Some(prev_tail)) = (batch.tail, last_observed_tail)
+        && (tail.seq_num, tail.timestamp) < (prev_tail.seq_num, prev_tail.timestamp)
     {
         return Err(format!(
-            "read batch tail seq_num {} regressed below last observed tail {}",
-            tail.seq_num, prev_tail_seq
+            "read batch tail ({}, {}) regressed below last observed tail ({}, {})",
+            tail.seq_num, tail.timestamp, prev_tail.seq_num, prev_tail.timestamp
         ));
     }
 
@@ -2126,8 +2114,31 @@ mod tests {
             })
         ));
         assert!(matches!(
-            validate_read_batch(batch(vec![], Some(position(5))), Some(5), Some(5)),
+            validate_read_batch(
+                batch(vec![], Some(position(5))),
+                Some(5),
+                Some(position(5))
+            ),
             Ok(ValidatedMessage::Heartbeat(pos)) if pos == position(5)
+        ));
+        // Higher seq_num with lower timestamp advances lexicographically (`R6`/`R7b`).
+        let higher_seq_lower_ts = StreamPosition {
+            seq_num: 6,
+            timestamp: 400,
+        };
+        assert!(matches!(
+            validate_read_batch(
+                batch(vec![record(5)], Some(higher_seq_lower_ts)),
+                Some(5),
+                Some(StreamPosition {
+                    seq_num: 5,
+                    timestamp: 500
+                }),
+            ),
+            Ok(ValidatedMessage::Records {
+                last_seq_num: 5,
+                ..
+            })
         ));
 
         assert!(validate_read_batch(batch(vec![record(2)], None), Some(3), None).is_err());
@@ -2136,12 +2147,40 @@ mod tests {
         );
         assert!(validate_read_batch(batch(vec![], None), Some(0), None).is_err());
         assert!(
-            validate_read_batch(batch(vec![record(3)], Some(position(4))), Some(3), Some(5))
-                .is_err()
+            validate_read_batch(
+                batch(vec![record(3)], Some(position(4))),
+                Some(3),
+                Some(position(5))
+            )
+            .is_err()
         );
         assert!(validate_read_batch(batch(vec![], Some(position(2))), Some(3), None).is_err());
-        assert!(validate_read_batch(batch(vec![], Some(position(4))), Some(3), Some(5)).is_err());
-        assert!(validate_read_batch(batch(vec![], Some(position(6))), Some(7), Some(5)).is_err());
+        assert!(
+            validate_read_batch(batch(vec![], Some(position(4))), Some(3), Some(position(5)))
+                .is_err()
+        );
+        assert!(
+            validate_read_batch(batch(vec![], Some(position(6))), Some(7), Some(position(5)))
+                .is_err()
+        );
+        // Equal seq_num with lower timestamp regresses lexicographically (`R6`).
+        assert!(
+            validate_read_batch(
+                batch(
+                    vec![],
+                    Some(StreamPosition {
+                        seq_num: 5,
+                        timestamp: 400
+                    })
+                ),
+                Some(5),
+                Some(StreamPosition {
+                    seq_num: 5,
+                    timestamp: 500
+                }),
+            )
+            .is_err()
+        );
     }
 
     #[tokio::test]
@@ -2593,6 +2632,24 @@ mod tests {
                 session.next().await,
                 Some(Err(ReadSessionError::Timeout(_)))
             ));
+        }
+        // 5. Buffered clean response ending arriving before resume past 20s is consumed before
+        //    checking deadline expiry (`T7d`).
+        {
+            let (mut session, tx, _chunks, _state, _shutdown) = test_session_with_retry(
+                ReadInput::new(crate::types::ReadStart::SeqNum(0)).with_wait_secs(5),
+                RetryConfig::new().with_max_attempts(1),
+            );
+            let mut pending = Box::pin(session.next());
+            assert!(poll!(pending.as_mut()).is_pending());
+            drop(pending);
+
+            drop(tx);
+            tokio::time::advance(Duration::from_secs(30)).await;
+            assert!(
+                session.next().await.is_none(),
+                "T7d: buffered response ending must be consumed before heartbeat timeout"
+            );
         }
     }
 

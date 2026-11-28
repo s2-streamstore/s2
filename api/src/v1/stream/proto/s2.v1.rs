@@ -89,7 +89,7 @@ pub struct ReadBatch {
     #[prost(message, repeated, tag = "1")]
     pub records: ::prost::alloc::vec::Vec<SequencedRecord>,
     /// Sequence number that will be assigned to the next record on the stream, and timestamp of the last record.
-    /// Present only when reading recent records or on a session heartbeat; when a session reaches the tail with no `wait` remaining and ends cleanly without exhausting `count` or `bytes`, the final message is either a record batch with `tail.seq_num` one past its last record or a trailing heartbeat carrying `tail`.
+    /// Present only when reading recent records, upon reaching the tail, or on a session heartbeat. On a `200` unary read that reaches the tail without exhausting `count` or `bytes`, `tail` is always populated; when a session ends cleanly at the tail without exhausting `count` or `bytes`, the final message is either a record batch with `tail.seq_num` one past its last record or a trailing heartbeat carrying `tail`.
     #[prost(message, optional, tag = "2")]
     pub tail: ::core::option::Option<StreamPosition>,
 }
