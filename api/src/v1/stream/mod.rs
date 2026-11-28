@@ -471,7 +471,7 @@ pub struct ReadBatch {
     /// This can only be empty in response to a unary read (i.e. not SSE), if the request cannot be satisfied without violating an explicit bound (`count`, `bytes`, `until`, or `wait`).
     pub records: Vec<SequencedRecord>,
     /// Sequence number that will be assigned to the next record on the stream, and timestamp of the last record.
-    /// Present only when reading recent records. When a streaming read ends cleanly at the tail (other than by exhausting `count` or `bytes`), the final message is either a `batch` with `tail.seq_num` one past its last record or a trailing `ping` event carrying `tail`.
+    /// Present only when reading recent records or upon reaching the tail. On a `200` unary read that reaches the tail without exhausting `count` or `bytes`, `tail` is always populated; when a streaming read ends cleanly at the tail without exhausting `count` or `bytes`, the final message is either a `batch` with `tail.seq_num` one past its last record or a trailing `ping` event carrying `tail`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tail: Option<StreamPosition>,
 }
