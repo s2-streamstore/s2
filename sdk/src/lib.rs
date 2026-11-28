@@ -193,6 +193,7 @@ issue.
 #![warn(missing_docs)]
 
 mod api;
+mod cancel;
 mod client;
 mod reconnect;
 mod send_gate;

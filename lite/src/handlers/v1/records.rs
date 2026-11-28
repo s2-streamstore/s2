@@ -2008,6 +2008,28 @@ mod tests {
             );
         }
 
+        async fn assert_416_all_modes(
+            app: &axum::Router,
+            basin: &BasinName,
+            stream: &StreamName,
+            query: &str,
+            expected_tail: StreamPosition,
+            label: &str,
+        ) {
+            for (mode, hdr) in [
+                ("unary", None),
+                ("s2s", Some((header::CONTENT_TYPE, "s2s/proto"))),
+                ("sse", Some((header::ACCEPT, "text/event-stream"))),
+            ] {
+                let mut req = request_builder("GET", records_uri(stream, query), basin);
+                if let Some((k, v)) = hdr {
+                    req = req.header(k, v);
+                }
+                let resp = send(app, req.body(Body::empty()).unwrap()).await;
+                assert_416(resp, expected_tail, &format!("{mode} {label}")).await;
+            }
+        }
+
         // 1. Empty stream (tail = (0, 0)).
         let (empty_app, _empty_backend, empty_basin, empty_stream) = setup_app_with_config(
             "until-empty-stop",
@@ -2047,27 +2069,15 @@ mod tests {
         .await;
 
         // Empty stream strictly beyond tail without clamp -> 416 across all modes.
-        for (mode, hdr) in [
-            ("unary", None),
-            ("s2s", Some((header::CONTENT_TYPE, "s2s/proto"))),
-            ("sse", Some((header::ACCEPT, "text/event-stream"))),
-        ] {
-            let mut req = request_builder(
-                "GET",
-                records_uri(&empty_stream, "seq_num=5&until=0"),
-                &empty_basin,
-            );
-            if let Some((k, v)) = hdr {
-                req = req.header(k, v);
-            }
-            let resp = send(&empty_app, req.body(Body::empty()).unwrap()).await;
-            assert_416(
-                resp,
-                StreamPosition::MIN,
-                &format!("{mode} empty beyond tail"),
-            )
-            .await;
-        }
+        assert_416_all_modes(
+            &empty_app,
+            &empty_basin,
+            &empty_stream,
+            "seq_num=5&until=0",
+            StreamPosition::MIN,
+            "empty beyond tail",
+        )
+        .await;
 
         // 2. Non-empty stream (tail = (2, 2000)).
         let (app, backend, basin, stream) = setup_app_with_config(
@@ -2109,18 +2119,14 @@ mod tests {
 
         // Strictly beyond tail without clamp -> 416 across all modes even when until <=
         // tail.timestamp.
-        for (mode, hdr) in [
-            ("unary", None),
-            ("s2s", Some((header::CONTENT_TYPE, "s2s/proto"))),
-            ("sse", Some((header::ACCEPT, "text/event-stream"))),
-        ] {
-            let mut req =
-                request_builder("GET", records_uri(&stream, "seq_num=10&until=1500"), &basin);
-            if let Some((k, v)) = hdr {
-                req = req.header(k, v);
-            }
-            let resp = send(&app, req.body(Body::empty()).unwrap()).await;
-            assert_416(resp, ack.end, &format!("{mode} nonempty beyond tail")).await;
-        }
+        assert_416_all_modes(
+            &app,
+            &basin,
+            &stream,
+            "seq_num=10&until=1500",
+            ack.end,
+            "nonempty beyond tail",
+        )
+        .await;
     }
 }

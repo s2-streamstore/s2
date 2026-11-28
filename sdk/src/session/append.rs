@@ -24,7 +24,7 @@ use tracing::{Instrument, debug, debug_span};
 use crate::{
     api::{BasinClient, Streaming},
     batching::RECORD_BATCH_MIN,
-    client::CancellationToken,
+    cancel::CancellationToken,
     error::{
         AbortedError, AppendSessionError, ConnectionLostError, ErrorContext, ProtocolError,
         SessionClosedError, TimeoutError, TransportError, ValidationError,

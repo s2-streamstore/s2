@@ -6,7 +6,7 @@ use std::{
     pin::pin,
     sync::{
         Arc, Mutex, OnceLock, RwLock as StdRwLock, Weak,
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -33,111 +33,15 @@ use tokio::{
     sync::{Notify, watch},
     time::{Instant, timeout, timeout_at},
 };
-use tokio_util::{
-    sync::{WaitForCancellationFuture, WaitForCancellationFutureOwned},
-    task::AbortOnDropHandle,
-};
+use tokio_util::task::AbortOnDropHandle;
 use tower_service::Service;
 
 use crate::{
+    cancel::CancellationToken,
     error::find_source_err,
     send_gate::{GatedRequestBody, SendGate},
     types::{Compression, Http2Config},
 };
-
-struct CancelFlag {
-    cancelled: AtomicBool,
-    parent: Option<Arc<CancelFlag>>,
-}
-
-impl CancelFlag {
-    fn is_cancelled(&self) -> bool {
-        let mut cur = Some(self);
-        while let Some(node) = cur {
-            if node.cancelled.load(Ordering::Acquire) {
-                return true;
-            }
-            cur = node.parent.as_deref();
-        }
-        false
-    }
-}
-
-/// Wrapper around [`tokio_util::sync::CancellationToken`] with a lock-free `is_cancelled()` fast
-/// path (`tokio_util`'s `is_cancelled()` acquires an internal `std::sync::Mutex` shared across all
-/// sessions on a client).
-#[derive(Clone)]
-pub(crate) struct CancellationToken {
-    inner: tokio_util::sync::CancellationToken,
-    flag: Arc<CancelFlag>,
-}
-
-impl Default for CancellationToken {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl std::fmt::Debug for CancellationToken {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CancellationToken")
-            .field("is_cancelled", &self.is_cancelled())
-            .finish()
-    }
-}
-
-impl CancellationToken {
-    pub(crate) fn new() -> Self {
-        Self {
-            inner: tokio_util::sync::CancellationToken::new(),
-            flag: Arc::new(CancelFlag {
-                cancelled: AtomicBool::new(false),
-                parent: None,
-            }),
-        }
-    }
-
-    pub(crate) fn cancel(&self) {
-        // Store `Release` before cancelling `inner` so any task woken by `cancelled()` /
-        // `cancelled_owned()` is guaranteed to observe `is_cancelled() == true`. Note that this
-        // guarantee is one-way: a caller observing `is_cancelled() == true` may momentarily poll
-        // `cancelled()` as `Pending` until `inner.cancel()` finishes.
-        self.flag.cancelled.store(true, Ordering::Release);
-        self.inner.cancel();
-    }
-
-    pub(crate) fn is_cancelled(&self) -> bool {
-        self.flag.is_cancelled()
-    }
-
-    pub(crate) fn child_token(&self) -> Self {
-        let flag = if self.is_cancelled() {
-            // Already cancelled: create a detached flag so child tokens do not retain parent
-            // chains or walk ancestors on `is_cancelled()`, matching `tokio_util`.
-            Arc::new(CancelFlag {
-                cancelled: AtomicBool::new(true),
-                parent: None,
-            })
-        } else {
-            Arc::new(CancelFlag {
-                cancelled: AtomicBool::new(false),
-                parent: Some(self.flag.clone()),
-            })
-        };
-        Self {
-            inner: self.inner.child_token(),
-            flag,
-        }
-    }
-
-    pub(crate) fn cancelled(&self) -> WaitForCancellationFuture<'_> {
-        self.inner.cancelled()
-    }
-
-    pub(crate) fn cancelled_owned(self) -> WaitForCancellationFutureOwned {
-        self.inner.cancelled_owned()
-    }
-}
 
 const APPLICATION_JSON: HeaderValue = HeaderValue::from_static("application/json");
 pub(crate) const DEFAULT_MAX_CONCURRENT_REQUESTS_PER_CONNECTION: usize = 50;
@@ -3112,39 +3016,5 @@ mod tests {
         let before = within_budget.capacity();
         shrink_if_excess_slack(&mut within_budget, 4096);
         assert_eq!(within_budget.capacity(), before);
-    }
-
-    #[tokio::test]
-    async fn cancellation_token_propagates_parent_to_children_lock_free() {
-        let root = CancellationToken::new();
-        let child = root.child_token();
-        let grandchild = child.child_token();
-        let sibling = root.child_token();
-
-        assert!(!root.is_cancelled());
-        assert!(!child.is_cancelled());
-        assert!(!grandchild.is_cancelled());
-        assert!(!sibling.is_cancelled());
-
-        // Cancelling a child does not cancel its parent or sibling, but does cancel descendants.
-        child.cancel();
-        assert!(!root.is_cancelled());
-        assert!(child.is_cancelled());
-        assert!(grandchild.is_cancelled());
-        assert!(!sibling.is_cancelled());
-
-        // Cancelling the root wakes waiting children and makes `is_cancelled()` true immediately.
-        let wait_sibling = sibling.clone().cancelled_owned();
-        root.cancel();
-        wait_sibling.await;
-        assert!(root.is_cancelled());
-        assert!(sibling.is_cancelled());
-
-        // Child tokens created from an already-cancelled token are immediately cancelled and
-        // detached from the parent flag chain.
-        let post_cancel_child = root.child_token();
-        assert!(post_cancel_child.is_cancelled());
-        assert!(post_cancel_child.flag.parent.is_none());
-        post_cancel_child.cancelled().await;
     }
 }
