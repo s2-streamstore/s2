@@ -29,7 +29,8 @@ use tokio_util::codec::Decoder;
 use tracing::{Instrument, debug, debug_span};
 
 use crate::{
-    client::{self, CancellationToken, StreamingResponse, UnaryResponse},
+    cancel::CancellationToken,
+    client::{self, StreamingResponse, UnaryResponse},
     error::{
         AbortedError, AppendSessionError, ClientClosedError, ConnectionLostError, ErrorCode,
         ErrorContext, OpScope, ProtocolError, ReadSessionError, TransportError, ValidationError,

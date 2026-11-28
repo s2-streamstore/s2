@@ -33,11 +33,11 @@ use tokio::{
     sync::{Notify, watch},
     time::{Instant, timeout, timeout_at},
 };
-pub(crate) use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 use tower_service::Service;
 
 use crate::{
+    cancel::CancellationToken,
     error::find_source_err,
     send_gate::{GatedRequestBody, SendGate},
     types::{Compression, Http2Config},

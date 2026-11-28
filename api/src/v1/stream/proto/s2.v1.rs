@@ -85,11 +85,11 @@ pub struct SequencedRecord {
 pub struct ReadBatch {
     /// Records that are durably sequenced on the stream, retrieved based on the requested criteria.
     /// This can only be empty in response to a unary read if the request cannot be satisfied without violating an explicit bound (`count`, `bytes`, `until`, or `wait`).
-    /// In the context of a session, it can be empty as a heartbeat message. A heartbeat will be sent whenever a switch to following in real-time happens, and then at a randomized gap between 5 and 15 seconds if no records have become available.
+    /// In the context of a session, it can be empty only as a heartbeat message carrying `tail`, sent while waiting for new records (at least every 15 seconds) or before ending cleanly at the tail.
     #[prost(message, repeated, tag = "1")]
     pub records: ::prost::alloc::vec::Vec<SequencedRecord>,
     /// Sequence number that will be assigned to the next record on the stream, and timestamp of the last record.
-    /// It will only be present when reading recent records.
+    /// Present only when reading recent records, upon reaching the tail, or on a session heartbeat. On a `200` unary read that reaches the tail without exhausting the effective `count` or `bytes` limit, `tail` is always populated; when a session ends cleanly at the tail without exhausting `count` or `bytes`, the final message is either a record batch with `tail.seq_num` one past its last record or a trailing heartbeat carrying `tail`.
     #[prost(message, optional, tag = "2")]
     pub tail: ::core::option::Option<StreamPosition>,
 }

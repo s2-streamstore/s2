@@ -1,15 +1,26 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     env::VarError,
+    pin::Pin,
     str::FromStr,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 
 use bytes::{Bytes, BytesMut};
+use prost::Message as _;
 use s2_api::v1::{
     error::ErrorCode,
-    stream::s2s::{FrameDecoder, SessionMessage},
+    stream::{
+        proto::{
+            ReadBatch as ProtoReadBatch, SequencedRecord as ProtoSequencedRecord,
+            StreamPosition as ProtoStreamPosition,
+        },
+        s2s::{FrameDecoder, SessionMessage},
+    },
 };
 use s2_sdk::{
     S2,
@@ -20,7 +31,7 @@ use s2_sdk::{
         ValidationError,
     },
     producer::ProducerConfig,
-    read_session::ReadSessionConfig,
+    read_session::{CaughtUp, ReadBatchSession, ReadSession, ReadSessionConfig, ReadSessionState},
     types::{
         AccessTokenMatcher, AccessTokenScope, AccountEndpoint, AccountMetricSet, AppendInput,
         AppendRecord, AppendRecordBatch, BasinEndpoint, BasinMatcher, BasinMetricSet, BasinName,
@@ -351,7 +362,7 @@ async fn spec_vectors_keys() {
 }
 
 // ---------------------------------------------------------------------------
-// A2d, C2, D5: numbers.json
+// A2d, C2, D5, R2: numbers.json
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
@@ -368,7 +379,7 @@ struct NumberCase {
     expect: String,
 }
 
-// spec: r1 A2d, C2, D5
+// spec: r1 A2d, C2, D5, R2
 #[tokio::test]
 async fn spec_vectors_numbers() {
     let file: NumbersFile = read_json("sdk/vectors/numbers.json");
@@ -440,6 +451,36 @@ async fn spec_vectors_numbers() {
                         "{label}"
                     );
                 }),
+                "read_session.stop.count" | "read_session.stop.bytes" => {
+                    let apply_limit: fn(ReadInput, u64) -> ReadInput =
+                        if case.field == "read_session.stop.count" {
+                            ReadInput::with_count
+                        } else {
+                            ReadInput::with_bytes
+                        };
+                    match raw.parse::<u64>() {
+                        Ok(v) => {
+                            let input = apply_limit(ReadInput::new(ReadStart::TAIL), v);
+                            let rs =
+                                stream.read_session(input.clone(), ReadSessionConfig::default());
+                            let rbs =
+                                stream.read_batch_session(input, ReadSessionConfig::default());
+                            assert_eq!(rs.is_ok(), expect_valid, "{label}");
+                            assert_eq!(rbs.is_ok(), expect_valid, "{label}");
+                            if !expect_valid {
+                                assert!(
+                                    matches!(rs, Err(ReadSessionError::Validation(_))),
+                                    "{label}"
+                                );
+                                assert!(
+                                    matches!(rbs, Err(ReadSessionError::Validation(_))),
+                                    "{label}"
+                                );
+                            }
+                        }
+                        Err(_) => assert!(!expect_valid, "{label}"),
+                    }
+                }
                 "read.stop.until" => check_u64(&|v| {
                     assert_eq!(
                         ReadInput::new(ReadStart::TAIL).with_until(v).until(),
@@ -1515,5 +1556,1012 @@ async fn spec_f2_f3_open_enums_tagged_unions_and_closed_request_enums() {
         AccountMetricSet::ActiveBasins(range),
         BasinMetricSet::Storage(range),
         StreamMetricSet::Storage(range),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// D4, R1, R6, R7, R8, R9, R10a, R10b, R10c, T6a, T6b: read_state.json
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct ReadStateFile {
+    cases: Vec<ReadStateCase>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReadStateCase {
+    rule: String,
+    name: String,
+    start: ReadStateStart,
+    stop: Option<ReadStateStop>,
+    steps: Vec<ReadStateStep>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReadStateStart {
+    seq_num: Option<String>,
+    timestamp: Option<String>,
+    tail_offset: Option<String>,
+    clamp: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReadStateStop {
+    count: Option<String>,
+    bytes: Option<String>,
+    until: Option<String>,
+    wait: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReadStatePos {
+    seq_num: String,
+    timestamp: String,
+}
+
+impl ReadStatePos {
+    fn parse(&self) -> (u64, u64) {
+        (
+            self.seq_num.parse().unwrap(),
+            self.timestamp.parse().unwrap(),
+        )
+    }
+
+    fn is_representable(&self) -> bool {
+        self.seq_num.parse::<u64>().is_ok() && self.timestamp.parse::<u64>().is_ok()
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReadStateRecord {
+    seq_num: String,
+    timestamp: String,
+    #[serde(default)]
+    body_len: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CaughtUpExpect {
+    Pending,
+    Resolved(ReadStatePos),
+    Error(String),
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum IterationExpect {
+    Clean,
+    Record(String),
+    Error(String),
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReadStateExpect {
+    next_seq_num: Option<String>,
+    last_observed_tail: Option<ReadStatePos>,
+    is_caught_up: bool,
+    caught_up: CaughtUpExpect,
+    #[serde(default)]
+    iteration: Option<IterationExpect>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StepExpect {
+    Conditional {
+        if_representable: Box<ReadStateExpect>,
+        otherwise: Box<ReadStateExpect>,
+    },
+    Direct(Box<ReadStateExpect>),
+}
+
+impl StepExpect {
+    fn resolve(&self, representable: bool) -> &ReadStateExpect {
+        match self {
+            Self::Direct(exp) => exp,
+            Self::Conditional {
+                if_representable,
+                otherwise,
+            } => {
+                if representable {
+                    if_representable
+                } else {
+                    otherwise
+                }
+            }
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RequestParamExpect {
+    Bool(bool),
+    Str(String),
+}
+
+type ExpectRequest = BTreeMap<String, Option<RequestParamExpect>>;
+
+#[derive(Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+enum ReadStateStep {
+    Check {
+        expect: StepExpect,
+    },
+    ReceiveBatch {
+        records: Vec<ReadStateRecord>,
+        tail: Option<ReadStatePos>,
+        #[serde(default)]
+        reconnect_advised: bool,
+    },
+    ReceiveHeartbeat {
+        tail: ReadStatePos,
+        #[serde(default)]
+        reconnect_advised: bool,
+        expect: Option<StepExpect>,
+    },
+    ReceiveCleanEnd,
+    ReceiveError {
+        status: u16,
+        code: Option<String>,
+        message: Option<String>,
+        tail: Option<ReadStatePos>,
+    },
+    Disconnect,
+    NextRequest {
+        expect: Option<StepExpect>,
+        expect_request: Option<ExpectRequest>,
+    },
+    Pull {
+        expect: StepExpect,
+    },
+    Close {
+        expect: Option<StepExpect>,
+    },
+    Abort {
+        expect: Option<StepExpect>,
+    },
+}
+
+enum ReadStateAction {
+    Batch {
+        records: Vec<(u64, u64, usize)>,
+        tail: Option<(u64, u64)>,
+        reconnect_advised: bool,
+    },
+    CleanEnd,
+    Error {
+        status: u16,
+        code: Option<String>,
+        message: Option<String>,
+        tail: Option<(u64, u64)>,
+    },
+    Disconnect,
+}
+
+struct AttemptChannel {
+    tx: tokio::sync::mpsc::UnboundedSender<ReadStateAction>,
+    rx: Option<tokio::sync::mpsc::UnboundedReceiver<ReadStateAction>>,
+    opened_tx: Option<tokio::sync::oneshot::Sender<BTreeMap<String, String>>>,
+    opened_rx: Option<tokio::sync::oneshot::Receiver<BTreeMap<String, String>>>,
+}
+
+impl AttemptChannel {
+    fn new() -> Self {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (opened_tx, opened_rx) = tokio::sync::oneshot::channel();
+        Self {
+            tx,
+            rx: Some(rx),
+            opened_tx: Some(opened_tx),
+            opened_rx: Some(opened_rx),
+        }
+    }
+}
+
+fn ensure_attempt(attempts: &mut Vec<AttemptChannel>, idx: usize) -> &mut AttemptChannel {
+    while attempts.len() <= idx {
+        attempts.push(AttemptChannel::new());
+    }
+    &mut attempts[idx]
+}
+
+enum ReadStateSession {
+    Records(ReadSession),
+    Batches(ReadBatchSession),
+}
+
+impl ReadStateSession {
+    fn state(&self) -> ReadSessionState {
+        match self {
+            Self::Records(s) => s.state(),
+            Self::Batches(s) => s.state(),
+        }
+    }
+
+    async fn next_record(&mut self) -> Option<Result<SequencedRecord, ReadSessionError>> {
+        match self {
+            Self::Records(s) => s.next().await,
+            Self::Batches(s) => match s.next().await {
+                None => None,
+                Some(Err(e)) => Some(Err(e)),
+                Some(Ok(batch)) => {
+                    assert_eq!(
+                        batch.records.len(),
+                        1,
+                        "batch-view parity runner expects single-record batches"
+                    );
+                    Some(Ok(batch.records.into_iter().next().unwrap()))
+                }
+            },
+        }
+    }
+}
+
+type PullOutput = (
+    ReadStateSession,
+    Option<Result<SequencedRecord, ReadSessionError>>,
+);
+
+struct ReadStateSessionSlot {
+    session: Option<ReadStateSession>,
+    pending: Option<tokio::task::JoinHandle<PullOutput>>,
+    closed_by_caller: bool,
+}
+
+impl ReadStateSessionSlot {
+    fn new(session: ReadStateSession) -> Self {
+        Self {
+            session: Some(session),
+            pending: None,
+            closed_by_caller: false,
+        }
+    }
+
+    fn ensure_pulling(&mut self) {
+        if self.pending.is_none()
+            && let Some(mut session) = self.session.take()
+        {
+            self.pending = Some(tokio::spawn(async move {
+                let item = session.next_record().await;
+                (session, item)
+            }));
+        }
+    }
+
+    async fn pull(&mut self, label: &str) -> Option<Result<SequencedRecord, ReadSessionError>> {
+        if let Some(handle) = self.pending.take() {
+            let (session, item) = tokio::time::timeout(Duration::from_secs(3), handle)
+                .await
+                .unwrap_or_else(|_| panic!("{label}: pending pull timed out"))
+                .expect("pull task did not panic");
+            self.session = Some(session);
+            item
+        } else {
+            let session = self
+                .session
+                .as_mut()
+                .unwrap_or_else(|| panic!("{label}: pull called without active session"));
+            tokio::time::timeout(Duration::from_secs(3), session.next_record())
+                .await
+                .unwrap_or_else(|_| panic!("{label}: pull timed out"))
+        }
+    }
+
+    async fn close(&mut self) {
+        self.closed_by_caller = true;
+        if let Some(handle) = self.pending.take() {
+            handle.abort();
+            let _ = handle.await;
+        }
+        self.session = None;
+    }
+}
+
+fn case_is_representable(case: &ReadStateCase) -> bool {
+    let opt_u64 = |v: &Option<String>| v.as_deref().is_none_or(|s| s.parse::<u64>().is_ok());
+    if !opt_u64(&case.start.seq_num)
+        || !opt_u64(&case.start.timestamp)
+        || !opt_u64(&case.start.tail_offset)
+    {
+        return false;
+    }
+    if let Some(stop) = &case.stop
+        && (!opt_u64(&stop.count)
+            || !opt_u64(&stop.bytes)
+            || !opt_u64(&stop.until)
+            || stop
+                .wait
+                .as_deref()
+                .is_some_and(|s| s.parse::<u32>().is_err()))
+    {
+        return false;
+    }
+    for step in &case.steps {
+        match step {
+            ReadStateStep::ReceiveBatch { records, tail, .. } => {
+                if tail.as_ref().is_some_and(|t| !t.is_representable()) {
+                    return false;
+                }
+                for r in records {
+                    let Some(seq) = r.seq_num.parse::<u64>().ok() else {
+                        return false;
+                    };
+                    if seq.checked_add(1).is_none() || r.timestamp.parse::<u64>().is_err() {
+                        return false;
+                    }
+                }
+            }
+            ReadStateStep::ReceiveHeartbeat { tail, .. } if !tail.is_representable() => {
+                return false;
+            }
+            ReadStateStep::ReceiveError { tail, .. }
+                if tail.as_ref().is_some_and(|t| !t.is_representable()) =>
+            {
+                return false;
+            }
+            _ => {}
+        }
+    }
+    true
+}
+
+fn case_supports_batch_view(case: &ReadStateCase) -> bool {
+    let mut pending_multi = false;
+    for step in &case.steps {
+        match step {
+            ReadStateStep::ReceiveBatch { records, .. } if records.len() > 1 => {
+                pending_multi = true;
+            }
+            ReadStateStep::Pull { expect } if pending_multi => {
+                let is_error = match expect {
+                    StepExpect::Direct(e) => {
+                        matches!(e.iteration, Some(IterationExpect::Error(_)))
+                    }
+                    StepExpect::Conditional {
+                        if_representable,
+                        otherwise,
+                    } => {
+                        matches!(if_representable.iteration, Some(IterationExpect::Error(_)))
+                            && matches!(otherwise.iteration, Some(IterationExpect::Error(_)))
+                    }
+                };
+                if !is_error {
+                    return false;
+                }
+                pending_multi = false;
+            }
+            _ => {}
+        }
+    }
+    !pending_multi
+}
+
+fn pos_tuple(pos: s2_sdk::types::StreamPosition) -> (u64, u64) {
+    (pos.seq_num, pos.timestamp)
+}
+
+fn assert_read_session_error_kind(label: &str, err: &ReadSessionError, expected: &str) {
+    match expected {
+        "ProtocolError" => assert!(
+            matches!(err, ReadSessionError::Protocol(_)),
+            "{label}: expected ProtocolError, got {err:?}"
+        ),
+        "ReadUnwrittenError" => assert!(
+            matches!(err, ReadSessionError::ReadUnwritten(_)),
+            "{label}: expected ReadUnwrittenError, got {err:?}"
+        ),
+        "ServerError" => assert!(
+            matches!(err, ReadSessionError::Server(_)),
+            "{label}: expected ServerError, got {err:?}"
+        ),
+        "SessionClosedError" => assert!(
+            matches!(err, ReadSessionError::SessionClosed(e) if e.failure().is_none()),
+            "{label}: expected clean SessionClosedError, got {err:?}"
+        ),
+        "AbortedError" => assert!(
+            matches!(err, ReadSessionError::Aborted(_)),
+            "{label}: expected AbortedError, got {err:?}"
+        ),
+        "ConnectionLostError" => assert!(
+            matches!(err, ReadSessionError::ConnectionLost(_)),
+            "{label}: expected ConnectionLostError, got {err:?}"
+        ),
+        other => panic!("{label}: unexpected error type {other:?}"),
+    }
+}
+
+fn assert_expect_request(
+    label: &str,
+    params: &BTreeMap<String, String>,
+    expect_request: &ExpectRequest,
+) {
+    for (k, v) in expect_request {
+        match v {
+            None => assert!(
+                !params.contains_key(k),
+                "{label}: expected query param {k:?} to be omitted, got {params:?}"
+            ),
+            Some(RequestParamExpect::Bool(b)) => assert_eq!(
+                params.get(k).map(String::as_str),
+                Some(if *b { "true" } else { "false" }),
+                "{label}: query param {k:?} mismatch in {params:?}"
+            ),
+            Some(RequestParamExpect::Str(s)) => assert_eq!(
+                params.get(k).map(String::as_str),
+                Some(s.as_str()),
+                "{label}: query param {k:?} mismatch in {params:?}"
+            ),
+        }
+    }
+}
+
+struct ReadStateHarness {
+    client: S2,
+    state: ReadSessionState,
+    slot: ReadStateSessionSlot,
+    attempts: Arc<Mutex<Vec<AttemptChannel>>>,
+    server_attempt: Arc<AtomicUsize>,
+    unexpected_requests: Arc<AtomicUsize>,
+    expects_initial_request: bool,
+    pending_cu: Option<CaughtUp>,
+    resolved_cus: Vec<(CaughtUp, (u64, u64))>,
+    target_attempt: usize,
+}
+
+impl ReadStateHarness {
+    fn assert_no_unexpected_requests(&self, label: &str) {
+        assert_eq!(
+            self.unexpected_requests.load(Ordering::SeqCst),
+            0,
+            "{label}: SDK opened unexpected extra request(s)"
+        );
+        let expected_max = if self.expects_initial_request {
+            self.target_attempt + 1
+        } else {
+            0
+        };
+        let opened = self.server_attempt.load(Ordering::SeqCst);
+        assert!(
+            opened <= expected_max,
+            "{label}: SDK opened {opened} request(s), expected at most {expected_max}"
+        );
+    }
+
+    fn push_action(&self, action: ReadStateAction) {
+        let tx = {
+            let mut guard = self.attempts.lock().unwrap();
+            ensure_attempt(&mut guard, self.target_attempt).tx.clone()
+        };
+        let _ = tx.send(action);
+    }
+
+    fn take_opened_rx(
+        &self,
+        attempt_idx: usize,
+    ) -> tokio::sync::oneshot::Receiver<BTreeMap<String, String>> {
+        let mut guard = self.attempts.lock().unwrap();
+        ensure_attempt(&mut guard, attempt_idx)
+            .opened_rx
+            .take()
+            .expect("opened_rx not yet consumed")
+    }
+
+    async fn assert_expect(&mut self, label: &str, expect: &ReadStateExpect) {
+        self.assert_no_unexpected_requests(label);
+        let expected_next: Option<u64> = expect.next_seq_num.as_deref().map(|s| s.parse().unwrap());
+        let expected_tail = expect.last_observed_tail.as_ref().map(ReadStatePos::parse);
+
+        assert_eq!(
+            self.state.next_seq_num(),
+            expected_next,
+            "{label}: next_seq_num"
+        );
+        assert_eq!(
+            self.state.last_observed_tail().map(pos_tuple),
+            expected_tail,
+            "{label}: last_observed_tail"
+        );
+        assert_eq!(
+            self.state.is_caught_up(),
+            expect.is_caught_up,
+            "{label}: is_caught_up"
+        );
+
+        match &expect.caught_up {
+            CaughtUpExpect::Pending => {
+                let cu = self
+                    .pending_cu
+                    .get_or_insert_with(|| self.state.caught_up());
+                assert!(
+                    futures_util::poll!(Pin::new(cu)).is_pending(),
+                    "{label}: retained pending caught_up must remain pending"
+                );
+                let mut fresh = self.state.caught_up();
+                assert!(
+                    futures_util::poll!(Pin::new(&mut fresh)).is_pending(),
+                    "{label}: fresh caught_up must be pending"
+                );
+            }
+            CaughtUpExpect::Resolved(pos) => {
+                let expected_pos = pos.parse();
+                if let Some(mut cu) = self.pending_cu.take() {
+                    let actual = tokio::time::timeout(Duration::from_secs(1), &mut cu)
+                        .await
+                        .unwrap_or_else(|_| {
+                            panic!("{label}: retained pending caught_up did not resolve")
+                        })
+                        .unwrap_or_else(|e| {
+                            panic!("{label}: retained pending caught_up failed unexpectedly: {e:?}")
+                        });
+                    assert_eq!(
+                        pos_tuple(actual),
+                        expected_pos,
+                        "{label}: retained pending caught_up tail"
+                    );
+                    self.resolved_cus.push((cu, expected_pos));
+                }
+                let mut fresh = self.state.caught_up();
+                let actual = tokio::time::timeout(Duration::from_secs(1), &mut fresh)
+                    .await
+                    .unwrap_or_else(|_| panic!("{label}: fresh caught_up did not resolve"))
+                    .unwrap_or_else(|e| {
+                        panic!("{label}: fresh caught_up failed unexpectedly: {e:?}")
+                    });
+                assert_eq!(
+                    pos_tuple(actual),
+                    expected_pos,
+                    "{label}: fresh caught_up tail"
+                );
+                self.resolved_cus.push((fresh, expected_pos));
+            }
+            CaughtUpExpect::Error(err_name) => {
+                if let Some(cu) = self.pending_cu.take() {
+                    let err = tokio::time::timeout(Duration::from_secs(1), cu)
+                        .await
+                        .unwrap_or_else(|_| {
+                            panic!("{label}: retained pending caught_up did not fail")
+                        })
+                        .expect_err(&format!(
+                            "{label}: retained pending caught_up should fail with {err_name}"
+                        ));
+                    assert_read_session_error_kind(label, &err, err_name);
+                }
+                let fresh_err =
+                    tokio::time::timeout(Duration::from_secs(1), self.state.caught_up())
+                        .await
+                        .unwrap_or_else(|_| panic!("{label}: fresh caught_up did not fail"))
+                        .expect_err(&format!(
+                            "{label}: fresh caught_up should fail with {err_name}"
+                        ));
+                assert_read_session_error_kind(label, &fresh_err, err_name);
+            }
+        }
+
+        // R8a: every previously resolved CaughtUp future retains its original resolved tail
+        // forever (verify both direct re-poll of the original and polling a clone).
+        for (cu, expected_pos) in &mut self.resolved_cus {
+            let direct = Pin::new(&mut *cu).await.unwrap_or_else(|e| {
+                panic!("{label}: previously resolved caught_up changed on re-poll to {e:?}")
+            });
+            assert_eq!(
+                pos_tuple(direct),
+                *expected_pos,
+                "{label}: previously resolved caught_up tail mutated on re-poll (R8a)"
+            );
+            let cloned = cu.clone().await.unwrap_or_else(|e| {
+                panic!("{label}: previously resolved caught_up clone changed to {e:?}")
+            });
+            assert_eq!(
+                pos_tuple(cloned),
+                *expected_pos,
+                "{label}: previously resolved caught_up clone tail mutated (R8a)"
+            );
+        }
+    }
+
+    async fn await_replacement_request(
+        &mut self,
+        label: &str,
+        expect_request: Option<&ExpectRequest>,
+        expect: Option<&ReadStateExpect>,
+    ) {
+        self.slot.ensure_pulling();
+        let opened_rx = self.take_opened_rx(self.target_attempt);
+        let params = tokio::time::timeout(Duration::from_secs(3), opened_rx)
+            .await
+            .unwrap_or_else(|_| panic!("{label}: replacement request did not open"))
+            .unwrap();
+        self.assert_no_unexpected_requests(label);
+        if let Some(req_exp) = expect_request {
+            assert_expect_request(label, &params, req_exp);
+        }
+        if let Some(exp) = expect {
+            self.assert_expect(label, exp).await;
+        }
+    }
+}
+
+async fn run_read_state_case(case: &ReadStateCase, batch_view: bool) {
+    let view = if batch_view { "batch" } else { "record" };
+    let case_label = format!("[{}][{view}] {}", case.rule, case.name);
+    let representable = case_is_representable(case);
+    let attempts: Arc<Mutex<Vec<AttemptChannel>>> = Arc::new(Mutex::new(Vec::new()));
+    let server_attempt = Arc::new(AtomicUsize::new(0));
+    let unexpected_requests = Arc::new(AtomicUsize::new(0));
+    let expects_initial_request = case.steps.iter().any(|s| {
+        matches!(
+            s,
+            ReadStateStep::ReceiveBatch { .. }
+                | ReadStateStep::ReceiveHeartbeat { .. }
+                | ReadStateStep::ReceiveCleanEnd
+                | ReadStateStep::ReceiveError { .. }
+                | ReadStateStep::Disconnect
+                | ReadStateStep::NextRequest { .. }
+        )
+    });
+    let max_allowed_attempts = if expects_initial_request {
+        1 + case
+            .steps
+            .iter()
+            .filter(|s| matches!(s, ReadStateStep::NextRequest { .. }))
+            .count()
+    } else {
+        0
+    };
+
+    let server = MockH2Server::start({
+        let attempts = attempts.clone();
+        let server_attempt = server_attempt.clone();
+        let unexpected_requests = unexpected_requests.clone();
+        move |_conn_id, req, respond| {
+            let attempts = attempts.clone();
+            let server_attempt = server_attempt.clone();
+            let unexpected_requests = unexpected_requests.clone();
+            async move {
+                let idx = server_attempt.fetch_add(1, Ordering::SeqCst);
+                if idx >= max_allowed_attempts {
+                    unexpected_requests.fetch_add(1, Ordering::SeqCst);
+                    if let Some(mut s2s) = S2sResponder::open(respond) {
+                        s2s.reset(h2::Reason::INTERNAL_ERROR);
+                    }
+                    return;
+                }
+                let params = query_pairs(req.uri());
+                let (mut rx, opened_tx) = {
+                    let mut guard = attempts.lock().unwrap();
+                    let ch = ensure_attempt(&mut guard, idx);
+                    (ch.rx.take().unwrap(), ch.opened_tx.take())
+                };
+                if let Some(tx) = opened_tx {
+                    let _ = tx.send(params);
+                }
+
+                let mut respond = Some(respond);
+                let mut s2s: Option<S2sResponder> = None;
+                let ensure_s2s = |s2s: &mut Option<S2sResponder>,
+                                  respond: &mut Option<h2::server::SendResponse<Bytes>>|
+                 -> bool {
+                    if s2s.is_none() {
+                        let Some(r) = respond.take() else {
+                            return false;
+                        };
+                        *s2s = S2sResponder::open(r);
+                    }
+                    s2s.is_some()
+                };
+
+                while let Some(action) = rx.recv().await {
+                    match action {
+                        ReadStateAction::Batch {
+                            records,
+                            tail,
+                            reconnect_advised,
+                        } => {
+                            if !ensure_s2s(&mut s2s, &mut respond) {
+                                break;
+                            }
+                            let payload = ProtoReadBatch {
+                                records: records
+                                    .into_iter()
+                                    .map(|(seq_num, timestamp, body_len)| ProtoSequencedRecord {
+                                        seq_num,
+                                        timestamp,
+                                        headers: vec![],
+                                        body: Bytes::from(vec![0u8; body_len]),
+                                    })
+                                    .collect(),
+                                tail: tail.map(|(seq_num, timestamp)| ProtoStreamPosition {
+                                    seq_num,
+                                    timestamp,
+                                }),
+                            }
+                            .encode_to_vec();
+                            s2s.as_mut()
+                                .unwrap()
+                                .send_regular(&payload, reconnect_advised, false);
+                        }
+                        ReadStateAction::CleanEnd => {
+                            if ensure_s2s(&mut s2s, &mut respond) {
+                                s2s.take().unwrap().send_eof();
+                            }
+                            break;
+                        }
+                        ReadStateAction::Error {
+                            status,
+                            code,
+                            message,
+                            tail,
+                        } => {
+                            let body = if status == 416
+                                && let Some((seq_num, timestamp)) = tail
+                            {
+                                format!(
+                                    r#"{{"tail":{{"seq_num":{seq_num},"timestamp":{timestamp}}}}}"#
+                                )
+                            } else {
+                                let mut obj = serde_json::Map::new();
+                                if let Some(c) = code {
+                                    obj.insert("code".to_owned(), serde_json::Value::String(c));
+                                }
+                                obj.insert(
+                                    "message".to_owned(),
+                                    serde_json::Value::String(message.unwrap_or_default()),
+                                );
+                                serde_json::Value::Object(obj).to_string()
+                            };
+                            if let Some(mut s) = s2s.take() {
+                                s.send_terminal(status, body.as_bytes());
+                            } else if let Some(r) = respond.take() {
+                                send_json(r, status, body);
+                            }
+                            break;
+                        }
+                        ReadStateAction::Disconnect => {
+                            if ensure_s2s(&mut s2s, &mut respond) {
+                                s2s.take().unwrap().reset(h2::Reason::INTERNAL_ERROR);
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    })
+    .await;
+
+    let start = if let Some(s) = &case.start.seq_num {
+        ReadStart::SeqNum(s.parse().unwrap())
+    } else if let Some(t) = &case.start.timestamp {
+        ReadStart::Timestamp(t.parse().unwrap())
+    } else if let Some(o) = &case.start.tail_offset {
+        ReadStart::TailOffset(o.parse().unwrap())
+    } else {
+        ReadStart::TAIL
+    };
+    let mut input = ReadInput::new(start);
+    if let Some(clamp) = case.start.clamp {
+        input = input.with_clamp(clamp);
+    }
+    if let Some(stop) = &case.stop {
+        if let Some(c) = &stop.count {
+            input = input.with_count(c.parse().unwrap());
+        }
+        if let Some(b) = &stop.bytes {
+            input = input.with_bytes(b.parse().unwrap());
+        }
+        if let Some(u) = &stop.until {
+            input = input.with_until(u.parse().unwrap());
+        }
+        if let Some(w) = &stop.wait {
+            input = input.with_wait_secs(w.parse().unwrap());
+        }
+    }
+
+    let client = server.client(fast_retry_config(3));
+    let (basin_name, stream_name) = test_basin_and_stream();
+    let stream = client.basin(basin_name).stream(stream_name);
+    let session = if batch_view {
+        ReadStateSession::Batches(
+            stream
+                .read_batch_session(input, ReadSessionConfig::default())
+                .unwrap_or_else(|e| panic!("{case_label}: failed to open batch session: {e:?}")),
+        )
+    } else {
+        ReadStateSession::Records(
+            stream
+                .read_session(input, ReadSessionConfig::default())
+                .unwrap_or_else(|e| panic!("{case_label}: failed to open session: {e:?}")),
+        )
+    };
+    let state = session.state();
+    let pending_cu = Some(state.caught_up());
+    let mut h = ReadStateHarness {
+        client,
+        state,
+        slot: ReadStateSessionSlot::new(session),
+        attempts,
+        server_attempt,
+        unexpected_requests,
+        expects_initial_request,
+        pending_cu,
+        resolved_cus: Vec::new(),
+        target_attempt: 0,
+    };
+
+    for (step_idx, step) in case.steps.iter().enumerate() {
+        let label = format!("{case_label} (step {step_idx})");
+
+        match step {
+            ReadStateStep::Check { expect } => {
+                h.assert_expect(&label, expect.resolve(representable)).await;
+            }
+            ReadStateStep::ReceiveBatch {
+                records,
+                tail,
+                reconnect_advised,
+            } => {
+                let records: Vec<(u64, u64, usize)> = records
+                    .iter()
+                    .map(|r| {
+                        (
+                            r.seq_num.parse().unwrap(),
+                            r.timestamp.parse().unwrap(),
+                            r.body_len as usize,
+                        )
+                    })
+                    .collect();
+                let tail = tail.as_ref().map(ReadStatePos::parse);
+
+                h.push_action(ReadStateAction::Batch {
+                    records,
+                    tail,
+                    reconnect_advised: *reconnect_advised,
+                });
+            }
+            ReadStateStep::ReceiveHeartbeat {
+                tail,
+                reconnect_advised,
+                expect,
+            } => {
+                let tail = tail.parse();
+                h.push_action(ReadStateAction::Batch {
+                    records: vec![],
+                    tail: Some(tail),
+                    reconnect_advised: *reconnect_advised,
+                });
+                if let Some(exp) = expect {
+                    assert!(
+                        !h.state.is_caught_up(),
+                        "{label}: receive_heartbeat with expect must transition is_caught_up false -> true"
+                    );
+                    let synced = h.state.caught_up();
+                    h.slot.ensure_pulling();
+                    tokio::time::timeout(Duration::from_secs(3), synced)
+                        .await
+                        .unwrap_or_else(|_| {
+                            panic!("{label}: timed out waiting for heartbeat catch-up")
+                        })
+                        .unwrap_or_else(|e| {
+                            panic!("{label}: heartbeat catch-up failed unexpectedly: {e:?}")
+                        });
+                    h.assert_expect(&label, exp.resolve(representable)).await;
+                }
+            }
+            ReadStateStep::ReceiveCleanEnd => {
+                h.push_action(ReadStateAction::CleanEnd);
+            }
+            ReadStateStep::ReceiveError {
+                status,
+                code,
+                message,
+                tail,
+            } => {
+                h.push_action(ReadStateAction::Error {
+                    status: *status,
+                    code: code.clone(),
+                    message: message.clone(),
+                    tail: tail.as_ref().map(ReadStatePos::parse),
+                });
+            }
+            ReadStateStep::Disconnect => {
+                h.push_action(ReadStateAction::Disconnect);
+            }
+            ReadStateStep::NextRequest {
+                expect,
+                expect_request,
+            } => {
+                h.target_attempt += 1;
+                h.await_replacement_request(
+                    &label,
+                    expect_request.as_ref(),
+                    expect.as_ref().map(|e| e.resolve(representable)),
+                )
+                .await;
+            }
+            ReadStateStep::Pull { expect } => {
+                let exp = expect.resolve(representable);
+                if !h.slot.closed_by_caller {
+                    let outcome = h.slot.pull(&label).await;
+                    match exp
+                        .iteration
+                        .as_ref()
+                        .expect("pull expect must carry iteration")
+                    {
+                        IterationExpect::Clean => assert!(
+                            outcome.is_none(),
+                            "{label}: expected clean end, got {outcome:?}"
+                        ),
+                        IterationExpect::Record(rec_seq) => {
+                            let expected_seq: u64 = rec_seq.parse().unwrap();
+                            let rec = outcome
+                                .unwrap_or_else(|| {
+                                    panic!("{label}: expected record {expected_seq}, got clean end")
+                                })
+                                .unwrap_or_else(|e| {
+                                    panic!(
+                                        "{label}: expected record {expected_seq}, got error {e:?}"
+                                    )
+                                });
+                            assert_eq!(rec.seq_num, expected_seq, "{label}: record seq_num");
+                        }
+                        IterationExpect::Error(err_name) => {
+                            let err = outcome
+                                .unwrap_or_else(|| {
+                                    panic!("{label}: expected error {err_name}, got clean end")
+                                })
+                                .expect_err(&format!("{label}: expected error {err_name}"));
+                            assert_read_session_error_kind(&label, &err, err_name);
+                        }
+                    }
+                }
+                h.assert_expect(&label, exp).await;
+            }
+            ReadStateStep::Close { expect } => {
+                h.slot.close().await;
+                if let Some(exp) = expect {
+                    h.assert_expect(&label, exp.resolve(representable)).await;
+                }
+            }
+            ReadStateStep::Abort { expect } => {
+                h.client.close();
+                if let Some(exp) = expect {
+                    h.assert_expect(&label, exp.resolve(representable)).await;
+                }
+            }
+        }
+    }
+
+    h.assert_no_unexpected_requests(&case_label);
+    // Clean up any trailing pending pull task before dropping the server.
+    h.slot.close().await;
+    h.assert_no_unexpected_requests(&case_label);
+}
+
+// spec: r1 D4, R1, R6, R6a, R7, R7a, R7b, R7c, R8, R8a, R8c, R8d, R9, R9a, R9b, R9c, R9d, R10a,
+// R10b, R10c, T6a, T6b
+#[tokio::test]
+async fn spec_vectors_read_state() {
+    let file: ReadStateFile = read_json("sdk/vectors/read_state.json");
+    assert!(!file.cases.is_empty());
+
+    let mut batch_view_cases = 0usize;
+    for case in &file.cases {
+        run_read_state_case(case, false).await;
+        if case_supports_batch_view(case) {
+            run_read_state_case(case, true).await;
+            batch_view_cases += 1;
+        }
+    }
+    assert!(
+        batch_view_cases >= 30,
+        "expected batch-view parity runner to cover single/zero-record cases, ran {batch_view_cases}"
     );
 }

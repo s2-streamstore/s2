@@ -705,6 +705,56 @@ async fn read_session_reports_caught_up_after_tail_delivery(
     Ok(())
 }
 
+#[test_context(S2Stream)]
+#[tokio_shared_rt::test(shared)]
+async fn read_session_bounded_at_tail_ends_caught_up_and_rejects_zero_limits(
+    stream: &S2Stream,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // R2: ReadSession and ReadBatchSession reject count = 0 and bytes = 0 at open.
+    for bad_input in [
+        ReadInput::new(ReadStart::SeqNum(0)).with_count(0),
+        ReadInput::new(ReadStart::SeqNum(0)).with_bytes(0),
+    ] {
+        assert_matches!(
+            stream.read_session(bad_input.clone(), ReadSessionConfig::default()),
+            Err(ReadSessionError::Validation(_))
+        );
+        assert_matches!(
+            stream.read_batch_session(bad_input, ReadSessionConfig::default()),
+            Err(ReadSessionError::Validation(_))
+        );
+    }
+
+    // Empty stream: bounded read session starting at seq_num = 0 ends cleanly caught up at tail 0.
+    let mut empty_sess = stream.read_session(
+        ReadInput::new(ReadStart::SeqNum(0)).with_count(10),
+        ReadSessionConfig::default(),
+    )?;
+    let empty_cu = empty_sess.caught_up();
+    assert!(empty_sess.next().await.is_none());
+    assert!(empty_sess.is_caught_up());
+    assert_eq!(empty_sess.next_seq_num(), Some(0));
+    assert_eq!(empty_sess.last_observed_tail().map(|t| t.seq_num), Some(0));
+    assert_eq!(empty_cu.await?.seq_num, 0);
+    assert_eq!(empty_sess.caught_up().await?.seq_num, 0);
+
+    // Non-empty stream: wait = 0 starting at tail ends cleanly caught up at current tail.
+    let ack = stream.append(AppendRecord::new("only")?).await?;
+    let mut tail_sess = stream.read_session(
+        ReadInput::new(ReadStart::SeqNum(ack.tail.seq_num)).with_wait_secs(0),
+        ReadSessionConfig::default(),
+    )?;
+    let tail_cu = tail_sess.caught_up();
+    assert!(tail_sess.next().await.is_none());
+    assert!(tail_sess.is_caught_up());
+    assert_eq!(tail_sess.next_seq_num(), Some(ack.tail.seq_num));
+    assert_eq!(tail_sess.last_observed_tail(), Some(ack.tail));
+    assert_eq!(tail_cu.await?, ack.tail);
+    assert_eq!(tail_sess.caught_up().await?, ack.tail);
+
+    Ok(())
+}
+
 #[test_context(SharedS2Basin)]
 #[tokio_shared_rt::test(shared)]
 async fn nonexistent_stream_errors(

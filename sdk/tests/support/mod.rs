@@ -295,6 +295,10 @@ impl S2sResponder {
         self.0.send_reset(reason);
     }
 
+    pub async fn wait_reset(&mut self) -> Result<h2::Reason, h2::Error> {
+        std::future::poll_fn(|cx| self.0.poll_reset(cx)).await
+    }
+
     /// Push `frame` chunks using HTTP/2 send flow control until the stream receive window is
     /// completely exhausted (`capacity() == 0` and `poll_capacity` returns `Poll::Pending`),
     /// proving the peer has buffered the full window without releasing credit. Returns the total
@@ -491,35 +495,43 @@ pub fn proto_read_batch(seq_num: u64, tail_seq: u64) -> Vec<u8> {
     ProtoReadBatch {
         records: vec![ProtoSequencedRecord {
             seq_num,
-            timestamp: 1000,
+            timestamp: 1000u64.saturating_add(seq_num),
             headers: vec![],
             body: Bytes::from_static(b"rec"),
         }],
         tail: Some(ProtoStreamPosition {
             seq_num: tail_seq,
-            timestamp: 1000,
+            timestamp: 1000u64.saturating_add(tail_seq),
         }),
     }
     .encode_to_vec()
 }
 
-pub fn proto_read_batch_records(seq_nums: &[u64], tail_seq: Option<u64>) -> Vec<u8> {
+pub fn proto_read_batch_records_base(
+    seq_nums: &[u64],
+    tail_seq: Option<u64>,
+    base_ts: u64,
+) -> Vec<u8> {
     ProtoReadBatch {
         records: seq_nums
             .iter()
             .map(|&seq_num| ProtoSequencedRecord {
                 seq_num,
-                timestamp: 1000u64.saturating_add(seq_num),
+                timestamp: base_ts.saturating_add(seq_num),
                 headers: vec![],
                 body: Bytes::from(format!("rec-{seq_num}")),
             })
             .collect(),
         tail: tail_seq.map(|seq_num| ProtoStreamPosition {
             seq_num,
-            timestamp: 1000u64.saturating_add(seq_num),
+            timestamp: base_ts.saturating_add(seq_num),
         }),
     }
     .encode_to_vec()
+}
+
+pub fn proto_read_batch_records(seq_nums: &[u64], tail_seq: Option<u64>) -> Vec<u8> {
+    proto_read_batch_records_base(seq_nums, tail_seq, 1000)
 }
 
 pub fn proto_heartbeat(tail_seq: u64) -> Vec<u8> {

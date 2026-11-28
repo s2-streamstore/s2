@@ -177,6 +177,18 @@ fn invalid_basin_name() {
 }
 
 #[test]
+fn read_rejects_zero_count_and_bytes_in_cli_args() {
+    for flag in ["--count", "--bytes"] {
+        TestEnv::new()
+            .s2()
+            .args(["read", "s2://test-basin/test-stream", flag, "0"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("is not in 1.."));
+    }
+}
+
+#[test]
 fn missing_access_token() {
     let env = TestEnv::new();
     let mut cmd = env.s2();

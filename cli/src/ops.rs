@@ -860,20 +860,36 @@ pub fn tail(
     encryption_key: Option<&EncryptionKey>,
 ) -> Result<impl Stream<Item = Result<SequencedRecord, CliError>> + Send + Unpin, CliError> {
     let stream = stream_with_encryption(s2, args.uri.clone(), encryption_key);
+    let records = if !args.follow && args.lines == 0 {
+        None
+    } else {
+        // Use clamp to handle empty streams gracefully - if we ask for
+        // TailOffset(10) but there are fewer records, clamp to the actual start.
+        let mut input = ReadInput::new(ReadStart::TailOffset(args.lines)).with_clamp(true);
+        if !args.follow {
+            input = input.with_count(args.lines);
+        }
 
-    // Use clamp to handle empty streams gracefully - if we ask for
-    // TailOffset(10) but there are fewer records, clamp to the actual start.
-    let mut input = ReadInput::new(ReadStart::TailOffset(args.lines)).with_clamp(true);
-    if !args.follow {
-        input = input.with_count(args.lines);
-    }
-
-    let mut records = stream
-        .read_session(input, ReadSessionConfig::default())
-        .map_err(|e| CliError::op(OpKind::Tail, e))?;
+        Some(
+            stream
+                .read_session(input, ReadSessionConfig::default())
+                .map_err(|e| CliError::op(OpKind::Tail, e))?,
+        )
+    };
 
     let follow = args.follow;
     Ok(Box::pin(async_stream::stream! {
+        let Some(mut records) = records else {
+            // Use a unary `count = 0` read rather than `check_tail()` so `-n 0` requires the
+            // same `read` permission and validates encryption keys and stream existence
+            // (matching GNU `tail -n 0`).
+            let input = ReadInput::new(ReadStart::TAIL).with_count(0);
+            match stream.read(input).await {
+                Ok(_) | Err(sdk::error::ReadError::ReadUnwritten(_)) => {}
+                Err(e) => yield Err(CliError::op(OpKind::Tail, e)),
+            }
+            return;
+        };
         let mut seen_any = false;
         while let Some(item) = records.next().await {
             match item {
@@ -883,7 +899,7 @@ pub fn tail(
                 }
                 // Compatibility with older servers that still return an initial 416 instead of
                 // a tail heartbeat for non-follow tail when starting at the tail (e.g. an empty
-                // stream or `-n 0`).
+                // stream).
                 Err(sdk::error::ReadSessionError::ReadUnwritten(_)) if !follow && !seen_any => {
                     break;
                 }
