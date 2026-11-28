@@ -30,6 +30,12 @@ pub struct ListArgs {
     tag = super::paths::access_tokens::TAG,
     responses(
         (status = StatusCode::OK, body = v1t::access::ListAccessTokensResponse),
+        (
+            status = StatusCode::TOO_MANY_REQUESTS,
+            description = "Rate limit exceeded (`rate_limited`).",
+            body = v1t::error::ErrorInfo,
+            headers(("retry-after-ms" = u64, description = "Milliseconds to wait before retrying.")),
+        ),
         (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
         (status = StatusCode::FORBIDDEN, body = v1t::error::ErrorInfo),
         (status = StatusCode::REQUEST_TIMEOUT, body = v1t::error::ErrorInfo),
@@ -58,6 +64,12 @@ pub struct IssueArgs {
     request_body = v1t::access::IssueAccessTokenRequest,
     responses(
         (status = StatusCode::CREATED, body = v1t::access::IssueAccessTokenResponse),
+        (
+            status = StatusCode::TOO_MANY_REQUESTS,
+            description = "Rate limit exceeded (`rate_limited`).",
+            body = v1t::error::ErrorInfo,
+            headers(("retry-after-ms" = u64, description = "Milliseconds to wait before retrying.")),
+        ),
         (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
         (status = StatusCode::FORBIDDEN, body = v1t::error::ErrorInfo),
         (status = StatusCode::REQUEST_TIMEOUT, body = v1t::error::ErrorInfo),
@@ -86,6 +98,12 @@ pub struct RevokeArgs {
     responses(
         (status = StatusCode::NO_CONTENT),
         (status = StatusCode::NOT_FOUND, description = "No access token exists with this ID (`access_token_not_found`).", body = v1t::error::ErrorInfo),
+        (
+            status = StatusCode::TOO_MANY_REQUESTS,
+            description = "Rate limit exceeded (`rate_limited`).",
+            body = v1t::error::ErrorInfo,
+            headers(("retry-after-ms" = u64, description = "Milliseconds to wait before retrying.")),
+        ),
         (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),
         (status = StatusCode::FORBIDDEN, body = v1t::error::ErrorInfo),
         (status = StatusCode::REQUEST_TIMEOUT, body = v1t::error::ErrorInfo),
