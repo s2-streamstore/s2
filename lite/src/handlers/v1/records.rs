@@ -166,7 +166,7 @@ pub struct ReadArgs {
         )),
         (
             status = StatusCode::RANGE_NOT_SATISFIABLE,
-            description = "Requested starting position is beyond the tail without `clamp` (`seq_num > tail.seq_num` or `timestamp > tail.timestamp`), or a unary read with `wait` of `0` reached the tail with no records to return.",
+            description = "Requested starting position is beyond the tail without `clamp` (`seq_num > tail.seq_num` or `timestamp > tail.timestamp`), or a unary read with `wait` of `0` reached the tail with no records (unless stopped first by `count`, `bytes`, or `until`).",
             body = v1t::stream::TailResponse,
         ),
         (status = StatusCode::BAD_REQUEST, body = v1t::error::ErrorInfo),

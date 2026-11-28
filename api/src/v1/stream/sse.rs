@@ -206,7 +206,7 @@ impl From<StandardError> for ErrorEventData {
     }
 }
 
-/// Heartbeat carrying the tail, sent only once all records before `tail` have been delivered.
+/// Heartbeat carrying the tail, sent only when the server has nothing earlier to send.
 /// Emitted while waiting at the tail for new records, or before `[DONE]` when ending cleanly at the tail.
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize)]
