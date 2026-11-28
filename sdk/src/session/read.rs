@@ -509,9 +509,13 @@ impl ReadSessionState {
                 inner.abort_for_client_close();
             }
             let out = f(&mut inner);
-            let notify = inner
-                .caught_up_outcome()
-                .and_then(|outcome| inner.waiter.take()?.set_result(outcome));
+            let notify = if inner.waiter.is_some() {
+                inner
+                    .caught_up_outcome()
+                    .and_then(|outcome| inner.waiter.take()?.set_result(outcome))
+            } else {
+                None
+            };
             (out, notify)
         };
         if let Some(notify) = notify {
@@ -1135,9 +1139,11 @@ impl ReadSessionCore {
 
 impl Drop for ReadSessionCore {
     fn drop(&mut self) {
-        self.state.update(|inner| {
-            inner.close_with(TerminalClose::Clean);
-        });
+        if matches!(self.lifecycle, StreamLifecycle::Active(_)) {
+            self.state.update(|inner| {
+                inner.close_with(TerminalClose::Clean);
+            });
+        }
     }
 }
 

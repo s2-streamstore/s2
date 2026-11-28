@@ -2353,9 +2353,9 @@ async fn run_read_state_case(case: &ReadStateCase, batch_view: bool) {
 
     for (step_idx, step) in case.steps.iter().enumerate() {
         let label = format!("{case_label} (step {step_idx})");
-        let next_expects_protocol_error = case
-            .steps
-            .get(step_idx + 1)
+        let next_expects_protocol_error = case.steps[step_idx + 1..]
+            .iter()
+            .find(|s| !matches!(s, ReadStateStep::Check { .. }))
             .is_some_and(|next| next.expects_protocol_error(representable));
 
         match step {
@@ -2379,15 +2379,19 @@ async fn run_read_state_case(case: &ReadStateCase, batch_view: bool) {
                     .collect();
                 let tail = tail.as_ref().map(ReadStatePos::parse);
 
-                if let Some(c) = h.remaining_count.as_mut() {
-                    *c = c.saturating_sub(records.len() as u64);
-                }
-                if let Some(b) = h.remaining_bytes.as_mut() {
-                    let metered: u64 = records.iter().map(|(_, _, len)| 8 + *len as u64).sum();
-                    *b = b.saturating_sub(metered);
-                }
-                let exhausted = !records.is_empty()
-                    && (h.remaining_count == Some(0) || h.remaining_bytes == Some(0));
+                let exhausted = if next_expects_protocol_error {
+                    false
+                } else {
+                    if let Some(c) = h.remaining_count.as_mut() {
+                        *c = c.saturating_sub(records.len() as u64);
+                    }
+                    if let Some(b) = h.remaining_bytes.as_mut() {
+                        let metered: u64 = records.iter().map(|(_, _, len)| 8 + *len as u64).sum();
+                        *b = b.saturating_sub(metered);
+                    }
+                    !records.is_empty()
+                        && (h.remaining_count == Some(0) || h.remaining_bytes == Some(0))
+                };
 
                 h.push_action(ReadStateAction::Batch {
                     records,
