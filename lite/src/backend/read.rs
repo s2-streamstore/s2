@@ -197,6 +197,9 @@ async fn read_session(
                 state.start_seq_num = state.tail.seq_num;
             } else {
                 assert_eq!(state.start_seq_num, state.tail.seq_num);
+                if end.until.deny(state.tail.timestamp) {
+                    break 'session;
+                }
                 let follow_rx = if end.may_follow() {
                     match client.follow(state.start_seq_num).await? {
                         Ok(follow_rx) => {
@@ -1170,5 +1173,306 @@ mod tests {
             panic!("expected envelope record");
         };
         assert_eq!(envelope.body().as_ref(), b"follow-1");
+    }
+
+    fn append_input_at(record: Record, timestamp: Timestamp) -> AppendInput {
+        let record: AppendRecord = AppendRecordParts {
+            timestamp: Some(timestamp),
+            record: Metered::from(record),
+        }
+        .try_into()
+        .unwrap();
+        let records: AppendRecordBatch = vec![record].try_into().unwrap();
+        AppendInput {
+            records,
+            match_seq_num: None,
+            fencing_token: None,
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn read_at_tail_with_denied_until_stops_immediately_without_heartbeat_or_wait() {
+        let (backend, basin, stream) = setup_stream().await;
+
+        // 1. Empty stream (tail = (0, 0)): until = 0 stops immediately without heartbeat or wait.
+        for (start, wait) in [
+            (
+                ReadStart {
+                    from: ReadFrom::SeqNum(0),
+                    clamp: false,
+                },
+                None,
+            ),
+            (
+                ReadStart {
+                    from: ReadFrom::TailOffset(0),
+                    clamp: false,
+                },
+                Some(Duration::from_secs(30)),
+            ),
+            (
+                ReadStart {
+                    from: ReadFrom::SeqNum(5),
+                    clamp: true,
+                },
+                Some(Duration::from_secs(30)),
+            ),
+        ] {
+            let started = Instant::now();
+            let session = backend
+                .open_for_read(&basin, &stream, None, OptionalStreamConfig::default())
+                .await
+                .unwrap()
+                .read(
+                    start,
+                    ReadEnd {
+                        limit: ReadLimit::Unbounded,
+                        until: ReadUntil::Timestamp(0),
+                        wait,
+                    },
+                )
+                .await
+                .unwrap();
+            let outputs: Vec<_> = session
+                .collect::<Vec<_>>()
+                .await
+                .into_iter()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            assert!(outputs.is_empty(), "expected clean EOF, got {outputs:?}");
+            assert_eq!(Instant::now(), started, "must not sleep on wait");
+        }
+
+        // Empty stream with future-reachable until = 1 still emits tail heartbeat.
+        let session = backend
+            .open_for_read(&basin, &stream, None, OptionalStreamConfig::default())
+            .await
+            .unwrap()
+            .read(
+                ReadStart {
+                    from: ReadFrom::SeqNum(0),
+                    clamp: false,
+                },
+                ReadEnd {
+                    limit: ReadLimit::Unbounded,
+                    until: ReadUntil::Timestamp(1),
+                    wait: None,
+                },
+            )
+            .await
+            .unwrap();
+        let outputs: Vec<_> = session
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(matches!(
+            outputs.as_slice(),
+            [ReadSessionOutput::Heartbeat(tail)] if *tail == StreamPosition::MIN
+        ));
+
+        // Empty stream strictly beyond tail without clamp still returns UnwrittenError first.
+        let err = match backend
+            .open_for_read(&basin, &stream, None, OptionalStreamConfig::default())
+            .await
+            .unwrap()
+            .read(
+                ReadStart {
+                    from: ReadFrom::SeqNum(5),
+                    clamp: false,
+                },
+                ReadEnd {
+                    limit: ReadLimit::Unbounded,
+                    until: ReadUntil::Timestamp(0),
+                    wait: None,
+                },
+            )
+            .await
+        {
+            Ok(_) => panic!("expected UnwrittenError"),
+            Err(err) => err,
+        };
+        assert!(
+            matches!(err, ReadError::Unwritten(UnwrittenError(tail)) if tail == StreamPosition::MIN)
+        );
+
+        // 2. Active non-empty stream (tail = (2, 2000)).
+        for (body, ts) in [(&b"a"[..], 1000u64), (&b"b"[..], 2000u64)] {
+            backend
+                .open_for_append(&basin, &stream, None, OptionalStreamConfig::default())
+                .await
+                .unwrap()
+                .append(append_input_at(
+                    Record::try_from_parts(vec![], bytes::Bytes::from_static(body)).unwrap(),
+                    ts,
+                ))
+                .await
+                .unwrap();
+        }
+        let expected_tail = StreamPosition {
+            seq_num: 2,
+            timestamp: 2000,
+        };
+
+        for (start, until, wait) in [
+            (
+                ReadStart {
+                    from: ReadFrom::SeqNum(2),
+                    clamp: false,
+                },
+                2000,
+                None,
+            ),
+            (
+                ReadStart {
+                    from: ReadFrom::SeqNum(2),
+                    clamp: false,
+                },
+                1500,
+                Some(Duration::from_secs(30)),
+            ),
+            (
+                ReadStart {
+                    from: ReadFrom::TailOffset(0),
+                    clamp: false,
+                },
+                2000,
+                Some(Duration::from_secs(30)),
+            ),
+            (
+                ReadStart {
+                    from: ReadFrom::SeqNum(10),
+                    clamp: true,
+                },
+                2000,
+                Some(Duration::from_secs(30)),
+            ),
+        ] {
+            let started = Instant::now();
+            let session = backend
+                .open_for_read(&basin, &stream, None, OptionalStreamConfig::default())
+                .await
+                .unwrap()
+                .read(
+                    start,
+                    ReadEnd {
+                        limit: ReadLimit::Unbounded,
+                        until: ReadUntil::Timestamp(until),
+                        wait,
+                    },
+                )
+                .await
+                .unwrap();
+            let outputs: Vec<_> = session
+                .collect::<Vec<_>>()
+                .await
+                .into_iter()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            assert!(
+                outputs.is_empty(),
+                "expected clean EOF for until={until}, got {outputs:?}"
+            );
+            assert_eq!(Instant::now(), started, "must not sleep on wait");
+        }
+
+        // Future-reachable until = 2001 still emits tail heartbeat at tail.
+        let session = backend
+            .open_for_read(&basin, &stream, None, OptionalStreamConfig::default())
+            .await
+            .unwrap()
+            .read(
+                ReadStart {
+                    from: ReadFrom::SeqNum(2),
+                    clamp: false,
+                },
+                ReadEnd {
+                    limit: ReadLimit::Unbounded,
+                    until: ReadUntil::Timestamp(2001),
+                    wait: None,
+                },
+            )
+            .await
+            .unwrap();
+        let outputs: Vec<_> = session
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(matches!(
+            outputs.as_slice(),
+            [ReadSessionOutput::Heartbeat(tail)] if *tail == expected_tail
+        ));
+
+        // Unclamped beyond-tail still returns UnwrittenError even when until <= tail.timestamp.
+        let err = match backend
+            .open_for_read(&basin, &stream, None, OptionalStreamConfig::default())
+            .await
+            .unwrap()
+            .read(
+                ReadStart {
+                    from: ReadFrom::SeqNum(10),
+                    clamp: false,
+                },
+                ReadEnd {
+                    limit: ReadLimit::Unbounded,
+                    until: ReadUntil::Timestamp(1500),
+                    wait: None,
+                },
+            )
+            .await
+        {
+            Ok(_) => panic!("expected UnwrittenError"),
+            Err(err) => err,
+        };
+        assert!(matches!(err, ReadError::Unwritten(UnwrittenError(tail)) if tail == expected_tail));
+
+        // 3. Deleted trailing record whose timestamp was >= until: surviving earlier record is
+        //    yielded, then at-tail until check stops immediately without heartbeat or wait.
+        let stream_id = StreamId::new(&basin, &stream);
+        let mut del = WriteBatch::new();
+        del.delete(kv::stream_record_data::ser_key(
+            stream_id,
+            StreamPosition {
+                seq_num: 1,
+                timestamp: 2000,
+            },
+        ));
+        backend.db.write(del).assert_durable().await;
+
+        let started = Instant::now();
+        let session = backend
+            .open_for_read(&basin, &stream, None, OptionalStreamConfig::default())
+            .await
+            .unwrap()
+            .read(
+                ReadStart {
+                    from: ReadFrom::SeqNum(0),
+                    clamp: false,
+                },
+                ReadEnd {
+                    limit: ReadLimit::Unbounded,
+                    until: ReadUntil::Timestamp(1500),
+                    wait: Some(Duration::from_secs(30)),
+                },
+            )
+            .await
+            .unwrap();
+        let outputs: Vec<_> = session
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(outputs.len(), 1);
+        assert!(matches!(
+            &outputs[0],
+            ReadSessionOutput::Batch(batch) if batch.records.len() == 1
+                && batch.records[0].position().seq_num == 0
+                && batch.tail.is_none()
+        ));
+        assert_eq!(Instant::now(), started, "must not sleep on wait");
     }
 }

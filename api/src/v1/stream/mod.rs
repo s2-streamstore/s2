@@ -190,6 +190,7 @@ pub struct ReadEnd {
     #[cfg_attr(feature = "utoipa", param(value_type = u64, required = false))]
     pub bytes: Option<u64>,
     /// Exclusive timestamp to read until.
+    /// If the stream's tail is already at or past `until`, the read stops immediately with no further records.
     #[cfg_attr(feature = "utoipa", param(value_type = record::Timestamp, required = false))]
     pub until: Option<record::Timestamp>,
     /// Duration in seconds to wait for new records.

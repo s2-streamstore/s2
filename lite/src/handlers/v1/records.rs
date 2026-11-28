@@ -1961,4 +1961,166 @@ mod tests {
         assert_eq!(body["tail"]["seq_num"], second_ack.end.seq_num);
         assert_eq!(body["tail"]["timestamp"], second_ack.end.timestamp);
     }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn read_at_tail_until_at_or_before_tail_timestamp_stops_cleanly_across_modes() {
+        async fn assert_empty_clean_stop(
+            app: &axum::Router,
+            basin: &BasinName,
+            stream: &StreamName,
+            query: &str,
+        ) {
+            let started = tokio::time::Instant::now();
+
+            // Unary: 200 OK with empty records and no tail (not 416).
+            let resp = send(
+                app,
+                request_builder("GET", records_uri(stream, query), basin)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::OK, "unary query `{query}`");
+            let body = response_json(resp, "unary empty until response").await;
+            assert_eq!(
+                body["records"],
+                serde_json::json!([]),
+                "unary query `{query}`"
+            );
+            assert!(body.get("tail").is_none(), "unary query `{query}`");
+
+            // S2S: 200 OK with zero frames and clean EOF.
+            let s2s_batches = s2s_read_batches(app, basin, stream, query).await;
+            assert!(
+                s2s_batches.is_empty(),
+                "S2S query `{query}` should emit no frames, got {s2s_batches:?}"
+            );
+
+            // SSE: 200 OK with zero batches, zero pings, followed by [DONE].
+            let sse = sse_read_query(app, basin, stream, query, None).await;
+            assert!(sse.seq_nums.is_empty(), "SSE query `{query}`");
+            assert!(sse.pings.is_empty(), "SSE query `{query}`");
+
+            assert_eq!(
+                tokio::time::Instant::now(),
+                started,
+                "query `{query}` must not sleep on wait"
+            );
+        }
+
+        // 1. Empty stream (tail = (0, 0)).
+        let (empty_app, _empty_backend, empty_basin, empty_stream) = setup_app_with_config(
+            "until-empty-stop",
+            BasinConfig::default(),
+            OptionalStreamConfig::default(),
+        )
+        .await;
+        for query in [
+            "until=0",
+            "seq_num=0&until=0",
+            "seq_num=0&until=0&wait=30",
+            "seq_num=5&clamp=true&until=0&wait=30",
+        ] {
+            assert_empty_clean_stop(&empty_app, &empty_basin, &empty_stream, query).await;
+        }
+
+        // Empty stream with future-reachable until=1 -> unary 416, streaming tail heartbeat.
+        let resp = send(
+            &empty_app,
+            request_builder(
+                "GET",
+                records_uri(&empty_stream, "seq_num=0&until=1"),
+                &empty_basin,
+            )
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await;
+        assert_416(resp, StreamPosition::MIN, "unary empty future until").await;
+        assert_streaming_tail_heartbeat(
+            &empty_app,
+            &empty_basin,
+            &empty_stream,
+            "seq_num=0&until=1",
+            StreamPosition::MIN,
+        )
+        .await;
+
+        // Empty stream strictly beyond tail without clamp -> 416 across all modes.
+        for (mode, hdr) in [
+            ("unary", None),
+            ("s2s", Some((header::CONTENT_TYPE, "s2s/proto"))),
+            ("sse", Some((header::ACCEPT, "text/event-stream"))),
+        ] {
+            let mut req = request_builder(
+                "GET",
+                records_uri(&empty_stream, "seq_num=5&until=0"),
+                &empty_basin,
+            );
+            if let Some((k, v)) = hdr {
+                req = req.header(k, v);
+            }
+            let resp = send(&empty_app, req.body(Body::empty()).unwrap()).await;
+            assert_416(
+                resp,
+                StreamPosition::MIN,
+                &format!("{mode} empty beyond tail"),
+            )
+            .await;
+        }
+
+        // 2. Non-empty stream (tail = (2, 2000)).
+        let (app, backend, basin, stream) = setup_app_with_config(
+            "until-nonempty-stop",
+            BasinConfig::default(),
+            OptionalStreamConfig::default(),
+        )
+        .await;
+        let ack = append_records(
+            &backend,
+            &basin,
+            &stream,
+            vec![
+                envelope_record(b"a", Some(1000)),
+                envelope_record(b"b", Some(2000)),
+            ],
+        )
+        .await;
+        for query in [
+            "until=2000",
+            "seq_num=2&until=2000",
+            "seq_num=2&until=1500&wait=30",
+            "seq_num=10&clamp=true&until=2000&wait=30",
+        ] {
+            assert_empty_clean_stop(&app, &basin, &stream, query).await;
+        }
+
+        // Future-reachable until=2001 at tail -> unary 416, streaming tail heartbeat.
+        let resp = send(
+            &app,
+            request_builder("GET", records_uri(&stream, "seq_num=2&until=2001"), &basin)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_416(resp, ack.end, "unary nonempty future until").await;
+        assert_streaming_tail_heartbeat(&app, &basin, &stream, "seq_num=2&until=2001", ack.end)
+            .await;
+
+        // Strictly beyond tail without clamp -> 416 across all modes even when until <=
+        // tail.timestamp.
+        for (mode, hdr) in [
+            ("unary", None),
+            ("s2s", Some((header::CONTENT_TYPE, "s2s/proto"))),
+            ("sse", Some((header::ACCEPT, "text/event-stream"))),
+        ] {
+            let mut req =
+                request_builder("GET", records_uri(&stream, "seq_num=10&until=1500"), &basin);
+            if let Some((k, v)) = hdr {
+                req = req.header(k, v);
+            }
+            let resp = send(&app, req.body(Body::empty()).unwrap()).await;
+            assert_416(resp, ack.end, &format!("{mode} nonempty beyond tail")).await;
+        }
+    }
 }
