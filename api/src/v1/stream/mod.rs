@@ -197,7 +197,8 @@ pub struct ReadEnd {
     /// The default duration is 0 if there is a bound on `count`, `bytes`, or `until`, and otherwise infinite.
     /// Non-streaming reads are always bounded on `count` and `bytes`, so you can achieve long poll semantics by specifying a non-zero duration up to 60 seconds.
     /// In the context of an SSE or S2S streaming read, the duration will bound how much time can elapse between records throughout the lifetime of the session.
-    /// When `wait` is 0 (explicitly or by default), a unary read that reaches the tail with no records returns `416` unless stopped first by `count`, `bytes`, or `until`. A streaming read that ends cleanly at the tail (other than by exhausting `count` or `bytes`) finishes with a message carrying the catching-up `tail`.
+    /// When `wait` is 0 (explicitly or by default), a unary read that reaches the tail with no records returns `416` unless stopped first by `count`, `bytes`, or `until`.
+    /// When a streaming read ends cleanly at the tail without exhausting `count` or `bytes`, its final message carries `tail` (see `ReadBatch.tail`).
     #[cfg_attr(feature = "utoipa", param(value_type = u32, required = false))]
     pub wait: Option<u32>,
 }
@@ -471,7 +472,7 @@ pub struct ReadBatch {
     /// This can only be empty in response to a unary read (i.e. not SSE), if the request cannot be satisfied without violating an explicit bound (`count`, `bytes`, `until`, or `wait`).
     pub records: Vec<SequencedRecord>,
     /// Sequence number that will be assigned to the next record on the stream, and timestamp of the last record.
-    /// Present only when reading recent records or upon reaching the tail. On a `200` unary read that reaches the tail without exhausting `count` or `bytes`, `tail` is always populated; when a streaming read ends cleanly at the tail without exhausting `count` or `bytes`, the final message is either a `batch` with `tail.seq_num` one past its last record or a trailing `ping` event carrying `tail`.
+    /// Present only when reading recent records or upon reaching the tail. On a `200` unary read that reaches the tail without exhausting the effective `count` or `bytes` limit, `tail` is always populated; when a streaming read ends cleanly at the tail without exhausting `count` or `bytes`, the final message is either a `batch` with `tail.seq_num` one past its last record or a trailing `ping` event carrying `tail`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tail: Option<StreamPosition>,
 }

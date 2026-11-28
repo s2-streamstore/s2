@@ -305,9 +305,9 @@ impl TerminalClose {
 struct ReadStateInner {
     next_seq_num: Option<u64>,
     last_observed_tail: Option<StreamPosition>,
-    /// `tail.seq_num` carried by the latest valid received batch or heartbeat (`None` initially or
-    /// when the latest valid batch omitted `tail`).
-    latest_message_tail_seq: Option<u64>,
+    /// Whether the latest valid received batch or heartbeat carried a `tail` (in which case
+    /// `last_observed_tail` holds that exact tail per `R6`/`R7b`).
+    latest_message_had_tail: bool,
     /// Pending `caught_up()` waiter; lazily allocated on demand. Invariant outside the lock:
     /// `Some` implies `caught_up_outcome().is_none()`.
     waiter: Option<Arc<CaughtUpSignal>>,
@@ -324,7 +324,7 @@ impl ReadStateInner {
         Self {
             next_seq_num: initial_next_seq_num,
             last_observed_tail: None,
-            latest_message_tail_seq: None,
+            latest_message_had_tail: false,
             waiter: None,
             closed: None,
             context,
@@ -337,9 +337,11 @@ impl ReadStateInner {
     }
 
     fn caught_up_tail(&self) -> Option<StreamPosition> {
-        let tail_seq = self.latest_message_tail_seq?;
+        if !self.latest_message_had_tail {
+            return None;
+        }
         self.last_observed_tail
-            .filter(|_| self.next_seq_num == Some(tail_seq))
+            .filter(|tail| self.next_seq_num == Some(tail.seq_num))
     }
 
     fn is_caught_up(&self) -> bool {
@@ -371,7 +373,7 @@ impl ReadStateInner {
         if let Some(tail) = tail {
             self.last_observed_tail = Some(tail);
         }
-        self.latest_message_tail_seq = tail.map(|t| t.seq_num);
+        self.latest_message_had_tail = tail.is_some();
         self.next_seq_num = Some(next_seq_num);
     }
 

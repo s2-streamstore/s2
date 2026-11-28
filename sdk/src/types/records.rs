@@ -1079,7 +1079,7 @@ pub struct ReadBatch {
     /// Sequence number that will be assigned to the next record on the stream, and timestamp of
     /// the last record.
     ///
-    /// It will only be present when reading recent records.
+    /// Present only when reading recent records or upon reaching the tail.
     pub tail: Option<StreamPosition>,
 }
 

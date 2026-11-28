@@ -207,7 +207,7 @@ impl From<StandardError> for ErrorEventData {
 }
 
 /// Heartbeat carrying the tail, sent only when the server has nothing earlier to send.
-/// Emitted while waiting at the tail for new records, or before `[DONE]` when ending cleanly at the tail.
+/// Emitted at least every 15 seconds while waiting at the tail for new records, or as a final message before `[DONE]` when ending cleanly at the tail if the last `batch` did not already reach it.
 #[rustfmt::skip]
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
